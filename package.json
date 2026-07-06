@@ -1,0 +1,46 @@
+{
+  "name": "jarvis-os",
+  "version": "0.1.0",
+  "description": "Jarvis OS — Personal AI Operating System",
+  "private": true,
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"npm run backend\" \"npm run frontend:dev\" \"wait-on http://localhost:5173 && npm run electron:dev\"",
+    "frontend:dev": "cd frontend && npm run dev",
+    "electron:dev": "tsc -p electron/tsconfig.json && cross-env NODE_ENV=development electron .",
+    "electron:build": "electron-builder",
+    "backend": "cd backend && venv\\Scripts\\python -m uvicorn main:app --reload --port 8000",
+    "build": "cd frontend && npm run build && npm run electron:build",
+    "lint": "cd frontend && npm run lint",
+    "typecheck": "cd frontend && npx tsc --noEmit",
+    "install:all": "npm install && cd frontend && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^28.2.0",
+    "electron-builder": "^24.9.1",
+    "typescript": "^5.3.3",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.jarvis.os",
+    "productName": "Jarvis OS",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-electron/**/*",
+      "frontend/dist/**/*"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}

@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+dist/
+dist-electron/
+release/
+frontend/dist/
+frontend/node_modules/
+*.local
+
+# Python
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/**/*.pyc
+backend/.mypy_cache/
+backend/.pytest_cache/
+backend/*.db
+backend/*.egg-info/
+backend/.env
+.env
+!.env.example
+
+# Electron
+out/
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Qdrant data (embedded local disk mode + Docker volume)
+qdrant_storage/
+backend/qdrant_data/
+
+# Voice models (large files)
+backend/voices/*.onnx
+backend/voices/*.onnx.json

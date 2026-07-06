@@ -1,0 +1,224 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   Jarvis OS Global Styles
+   ============================================================ */
+
+@layer base {
+  :root {
+    --bg-primary: #0A0A0F;
+    --bg-surface: #0F0F17;
+    --bg-elevated: #14141E;
+    --border-subtle: #2A2A3E;
+    --text-primary: #E2E8F0;
+    --text-secondary: #94A3B8;
+    --text-muted: #475569;
+    --accent-cyan: #06B6D4;
+    --accent-blue: #3B82F6;
+    --glow-cyan: rgba(6, 182, 212, 0.25);
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    user-select: none;
+  }
+
+  /* Allow text selection in chat and content areas */
+  .selectable {
+    user-select: text;
+  }
+
+  ::selection {
+    background-color: rgba(6, 182, 212, 0.3);
+    color: #E2E8F0;
+  }
+}
+
+/* ============================================================
+   Custom Scrollbars — thin and dark
+   ============================================================ */
+@layer base {
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #2A2A3E;
+    border-radius: 2px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3A3A5E;
+  }
+}
+
+/* ============================================================
+   HUD Utilities
+   ============================================================ */
+@layer utilities {
+  .hud-border {
+    border: 1px solid rgba(6, 182, 212, 0.2);
+  }
+
+  .hud-border-active {
+    border: 1px solid rgba(6, 182, 212, 0.5);
+    box-shadow: 0 0 12px rgba(6, 182, 212, 0.15), inset 0 0 12px rgba(6, 182, 212, 0.05);
+  }
+
+  .glow-cyan {
+    box-shadow: 0 0 12px rgba(6, 182, 212, 0.4);
+  }
+
+  .glow-cyan-sm {
+    box-shadow: 0 0 6px rgba(6, 182, 212, 0.25);
+  }
+
+  .text-glow-cyan {
+    text-shadow: 0 0 12px rgba(6, 182, 212, 0.6);
+  }
+
+  .surface-glass {
+    background: rgba(15, 15, 23, 0.8);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+}
+
+/* ============================================================
+   Markdown Content Styles (chat messages)
+   ============================================================ */
+@layer components {
+  .prose-jarvis {
+    @apply text-slate-200 leading-relaxed selectable;
+  }
+
+  .prose-jarvis p {
+    @apply mb-3;
+  }
+
+  .prose-jarvis p:last-child {
+    @apply mb-0;
+  }
+
+  .prose-jarvis h1,
+  .prose-jarvis h2,
+  .prose-jarvis h3 {
+    @apply text-cyan-400 font-semibold mb-2 mt-4;
+  }
+
+  .prose-jarvis h1 { @apply text-lg; }
+  .prose-jarvis h2 { @apply text-base; }
+  .prose-jarvis h3 { @apply text-sm; }
+
+  .prose-jarvis code {
+    @apply font-mono text-cyan-300 bg-surface-2 px-1.5 py-0.5 rounded text-xs;
+  }
+
+  .prose-jarvis pre {
+    @apply bg-surface-2 border border-surface-border rounded-lg p-4 overflow-x-auto my-3;
+  }
+
+  .prose-jarvis pre code {
+    @apply bg-transparent p-0 text-slate-300;
+  }
+
+  .prose-jarvis ul,
+  .prose-jarvis ol {
+    @apply pl-5 mb-3 space-y-1;
+  }
+
+  .prose-jarvis ul { @apply list-disc; }
+  .prose-jarvis ol { @apply list-decimal; }
+
+  .prose-jarvis li {
+    @apply text-slate-300;
+  }
+
+  .prose-jarvis a {
+    @apply text-cyan-400 underline underline-offset-2 hover:text-cyan-300;
+  }
+
+  .prose-jarvis blockquote {
+    @apply border-l-2 border-cyan-500/50 pl-4 italic text-slate-400 my-3;
+  }
+
+  .prose-jarvis strong {
+    @apply text-slate-100 font-semibold;
+  }
+
+  .prose-jarvis em {
+    @apply text-slate-300 italic;
+  }
+
+  .prose-jarvis hr {
+    @apply border-surface-border my-4;
+  }
+
+  .prose-jarvis table {
+    @apply w-full border-collapse my-3;
+  }
+
+  .prose-jarvis th,
+  .prose-jarvis td {
+    @apply border border-surface-border px-3 py-2 text-sm;
+  }
+
+  .prose-jarvis th {
+    @apply bg-surface-2 text-cyan-400 font-medium;
+  }
+}
+
+/* ============================================================
+   Transition Presets
+   ============================================================ */
+@layer utilities {
+  .transition-smooth {
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .transition-fast {
+    transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+}
+
+/* ============================================================
+   Typing Cursor for streaming
+   ============================================================ */
+.typing-cursor::after {
+  content: '▋';
+  animation: blink 1s step-start infinite;
+  color: var(--accent-cyan);
+  margin-left: 1px;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
