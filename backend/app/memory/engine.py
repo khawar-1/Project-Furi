@@ -1191,6 +1191,69 @@ class MemoryEngine:
                     f"Supersede blocked (new fact does not cover it): '{old_text[:60]}'"
                 )
 
+    async def delete_semantic_memory(self, memory_id: str) -> bool:
+        """
+        Hard-delete a semantic memory by id (user-initiated, e.g. the trash
+        button in About Me). Unlike the supersede path (which only soft-deletes
+        so history is recoverable), a user deletion removes the SQLite row AND
+        the Qdrant point — the fact must be gone from the database, not hidden.
+        Deleting the row also clears the exact-text dedup, so the user can
+        re-add the same fact later.
+        """
+        result = await self.db.execute(
+            select(SemanticMemory).where(SemanticMemory.id == memory_id)
+        )
+        memory = result.scalar_one_or_none()
+        if not memory:
+            return False
+        content_preview = memory.content[:60]
+        await self.db.delete(memory)
+        await self.db.commit()
+
+        # Best-effort Qdrant cleanup AFTER the SQLite delete: a stale point is
+        # harmless (search maps hits back through SQLite rows), a stale row is not.
+        if self.qdrant:
+            try:
+                await self.qdrant.delete(
+                    collection_name="semantic_memory",
+                    points_selector=qdrant_models.PointIdsList(points=[memory_id]),
+                )
+            except Exception as e:
+                logger.warning(f"Qdrant point delete failed for memory {memory_id} (non-critical): {e}")
+
+        logger.info(f"Deleted semantic memory (user request): '{content_preview}'")
+        return True
+
+    async def delete_contact_fact(self, contact_id: str, interaction_id: str) -> bool:
+        """
+        Hard-delete one entry from a contact's fact log (user-initiated).
+        The interaction must belong to the given contact. Decrements the
+        contact's interaction_count. Contact facts have no Qdrant points,
+        so the SQLite delete is the whole story. Commits.
+        """
+        result = await self.db.execute(
+            select(ContactInteraction).where(
+                ContactInteraction.id == interaction_id,
+                ContactInteraction.contact_id == contact_id,
+            )
+        )
+        interaction = result.scalar_one_or_none()
+        if not interaction:
+            return False
+        description_preview = interaction.description[:60]
+        await self.db.delete(interaction)
+
+        contact_result = await self.db.execute(
+            select(Contact).where(Contact.id == contact_id)
+        )
+        contact = contact_result.scalar_one_or_none()
+        if contact and contact.interaction_count > 0:
+            contact.interaction_count -= 1
+
+        await self.db.commit()
+        logger.info(f"Deleted contact fact (user request): '{description_preview}'")
+        return True
+
     async def delete_semantic_memory_by_content(self, content: str) -> bool:
         """Soft-delete a semantic memory by its exact content. Used to supersede outdated facts."""
         result = await self.db.execute(

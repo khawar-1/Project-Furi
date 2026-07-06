@@ -27,6 +27,11 @@ Current architecture rules:
   deleted only AFTER its replacement is actually written (parked replacements
   wait) and only if the new text covers every word of the old one
   (`apply_supersede_candidates` / `supersede_is_covered`)
+- User-initiated deletion is a HARD delete: `delete_semantic_memory` removes
+  the SQLite row AND the Qdrant point (`delete_contact_fact` likewise removes
+  the ContactInteraction row and decrements interaction_count). Only the
+  supersede path soft-deletes (`delete_semantic_memory_by_content`). Deleting
+  one side of a shared fact never touches the other side
 - Contacts use append-only facts log, never mutable notes
 - AI tools never saved as contacts
 - First-Word Funnel only triggers for single-word names

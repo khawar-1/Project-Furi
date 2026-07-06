@@ -141,6 +141,24 @@ async def delete_contact(
     return {"deleted": contact_id}
 
 
+@router.delete(
+    "/{contact_id}/interactions/{interaction_id}",
+    summary="Delete a fact from a contact's fact log",
+)
+async def delete_interaction(
+    contact_id: str,
+    interaction_id: str,
+    db: AsyncSession = Depends(get_db),
+    qdrant=Depends(get_qdrant),
+) -> dict:
+    """Permanently delete one fact-log entry (must belong to this contact)."""
+    engine = MemoryEngine(db=db, qdrant=qdrant)
+    deleted = await engine.delete_contact_fact(contact_id, interaction_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Fact not found for this contact")
+    return {"deleted": interaction_id}
+
+
 @router.post("/{contact_id}/interactions", summary="Add interaction to contact")
 async def add_interaction(
     contact_id: str,

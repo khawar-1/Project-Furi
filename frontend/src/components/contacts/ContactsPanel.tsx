@@ -6,7 +6,7 @@ import { useEffect, useState } from 'react';
 import { Users, Search, Plus, X, ChevronRight, RefreshCw, Trash2, Mail, Phone, Building, MessageSquare, Cake, Calendar, Code2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useContactsStore } from '@/stores/contactsStore';
-import type { RelationshipType } from '@/types';
+import type { ContactInteraction, RelationshipType } from '@/types';
 
 const REL_COLORS: Record<string, string> = {
   client: 'bg-blue-500/20 text-blue-300 border-blue-500/30',
@@ -37,10 +37,56 @@ function Avatar({ name }: { name: string }) {
 }
 
 // ============================================================
+// Fact Log Row (with inline delete confirm)
+// ============================================================
+function FactLogRow({ interaction, onDelete }: { interaction: ContactInteraction; onDelete: (id: string) => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const i = interaction;
+
+  return (
+    <div className="group flex gap-2 text-sm bg-surface-2 rounded-lg p-3 border border-surface-border hover:border-red-500/20 transition-colors">
+      <div className="flex-1 min-w-0">
+        <p className="text-slate-300 leading-relaxed">{i.description}</p>
+        <div className="flex items-center gap-2 mt-1">
+          <span className="text-[10px] uppercase font-bold text-cyan-500 bg-cyan-500/10 px-1.5 py-0.5 rounded">{i.category || 'other'}</span>
+          <span className="text-xs text-muted">{new Date(i.interaction_date).toLocaleDateString()}</span>
+        </div>
+      </div>
+      <div className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+        {confirming ? (
+          <div className="flex gap-1">
+            <button
+              onClick={() => { onDelete(i.id); setConfirming(false); }}
+              className="px-2 py-1 text-[10px] bg-red-500/20 text-red-400 rounded hover:bg-red-500/30 transition-colors"
+            >
+              Delete
+            </button>
+            <button
+              onClick={() => setConfirming(false)}
+              className="px-2 py-1 text-[10px] bg-surface-2 text-slate-400 rounded hover:bg-surface-3 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setConfirming(true)}
+            className="p-1.5 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+            title="Delete fact"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // Contact Detail View
 // ============================================================
 function ContactDetail() {
-  const { selectedContact, clearSelected, deleteContact, isLoading } = useContactsStore();
+  const { selectedContact, clearSelected, deleteContact, deleteInteraction, isLoading } = useContactsStore();
   if (!selectedContact) return null;
   const c = selectedContact;
 
@@ -150,15 +196,11 @@ function ContactDetail() {
             <h3 className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">Facts Log</h3>
             <div className="space-y-2">
               {c.interactions.map((i) => (
-                <div key={i.id} className="flex gap-2 text-sm bg-surface-2 rounded-lg p-3 border border-surface-border">
-                  <div className="flex-1">
-                    <p className="text-slate-300 leading-relaxed">{i.description}</p>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="text-[10px] uppercase font-bold text-cyan-500 bg-cyan-500/10 px-1.5 py-0.5 rounded">{i.category || 'other'}</span>
-                      <span className="text-xs text-muted">{new Date(i.interaction_date).toLocaleDateString()}</span>
-                    </div>
-                  </div>
-                </div>
+                <FactLogRow
+                  key={i.id}
+                  interaction={i}
+                  onDelete={(interactionId) => deleteInteraction(c.id, interactionId)}
+                />
               ))}
             </div>
           </div>

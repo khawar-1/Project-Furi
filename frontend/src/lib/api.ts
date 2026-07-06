@@ -157,6 +157,9 @@ export const contactsApi = {
   delete: (id: string): Promise<{ deleted: string }> =>
     apiFetch(`/api/contacts/${id}`, { method: 'DELETE' }),
 
+  deleteInteraction: (contactId: string, interactionId: string): Promise<{ deleted: string }> =>
+    apiFetch(`/api/contacts/${contactId}/interactions/${interactionId}`, { method: 'DELETE' }),
+
   resolve: (name: string): Promise<{ status: string; contact?: Contact; matches?: Contact[] }> =>
     apiFetch(`/api/contacts/resolve/${encodeURIComponent(name)}`),
 };

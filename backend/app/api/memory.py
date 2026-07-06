@@ -77,17 +77,13 @@ async def create_memory(
 async def delete_memory(
     memory_id: str,
     db: AsyncSession = Depends(get_db),
+    qdrant=Depends(get_qdrant),
 ) -> dict:
-    """Soft-delete a memory by marking it inactive."""
-    result = await db.execute(
-        select(SemanticMemory).where(SemanticMemory.id == memory_id)
-    )
-    memory = result.scalar_one_or_none()
-    if not memory:
+    """Permanently delete a memory: SQLite row + Qdrant vector, not a soft-delete."""
+    engine = MemoryEngine(db=db, qdrant=qdrant)
+    deleted = await engine.delete_semantic_memory(memory_id)
+    if not deleted:
         raise HTTPException(status_code=404, detail="Memory not found")
-
-    memory.is_active = False
-    await db.commit()
     return {"deleted": memory_id}
 
 

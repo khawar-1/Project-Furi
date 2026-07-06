@@ -18,6 +18,7 @@ interface ContactsState {
   createContact: (payload: Partial<Contact> & { name: string }) => Promise<void>;
   updateContact: (id: string, payload: Partial<Contact>) => Promise<void>;
   deleteContact: (id: string) => Promise<void>;
+  deleteInteraction: (contactId: string, interactionId: string) => Promise<void>;
   setSearchQuery: (q: string) => void;
 }
 
@@ -69,6 +70,23 @@ export const useContactsStore = create<ContactsState>((set, get) => ({
       contacts: state.contacts.filter((c) => c.id !== id),
       selectedContact: state.selectedContact?.id === id ? null : state.selectedContact,
     }));
+  },
+
+  deleteInteraction: async (contactId, interactionId) => {
+    await contactsApi.deleteInteraction(contactId, interactionId);
+    set((state) => {
+      const sel = state.selectedContact;
+      if (!sel || sel.id !== contactId) return {};
+      const updated = {
+        ...sel,
+        interactions: (sel.interactions ?? []).filter((i) => i.id !== interactionId),
+        interaction_count: Math.max(0, sel.interaction_count - 1),
+      };
+      return {
+        selectedContact: updated,
+        contacts: state.contacts.map((c) => (c.id === contactId ? { ...c, interaction_count: updated.interaction_count } : c)),
+      };
+    });
   },
 
   setSearchQuery: (q) => set({ searchQuery: q }),
