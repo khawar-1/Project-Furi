@@ -778,11 +778,15 @@ class MemoryEngine:
         contacts: list[Contact],
         contact_mapping: Optional[dict] = None,
         default_contact_name: Optional[str] = None,
-    ) -> None:
+    ) -> str:
         """
         Write both perspectives of a fully-resolved shared fact:
         user perspective → SemanticMemory (About Me), contact perspective →
         each contact's interaction log.
+
+        Returns the substituted user-perspective text so callers can tell the
+        LLM exactly what was saved just now (it will already show up in the
+        memory context of the same turn and must not read as an old memory).
         """
         user_name = await self.get_user_name()
         event_date = parse_event_date(fact.get("event_date"))
@@ -836,6 +840,7 @@ class MemoryEngine:
                 logger.info(
                     f"Shared fact written to {len(contacts)} contact log(s): '{contact_side[:60]}'"
                 )
+        return user_side
 
     async def store_shared_fact(self, fact: dict, session_id: Optional[str] = None) -> None:
         """
@@ -893,14 +898,15 @@ class MemoryEngine:
 
         await self._write_shared_fact(fact, resolved, contact_mapping=mapping)
 
-    async def apply_shared_fact_to_contact(self, fact: dict, contact: Contact) -> None:
+    async def apply_shared_fact_to_contact(self, fact: dict, contact: Contact) -> str:
         """
         Apply a parked dual-perspective fact after its one unresolved name has
         been confirmed as `contact` (remaining placeholders all refer to them).
+        Returns the saved user-perspective text.
         """
-        await self._write_shared_fact(fact, [contact], default_contact_name=contact.name)
+        return await self._write_shared_fact(fact, [contact], default_contact_name=contact.name)
 
-    async def apply_shared_fact_user_only(self, fact: dict, as_said_name: Optional[str] = None) -> None:
+    async def apply_shared_fact_user_only(self, fact: dict, as_said_name: Optional[str] = None) -> str:
         """
         User declined to create the contact: keep only the About-Me side,
         with the person's name exactly as the user said it.
@@ -919,6 +925,7 @@ class MemoryEngine:
                 subject="user",
                 event_date=parse_event_date(fact.get("event_date")),
             )
+        return text
 
     async def get_all_contact_names(self) -> list[str]:
         """Return all active contact names for the extractor to use for disambiguation."""

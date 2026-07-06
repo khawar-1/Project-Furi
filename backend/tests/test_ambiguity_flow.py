@@ -96,6 +96,41 @@ def test_prompt_priority_note_beats_ambiguity_directive():
 
 
 # ============================================================
+# "Saved just now" timeline clause (live-transcript regression:
+# "we had previously noted..." for a fact confirmed seconds earlier)
+# ============================================================
+
+def test_saved_just_now_clause_lists_facts():
+    from app.api.chat import _saved_just_now_clause
+
+    clause = _saved_just_now_clause(
+        ["Playing a badminton match with jamil ali khan on 2026-08-03", ""]
+    )
+    assert "SAVED JUST NOW" in clause
+    assert "badminton" in clause
+    assert "FIRST time" in clause
+    # empty strings are dropped; all-empty input yields no clause
+    assert _saved_just_now_clause(["", None]) == ""
+
+
+@pytest.mark.asyncio
+async def test_apply_shared_fact_returns_saved_text(engine, session_id):
+    await engine.store_user_profile({"name": "Khawar"})
+    contact = await engine.create_contact_manual("jamil ali khan")
+    text = await engine.apply_shared_fact_to_contact(
+        {
+            "fact_user_perspective": "Playing badminton with {CONTACT:jamil} on 2026-08-03",
+            "fact_contact_perspective": "Playing badminton with {USER} on 2026-08-03",
+            "subject": "shared",
+            "related_contacts": ["jamil"],
+            "event_date": "2026-08-03",
+        },
+        contact,
+    )
+    assert text == "Playing badminton with jamil ali khan on 2026-08-03"
+
+
+# ============================================================
 # {USER} substitution in contact fact logs
 # ============================================================
 

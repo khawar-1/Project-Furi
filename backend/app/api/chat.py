@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_db, get_llm_provider, get_qdrant
 from app.db.models import Message
 from app.db.schemas import ChatRequest, ChatResponse, StreamChunk
-from app.memory.engine import MemoryEngine
+from app.memory.engine import MemoryEngine, substitute_placeholders
 from app.memory.extractor import run_extraction_pipeline
 from app.providers.base import LLMMessage, LLMProvider
 
@@ -35,6 +35,24 @@ def _interpret_yes_no(text: str) -> Optional[bool]:
     if _AFFIRMATIVE_RE.search(t):
         return True
     return None
+
+
+def _saved_just_now_clause(saved_texts: list) -> str:
+    """
+    Spell out exactly what was written this turn. The parked writes land in
+    the DB BEFORE format_context renders the memory block, so the just-saved
+    fact already shows up in MEMORY CONTEXT of the same prompt — without this
+    clause the LLM reads it as an old memory ("we had previously noted...").
+    """
+    texts = [t for t in saved_texts if t]
+    if not texts:
+        return ""
+    listed = "; ".join(f'"{t}"' for t in texts)
+    return (
+        f" SAVED JUST NOW (this very moment, from the user's current confirmation): {listed}. "
+        f"If this same information appears in the MEMORY CONTEXT above, that entry was written seconds ago — "
+        f"it is NOT something you knew before and NOT a previous plan. The user is telling you this for the FIRST time."
+    )
 
 
 def _build_system_prompt(
@@ -63,6 +81,7 @@ MEMORY RULES:
 - If the memory context is empty, you know nothing about the user yet. Ask to learn.
 - Never fabricate facts, past interactions, emails, reminders, or events not in memory.
 - If the user tells you something new about themselves, acknowledge it naturally.
+- TIMELINE HONESTY: memory entries may have been written seconds ago from THIS very conversation. Never claim the user told you something "previously" or that something "was already in our plans" unless you are certain it came from an earlier conversation — when in doubt, treat it as new information the user just gave you.
 - Current date and time: {current_datetime}
 
 CLARIFICATION RULES:
@@ -239,13 +258,24 @@ async def chat_stream(
                     # Apply the parked writes deterministically — the whole point
                     # of deferring was to write them once the identity is known.
                     saved_something = False
+                    saved_texts: list = []
                     try:
                         if resolved_contact:
                             if pr.pending_update:
                                 await memory_engine.update_contact(resolved_contact.id, pr.pending_update)
                                 saved_something = True
+                                user_name_note = await memory_engine.get_user_name()
+                                saved_texts.extend(
+                                    substitute_placeholders(
+                                        f.get("fact", ""), user_name=user_name_note,
+                                        default_contact_name=resolved_contact.name,
+                                    )
+                                    for f in pr.pending_update.get("new_facts", []) if f.get("fact")
+                                )
                             for parked_fact in pr.pending_shared_facts:
-                                await memory_engine.apply_shared_fact_to_contact(parked_fact, resolved_contact)
+                                saved_texts.append(
+                                    await memory_engine.apply_shared_fact_to_contact(parked_fact, resolved_contact)
+                                )
                                 saved_something = True
                     except Exception as e:
                         logger.warning(f"Applying parked writes after disambiguation failed: {e}")
@@ -255,15 +285,15 @@ async def chat_stream(
                     touch_session(session_id)
                     # Tell the LLM exactly what happened
                     saved_note = (
-                        f"The pending information WAS SAVED to \"{resolved_name}\" (and to the user's own memory where it involves them). "
+                        f"The pending information from their previous message has now been successfully linked and saved to \"{resolved_name}\". "
                         if saved_something else
-                        f"The original pending fact should now be applied to \"{resolved_name}\". "
+                        f"The original pending fact is now securely linked to \"{resolved_name}\". "
                     )
                     disambiguation_resolved_note = (
-                        f"DISAMBIGUATION RESOLVED: The user's reply \"{last_user_msg_content}\" "
-                        f"has been matched to the contact \"{resolved_name}\". "
+                        f"DISAMBIGUATION RESOLVED: The user meant \"{resolved_name}\". "
                         + saved_note +
-                        f"Do NOT ask for clarification again. Acknowledge naturally and move on."
+                        f"CRITICAL: Acknowledge this naturally (e.g., 'Got it, {resolved_name}. Noted.'), but DO NOT phrase your response as if this is an old memory you just remembered (e.g. do NOT say 'we had previously noted' or 'that's already in our plans'). The user literally just told you this in the previous turn! Do NOT ask for clarification again."
+                        + _saved_just_now_clause(saved_texts)
                     )
 
             # --- PENDING CONTACT CREATION: resolve the yes/no in Python ---
@@ -282,18 +312,30 @@ async def chat_stream(
                     if chk.status == ResolutionStatus.RESOLVED:
                         try:
                             saved_any = False
+                            saved_texts = []
                             if any(v for v in pc.pending_update.values()):
                                 await memory_engine.update_contact(chk.contact.id, pc.pending_update)
                                 saved_any = True
+                                user_name_note = await memory_engine.get_user_name()
+                                saved_texts.extend(
+                                    substitute_placeholders(
+                                        f.get("fact", ""), user_name=user_name_note,
+                                        default_contact_name=chk.contact.name,
+                                    )
+                                    for f in pc.pending_update.get("new_facts", []) if f.get("fact")
+                                )
                             for parked_fact in pc.pending_shared_facts:
-                                await memory_engine.apply_shared_fact_to_contact(parked_fact, chk.contact)
+                                saved_texts.append(
+                                    await memory_engine.apply_shared_fact_to_contact(parked_fact, chk.contact)
+                                )
                                 saved_any = True
                             if saved_any:
                                 disambiguation_resolved_note = (
                                     f"NAME MATCHED EXISTING CONTACT: \"{pc.name}\" is the saved contact "
                                     f"\"{chk.contact.name}\" — they were NOT missing. The pending information "
-                                    f"WAS SAVED to \"{chk.contact.name}\" (and to the user's own memory where "
-                                    f"it involves the user). Do NOT offer to create a contact. Acknowledge naturally."
+                                    f"from their previous message has now been successfully saved to \"{chk.contact.name}\". "
+                                    f"CRITICAL: Acknowledge this naturally without sounding like it is an old memory (e.g. do NOT say 'we had previously noted'). Do NOT offer to create a contact."
+                                    + _saved_just_now_clause(saved_texts)
                                 )
                         except Exception as e:
                             logger.warning(f"Applying rechecked pending creation failed: {e}")
@@ -318,12 +360,23 @@ async def chat_stream(
                                     pc.name,
                                     {k: v for k, v in pc.pending_update.items() if k != "new_facts"},
                                 )
+                                saved_texts = []
                                 if pc.pending_update.get("new_facts"):
                                     await memory_engine.update_contact(
                                         new_contact.id, {"new_facts": pc.pending_update["new_facts"]}
                                     )
+                                    user_name_note = await memory_engine.get_user_name()
+                                    saved_texts.extend(
+                                        substitute_placeholders(
+                                            f.get("fact", ""), user_name=user_name_note,
+                                            default_contact_name=new_contact.name,
+                                        )
+                                        for f in pc.pending_update.get("new_facts", []) if f.get("fact")
+                                    )
                                 for parked_fact in pc.pending_shared_facts:
-                                    await memory_engine.apply_shared_fact_to_contact(parked_fact, new_contact)
+                                    saved_texts.append(
+                                        await memory_engine.apply_shared_fact_to_contact(parked_fact, new_contact)
+                                    )
                                 new_entity = ActiveEntity(
                                     id=new_contact.id, type="contact",
                                     name=new_contact.name, confidence=1.0,
@@ -332,24 +385,29 @@ async def chat_stream(
                                 sess.active_entities = [new_entity]
                                 sess.focus_entity = new_entity
                                 disambiguation_resolved_note = (
-                                    f"CONTACT CREATED: \"{pc.name}\" WAS ADDED to the user's contacts and the pending "
-                                    f"information WAS SAVED (to their fact log, and to the user's own memory where it "
-                                    f"involves the user). Confirm this naturally. Do NOT ask again."
+                                    f"CONTACT CREATED: \"{pc.name}\" has been added to the user's contacts and the pending "
+                                    f"information from their previous message has now been successfully saved. "
+                                    f"CRITICAL: Confirm this naturally without sounding like it is an old memory (e.g. do NOT say 'we had previously noted'). Do NOT ask again."
+                                    + _saved_just_now_clause(saved_texts)
                                 )
                             except Exception as e:
                                 logger.warning(f"Pending contact creation failed: {e}")
                             sess.pending_creation = None
                             touch_session(session_id)
                         elif answer is False:
+                            saved_texts = []
                             try:
                                 for parked_fact in pc.pending_shared_facts:
-                                    await memory_engine.apply_shared_fact_user_only(parked_fact, as_said_name=pc.name)
+                                    saved_texts.append(
+                                        await memory_engine.apply_shared_fact_user_only(parked_fact, as_said_name=pc.name)
+                                    )
                             except Exception as e:
                                 logger.warning(f"User-only fact write after declined creation failed: {e}")
                             disambiguation_resolved_note = (
                                 f"CONTACT CREATION DECLINED: The user chose not to add \"{pc.name}\" as a contact. "
-                                f"Any fact involving the user WAS still SAVED to the user's own memory. "
-                                f"Acknowledge naturally and move on. Do NOT ask again."
+                                f"Any fact involving the user from their previous message was successfully saved to their own memory instead. "
+                                f"CRITICAL: Acknowledge naturally without sounding like it is an old memory. Do NOT ask again."
+                                + _saved_just_now_clause(saved_texts)
                             )
                             sess.pending_creation = None
                             touch_session(session_id)
