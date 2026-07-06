@@ -230,6 +230,25 @@ def identify_contact(extracted_name: str, contacts: list) -> IdentityResult:
         reason="Only 1 contact passed MIN_SCORE threshold — resolved unambiguously"
     )
 
+def _find_embedded_name(reply: str, named_items: list) -> Optional[dict]:
+    """
+    Find a contact whose full name appears word-bounded inside the reply
+    ("I meant jamil ali" → Jamil Ali). Returns the single longest match,
+    or None if there is no match or the longest match is tied (ambiguous).
+    """
+    padded_reply = f" {normalize_name(reply)} "
+    contained = [
+        item for item in named_items
+        if normalize_name(item["name"]) and f" {normalize_name(item['name'])} " in padded_reply
+    ]
+    if not contained:
+        return None
+    contained.sort(key=lambda item: len(normalize_name(item["name"])), reverse=True)
+    longest = len(normalize_name(contained[0]["name"]))
+    ties = [i for i in contained if len(normalize_name(i["name"])) == longest]
+    return ties[0] if len(ties) == 1 else None
+
+
 def resolve_confirmation(clarified_name: str, candidate_dicts: list, all_contacts: list) -> str | int | None:
     clarified_lower = clarified_name.strip().lower()
 
@@ -240,7 +259,13 @@ def resolve_confirmation(clarified_name: str, candidate_dicts: list, all_contact
     if clarified_lower in ["the second one", "second one", "second", "2", "2nd"]:
         if len(candidate_dicts) >= 2:
             return candidate_dicts[1]["id"]
-            
+
+    # Check A2: Candidate name embedded in a sentence ("I meant jamil ali").
+    # Fuzzy scoring punishes the extra words, so check containment first.
+    embedded = _find_embedded_name(clarified_name, candidate_dicts)
+    if embedded:
+        return embedded["id"]
+
     # Check B: Candidate Exact/Fuzzy Match
     class MockContact:
         def __init__(self, id, name):
@@ -252,8 +277,13 @@ def resolve_confirmation(clarified_name: str, candidate_dicts: list, all_contact
     if candidate_result.status == ResolutionStatus.RESOLVED:
         return candidate_result.contact.id
 
-    # Check C: Global Database Exact Match
+    # Check C: Global Database Match
     # Only if the user typed something completely different (e.g. they corrected the name)
+    embedded_global = _find_embedded_name(
+        clarified_name, [{"id": c.id, "name": c.name} for c in all_contacts]
+    )
+    if embedded_global:
+        return embedded_global["id"]
     global_result = identify_contact(clarified_name, all_contacts)
     if global_result.status == ResolutionStatus.RESOLVED:
         return global_result.contact.id
@@ -301,7 +331,7 @@ class MemoryEngine:
                 SemanticMemory.is_active == True,
             )
         )
-        existing = existing_result.scalar_one_or_none()
+        existing = existing_result.scalars().first()
         if existing:
             logger.debug(f"Dedup (exact): memory already exists: {content[:60]}")
             return existing
@@ -507,7 +537,10 @@ class MemoryEngine:
         if result.status == ResolutionStatus.NOT_FOUND:
             # Unknown person — never create silently. Park the details so the
             # next turn can ask "X isn't in your contacts — want me to add them?"
-            if session_id and details:
+            # Only park when there is actual information to save; an empty
+            # mention isn't worth interrupting the user for.
+            has_signal = any(v for v in details.values())
+            if session_id and has_signal:
                 self._park_pending_creation(session_id, name, pending_update=details)
                 logger.info(f"store_contact: Contact '{name}' not found. Parked for creation confirmation.")
             else:
@@ -746,9 +779,21 @@ class MemoryEngine:
             contact_mapping=contact_mapping,
             default_contact_name=default_contact_name,
         )
+        # Guard against LLM misfills: a contact perspective identical to the
+        # user perspective means the model duplicated it instead of flipping it.
+        if contact_side and user_side and contact_side.strip().lower() == user_side.strip().lower():
+            logger.debug("Skipping contact-side write: perspective not flipped by extractor")
+            contact_side = ""
         if contact_side and contacts:
             added = False
             for contact in contacts:
+                # A contact's own log entry should never refer to them by name
+                # (single-contact facts) — that's the misfilled user perspective.
+                if len(contacts) == 1 and contact.name.lower() in contact_side.lower():
+                    logger.debug(
+                        f"Skipping contact-side write for '{contact.name}': text is self-referential"
+                    )
+                    continue
                 if await self.add_contact_fact(
                     contact, contact_side, category=category, event_date=event_date
                 ):
@@ -856,11 +901,12 @@ class MemoryEngine:
         result = await self.db.execute(
             select(Contact).where(func.lower(Contact.name) == name.lower())
         )
-        contact = result.scalar_one_or_none()
-        if contact:
+        contacts = list(result.scalars().all())
+        for contact in contacts:
             await self.db.delete(contact)
+        if contacts:
             await self.db.commit()
-            logger.info(f"Deleted mistakenly created contact: '{name}'")
+            logger.info(f"Deleted mistakenly created contact: '{name}' ({len(contacts)} row(s))")
             return True
         return False
 
@@ -872,9 +918,10 @@ class MemoryEngine:
                 SemanticMemory.is_active == True,
             )
         )
-        memory = result.scalar_one_or_none()
-        if memory:
+        memories = list(result.scalars().all())
+        for memory in memories:
             memory.is_active = False
+        if memories:
             await self.db.commit()
             logger.info(f"Superseded outdated fact: '{content[:60]}'")
             return True
@@ -891,7 +938,7 @@ class MemoryEngine:
         All other fields are overwritten if the new value is non-null.
         """
         result = await self.db.execute(select(UserProfile))
-        profile = result.scalar_one_or_none()
+        profile = result.scalars().first()
 
         if not profile:
             import uuid
@@ -924,9 +971,9 @@ class MemoryEngine:
         return profile
 
     async def get_user_profile(self) -> Optional[UserProfile]:
-        """Fetch the single UserProfile row."""
+        """Fetch the single UserProfile row (first row wins on legacy dupes)."""
         result = await self.db.execute(select(UserProfile))
-        return result.scalar_one_or_none()
+        return result.scalars().first()
 
     # ==============================================================
     # ENTITY EDGES (Phase 2.5 Lite)
@@ -959,7 +1006,7 @@ class MemoryEngine:
                 EntityEdge.is_active == True,
             )
         )
-        existing = result.scalar_one_or_none()
+        existing = result.scalars().first()
         if existing:
             # Update confidence if new value is higher
             existing.confidence = max(existing.confidence, confidence)

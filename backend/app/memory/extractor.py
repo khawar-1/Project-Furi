@@ -106,7 +106,7 @@ Return ONLY valid JSON with this exact structure (no explanation, no markdown):
 CRITICAL RULES — READ CAREFULLY:
 1. USE CONVERSATION CONTEXT: Resolve ALL pronouns. If the user says "it's called Remo Office", look back in the conversation to see what "it" refers to. Never leave a reference unresolved.
 2. CORRECTIONS: If the user corrects a name or entity (e.g. "I meant Hamil" instead of "Jameell"), you MUST re-extract any facts (like phone numbers, emails, skills) that were provided for the wrong name in recent turns and attach them to the correct name in the current extraction.
-3. CONTACTS — HUMANS ONLY: NEVER create contact entries for AI tools, bots, or software. This includes: Jarvis, ChatGPT, GPT-4, Claude, Gemini, Antigravity, Copilot, Llama, Mistral.
+3. CONTACTS — HUMANS ONLY: NEVER create contact entries for AI tools, bots, or software. This includes: Jarvis, ChatGPT, GPT-4, Claude, Gemini, Antigravity, Copilot, Llama, Mistral. NEVER include the USER THEMSELVES in people_mentioned — the user is not their own contact; facts about the user go in user_profile_enrichment or facts_about_user.
 4. DATES IN FACTS: If a fact involves a specific event, date, or time, resolve the relative date using the CURRENT SYSTEM DATE above, include the absolute YYYY-MM-DD date inside the fact text itself, AND set "event_date".
 5. SKILLS: Extract skills for people (e.g. "Python", "AI Engineering", "React"). Always populate the "skills" array when a person's skills are mentioned.
 6. RELATIONSHIPS: Extract every explicit relationship as an edge. Use ONLY these edge_types: FRIEND_OF, CLIENT_OF, COLLABORATES_WITH. For anything else, use OTHER and populate edge_label. Confidence: 1.0 if user explicitly stated it, 0.7 if inferred.
@@ -268,7 +268,17 @@ async def run_extraction_pipeline(
         for old_fact in entities.facts_to_supersede:
             await engine.delete_semantic_memory_by_content(old_fact)
 
-        # --- Store people (humans only)
+        # --- Store people (humans only, and never the user themselves)
+        from app.memory.engine import normalize_name
+        # The user's name may only be arriving in THIS extraction
+        # ("My name is Khawar") — check the enrichment too, not just the profile.
+        enriched_name = (
+            entities.user_profile_enrichment.name
+            if entities.user_profile_enrichment else None
+        )
+        user_name_norms = {
+            normalize_name(n) for n in (user_name, enriched_name) if n
+        }
         for person in entities.people_mentioned:
             name = person.name
             if not name or len(name) < 2:
@@ -276,6 +286,10 @@ async def run_extraction_pipeline(
             # Block AI tools from being saved as contacts
             if name.lower() in AI_TOOLS or any(ai in name.lower() for ai in ["gpt", "llm", "ai ", " ai"]):
                 logger.debug(f"Skipping AI tool contact: {name}")
+                continue
+            # The user is not their own contact — the LLM sometimes slips this in
+            if normalize_name(name) in user_name_norms:
+                logger.debug(f"Skipping user-as-contact: {name}")
                 continue
 
             await engine.store_contact(name, {

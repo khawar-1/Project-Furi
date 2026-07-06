@@ -205,6 +205,41 @@ async def test_apply_user_only_after_declined_creation(engine, db_session, sessi
 
 
 # ============================================================
+# Guards against extractor misfills (live-testing regressions)
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_unflipped_contact_perspective_is_not_written(engine, db_session, session_id):
+    """If the LLM duplicates the user perspective instead of flipping it,
+    the contact log must not receive the self-referential copy."""
+    await engine.store_user_profile({"name": "Khawar"})
+    contact = await engine.create_contact_manual("Jamil Ali")
+
+    fact = dict(COFFEE_FACT)
+    fact["related_contacts"] = ["Jamil Ali"]
+    fact["fact_user_perspective"] = "Went to coffee with {CONTACT:Jamil Ali} on 2026-07-06"
+    # Misfill: contact perspective names the contact instead of {USER}
+    fact["fact_contact_perspective"] = "Went to coffee with Jamil Ali on 2026-07-06"
+
+    await engine.store_shared_fact(fact, session_id=session_id)
+
+    memories = await _semantic_contents(db_session)
+    assert len(memories) == 1  # user side still written
+    assert await _interactions_for(db_session, contact.id) == []  # bad copy blocked
+
+
+@pytest.mark.asyncio
+async def test_store_contact_empty_details_does_not_park_creation(engine, session_id):
+    """A bare mention with no facts must not trigger 'want me to add them?'."""
+    result = await engine.store_contact(
+        "Khawar", {"email": None, "phone": None, "skills": [], "new_facts": []},
+        session_id=session_id,
+    )
+    assert result is None
+    assert get_session(session_id).pending_creation is None
+
+
+# ============================================================
 # Extraction schema validation
 # ============================================================
 

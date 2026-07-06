@@ -105,3 +105,19 @@ def test_completely_different_name_falls_back_to_global_match():
 
 def test_unknown_reply_returns_not_found_global():
     assert resolve_confirmation("zzz qqq", CANDIDATES, ALL_CONTACTS) == "NOT_FOUND_GLOBAL"
+
+
+def test_name_embedded_in_sentence_resolves():
+    # Fuzzy scoring punishes the extra words — containment must catch these.
+    assert resolve_confirmation("I meant jamil ali", CANDIDATES, ALL_CONTACTS) == "c1"
+    assert resolve_confirmation("it was Jamil Khan actually", CANDIDATES, ALL_CONTACTS) == "c2"
+    assert resolve_confirmation("no no, I meant Sara Malik", CANDIDATES, ALL_CONTACTS) == "id-2"
+
+
+def test_embedded_name_prefers_longest_match():
+    # "jamil" (a real contact) is contained too, but "jamil ali" is longer
+    candidates = [
+        {"id": "short", "name": "jamil"},
+        {"id": "long", "name": "Jamil Ali"},
+    ]
+    assert resolve_confirmation("I meant jamil ali", candidates, contacts("jamil", "Jamil Ali")) == "long"

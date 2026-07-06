@@ -107,7 +107,10 @@ class Contact(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
     interactions: Mapped[list["ContactInteraction"]] = relationship(
-        "ContactInteraction", back_populates="contact", order_by="ContactInteraction.interaction_date.desc()"
+        "ContactInteraction",
+        back_populates="contact",
+        order_by="ContactInteraction.interaction_date.desc()",
+        cascade="all, delete-orphan",  # deleting a contact removes their fact log
     )
 
 

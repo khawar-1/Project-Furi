@@ -102,6 +102,27 @@ async def test_update_contact_merges_skills(engine, session_id):
 
 
 # ============================================================
+# 5b. Deleting a contact cascades to their fact log
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_delete_contact_cascades_interactions(engine, db_session):
+    """Regression: deleting a contact with facts used to raise
+    'NOT NULL constraint failed: contact_interactions.contact_id'."""
+    from sqlalchemy import select
+    from app.db.models import ContactInteraction
+
+    contact = await engine.create_contact_manual("Temp Person")
+    await engine.update_contact(
+        contact.id, {"new_facts": [{"fact": "Some fact", "category": "other"}]}
+    )
+
+    assert await engine.delete_contact_by_name("Temp Person") is True
+    remaining = await db_session.execute(select(ContactInteraction))
+    assert list(remaining.scalars().all()) == []
+
+
+# ============================================================
 # 6. Store and retrieve an episode
 # ============================================================
 
