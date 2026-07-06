@@ -124,13 +124,25 @@ Simply let it inform how you respond, as a person would use their own memory.
 [SYSTEM NOTE — BACKEND RESOLVED]: {disambiguation_resolved_note}
 """
     elif pending_resolution:
-        names = [c["name"] for c in pending_resolution["candidates"]]
+        mentions = pending_resolution.get("mentions") or [{
+            "name": pending_resolution["original_name"],
+            "candidates": pending_resolution["candidates"],
+        }]
+        mention_lines = [
+            f'- "{m["name"]}" → possible matches: {", ".join(c["name"] for c in m["candidates"])}'
+            for m in mentions
+        ]
+        example = " And ".join(
+            f'by \'{m["name"]}\' did you mean {" or ".join(c["name"] for c in m["candidates"][:3])}?'
+            for m in mentions[:2]
+        )
         base += f"""
 PENDING DISAMBIGUATION:
-A background process flagged "{pending_resolution['original_name']}" as ambiguous (possible matches: {', '.join(names)}).
+A background process flagged the following name(s) from the user's earlier message as ambiguous:
+{chr(10).join(mention_lines)}
 However, check the latest user message first:
-- If the user has ALREADY clearly stated which person they mean in their most recent message, accept it and proceed — do NOT ask again.
-- If it is still unclear, ask the user to choose from: {', '.join(names)}. Do not invent alternatives.
+- If the user has ALREADY clearly stated which person they mean for EVERY name above, accept it and proceed — do NOT ask again.
+- Otherwise, ask ONE short question that handles EACH unresolved name SEPARATELY, listing only that name's own options (e.g. "Quick check — {example}"). NEVER merge different names' options into combined guesses, and do not invent alternatives.
 """
     elif pending_creation:
         base += f"""
@@ -144,10 +156,15 @@ Do not save or assume anything about this person until the user answers. If the 
         for m in ambiguous_mentions:
             names = ", ".join(c["name"] for c in m["candidates"])
             mention_lines.append(f'- "{m["mention"]}" could be any of: {names}')
+        example = " And ".join(
+            f'by \'{m["mention"]}\' did you mean {" or ".join(c["name"] for c in m["candidates"][:3])}?'
+            for m in ambiguous_mentions[:2]
+        )
         base += f"""
 AMBIGUOUS NAME(S) IN THE CURRENT MESSAGE (backend-verified — this is mandatory):
 {chr(10).join(mention_lines)}
-The user's latest message names a person who matches MULTIPLE saved contacts. You MUST ask which one they mean before confirming, acting on, or discussing any information about that person. Do NOT assume — not even the exact-spelling match. Nothing has been saved yet; the information is held until the user answers. Ask exactly one short question listing the options above.
+The user's latest message names one or more people who each match MULTIPLE saved contacts. You MUST ask which one they mean before confirming, acting on, or discussing any information about those people. Do NOT assume — not even the exact-spelling match. Nothing has been saved yet; the information is held until the user answers.
+Ask exactly ONE short question, but handle EACH ambiguous name SEPARATELY inside it: for every name above, list only that name's own options (e.g. "Quick check — {example}"). NEVER merge different names' options into combined guesses like "is it X and one of Y or Z".
 """
 
     return base
@@ -219,13 +236,17 @@ async def chat_stream(
             last_user_msg_content = user_msgs[-1] if user_msgs else ""
             
             if sess.pending_resolution is not None and last_user_msg_content:
-                from app.memory.engine import resolve_confirmation
+                from app.memory.engine import resolve_confirmation_multi
                 pr = sess.pending_resolution
                 all_contacts = await memory_engine.get_all_contacts()
-                
-                resolved_id = resolve_confirmation(last_user_msg_content, pr.candidates, all_contacts)
-                
-                if resolved_id == "NOT_FOUND_GLOBAL":
+                contacts_by_id = {c.id: c for c in all_contacts}
+                mentions = pr.mentions()
+
+                # One reply may settle SEVERAL pending names at once
+                # ("i meant hamil and ali raza" answering both "ali" and "jamil").
+                assignment = resolve_confirmation_multi(last_user_msg_content, mentions, all_contacts)
+
+                if not assignment:
                     sess.pending_resolution = None
                     touch_session(session_id)
                     disambiguation_resolved_note = (
@@ -233,68 +254,93 @@ async def chat_stream(
                         f"any known contacts. Tell the user exactly this: 'This contact isn't in your contact list. "
                         f"If you want me to remember facts about them, please save them as a contact first.'"
                     )
-                elif resolved_id is not None:
-                    # Pin the resolved entity as the focus contact. The match may
-                    # be a contact OUTSIDE the offered candidates (global match),
-                    # so resolve the display name from the full contact list.
-                    all_contacts = await memory_engine.get_all_contacts()
-                    resolved_contact = next((c for c in all_contacts if c.id == resolved_id), None)
-                    resolved_name = (
-                        resolved_contact.name if resolved_contact
-                        else next(
-                            (c["name"] for c in pr.candidates if c["id"] == resolved_id),
-                            last_user_msg_content,
-                        )
-                    )
-                    if resolved_contact:
-                        new_entity = ActiveEntity(
-                            id=resolved_contact.id, type="contact",
-                            name=resolved_contact.name, confidence=1.0,
-                            last_mentioned=time.time()
-                        )
-                        sess.active_entities = [new_entity]
-                        sess.focus_entity = new_entity
+                else:
+                    # Confirmed contacts: names settled in prior turns plus this reply.
+                    preresolved = {
+                        as_said: contacts_by_id[cid]
+                        for as_said, cid in pr.resolved_so_far.items()
+                        if cid in contacts_by_id
+                    }
+                    for as_said, cid in assignment.items():
+                        if cid in contacts_by_id:
+                            preresolved[as_said.lower()] = contacts_by_id[cid]
 
-                    # Apply the parked writes deterministically — the whole point
-                    # of deferring was to write them once the identity is known.
+                    resolved_contacts = [
+                        contacts_by_id[cid] for cid in assignment.values() if cid in contacts_by_id
+                    ]
+                    primary = preresolved.get(pr.original_name.lower()) or (
+                        resolved_contacts[0] if resolved_contacts else None
+                    )
+                    if resolved_contacts:
+                        entities = [
+                            ActiveEntity(
+                                id=c.id, type="contact", name=c.name,
+                                confidence=1.0, last_mentioned=time.time(),
+                            )
+                            for c in resolved_contacts
+                        ]
+                        sess.active_entities = entities
+                        sess.focus_entity = entities[0] if len(entities) == 1 else None
+
+                    # Apply the parked writes deterministically. Facts are
+                    # re-routed through store_shared_fact with the confirmed
+                    # contacts pinned: fully-resolved facts write both
+                    # perspectives; facts with names STILL unresolved re-park
+                    # and the question below asks only about those.
+                    parked_facts = pr.pending_shared_facts
+                    pending_update = pr.pending_update
+                    sess.pending_resolution = None  # clear before re-routing; re-parking recreates it
+                    touch_session(session_id)
+
                     saved_something = False
                     saved_texts: list = []
                     try:
-                        if resolved_contact:
-                            if pr.pending_update:
-                                await memory_engine.update_contact(resolved_contact.id, pr.pending_update)
-                                saved_something = True
-                                user_name_note = await memory_engine.get_user_name()
-                                saved_texts.extend(
-                                    substitute_placeholders(
-                                        f.get("fact", ""), user_name=user_name_note,
-                                        default_contact_name=resolved_contact.name,
-                                    )
-                                    for f in pr.pending_update.get("new_facts", []) if f.get("fact")
+                        if pending_update and primary:
+                            await memory_engine.update_contact(primary.id, pending_update)
+                            saved_something = True
+                            user_name_note = await memory_engine.get_user_name()
+                            saved_texts.extend(
+                                substitute_placeholders(
+                                    f.get("fact", ""), user_name=user_name_note,
+                                    default_contact_name=primary.name,
                                 )
-                            for parked_fact in pr.pending_shared_facts:
-                                saved_texts.append(
-                                    await memory_engine.apply_shared_fact_to_contact(parked_fact, resolved_contact)
-                                )
+                                for f in pending_update.get("new_facts", []) if f.get("fact")
+                            )
+                        for parked_fact in parked_facts:
+                            text = await memory_engine.store_shared_fact(
+                                parked_fact, session_id=session_id, preresolved=preresolved
+                            )
+                            if text:
+                                saved_texts.append(text)
                                 saved_something = True
                     except Exception as e:
                         logger.warning(f"Applying parked writes after disambiguation failed: {e}")
 
-                    # Clear pending resolution — it's been answered
-                    sess.pending_resolution = None
-                    touch_session(session_id)
-                    # Tell the LLM exactly what happened
+                    resolved_names = ", ".join(dict.fromkeys(c.name for c in resolved_contacts))
                     saved_note = (
-                        f"The pending information from their previous message has now been successfully linked and saved to \"{resolved_name}\". "
+                        f"The pending information from their previous message has now been successfully linked and saved to: {resolved_names}. "
                         if saved_something else
-                        f"The original pending fact is now securely linked to \"{resolved_name}\". "
+                        f"The original pending fact is now securely linked to: {resolved_names}. "
                     )
                     disambiguation_resolved_note = (
-                        f"DISAMBIGUATION RESOLVED: The user meant \"{resolved_name}\". "
+                        f"DISAMBIGUATION RESOLVED: The user meant: {resolved_names}. "
                         + saved_note +
-                        f"CRITICAL: Acknowledge this naturally (e.g., 'Got it, {resolved_name}. Noted.'), but DO NOT phrase your response as if this is an old memory you just remembered (e.g. do NOT say 'we had previously noted' or 'that's already in our plans'). The user literally just told you this in the previous turn! Do NOT ask for clarification again."
+                        f"CRITICAL: Acknowledge this naturally (e.g., 'Got it. Noted.'), but DO NOT phrase your response as if this is an old memory you just remembered (e.g. do NOT say 'we had previously noted' or 'that's already in our plans'). The user literally just told you this in the previous turn! Do NOT ask for clarification again."
                         + _saved_just_now_clause(saved_texts)
                     )
+                    # If some names are STILL unresolved, the fact re-parked —
+                    # tell the LLM to ask about those names only.
+                    still_pending = get_session(session_id).pending_resolution
+                    if still_pending is not None:
+                        remaining = "; ".join(
+                            f'"{m["name"]}" (options: {", ".join(c["name"] for c in m["candidates"])})'
+                            for m in still_pending.mentions()
+                        )
+                        disambiguation_resolved_note += (
+                            f" HOWEVER, the fact also involves name(s) still ambiguous: {remaining}. "
+                            f"After acknowledging, ask ONE short question — for EACH remaining name separately, "
+                            f"list that name's options and ask which one they meant."
+                        )
 
             # --- PENDING CONTACT CREATION: resolve the yes/no in Python ---
             elif sess.pending_creation is not None and last_user_msg_content:
@@ -310,6 +356,16 @@ async def chat_stream(
                     all_contacts_chk = await memory_engine.get_all_contacts()
                     chk = identify_contact(pc.name, all_contacts_chk)
                     if chk.status == ResolutionStatus.RESOLVED:
+                        parked_facts = pc.pending_shared_facts
+                        all_contacts_map = {c.id: c for c in all_contacts_chk}
+                        preresolved = {
+                            as_said: all_contacts_map[cid]
+                            for as_said, cid in pc.resolved_so_far.items()
+                            if cid in all_contacts_map
+                        }
+                        preresolved[pc.name.lower()] = chk.contact
+                        sess.pending_creation = None  # clear before re-routing
+                        touch_session(session_id)
                         try:
                             saved_any = False
                             saved_texts = []
@@ -324,11 +380,13 @@ async def chat_stream(
                                     )
                                     for f in pc.pending_update.get("new_facts", []) if f.get("fact")
                                 )
-                            for parked_fact in pc.pending_shared_facts:
-                                saved_texts.append(
-                                    await memory_engine.apply_shared_fact_to_contact(parked_fact, chk.contact)
+                            for parked_fact in parked_facts:
+                                text = await memory_engine.store_shared_fact(
+                                    parked_fact, session_id=session_id, preresolved=preresolved
                                 )
-                                saved_any = True
+                                if text:
+                                    saved_texts.append(text)
+                                    saved_any = True
                             if saved_any:
                                 disambiguation_resolved_note = (
                                     f"NAME MATCHED EXISTING CONTACT: \"{pc.name}\" is the saved contact "
@@ -339,7 +397,8 @@ async def chat_stream(
                                 )
                         except Exception as e:
                             logger.warning(f"Applying rechecked pending creation failed: {e}")
-                        sess.pending_creation = None
+                        if sess.pending_creation is pc:  # re-routing may have parked a NEW question
+                            sess.pending_creation = None
                         touch_session(session_id)
                     elif chk.status == ResolutionStatus.AMBIGUOUS:
                         # Multiple matches now — convert into a disambiguation question
@@ -349,6 +408,8 @@ async def chat_stream(
                                 pending_update=pc.pending_update,
                                 candidates=chk.candidates,
                                 pending_shared_facts=pc.pending_shared_facts,
+                                unresolved_mentions=[{"name": pc.name, "candidates": chk.candidates}],
+                                resolved_so_far=dict(pc.resolved_so_far),
                             )
                         sess.pending_creation = None
                         touch_session(session_id)
@@ -360,6 +421,16 @@ async def chat_stream(
                                     pc.name,
                                     {k: v for k, v in pc.pending_update.items() if k != "new_facts"},
                                 )
+                                parked_facts = pc.pending_shared_facts
+                                all_contacts_map = {c.id: c for c in all_contacts_chk}
+                                preresolved = {
+                                    as_said: all_contacts_map[cid]
+                                    for as_said, cid in pc.resolved_so_far.items()
+                                    if cid in all_contacts_map
+                                }
+                                preresolved[pc.name.lower()] = new_contact
+                                sess.pending_creation = None  # clear before re-routing
+                                touch_session(session_id)
                                 saved_texts = []
                                 if pc.pending_update.get("new_facts"):
                                     await memory_engine.update_contact(
@@ -373,10 +444,12 @@ async def chat_stream(
                                         )
                                         for f in pc.pending_update.get("new_facts", []) if f.get("fact")
                                     )
-                                for parked_fact in pc.pending_shared_facts:
-                                    saved_texts.append(
-                                        await memory_engine.apply_shared_fact_to_contact(parked_fact, new_contact)
+                                for parked_fact in parked_facts:
+                                    text = await memory_engine.store_shared_fact(
+                                        parked_fact, session_id=session_id, preresolved=preresolved
                                     )
+                                    if text:
+                                        saved_texts.append(text)
                                 new_entity = ActiveEntity(
                                     id=new_contact.id, type="contact",
                                     name=new_contact.name, confidence=1.0,
@@ -392,7 +465,8 @@ async def chat_stream(
                                 )
                             except Exception as e:
                                 logger.warning(f"Pending contact creation failed: {e}")
-                            sess.pending_creation = None
+                            if sess.pending_creation is pc:  # re-routing may have parked a NEW question
+                                sess.pending_creation = None
                             touch_session(session_id)
                         elif answer is False:
                             saved_texts = []
@@ -437,12 +511,14 @@ async def chat_stream(
             sess_after = get_session(session_id)
             if sess_after.pending_resolution is None:
                 pending_resolution = None
-            elif sess_after.pending_resolution is not None and pending_resolution is None:
-                # e.g. a pending creation was just converted into a disambiguation
+            else:
+                # Always re-serialize: the block above may have re-parked with
+                # fewer mentions, or converted a creation into a disambiguation.
                 pr_now = sess_after.pending_resolution
                 pending_resolution = {
                     "original_name": pr_now.original_name,
                     "candidates": pr_now.candidates,
+                    "mentions": pr_now.mentions(),
                 }
             if sess_after.pending_creation is not None and time.time() <= sess_after.pending_creation.expires:
                 pending_creation = {"name": sess_after.pending_creation.name}

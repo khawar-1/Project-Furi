@@ -42,12 +42,27 @@ class PendingResolution:
                            fact_user_perspective / fact_contact_perspective /
                            category / event_date, still containing {USER} and
                            {CONTACT:<name>} placeholders) deferred the same way.
+    unresolved_mentions  — ALL ambiguous names awaiting the user's answer:
+                           [{"name": as-said, "candidates": [{"id","name"}]}].
+                           original_name/candidates mirror the first entry for
+                           backward compatibility with single-name flows.
+    resolved_so_far      — as-said name (lowercased) → contact id for names in
+                           the parked facts that ARE already resolved, so a
+                           multi-name fact never re-asks about them.
     """
     original_name: str
     pending_update: dict
     candidates: list
     pending_shared_facts: list = field(default_factory=list)
+    unresolved_mentions: list = field(default_factory=list)
+    resolved_so_far: dict = field(default_factory=dict)
     expires: float = field(default_factory=lambda: time.time() + 300)
+
+    def mentions(self) -> list:
+        """All unresolved mentions, falling back to the legacy single-name shape."""
+        if self.unresolved_mentions:
+            return self.unresolved_mentions
+        return [{"name": self.original_name, "candidates": self.candidates}]
 
 
 @dataclass
@@ -61,6 +76,7 @@ class PendingCreation:
     name: str
     pending_update: dict = field(default_factory=dict)
     pending_shared_facts: list = field(default_factory=list)
+    resolved_so_far: dict = field(default_factory=dict)
     expires: float = field(default_factory=lambda: time.time() + 300)
 
 

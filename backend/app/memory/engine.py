@@ -77,6 +77,34 @@ def parse_event_date(value) -> Optional[date]:
         return datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+# Leading past-tense verbs → base form, for rewriting facts about FUTURE events
+# as plans ("Went to fishing ... on 2026-08-01" → "Planning to go to fishing ...").
+# The extractor prompt asks for plan phrasing directly; this is the deterministic
+# safety net for when the LLM phrases a future event in past tense anyway.
+_PAST_TO_PLAN = {
+    "went": "go", "had": "have", "played": "play", "met": "meet",
+    "visited": "visit", "attended": "attend", "saw": "see", "ate": "eat",
+    "drank": "drink", "watched": "watch", "took": "take", "did": "do",
+    "bought": "buy", "celebrated": "celebrate", "traveled": "travel",
+    "travelled": "travel", "got": "get", "made": "make", "gave": "give",
+    "joined": "join", "hosted": "host", "threw": "throw",
+}
+
+
+def normalize_future_phrasing(text: str, event_date: Optional[date], today: Optional[date] = None) -> str:
+    """If the event is in the future but the text opens with a past-tense verb,
+    rewrite the opening as a plan. Past/undated facts are returned unchanged."""
+    if not text or not event_date:
+        return text
+    if event_date <= (today or datetime.now().date()):
+        return text
+    first, _, rest = text.strip().partition(" ")
+    base = _PAST_TO_PLAN.get(first.lower())
+    if not base:
+        return text
+    return f"Planning to {base} {rest}".strip()
 from dataclasses import dataclass, field
 
 class ResolutionStatus(Enum):
@@ -320,6 +348,74 @@ def resolve_confirmation(clarified_name: str, candidate_dicts: list, all_contact
     return "NOT_FOUND_GLOBAL"
 
 
+def _scan_reply_contacts(reply: str, all_contacts: list) -> list:
+    """
+    Every contact whose full name appears word-bounded in the reply, longest
+    names first, each text span consumed once ("ali raza" swallows "ali").
+    """
+    padded = f" {normalize_name(reply)} "
+    found = []
+    for contact in sorted(all_contacts, key=lambda c: len(normalize_name(c.name)), reverse=True):
+        norm = normalize_name(contact.name)
+        if norm and f" {norm} " in padded:
+            found.append(contact)
+            padded = padded.replace(f" {norm} ", "  ", 1)
+    return found
+
+
+def resolve_confirmation_multi(reply: str, mentions: list, all_contacts: list) -> dict:
+    """
+    Resolve a confirmation reply that may answer SEVERAL pending ambiguous
+    names at once ("i meant hamil and ali raza" answering both "ali" and
+    "jamil"). Returns {as-said mention name → contact id} for every mention
+    the reply settles; mentions it doesn't settle are simply absent.
+
+    Assignment order:
+      1. single pending mention → the full single-name resolver (positional
+         answers, embedded names, fuzzy, global) — unchanged behavior.
+      2. candidate membership — a contact named in the reply that is among a
+         mention's offered candidates answers THAT mention ("ali raza" → "ali").
+      3. fuzzy leftovers — remaining reply names pair with remaining mentions
+         by name similarity ("hamil" → the mention "jamil"): the user corrected
+         the name rather than picking a candidate.
+    """
+    if len(mentions) == 1:
+        resolved = resolve_confirmation(reply, mentions[0].get("candidates", []), all_contacts)
+        if resolved and resolved != "NOT_FOUND_GLOBAL":
+            return {mentions[0]["name"]: resolved}
+        return {}
+
+    assignment: dict = {}
+    pool = _scan_reply_contacts(reply, all_contacts)
+    remaining = list(mentions)
+
+    # Pass 1: candidate membership
+    for mention in list(remaining):
+        candidate_ids = {c["id"] for c in mention.get("candidates", [])}
+        members = [c for c in pool if c.id in candidate_ids]
+        if len(members) == 1:
+            assignment[mention["name"]] = members[0].id
+            pool.remove(members[0])
+            remaining.remove(mention)
+
+    # Pass 2: pair leftover reply names with leftover mentions by similarity
+    while remaining and pool:
+        best_score, best_pair = 0.0, None
+        for mention in remaining:
+            for contact in pool:
+                score = fuzz.WRatio(normalize_name(mention["name"]), normalize_name(contact.name))
+                if score > best_score:
+                    best_score, best_pair = score, (mention, contact)
+        if best_pair is None or best_score < 60:
+            break
+        mention, contact = best_pair
+        assignment[mention["name"]] = contact.id
+        pool.remove(contact)
+        remaining.remove(mention)
+
+    return assignment
+
+
 class MemoryEngine:
     """
     The brain of Jarvis OS.
@@ -352,6 +448,7 @@ class MemoryEngine:
         fact has cosine similarity > 0.92 (same meaning, different wording),
         the old fact is soft-deleted and replaced by the new one.
         """
+        content = normalize_future_phrasing(content, event_date)
         # --- Exact-text dedup ---
         existing_result = await self.db.execute(
             select(SemanticMemory).where(
@@ -664,7 +761,7 @@ class MemoryEngine:
         (case-insensitive description match). Does NOT commit — callers own
         the transaction. Returns True if a row was added.
         """
-        description = (description or "").strip()
+        description = normalize_future_phrasing((description or "").strip(), event_date)
         if not description:
             return False
         existing_result = await self.db.execute(
@@ -710,6 +807,7 @@ class MemoryEngine:
         name: str,
         pending_update: Optional[dict] = None,
         shared_fact: Optional[dict] = None,
+        resolved_so_far: Optional[dict] = None,
     ) -> None:
         """
         Defer writes for an unknown person until the user confirms creation.
@@ -733,26 +831,46 @@ class MemoryEngine:
             self._merge_pending_update(pc.pending_update, pending_update)
         if shared_fact:
             pc.pending_shared_facts.append(shared_fact)
+        pc.resolved_so_far.update(resolved_so_far or {})
         touch_session(session_id)
 
     def _park_pending_shared_resolution(
-        self, session_id: str, name: str, candidates: list, shared_fact: dict
+        self,
+        session_id: str,
+        mentions: list,
+        shared_fact: dict,
+        resolved_so_far: Optional[dict] = None,
     ) -> None:
-        """Defer a shared fact behind the session's disambiguation question."""
+        """
+        Defer a shared fact behind the session's disambiguation question.
+        mentions holds EVERY ambiguous name in the fact ([{"name","candidates"}]);
+        resolved_so_far carries the names that already resolved (as-said lower →
+        contact id) so re-routing after confirmation never re-asks about them.
+        """
         sess = get_session(session_id)
         pr = sess.pending_resolution
         if pr is not None and time.time() > pr.expires:
             sess.pending_resolution = None
             pr = None
         if pr is None:
-            pr = PendingResolution(original_name=name, pending_update={}, candidates=candidates)
-            sess.pending_resolution = pr
-        elif normalize_name(pr.original_name) != normalize_name(name):
-            logger.info(
-                f"_park_pending_shared_resolution: '{pr.original_name}' already pending; "
-                f"dropping shared fact for '{name}'"
+            pr = PendingResolution(
+                original_name=mentions[0]["name"],
+                pending_update={},
+                candidates=mentions[0]["candidates"],
+                unresolved_mentions=list(mentions),
             )
-            return
+            sess.pending_resolution = pr
+        else:
+            if not pr.unresolved_mentions:
+                pr.unresolved_mentions = [
+                    {"name": pr.original_name, "candidates": pr.candidates}
+                ]
+            known = {normalize_name(m["name"]) for m in pr.unresolved_mentions}
+            for mention in mentions:
+                if normalize_name(mention["name"]) not in known:
+                    pr.unresolved_mentions.append(mention)
+                    known.add(normalize_name(mention["name"]))
+        pr.resolved_so_far.update(resolved_so_far or {})
         pr.pending_shared_facts.append(shared_fact)
         touch_session(session_id)
 
@@ -798,6 +916,7 @@ class MemoryEngine:
             contact_mapping=contact_mapping,
             default_contact_name=default_contact_name,
         )
+        user_side = normalize_future_phrasing(user_side, event_date)
         if user_side:
             await self.store_semantic_memory(
                 user_side,
@@ -808,95 +927,180 @@ class MemoryEngine:
                 event_date=event_date,
             )
 
-        contact_side = substitute_placeholders(
-            fact.get("fact_contact_perspective", ""),
-            user_name=user_name,
-            contact_mapping=contact_mapping,
-            default_contact_name=default_contact_name,
-        )
-        # Guard against LLM misfills: a contact perspective identical to the
-        # user perspective means the model duplicated it instead of flipping it.
-        if contact_side and user_side and contact_side.strip().lower() == user_side.strip().lower():
-            logger.debug("Skipping contact-side write: perspective not flipped by extractor")
-            contact_side = ""
-        if contact_side and contacts:
-            added = False
-            for contact in contacts:
-                # A contact's own log entry should never refer to them by name
-                # (single-contact facts) — that's the misfilled user perspective.
-                if len(contacts) == 1 and contact.name.lower() in contact_side.lower():
+        added = False
+        for contact in contacts:
+            contact_side = self._derive_contact_side(
+                fact.get("fact_user_perspective", ""),
+                contact,
+                user_name=user_name,
+                contact_mapping=contact_mapping,
+                default_contact_name=default_contact_name,
+            )
+            if contact_side is None:
+                # Derivation impossible — fall back to the LLM's own perspective
+                # flip, with guards against the known misfill shapes.
+                contact_side = substitute_placeholders(
+                    fact.get("fact_contact_perspective", ""),
+                    user_name=user_name,
+                    contact_mapping=contact_mapping,
+                    default_contact_name=default_contact_name,
+                )
+                if contact_side and user_side and contact_side.strip().lower() == user_side.strip().lower():
+                    logger.debug("Skipping contact-side write: perspective not flipped by extractor")
+                    contact_side = ""
+                # A contact's own log should not name them (misfilled user
+                # perspective), and the user's name must not appear more than
+                # once ("Khawar went fishing with Khawar and Khawar").
+                if contact_side and contact.name.lower() in contact_side.lower():
                     logger.debug(
                         f"Skipping contact-side write for '{contact.name}': text is self-referential"
                     )
-                    continue
-                if await self.add_contact_fact(
-                    contact, contact_side, category=category, event_date=event_date
-                ):
-                    contact.interaction_count += 1
-                    contact.last_interaction = utc_now()
-                    added = True
-            if added:
-                await self.db.commit()
+                    contact_side = ""
+                if contact_side and user_name and contact_side.lower().count(user_name.lower()) > 1:
+                    logger.debug(
+                        "Skipping contact-side write: extractor filled multiple people as the user"
+                    )
+                    contact_side = ""
+            if not contact_side:
+                continue
+            if await self.add_contact_fact(
+                contact, contact_side, category=category, event_date=event_date
+            ):
+                contact.interaction_count += 1
+                contact.last_interaction = utc_now()
+                added = True
                 logger.info(
-                    f"Shared fact written to {len(contacts)} contact log(s): '{contact_side[:60]}'"
+                    f"Shared fact written to '{contact.name}' log: '{contact_side[:60]}'"
                 )
+        if added:
+            await self.db.commit()
         return user_side
 
-    async def store_shared_fact(self, fact: dict, session_id: Optional[str] = None) -> None:
+    @staticmethod
+    def _derive_contact_side(
+        user_perspective: str,
+        contact: Contact,
+        user_name: Optional[str],
+        contact_mapping: Optional[dict] = None,
+        default_contact_name: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Deterministically flip the user-perspective template for one contact's
+        log: that contact's {CONTACT:...} placeholder becomes the user's name,
+        every other placeholder resolves normally. "Went fishing with
+        {CONTACT:ali} and {CONTACT:jamil}" → on hamil's log: "Went fishing with
+        Ali Raza and Khawar". This never trusts the LLM's perspective flip.
+
+        Returns None when the flip can't be done safely: the template names the
+        user explicitly via {USER} (the swap would double the user up), or no
+        placeholder in it refers to this contact.
+        """
+        if not user_perspective or USER_PLACEHOLDER in user_perspective:
+            return None
+        mapping = {k.lower(): v for k, v in (contact_mapping or {}).items()}
+        contact_norm = normalize_name(contact.name)
+        swapped = False
+
+        def _sub(match: re.Match) -> str:
+            nonlocal swapped
+            as_said = match.group(1).strip()
+            resolved = mapping.get(as_said.lower()) or default_contact_name or as_said
+            if normalize_name(resolved) == contact_norm or normalize_name(as_said) == contact_norm:
+                swapped = True
+                return user_name or "the user"
+            return resolved
+
+        flipped = CONTACT_PLACEHOLDER_RE.sub(_sub, user_perspective)
+        return flipped if swapped else None
+
+    async def store_shared_fact(
+        self,
+        fact: dict,
+        session_id: Optional[str] = None,
+        preresolved: Optional[dict] = None,
+    ) -> Optional[str]:
         """
         Route one extracted fact-about-user through identity resolution.
 
         subject == "user" → single About-Me write.
         subject == "shared" → resolve every related contact; if all resolve,
-        write both perspectives; on the first AMBIGUOUS name park the whole
-        fact behind the session's disambiguation question; on the first
-        NOT_FOUND name park it behind a create-contact question.
+        write both perspectives. ALL ambiguous names park together behind ONE
+        disambiguation question (never one at a time); a NOT_FOUND name parks
+        behind a create-contact question once no ambiguity remains.
+
+        preresolved maps as-said names (lowercased) → Contact for names the
+        user has already confirmed in this session — those are never
+        re-resolved (re-resolving a confirmed "Jamil Ali" would flag it
+        ambiguous against "jamil ali khan" all over again).
+
+        Returns the saved user-perspective text, or None if the fact was
+        parked (or empty).
         """
         user_text = (fact.get("fact_user_perspective") or "").strip()
         if not user_text:
-            return
+            return None
         related = fact.get("related_contacts") or []
 
         if fact.get("subject") != "shared" or not related:
             user_name = await self.get_user_name()
             text = substitute_placeholders(user_text, user_name=user_name)
-            await self.store_semantic_memory(
+            memory = await self.store_semantic_memory(
                 text,
                 category=fact.get("category") or "fact",
                 source="extracted",
                 subject="user",
                 event_date=parse_event_date(fact.get("event_date")),
             )
-            return
+            return memory.content if memory else text
 
         all_contacts = await self.get_all_contacts()
+        preresolved = {k.lower(): v for k, v in (preresolved or {}).items()}
         mapping: dict = {}
         resolved: list[Contact] = []
+        ambiguous_mentions: list[dict] = []
+        unknown_names: list[str] = []
+        resolved_ids: dict = {}  # as-said (lower) → contact id, for re-parking
         for name in related:
+            confirmed = preresolved.get(name.lower())
+            if confirmed is not None:
+                mapping[name.lower()] = confirmed.name
+                resolved.append(confirmed)
+                resolved_ids[name.lower()] = confirmed.id
+                continue
             result = identify_contact(name, all_contacts)
             if result.status == ResolutionStatus.RESOLVED:
                 mapping[name.lower()] = result.contact.name
                 resolved.append(result.contact)
+                resolved_ids[name.lower()] = result.contact.id
             elif result.status == ResolutionStatus.AMBIGUOUS:
-                if session_id:
-                    parked = self._substitute_fact(fact, mapping)
-                    self._park_pending_shared_resolution(
-                        session_id, name, result.candidates, parked
-                    )
-                    logger.info(f"store_shared_fact: '{name}' ambiguous — fact parked for disambiguation")
-                else:
-                    logger.warning(f"store_shared_fact: '{name}' ambiguous, no session — fact dropped")
-                return
-            else:  # NOT_FOUND
-                if session_id:
-                    parked = self._substitute_fact(fact, mapping)
-                    self._park_pending_creation(session_id, name, shared_fact=parked)
-                    logger.info(f"store_shared_fact: '{name}' unknown — fact parked for creation confirmation")
-                else:
-                    logger.warning(f"store_shared_fact: '{name}' unknown, no session — fact dropped")
-                return
+                ambiguous_mentions.append({"name": name, "candidates": result.candidates})
+            else:
+                unknown_names.append(name)
+        if ambiguous_mentions:
+            if session_id:
+                parked = self._substitute_fact(fact, mapping)
+                self._park_pending_shared_resolution(
+                    session_id, ambiguous_mentions, parked, resolved_so_far=resolved_ids
+                )
+                names = ", ".join(m["name"] for m in ambiguous_mentions)
+                logger.info(f"store_shared_fact: ambiguous name(s) [{names}] — fact parked for disambiguation")
+            else:
+                logger.warning("store_shared_fact: ambiguous name(s), no session — fact dropped")
+            return None
+        if unknown_names:
+            if session_id:
+                parked = self._substitute_fact(fact, mapping)
+                self._park_pending_creation(
+                    session_id, unknown_names[0], shared_fact=parked, resolved_so_far=resolved_ids
+                )
+                logger.info(
+                    f"store_shared_fact: '{unknown_names[0]}' unknown — fact parked for creation confirmation"
+                )
+            else:
+                logger.warning(f"store_shared_fact: '{unknown_names[0]}' unknown, no session — fact dropped")
+            return None
 
-        await self._write_shared_fact(fact, resolved, contact_mapping=mapping)
+        return await self._write_shared_fact(fact, resolved, contact_mapping=mapping)
 
     async def apply_shared_fact_to_contact(self, fact: dict, contact: Contact) -> str:
         """
@@ -908,15 +1112,17 @@ class MemoryEngine:
 
     async def apply_shared_fact_user_only(self, fact: dict, as_said_name: Optional[str] = None) -> str:
         """
-        User declined to create the contact: keep only the About-Me side,
-        with the person's name exactly as the user said it.
+        User declined to create the contact: keep only the About-Me side.
+        Every unmapped {CONTACT:...} placeholder falls back to the name exactly
+        as it was said — never a single default slammed over all of them (a
+        multi-person fact may mix the declined name with already-resolved ones).
         """
         user_name = await self.get_user_name()
         text = substitute_placeholders(
             fact.get("fact_user_perspective", ""),
             user_name=user_name,
-            default_contact_name=as_said_name,
         )
+        text = normalize_future_phrasing(text, parse_event_date(fact.get("event_date")))
         if text:
             await self.store_semantic_memory(
                 text,
@@ -1360,7 +1566,8 @@ class MemoryEngine:
                 if time.time() <= pending_res.expires:
                     pending_res_dict = {
                         "original_name": pending_res.original_name,
-                        "candidates": pending_res.candidates
+                        "candidates": pending_res.candidates,
+                        "mentions": pending_res.mentions(),
                     }
                 else:
                     # Expired — clear it

@@ -209,9 +209,10 @@ async def test_apply_user_only_after_declined_creation(engine, db_session, sessi
 # ============================================================
 
 @pytest.mark.asyncio
-async def test_unflipped_contact_perspective_is_not_written(engine, db_session, session_id):
-    """If the LLM duplicates the user perspective instead of flipping it,
-    the contact log must not receive the self-referential copy."""
+async def test_unflipped_contact_perspective_is_overridden(engine, db_session, session_id):
+    """If the LLM misfills the contact perspective, the contact side is DERIVED
+    from the user perspective instead — the LLM flip is never trusted when the
+    template allows a deterministic flip."""
     await engine.store_user_profile({"name": "Khawar"})
     contact = await engine.create_contact_manual("Jamil Ali")
 
@@ -225,7 +226,8 @@ async def test_unflipped_contact_perspective_is_not_written(engine, db_session, 
 
     memories = await _semantic_contents(db_session)
     assert len(memories) == 1  # user side still written
-    assert await _interactions_for(db_session, contact.id) == []  # bad copy blocked
+    interactions = await _interactions_for(db_session, contact.id)
+    assert [i.description for i in interactions] == ["Went to coffee with Khawar on 2026-07-06"]
 
 
 @pytest.mark.asyncio
