@@ -22,6 +22,17 @@ Current architecture rules:
 - Ambiguous names always ask first — even exact matches that are a subset of a
   longer contact name; multiple ambiguous names in one fact park together and
   one reply can resolve them all (`resolve_confirmation_multi`)
+- Meta-conversation facts ("Mentioned X", "Inquired about Y") are never stored:
+  extraction prompt rule 13 + the deterministic `is_meta_conversation_fact`
+  filter (applies to facts_about_user AND people_mentioned.new_facts)
+- A parked disambiguation survives replies that don't name anyone ("yes", a
+  question, a tangent) — only a failed NAME attempt (`_looks_like_name_answer`)
+  clears it with the "not in your contacts" message
+- Park-after-answer race: the "which X?" question is asked in the same turn but
+  the fact only parks when background extraction finishes, so a fast reply can
+  precede the park. `_run_extraction` replays user messages that arrived during
+  extraction against the freshly parked question
+  (`apply_pending_resolution_reply` in chat.py)
 - Future-dated facts are stored as plans ("Planning to go…"), never past tense
 - The extractor's facts_to_supersede is never applied up front: an old fact is
   deleted only AFTER its replacement is actually written (parked replacements

@@ -37,6 +37,22 @@ def _interpret_yes_no(text: str) -> Optional[bool]:
     return None
 
 
+def _looks_like_name_answer(text: str) -> bool:
+    """
+    Could this reply plausibly be the user naming a person in answer to a
+    "which X?" question? Affirmations ("yes"), questions, and long sentences
+    are NOT name attempts — a parked fact must never be destroyed because an
+    unrelated reply failed to match a contact (live regression: "yes" after
+    the LLM's own confirmation question wiped the parked gym fact).
+    """
+    t = (text or "").strip()
+    if not t or "?" in t:
+        return False
+    if _interpret_yes_no(t) is not None:
+        return False
+    return len(t.split()) <= 6
+
+
 def _saved_just_now_clause(saved_texts: list) -> str:
     """
     Spell out exactly what was written this turn. The parked writes land in
@@ -247,13 +263,18 @@ async def chat_stream(
                 assignment = resolve_confirmation_multi(last_user_msg_content, mentions, all_contacts)
 
                 if not assignment:
-                    sess.pending_resolution = None
-                    touch_session(session_id)
-                    disambiguation_resolved_note = (
-                        f"DISAMBIGUATION FAILED: The user replied '{last_user_msg_content}' which did not match "
-                        f"any known contacts. Tell the user exactly this: 'This contact isn't in your contact list. "
-                        f"If you want me to remember facts about them, please save them as a contact first.'"
-                    )
+                    # Only a failed NAME attempt clears the question. Anything
+                    # else ("yes", a question, a tangent) leaves it parked —
+                    # the PENDING DISAMBIGUATION prompt block keeps it alive
+                    # and the parked facts survive (they expire via TTL).
+                    if _looks_like_name_answer(last_user_msg_content):
+                        sess.pending_resolution = None
+                        touch_session(session_id)
+                        disambiguation_resolved_note = (
+                            f"DISAMBIGUATION FAILED: The user replied '{last_user_msg_content}' which did not match "
+                            f"any known contacts. Tell the user exactly this: 'This contact isn't in your contact list. "
+                            f"If you want me to remember facts about them, please save them as a contact first.'"
+                        )
                 else:
                     # Confirmed contacts: names settled in prior turns plus this reply.
                     preresolved = {
@@ -538,10 +559,15 @@ async def chat_stream(
     for msg in request.messages:
         messages.append(LLMMessage(role=msg.role, content=msg.content))
 
-    # Persist the user's message
+    # Persist the user's message. The timestamp anchors the late-reply check:
+    # any user message persisted AFTER this moment arrived while the
+    # background extraction below was still running.
+    from datetime import datetime, timezone
     last_user_msg = user_msgs[-1] if user_msgs else None
+    user_msg_persisted_at = None
     if last_user_msg:
         await _persist_message(db, session_id, "user", last_user_msg)
+        user_msg_persisted_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     async def event_generator():
         """Yields SSE-formatted chunks from the provider stream."""
@@ -605,6 +631,7 @@ async def chat_stream(
                     session_id=session_id,
                     provider=provider,
                     qdrant=qdrant,
+                    extracted_at=user_msg_persisted_at,
                 )
 
     return StreamingResponse(
@@ -618,6 +645,92 @@ async def chat_stream(
     )
 
 
+async def apply_pending_resolution_reply(
+    memory_engine: MemoryEngine, session_id: str, reply_text: str
+) -> list[str]:
+    """
+    Deterministically resolve the session's parked disambiguation against a
+    user reply and apply the parked writes (same re-routing as the foreground
+    block in chat_stream). Returns the saved user-perspective texts; empty
+    list when the reply settles nothing — the question stays parked.
+    """
+    from app.memory.conversation_state import get_session, touch_session
+    from app.memory.engine import resolve_confirmation_multi
+
+    sess = get_session(session_id)
+    pr = sess.pending_resolution
+    if pr is None or not reply_text:
+        return []
+
+    all_contacts = await memory_engine.get_all_contacts()
+    assignment = resolve_confirmation_multi(reply_text, pr.mentions(), all_contacts)
+    if not assignment:
+        return []
+
+    contacts_by_id = {c.id: c for c in all_contacts}
+    preresolved = {
+        as_said: contacts_by_id[cid]
+        for as_said, cid in pr.resolved_so_far.items()
+        if cid in contacts_by_id
+    }
+    for as_said, cid in assignment.items():
+        if cid in contacts_by_id:
+            preresolved[as_said.lower()] = contacts_by_id[cid]
+    primary = preresolved.get(pr.original_name.lower())
+
+    parked_facts = pr.pending_shared_facts
+    pending_update = pr.pending_update
+    sess.pending_resolution = None  # clear before re-routing; re-parking recreates it
+    touch_session(session_id)
+
+    saved_texts: list[str] = []
+    if pending_update and primary:
+        await memory_engine.update_contact(primary.id, pending_update)
+    for parked_fact in parked_facts:
+        text = await memory_engine.store_shared_fact(
+            parked_fact, session_id=session_id, preresolved=preresolved
+        )
+        if text:
+            saved_texts.append(text)
+    return saved_texts
+
+
+async def _resolve_pending_with_late_replies(
+    db: AsyncSession, memory_engine: MemoryEngine, session_id: str, extracted_at
+) -> None:
+    """
+    Close the park-after-answer race: the disambiguation question is asked in
+    the SAME turn (deterministic ambiguity scan), but the fact is only parked
+    when this background extraction finishes — a fast reply ("jamil", 3s
+    later) lands before the park and resolves nothing. Replay every user
+    message that arrived while extraction was running against the freshly
+    parked question (live regression: the Jamil gym fact was lost this way).
+    """
+    from sqlalchemy import select
+    from app.memory.conversation_state import get_session
+
+    if extracted_at is None or get_session(session_id).pending_resolution is None:
+        return
+    result = await db.execute(
+        select(Message)
+        .where(
+            Message.session_id == session_id,
+            Message.role == "user",
+            Message.created_at > extracted_at,
+        )
+        .order_by(Message.created_at.asc())
+    )
+    for reply in result.scalars().all():
+        saved = await apply_pending_resolution_reply(memory_engine, session_id, reply.content)
+        if saved:
+            logger.info(
+                f"Late disambiguation resolved from reply '{reply.content[:40]}': "
+                f"{len(saved)} fact(s) saved"
+            )
+        if get_session(session_id).pending_resolution is None:
+            break
+
+
 async def _run_extraction(
     user_message: str,
     assistant_message: str,
@@ -625,6 +738,7 @@ async def _run_extraction(
     provider: LLMProvider,
     qdrant,
     conversation_history: list[dict] | None = None,
+    extracted_at=None,
 ) -> None:
     """Background task: creates its own DB session to run extraction pipeline."""
     from app.db.database import AsyncSessionLocal
@@ -639,6 +753,10 @@ async def _run_extraction(
             engine=engine,
             provider=provider,
         )
+        try:
+            await _resolve_pending_with_late_replies(db, engine, session_id, extracted_at)
+        except Exception as e:
+            logger.warning(f"Late disambiguation resolution failed (non-critical): {e}")
 
 
 @router.post("", response_model=ChatResponse, summary="Non-streaming chat completion")

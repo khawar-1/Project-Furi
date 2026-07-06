@@ -3,6 +3,7 @@ Jarvis OS — Extraction Pipeline
 After every user message, silently extract entities and preferences.
 Runs as a background task — never blocks the streaming response.
 """
+import asyncio
 import json
 import re
 from datetime import datetime
@@ -119,6 +120,7 @@ CRITICAL RULES — READ CAREFULLY:
 10. FACTS SUPERSEDING AND MERGING: If a new fact relates to an existing fact, combine them into a single comprehensive fact. Add the EXACT text of ALL old overlapping facts to "facts_to_supersede".
 11. PREFERENCES: Detect when the user explicitly states "I prefer...", "I like...", "I hate...", or corrects your style. Return in "preferences".
 12. Return empty arrays [] or null values for categories with nothing to extract.
+13. NO META-CONVERSATION FACTS: NEVER record the act of talking to the assistant as a fact. "Mentioned Ali Raza", "Inquired about Hamil", "Asked about X", "Wants to know Y" are NOT facts — they describe this chat, not the user's life. If the current message only names a person, answers a clarification question, or asks a question WITHOUT stating new real-world information, return empty arrays — extract NOTHING.
 """
 
 
@@ -179,8 +181,13 @@ async def extract_entities(
                 max_tokens=1500,
             )
         except Exception as e:
+            # A transient provider failure (rate limit, timeout) must not
+            # silently drop the whole turn's facts — retry once after a pause.
             logger.warning(f"Entity extraction LLM call failed (attempt {attempt}): {e}")
-            return None
+            if attempt == 2:
+                return None
+            await asyncio.sleep(2)
+            continue
         try:
             return _parse_extraction_json(response.content)
         except (json.JSONDecodeError, ValidationError) as e:
@@ -212,6 +219,25 @@ SKIP_WORDS = {
     "ok", "okay", "thanks", "thank you", "lol", "yes", "no", "sure",
     "haha", "hi", "hey", "hello", "yep", "nope", "cool",
 }
+
+# Meta-conversation phrasings the extractor sometimes emits as "facts" when a
+# message contains nothing extractable (live regression: replying "ali raza"
+# to a "which Ali?" question produced "Mentioned Ali Raza" in About Me and
+# "Mentioned Khawar" on Ali Raza's log). These describe the chat itself, not
+# the user's life — the prompt forbids them (rule 13) and this is the
+# deterministic safety net. Only unambiguous meta-verbs are listed: things
+# like "Discussed the trip with Ali" can be a real shared activity.
+_META_FACT_RE = re.compile(
+    r"^\s*(?:the\s+user\s+)?(?:just\s+)?"
+    r"(?:mentioned|inquired|enquired|asked|asks|is\s+asking|was\s+asking|"
+    r"wants?\s+to\s+know|wanted\s+to\s+know|queried)\b",
+    re.IGNORECASE,
+)
+
+
+def is_meta_conversation_fact(text: str) -> bool:
+    """True for junk facts about the conversation itself ("Mentioned X")."""
+    return bool(_META_FACT_RE.match(text or ""))
 
 
 async def run_extraction_pipeline(
@@ -307,7 +333,10 @@ async def run_extraction_pipeline(
                 "skills": person.skills,
                 "birthday": person.birthday,
                 "important_dates": person.important_dates,
-                "new_facts": [f.model_dump() for f in person.new_facts],
+                "new_facts": [
+                    f.model_dump() for f in person.new_facts
+                    if not is_meta_conversation_fact(f.fact)
+                ],
             }, session_id=session_id)
 
         # --- Delete mistakenly created contacts
@@ -351,6 +380,9 @@ async def run_extraction_pipeline(
         for fact in entities.facts_about_user:
             text = fact.fact_user_perspective
             if not text or len(text) < 10:
+                continue
+            if is_meta_conversation_fact(text):
+                logger.info(f"Skipping meta-conversation fact: '{text[:60]}'")
                 continue
 
             category = "fact"
