@@ -42,6 +42,7 @@ def _build_system_prompt(
     pending_resolution: dict = None,
     disambiguation_resolved_note: str = None,
     pending_creation: dict = None,
+    ambiguous_mentions: list = None,
 ) -> str:
     """Build the Jarvis OS system prompt, with optional memory context block."""
     from datetime import datetime
@@ -119,6 +120,16 @@ The user mentioned "{pending_creation['name']}", who is NOT in their contacts. I
 Ask the user exactly one question: "{pending_creation['name']} isn't in your contacts — want me to add them?"
 Do not save or assume anything about this person until the user answers. If the user's latest message already answers this (yes/no), acknowledge and move on — do not ask again.
 """
+    elif ambiguous_mentions:
+        mention_lines = []
+        for m in ambiguous_mentions:
+            names = ", ".join(c["name"] for c in m["candidates"])
+            mention_lines.append(f'- "{m["mention"]}" could be any of: {names}')
+        base += f"""
+AMBIGUOUS NAME(S) IN THE CURRENT MESSAGE (backend-verified — this is mandatory):
+{chr(10).join(mention_lines)}
+The user's latest message names a person who matches MULTIPLE saved contacts. You MUST ask which one they mean before confirming, acting on, or discussing any information about that person. Do NOT assume — not even the exact-spelling match. Nothing has been saved yet; the information is held until the user answers. Ask exactly one short question listing the options above.
+"""
 
     return base
 
@@ -170,12 +181,17 @@ async def chat_stream(
     memory_context = ""
     pending_resolution = None
     pending_creation = None
+    ambiguous_mentions = []
     disambiguation_resolved_note = None  # Injected into system prompt when resolved
 
     if recent_user_text:
         try:
-            bundle = await memory_engine.retrieve_context(recent_user_text, session_id=session_id)
-            
+            bundle = await memory_engine.retrieve_context(
+                recent_user_text,
+                session_id=session_id,
+                current_message=user_msgs[-1] if user_msgs else None,
+            )
+
             # --- DETERMINISTIC DISAMBIGUATION RESOLUTION ---
             # If there's an active pending_resolution in the session, try to resolve the
             # user's latest message against the candidates IN PYTHON — before calling the LLM.
@@ -199,14 +215,18 @@ async def chat_stream(
                         f"If you want me to remember facts about them, please save them as a contact first.'"
                     )
                 elif resolved_id is not None:
-                    # Find the matched candidate name
-                    resolved_name = next(
-                        (c["name"] for c in pr.candidates if c["id"] == resolved_id),
-                        last_user_msg_content
-                    )
-                    # Pin the resolved entity as the focus contact
+                    # Pin the resolved entity as the focus contact. The match may
+                    # be a contact OUTSIDE the offered candidates (global match),
+                    # so resolve the display name from the full contact list.
                     all_contacts = await memory_engine.get_all_contacts()
                     resolved_contact = next((c for c in all_contacts if c.id == resolved_id), None)
+                    resolved_name = (
+                        resolved_contact.name if resolved_contact
+                        else next(
+                            (c["name"] for c in pr.candidates if c["id"] == resolved_id),
+                            last_user_msg_content,
+                        )
+                    )
                     if resolved_contact:
                         new_entity = ActiveEntity(
                             id=resolved_contact.id, type="contact",
@@ -252,49 +272,88 @@ async def chat_stream(
                 if time.time() > pc.expires:
                     sess.pending_creation = None
                 else:
-                    answer = _interpret_yes_no(last_user_msg_content)
-                    if answer is True:
+                    # Sanity recheck: never ask to create a name that actually
+                    # resolves against the contact list (the extractor may have
+                    # normalized/expanded a name it saw in memory context).
+                    from app.memory.engine import identify_contact, ResolutionStatus
+                    from app.memory.conversation_state import PendingResolution
+                    all_contacts_chk = await memory_engine.get_all_contacts()
+                    chk = identify_contact(pc.name, all_contacts_chk)
+                    if chk.status == ResolutionStatus.RESOLVED:
                         try:
-                            new_contact = await memory_engine.create_contact_manual(
-                                pc.name,
-                                {k: v for k, v in pc.pending_update.items() if k != "new_facts"},
-                            )
-                            if pc.pending_update.get("new_facts"):
-                                await memory_engine.update_contact(
-                                    new_contact.id, {"new_facts": pc.pending_update["new_facts"]}
+                            saved_any = False
+                            if any(v for v in pc.pending_update.values()):
+                                await memory_engine.update_contact(chk.contact.id, pc.pending_update)
+                                saved_any = True
+                            for parked_fact in pc.pending_shared_facts:
+                                await memory_engine.apply_shared_fact_to_contact(parked_fact, chk.contact)
+                                saved_any = True
+                            if saved_any:
+                                disambiguation_resolved_note = (
+                                    f"NAME MATCHED EXISTING CONTACT: \"{pc.name}\" is the saved contact "
+                                    f"\"{chk.contact.name}\" — they were NOT missing. The pending information "
+                                    f"WAS SAVED to \"{chk.contact.name}\" (and to the user's own memory where "
+                                    f"it involves the user). Do NOT offer to create a contact. Acknowledge naturally."
                                 )
-                            for parked_fact in pc.pending_shared_facts:
-                                await memory_engine.apply_shared_fact_to_contact(parked_fact, new_contact)
-                            new_entity = ActiveEntity(
-                                id=new_contact.id, type="contact",
-                                name=new_contact.name, confidence=1.0,
-                                last_mentioned=time.time()
+                        except Exception as e:
+                            logger.warning(f"Applying rechecked pending creation failed: {e}")
+                        sess.pending_creation = None
+                        touch_session(session_id)
+                    elif chk.status == ResolutionStatus.AMBIGUOUS:
+                        # Multiple matches now — convert into a disambiguation question
+                        if sess.pending_resolution is None:
+                            sess.pending_resolution = PendingResolution(
+                                original_name=pc.name,
+                                pending_update=pc.pending_update,
+                                candidates=chk.candidates,
+                                pending_shared_facts=pc.pending_shared_facts,
                             )
-                            sess.active_entities = [new_entity]
-                            sess.focus_entity = new_entity
+                        sess.pending_creation = None
+                        touch_session(session_id)
+                    else:
+                        answer = _interpret_yes_no(last_user_msg_content)
+                        if answer is True:
+                            try:
+                                new_contact = await memory_engine.create_contact_manual(
+                                    pc.name,
+                                    {k: v for k, v in pc.pending_update.items() if k != "new_facts"},
+                                )
+                                if pc.pending_update.get("new_facts"):
+                                    await memory_engine.update_contact(
+                                        new_contact.id, {"new_facts": pc.pending_update["new_facts"]}
+                                    )
+                                for parked_fact in pc.pending_shared_facts:
+                                    await memory_engine.apply_shared_fact_to_contact(parked_fact, new_contact)
+                                new_entity = ActiveEntity(
+                                    id=new_contact.id, type="contact",
+                                    name=new_contact.name, confidence=1.0,
+                                    last_mentioned=time.time()
+                                )
+                                sess.active_entities = [new_entity]
+                                sess.focus_entity = new_entity
+                                disambiguation_resolved_note = (
+                                    f"CONTACT CREATED: \"{pc.name}\" WAS ADDED to the user's contacts and the pending "
+                                    f"information WAS SAVED (to their fact log, and to the user's own memory where it "
+                                    f"involves the user). Confirm this naturally. Do NOT ask again."
+                                )
+                            except Exception as e:
+                                logger.warning(f"Pending contact creation failed: {e}")
+                            sess.pending_creation = None
+                            touch_session(session_id)
+                        elif answer is False:
+                            try:
+                                for parked_fact in pc.pending_shared_facts:
+                                    await memory_engine.apply_shared_fact_user_only(parked_fact, as_said_name=pc.name)
+                            except Exception as e:
+                                logger.warning(f"User-only fact write after declined creation failed: {e}")
                             disambiguation_resolved_note = (
-                                f"CONTACT CREATED: \"{pc.name}\" WAS ADDED to the user's contacts and the pending "
-                                f"information WAS SAVED (to their fact log, and to the user's own memory where it "
-                                f"involves the user). Confirm this naturally. Do NOT ask again."
+                                f"CONTACT CREATION DECLINED: The user chose not to add \"{pc.name}\" as a contact. "
+                                f"Any fact involving the user WAS still SAVED to the user's own memory. "
+                                f"Acknowledge naturally and move on. Do NOT ask again."
                             )
-                        except Exception as e:
-                            logger.warning(f"Pending contact creation failed: {e}")
-                        sess.pending_creation = None
-                        touch_session(session_id)
-                    elif answer is False:
-                        try:
-                            for parked_fact in pc.pending_shared_facts:
-                                await memory_engine.apply_shared_fact_user_only(parked_fact, as_said_name=pc.name)
-                        except Exception as e:
-                            logger.warning(f"User-only fact write after declined creation failed: {e}")
-                        disambiguation_resolved_note = (
-                            f"CONTACT CREATION DECLINED: The user chose not to add \"{pc.name}\" as a contact. "
-                            f"Any fact involving the user WAS still SAVED to the user's own memory. "
-                            f"Acknowledge naturally and move on. Do NOT ask again."
-                        )
-                        sess.pending_creation = None
-                        touch_session(session_id)
-                    # answer is None → leave pending; the system prompt keeps the question alive
+                            sess.pending_creation = None
+                            touch_session(session_id)
+                        # answer is None → leave pending; the system prompt keeps the question alive
             # --- END DISAMBIGUATION / CREATION ---
             
             # Update ConversationSession deterministically.
@@ -320,8 +379,16 @@ async def chat_stream(
             sess_after = get_session(session_id)
             if sess_after.pending_resolution is None:
                 pending_resolution = None
+            elif sess_after.pending_resolution is not None and pending_resolution is None:
+                # e.g. a pending creation was just converted into a disambiguation
+                pr_now = sess_after.pending_resolution
+                pending_resolution = {
+                    "original_name": pr_now.original_name,
+                    "candidates": pr_now.candidates,
+                }
             if sess_after.pending_creation is not None and time.time() <= sess_after.pending_creation.expires:
                 pending_creation = {"name": sess_after.pending_creation.name}
+            ambiguous_mentions = bundle.ambiguous_mentions
         except Exception as e:
             logger.warning(f"Memory context build failed (non-critical): {e}")
 
@@ -331,6 +398,7 @@ async def chat_stream(
         LLMMessage(role="system", content=_build_system_prompt(
             memory_context, pending_resolution, disambiguation_resolved_note,
             pending_creation=pending_creation,
+            ambiguous_mentions=ambiguous_mentions,
         ))
     ]
     for msg in request.messages:

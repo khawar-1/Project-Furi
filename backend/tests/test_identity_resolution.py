@@ -37,12 +37,32 @@ def test_normalize_name_strips_possessive_and_punctuation():
 # identify_contact — RESOLVED / AMBIGUOUS / NOT_FOUND
 # ============================================================
 
-def test_exact_match_resolves_even_with_similar_candidates():
-    # "jamil ali" is an exact (case-insensitive) match — resolves immediately
-    # despite "Jamil Ali Khan" also being similar.
-    result = identify_contact("jamil ali", contacts("Jamil Ali", "Jamil Ali Khan"))
+def test_exact_match_without_longer_variants_resolves():
+    # "jamil ali" is an exact match and "Jamil Khan" is not a longer variant
+    # of it — resolves immediately.
+    result = identify_contact("jamil ali", contacts("Jamil Ali", "Jamil Khan"))
     assert result.status == ResolutionStatus.RESOLVED
     assert result.contact.name == "Jamil Ali"
+
+
+def test_exact_match_with_superset_names_is_ambiguous():
+    # Live-transcript regression: the user has contacts 'jamil', 'Jamil Ali'
+    # and 'jamil ali khan'. Saying "jamil" exactly matches the contact 'jamil'
+    # but may mean any of the three — must ask, never guess.
+    result = identify_contact(
+        "jamil", contacts("jamil", "Jamil Ali", "jamil ali khan", "Sara Khan")
+    )
+    assert result.status == ResolutionStatus.AMBIGUOUS
+    names = {c["name"] for c in result.candidates}
+    assert names == {"jamil", "Jamil Ali", "jamil ali khan"}
+
+
+def test_fully_qualified_name_with_no_superset_resolves():
+    result = identify_contact(
+        "jamil ali khan", contacts("jamil", "Jamil Ali", "jamil ali khan")
+    )
+    assert result.status == ResolutionStatus.RESOLVED
+    assert result.contact.name == "jamil ali khan"
 
 
 def test_subset_name_with_multiple_matches_is_ambiguous():
@@ -121,3 +141,16 @@ def test_embedded_name_prefers_longest_match():
         {"id": "long", "name": "Jamil Ali"},
     ]
     assert resolve_confirmation("I meant jamil ali", candidates, contacts("jamil", "Jamil Ali")) == "long"
+
+
+def test_answer_naming_contact_outside_candidates_resolves_globally():
+    # Live-transcript regression: the offered candidates were 'jamil' and
+    # 'jami', but the user answered with a third contact, 'jamil ali khan'.
+    # The shorter candidate names embedded inside the answer must NOT win.
+    candidates = [
+        {"id": "id-0", "name": "jamil"},
+        {"id": "id-3", "name": "jami"},
+    ]
+    roster = contacts("jamil", "Jamil Ali", "jamil ali khan", "jami")
+    resolved = resolve_confirmation("i meant jamil ali khan", candidates, roster)
+    assert resolved == "id-2"  # jamil ali khan's id in the roster

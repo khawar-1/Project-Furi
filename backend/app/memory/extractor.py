@@ -47,7 +47,7 @@ Return ONLY valid JSON with this exact structure (no explanation, no markdown):
 {{
   "people_mentioned": [
     {{
-      "name": "string",
+      "name": "The name EXACTLY as the user wrote it in the CURRENT USER MESSAGE ('jamil' stays 'jamil' — do NOT expand it to a fuller saved contact name). Only exception: an explicit clarification per DISAMBIGUATION RULE 1.",
       "email": "null or string",
       "phone": "null or string",
       "relationship": "friend|colleague|client|family|recruiter|mentor|other",
@@ -56,7 +56,7 @@ Return ONLY valid JSON with this exact structure (no explanation, no markdown):
       "important_dates": {{"anniversary": "YYYY-MM-DD"}},
       "new_facts": [
         {{
-          "fact": "A standalone factual statement about THIS PERSON ONLY, not involving the user (e.g. 'Got a new job at Google as Senior Developer'). Facts involving the user go in facts_about_user instead.",
+          "fact": "A standalone factual statement about THIS PERSON ONLY, not involving the user (e.g. 'Got a new job at Google as Senior Developer'). Facts involving the user go in facts_about_user instead — NEVER duplicate them here. If the user must be referenced, use the literal placeholder {{USER}}, never their name and never 'you'.",
           "category": "work|personal|contact|history|other"
         }}
       ]

@@ -117,6 +117,7 @@ class RetrievedContext:
     episodes: list
     contacts: list[Contact]  # Store raw contacts for format_context
     pending_creation: dict | None = None  # unknown person awaiting create-confirmation
+    ambiguous_mentions: list = field(default_factory=list)  # names in the current message needing a "which one?"
 
 
 import time
@@ -202,15 +203,35 @@ def identify_contact(extracted_name: str, contacts: list) -> IdentityResult:
         )
         
     best_candidate, best_score = passing_candidates[0]
-    
-    # EXACT MATCH RULE: A perfect score (100.0) means the user typed the exact name.
-    # Resolve immediately regardless of other candidates to prevent background desyncs.
+
+    # EXACT MATCH RULE: a perfect score (100.0) means the user typed a contact's
+    # exact name — but that is only unambiguous when NO other contact's name
+    # contains all of its words plus more. "jamil" is an exact match for the
+    # contact 'jamil', yet with 'Jamil Ali' and 'jamil ali khan' saved the user
+    # may mean any of them — never guess, ask.
     if best_score == 100.0:
+        exact_tokens = set(normalize_name(extracted_name).split())
+        supersets = [
+            c for c, s in results
+            if c.id != best_candidate.id
+            and exact_tokens < set(normalize_name(c.name).split())
+        ]
+        if not supersets:
+            return IdentityResult(
+                status=ResolutionStatus.RESOLVED,
+                contact=best_candidate,
+                best_score=best_score,
+                reason="Exact name match with no longer variants — resolved unambiguously"
+            )
+        candidate_list = [best_candidate] + supersets
         return IdentityResult(
-            status=ResolutionStatus.RESOLVED,
-            contact=best_candidate,
+            status=ResolutionStatus.AMBIGUOUS,
+            candidates=[{"id": c.id, "name": c.name} for c in candidate_list],
             best_score=best_score,
-            reason="Exact name match — resolved unambiguously"
+            reason=(
+                f"Exact match '{best_candidate.name}' is a subset of "
+                f"{len(supersets)} longer contact name(s) — confirmation required"
+            ),
         )
     
     if len(passing_candidates) > 1:
@@ -246,7 +267,11 @@ def _find_embedded_name(reply: str, named_items: list) -> Optional[dict]:
     contained.sort(key=lambda item: len(normalize_name(item["name"])), reverse=True)
     longest = len(normalize_name(contained[0]["name"]))
     ties = [i for i in contained if len(normalize_name(i["name"])) == longest]
-    return ties[0] if len(ties) == 1 else None
+    # Entries that are the same name (e.g. a candidate dict plus its roster
+    # entry) are not a real tie — earlier entries (candidates) win. Two
+    # DIFFERENT names of equal length are genuinely ambiguous.
+    tied_names = {normalize_name(i["name"]) for i in ties}
+    return ties[0] if len(tied_names) == 1 else None
 
 
 def resolve_confirmation(clarified_name: str, candidate_dicts: list, all_contacts: list) -> str | int | None:
@@ -260,9 +285,17 @@ def resolve_confirmation(clarified_name: str, candidate_dicts: list, all_contact
         if len(candidate_dicts) >= 2:
             return candidate_dicts[1]["id"]
 
-    # Check A2: Candidate name embedded in a sentence ("I meant jamil ali").
+    # Check A2: Contact name embedded in a sentence ("I meant jamil ali khan").
     # Fuzzy scoring punishes the extra words, so check containment first.
-    embedded = _find_embedded_name(clarified_name, candidate_dicts)
+    # Search candidates AND the whole contact list together: the user may name
+    # a contact that was not among the offered candidates, and a longer global
+    # name ("jamil ali khan") must beat a shorter candidate ("jamil ali")
+    # embedded inside it.
+    seen_ids = {c["id"] for c in candidate_dicts}
+    searchable = list(candidate_dicts) + [
+        {"id": c.id, "name": c.name} for c in all_contacts if c.id not in seen_ids
+    ]
+    embedded = _find_embedded_name(clarified_name, searchable)
     if embedded:
         return embedded["id"]
 
@@ -279,11 +312,6 @@ def resolve_confirmation(clarified_name: str, candidate_dicts: list, all_contact
 
     # Check C: Global Database Match
     # Only if the user typed something completely different (e.g. they corrected the name)
-    embedded_global = _find_embedded_name(
-        clarified_name, [{"id": c.id, "name": c.name} for c in all_contacts]
-    )
-    if embedded_global:
-        return embedded_global["id"]
     global_result = identify_contact(clarified_name, all_contacts)
     if global_result.status == ResolutionStatus.RESOLVED:
         return global_result.contact.id
@@ -609,10 +637,13 @@ class MemoryEngine:
         contact.updated_at = utc_now()
 
         # Add new facts as interactions — dedup by description to prevent repeated extraction
-        for fact in updates.get("new_facts", []):
+        new_facts = updates.get("new_facts", [])
+        user_name = await self.get_user_name() if new_facts else None
+        for fact in new_facts:
+            description = substitute_placeholders(fact.get("fact", ""), user_name=user_name)
             await self.add_contact_fact(
                 contact,
-                fact.get("fact", ""),
+                description,
                 category=fact.get("category", "other"),
                 event_date=parse_event_date(fact.get("event_date")),
             )
@@ -1255,45 +1286,62 @@ class MemoryEngine:
     # CONTEXT BUILDER — the most important method
     # ==============================================================
 
-    def _get_lexically_relevant_contacts(self, user_message: str, all_contacts: list) -> list:
-        """Fuzzy subset matching of message words against contact names."""
-        import re
-        
-        # Extract words from message, removing punctuation
-        msg_words = re.findall(r'\b\w+\b', user_message.lower())
-        msg_words = [w for w in msg_words if len(w) >= 3] # skip stop words / short words
-        
-        if not msg_words:
-            return []
-            
-        matched_contact_ids = set()
-        relevant = []
-        for word in msg_words:
-            result = identify_contact(word, all_contacts)
-            # Both RESOLVED and AMBIGUOUS statuses contain candidates that beat MIN_SCORE.
-            if result.status == ResolutionStatus.RESOLVED:
-                if result.contact.id not in matched_contact_ids:
-                    matched_contact_ids.add(result.contact.id)
-                    relevant.append(result.contact)
-            elif result.status == ResolutionStatus.AMBIGUOUS:
-                # The candidates in IdentityResult are dicts, but we need the actual Contact objects.
-                # However, IdentityResult.candidates is a list of dicts. We can just run it again?
-                # Actually, `resolve_identity(word, all_contacts)` gives us the actual contact objects!
-                # Or we can just find them from `all_contacts` by id.
-                for c_dict in result.candidates:
-                    if c_dict["id"] not in matched_contact_ids:
-                        matched_contact_ids.add(c_dict["id"])
-                        # Find the contact object
-                        c_obj = next((c for c in all_contacts if c.id == c_dict["id"]), None)
-                        if c_obj:
-                            relevant.append(c_obj)
-                
-        return relevant
+    def _scan_message_names(
+        self, user_message: str, all_contacts: list
+    ) -> tuple[list, list[dict]]:
+        """
+        Scan the message for contact names using n-grams (longest phrases
+        first, so "jamil ali khan" resolves before "jamil" flags ambiguity).
 
-    async def retrieve_context(self, user_message: str, session_id: Optional[str] = None) -> RetrievedContext:
+        Returns (resolved_contacts, ambiguous_mentions):
+          resolved_contacts  — Contact objects matched unambiguously
+          ambiguous_mentions — [{"mention": str, "candidates": [{"id","name"}]}]
+        Ambiguous candidates are NOT resolved entities — the caller must make
+        the LLM ask, never assume.
+        """
+        words = re.findall(r"\b\w+\b", user_message.lower())
+        if not words:
+            return [], []
+
+        resolved: list = []
+        ambiguous: list[dict] = []
+        matched_ids: set = set()
+        consumed: set = set()
+
+        for n in (3, 2, 1):
+            for i in range(len(words) - n + 1):
+                span = range(i, i + n)
+                if any(j in consumed for j in span):
+                    continue
+                phrase = " ".join(words[i:i + n])
+                if n == 1 and len(phrase) < 3:  # skip short/stop words
+                    continue
+                result = identify_contact(phrase, all_contacts)
+                if result.status == ResolutionStatus.RESOLVED:
+                    consumed.update(span)
+                    if result.contact.id not in matched_ids:
+                        matched_ids.add(result.contact.id)
+                        resolved.append(result.contact)
+                elif result.status == ResolutionStatus.AMBIGUOUS:
+                    consumed.update(span)
+                    ambiguous.append({"mention": phrase, "candidates": result.candidates})
+
+        return resolved, ambiguous
+
+    async def retrieve_context(
+        self,
+        user_message: str,
+        session_id: Optional[str] = None,
+        current_message: Optional[str] = None,
+    ) -> RetrievedContext:
         """
         Search all memory types for content relevant to the user's message,
         and bundle it into a structured RetrievedContext.
+
+        user_message may span recent turns (better retrieval recall);
+        current_message, when given, is only the LATEST user message and is
+        what gets scanned for name mentions — otherwise stale mentions from
+        prior turns would re-flag ambiguity every turn.
         """
         # Read pending_resolution / pending_creation from the unified session
         pending_res_dict = None
@@ -1323,13 +1371,22 @@ class MemoryEngine:
         # 1. Semantic memories
         memories = await self.search_semantic_memory(user_message, limit=5)
 
-        # 2. Known people (lexical and semantic filtering)
+        # 2. Known people (lexical and semantic filtering).
+        # Name-mention scanning runs on the CURRENT message only.
         all_contacts = await self.get_all_contacts()
-        lexical_contacts = self._get_lexically_relevant_contacts(user_message, all_contacts)
+        scan_text = current_message if current_message is not None else user_message
+        lexical_contacts, ambiguous_mentions = self._scan_message_names(scan_text, all_contacts)
         semantic_contacts = await self.find_contact(user_message)
-        
-        # Merge lexical and semantic matches uniquely
+
+        # Merge lexical and semantic matches uniquely; ambiguous candidates are
+        # included for display so the LLM can list them, but never as resolved.
         merged_map: dict = {c.id: c for c in lexical_contacts + semantic_contacts}
+        for mention in ambiguous_mentions:
+            for c_dict in mention["candidates"]:
+                if c_dict["id"] not in merged_map:
+                    c_obj = next((c for c in all_contacts if c.id == c_dict["id"]), None)
+                    if c_obj:
+                        merged_map[c_obj.id] = c_obj
 
         # Always inject active entities pinned in ConversationSession
         resolved_entities = []
@@ -1360,6 +1417,7 @@ class MemoryEngine:
             episodes=episodes,
             contacts=list(merged_map.values()),
             pending_creation=pending_creation_dict,
+            ambiguous_mentions=ambiguous_mentions,
         )
 
     async def format_context(self, bundle: RetrievedContext) -> str:
