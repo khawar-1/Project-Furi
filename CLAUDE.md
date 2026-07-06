@@ -23,6 +23,10 @@ Current architecture rules:
   longer contact name; multiple ambiguous names in one fact park together and
   one reply can resolve them all (`resolve_confirmation_multi`)
 - Future-dated facts are stored as plans ("Planning to go…"), never past tense
+- The extractor's facts_to_supersede is never applied up front: an old fact is
+  deleted only AFTER its replacement is actually written (parked replacements
+  wait) and only if the new text covers every word of the old one
+  (`apply_supersede_candidates` / `supersede_is_covered`)
 - Contacts use append-only facts log, never mutable notes
 - AI tools never saved as contacts
 - First-Word Funnel only triggers for single-word names

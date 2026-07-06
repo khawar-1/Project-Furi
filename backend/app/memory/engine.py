@@ -105,6 +105,19 @@ def normalize_future_phrasing(text: str, event_date: Optional[date], today: Opti
     if not base:
         return text
     return f"Planning to {base} {rest}".strip()
+
+
+def supersede_is_covered(old_text: str, new_text: str) -> bool:
+    """
+    An old fact may only be superseded (soft-deleted) when the replacement
+    preserves ALL of its information: every word of the old text must appear
+    in the new one. Blocks the two observed data-loss shapes: a "merged"
+    replacement that silently dropped participants, and supersede requests
+    whose replacement never got written at all.
+    """
+    old_tokens = set(re.findall(r"\w+", (old_text or "").lower()))
+    new_tokens = set(re.findall(r"\w+", (new_text or "").lower()))
+    return bool(old_tokens) and old_tokens <= new_tokens
 from dataclasses import dataclass, field
 
 class ResolutionStatus(Enum):
@@ -926,6 +939,7 @@ class MemoryEngine:
                 contact_id=contacts[0].id if contacts else None,
                 event_date=event_date,
             )
+            await self.apply_supersede_candidates(fact, user_side)
 
         added = False
         for contact in contacts:
@@ -1051,7 +1065,9 @@ class MemoryEngine:
                 subject="user",
                 event_date=parse_event_date(fact.get("event_date")),
             )
-            return memory.content if memory else text
+            saved_text = memory.content if memory else text
+            await self.apply_supersede_candidates(fact, saved_text)
+            return saved_text
 
         all_contacts = await self.get_all_contacts()
         preresolved = {k.lower(): v for k, v in (preresolved or {}).items()}
@@ -1153,6 +1169,27 @@ class MemoryEngine:
             logger.info(f"Deleted mistakenly created contact: '{name}' ({len(contacts)} row(s))")
             return True
         return False
+
+    async def apply_supersede_candidates(self, fact: dict, new_text: str) -> None:
+        """
+        Apply the extractor's supersede requests attached to a fact
+        (fact["_supersede_candidates"]) AFTER its user-side text was actually
+        written. Each old fact is deleted only if the new text covers it —
+        see supersede_is_covered. Requests travel with parked facts, so a
+        replacement deferred behind a "which X?" question supersedes the old
+        fact only once it finally lands, never before.
+        """
+        if not new_text:
+            return
+        for old_text in fact.get("_supersede_candidates") or []:
+            if old_text.strip().lower() == new_text.strip().lower():
+                continue  # never delete the fact that was just (re)written
+            if supersede_is_covered(old_text, new_text):
+                await self.delete_semantic_memory_by_content(old_text)
+            else:
+                logger.info(
+                    f"Supersede blocked (new fact does not cover it): '{old_text[:60]}'"
+                )
 
     async def delete_semantic_memory_by_content(self, content: str) -> bool:
         """Soft-delete a semantic memory by its exact content. Used to supersede outdated facts."""

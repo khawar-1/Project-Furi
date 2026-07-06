@@ -264,9 +264,17 @@ async def run_extraction_pipeline(
             logger.warning("Extraction skipped: no valid output from the LLM")
             return
 
-        # --- Supersede outdated/vague facts
-        for old_fact in entities.facts_to_supersede:
-            await engine.delete_semantic_memory_by_content(old_fact)
+        # --- Supersede requests are NEVER applied up front (live regression:
+        # the old fact was deleted while its "merged" replacement parked behind
+        # a "which jamil?" question — the About Me fact silently vanished).
+        # They travel attached to each fact and are applied by the engine only
+        # AFTER the replacement is actually written, and only if it covers the
+        # old fact's information (engine.apply_supersede_candidates).
+        supersede_requests = entities.facts_to_supersede
+        if supersede_requests and not entities.facts_about_user:
+            logger.info(
+                f"Ignoring {len(supersede_requests)} supersede request(s): no replacement facts extracted"
+            )
 
         # --- Store people (humans only, and never the user themselves)
         from app.memory.engine import normalize_name
@@ -357,6 +365,7 @@ async def run_extraction_pipeline(
 
             fact_dict = fact.model_dump()
             fact_dict["category"] = category
+            fact_dict["_supersede_candidates"] = supersede_requests
             await engine.store_shared_fact(fact_dict, session_id=session_id)
 
         # --- Store important events
