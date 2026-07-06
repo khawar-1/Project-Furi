@@ -315,6 +315,29 @@ def _find_embedded_name(reply: str, named_items: list) -> Optional[dict]:
     return ties[0] if len(tied_names) == 1 else None
 
 
+# Words allowed AROUND a corrected name in a disambiguation reply ("no i
+# meant hamil"). If a reply contains any other non-name word, the user is
+# saying something else ("what do u know about hamil") and a NON-candidate
+# contact name inside it must NOT be consumed as a correction.
+_CORRECTION_FILLER = {
+    "i", "meant", "mean", "no", "yes", "its", "it", "is", "was", "actually",
+    "sorry", "the", "one", "him", "her", "them", "that", "oh", "ah", "nah",
+    "and", "also", "both", "plus", "not", "first", "second", "other",
+}
+
+
+def _non_name_tokens_are_filler(reply: str, names: list[str]) -> bool:
+    """True when the reply is essentially just the given name(s) plus
+    correction filler — the only shape in which a name NOT among the offered
+    candidates may be taken as the user correcting the name."""
+    leftover = f" {normalize_name(reply)} "
+    for name in names:
+        norm = normalize_name(name)
+        if norm:
+            leftover = leftover.replace(f" {norm} ", "  ", 1)
+    return all(tok in _CORRECTION_FILLER for tok in leftover.split())
+
+
 def resolve_confirmation(clarified_name: str, candidate_dicts: list, all_contacts: list) -> str | int | None:
     clarified_lower = clarified_name.strip().lower()
 
@@ -338,7 +361,15 @@ def resolve_confirmation(clarified_name: str, candidate_dicts: list, all_contact
     ]
     embedded = _find_embedded_name(clarified_name, searchable)
     if embedded:
-        return embedded["id"]
+        # An offered candidate may be picked from any sentence shape ("yeah
+        # me, jamil and daud are joining..."). A NON-candidate global name is
+        # a correction and only counts when the reply is essentially just
+        # that name ("no i meant hamil") — otherwise a question or tangent
+        # that happens to mention a contact would hijack the answer.
+        if embedded["id"] in seen_ids or _non_name_tokens_are_filler(
+            clarified_name, [embedded["name"]]
+        ):
+            return embedded["id"]
 
     # Check B: Candidate Exact/Fuzzy Match
     class MockContact:
@@ -392,6 +423,11 @@ def resolve_confirmation_multi(reply: str, mentions: list, all_contacts: list) -
          by name similarity ("hamil" → the mention "jamil"): the user corrected
          the name rather than picking a candidate.
     """
+    # A reply that is itself a question is never an answer — "what do u know
+    # about hamil?" must not be consumed as a name correction.
+    if "?" in reply:
+        return {}
+
     if len(mentions) == 1:
         resolved = resolve_confirmation(reply, mentions[0].get("candidates", []), all_contacts)
         if resolved and resolved != "NOT_FOUND_GLOBAL":
@@ -400,6 +436,9 @@ def resolve_confirmation_multi(reply: str, mentions: list, all_contacts: list) -
 
     assignment: dict = {}
     pool = _scan_reply_contacts(reply, all_contacts)
+    # Correction pairing (pass 2) is only safe when the reply is essentially
+    # just names + filler — same rule as the single-name path.
+    correction_shaped = _non_name_tokens_are_filler(reply, [c.name for c in pool])
     remaining = list(mentions)
 
     # Pass 1: candidate membership
@@ -412,7 +451,7 @@ def resolve_confirmation_multi(reply: str, mentions: list, all_contacts: list) -
             remaining.remove(mention)
 
     # Pass 2: pair leftover reply names with leftover mentions by similarity
-    while remaining and pool:
+    while remaining and pool and correction_shaped:
         best_score, best_pair = 0.0, None
         for mention in remaining:
             for contact in pool:
@@ -668,6 +707,15 @@ class MemoryEngine:
                         # We intentionally do NOT delete the pending cache here.
                         # It should stay alive in case this was just a new topic,
                         # so the pending facts aren't lost if the user returns to it.
+
+        # 2a. A name the user already confirmed this session resolves
+        # directly — never re-ask (the subset rule keeps "jamil" ambiguous
+        # forever otherwise).
+        if session_id:
+            confirmed_id = get_session(session_id).confirmed_names.get(name.strip().lower())
+            if confirmed_id and any(c.id == confirmed_id for c in existing_contacts):
+                logger.info(f"store_contact: '{name}' resolved from session-confirmed names")
+                return await self.update_contact(confirmed_id, details)
 
         # 2. Resolve Identity
         result = identify_contact(name, existing_contacts)
@@ -1071,6 +1119,16 @@ class MemoryEngine:
 
         all_contacts = await self.get_all_contacts()
         preresolved = {k.lower(): v for k, v in (preresolved or {}).items()}
+        # Names the user already confirmed this session resolve directly —
+        # the subset rule would otherwise flag "jamil" ambiguous on every
+        # later fact even though the user just answered "which jamil?".
+        if session_id:
+            confirmed = get_session(session_id).confirmed_names
+            if confirmed:
+                by_id = {c.id: c for c in all_contacts}
+                for as_said, cid in confirmed.items():
+                    if as_said not in preresolved and cid in by_id:
+                        preresolved[as_said] = by_id[cid]
         mapping: dict = {}
         resolved: list[Contact] = []
         ambiguous_mentions: list[dict] = []

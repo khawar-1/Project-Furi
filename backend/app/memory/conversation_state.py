@@ -104,6 +104,12 @@ class ConversationSession:
     focus_entity: Optional[ActiveEntity] = None
     pending_resolution: Optional[PendingResolution] = None
     pending_creation: Optional[PendingCreation] = None
+    # as-said name (lowercased) → contact id for every name the user has
+    # explicitly confirmed THIS session ("jamil" → the contact jamil). The
+    # subset rule makes a short name like "jamil" permanently ambiguous, so
+    # without this cache every later fact naming him re-asks "which jamil?"
+    # (live regression). Session-scoped: a new session asks again.
+    confirmed_names: dict = field(default_factory=dict)
     current_topic: Optional[str] = None
     last_updated: float = field(default_factory=time.time)
     ttl: float = SESSION_TTL_SECONDS

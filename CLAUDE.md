@@ -25,9 +25,19 @@ Current architecture rules:
 - Meta-conversation facts ("Mentioned X", "Inquired about Y") are never stored:
   extraction prompt rule 13 + the deterministic `is_meta_conversation_fact`
   filter (applies to facts_about_user AND people_mentioned.new_facts)
-- A parked disambiguation survives replies that don't name anyone ("yes", a
-  question, a tangent) — only a failed NAME attempt (`_looks_like_name_answer`)
-  clears it with the "not in your contacts" message
+- A parked disambiguation is NEVER destroyed by an unmatched reply ("yes",
+  "its also happening", a question) — it stays parked until answered or
+  TTL-expired (`_still_open_note` tells the LLM to re-ask). A question ("?")
+  is never an answer, and a NON-candidate contact name in a reply only counts
+  as a correction when the reply is just names + filler
+  (`_non_name_tokens_are_filler`)
+- A name the user confirmed once is cached for the whole session
+  (`ConversationSession.confirmed_names`) and never re-asked — without this
+  the subset rule keeps "jamil" ambiguous on every later fact. Consulted by
+  `store_shared_fact` and `store_contact`; populated by every resolution path
+- The create-contact question is never suppressed by a resolved note from the
+  same turn (resolving "which jamil?" can park "add daud?" in one turn — the
+  prompt carries both); only a still-open disambiguation defers it
 - Park-after-answer race: the "which X?" question is asked in the same turn but
   the fact only parks when background extraction finishes, so a fast reply can
   precede the park. `_run_extraction` replays user messages that arrived during

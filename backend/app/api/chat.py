@@ -37,20 +37,26 @@ def _interpret_yes_no(text: str) -> Optional[bool]:
     return None
 
 
-def _looks_like_name_answer(text: str) -> bool:
+def _still_open_note(reply: str, mentions: list) -> str:
     """
-    Could this reply plausibly be the user naming a person in answer to a
-    "which X?" question? Affirmations ("yes"), questions, and long sentences
-    are NOT name attempts — a parked fact must never be destroyed because an
-    unrelated reply failed to match a contact (live regression: "yes" after
-    the LLM's own confirmation question wiped the parked gym fact).
+    Note injected when a reply settles none of the parked names. The parked
+    facts are NEVER destroyed here — two live regressions ("yes" after the
+    LLM's own confirmation question, then "its also happening") proved no
+    heuristic can safely tell a failed name attempt from an unrelated reply.
+    The question stays parked and simply expires via its TTL if never
+    answered.
     """
-    t = (text or "").strip()
-    if not t or "?" in t:
-        return False
-    if _interpret_yes_no(t) is not None:
-        return False
-    return len(t.split()) <= 6
+    open_questions = "; ".join(
+        f'"{m["name"]}" (options: {", ".join(c["name"] for c in m["candidates"])})'
+        for m in mentions
+    )
+    return (
+        f"DISAMBIGUATION STILL OPEN: The user's latest reply '{reply}' did not name any saved contact, "
+        f"so the earlier question is still unanswered: {open_questions}. The pending information is NOT "
+        f"saved yet. If the reply looks like it was naming a person, tell the user that name isn't in "
+        f"their contacts and re-ask with the listed options. Otherwise respond to their message naturally "
+        f"first, then briefly re-ask the pending question."
+    )
 
 
 def _saved_just_now_clause(saved_texts: list) -> str:
@@ -160,14 +166,7 @@ However, check the latest user message first:
 - If the user has ALREADY clearly stated which person they mean for EVERY name above, accept it and proceed — do NOT ask again.
 - Otherwise, ask ONE short question that handles EACH unresolved name SEPARATELY, listing only that name's own options (e.g. "Quick check — {example}"). NEVER merge different names' options into combined guesses, and do not invent alternatives.
 """
-    elif pending_creation:
-        base += f"""
-PENDING CONTACT CREATION:
-The user mentioned "{pending_creation['name']}", who is NOT in their contacts. Information about this person is on hold.
-Ask the user exactly one question: "{pending_creation['name']} isn't in your contacts — want me to add them?"
-Do not save or assume anything about this person until the user answers. If the user's latest message already answers this (yes/no), acknowledge and move on — do not ask again.
-"""
-    elif ambiguous_mentions:
+    elif ambiguous_mentions and not pending_creation:
         mention_lines = []
         for m in ambiguous_mentions:
             names = ", ".join(c["name"] for c in m["candidates"])
@@ -181,6 +180,18 @@ AMBIGUOUS NAME(S) IN THE CURRENT MESSAGE (backend-verified — this is mandatory
 {chr(10).join(mention_lines)}
 The user's latest message names one or more people who each match MULTIPLE saved contacts. You MUST ask which one they mean before confirming, acting on, or discussing any information about those people. Do NOT assume — not even the exact-spelling match. Nothing has been saved yet; the information is held until the user answers.
 Ask exactly ONE short question, but handle EACH ambiguous name SEPARATELY inside it: for every name above, list only that name's own options (e.g. "Quick check — {example}"). NEVER merge different names' options into combined guesses like "is it X and one of Y or Z".
+"""
+
+    # NOT an elif on the resolved note: resolving one question can park a
+    # create-contact question in the SAME turn (live regression: resolving
+    # "which jamil?" parked "add daud?", which was then never asked). Only a
+    # still-open disambiguation defers it (one clarifying question at a time).
+    if pending_creation and not pending_resolution:
+        base += f"""
+PENDING CONTACT CREATION:
+The user mentioned "{pending_creation['name']}", who is NOT in their contacts. Information about this person is on hold.
+Ask the user exactly one question: "{pending_creation['name']} isn't in your contacts — want me to add them?"
+Do not save or assume anything about this person until the user answers. If the user's latest message already answers this (yes/no), acknowledge and move on — do not ask again.
 """
 
     return base
@@ -263,18 +274,11 @@ async def chat_stream(
                 assignment = resolve_confirmation_multi(last_user_msg_content, mentions, all_contacts)
 
                 if not assignment:
-                    # Only a failed NAME attempt clears the question. Anything
-                    # else ("yes", a question, a tangent) leaves it parked —
-                    # the PENDING DISAMBIGUATION prompt block keeps it alive
-                    # and the parked facts survive (they expire via TTL).
-                    if _looks_like_name_answer(last_user_msg_content):
-                        sess.pending_resolution = None
-                        touch_session(session_id)
-                        disambiguation_resolved_note = (
-                            f"DISAMBIGUATION FAILED: The user replied '{last_user_msg_content}' which did not match "
-                            f"any known contacts. Tell the user exactly this: 'This contact isn't in your contact list. "
-                            f"If you want me to remember facts about them, please save them as a contact first.'"
-                        )
+                    # The question stays parked; the note handles both "user
+                    # named someone unknown" and "user said something else".
+                    disambiguation_resolved_note = _still_open_note(
+                        last_user_msg_content, mentions
+                    )
                 else:
                     # Confirmed contacts: names settled in prior turns plus this reply.
                     preresolved = {
@@ -285,6 +289,11 @@ async def chat_stream(
                     for as_said, cid in assignment.items():
                         if cid in contacts_by_id:
                             preresolved[as_said.lower()] = contacts_by_id[cid]
+                    # Remember the user's picks for the whole session — a
+                    # later fact saying the same name must never re-ask.
+                    sess.confirmed_names.update(
+                        {as_said.lower(): cid for as_said, cid in assignment.items()}
+                    )
 
                     resolved_contacts = [
                         contacts_by_id[cid] for cid in assignment.values() if cid in contacts_by_id
@@ -385,6 +394,7 @@ async def chat_stream(
                             if cid in all_contacts_map
                         }
                         preresolved[pc.name.lower()] = chk.contact
+                        sess.confirmed_names[pc.name.lower()] = chk.contact.id
                         sess.pending_creation = None  # clear before re-routing
                         touch_session(session_id)
                         try:
@@ -450,6 +460,7 @@ async def chat_stream(
                                     if cid in all_contacts_map
                                 }
                                 preresolved[pc.name.lower()] = new_contact
+                                sess.confirmed_names[pc.name.lower()] = new_contact.id
                                 sess.pending_creation = None  # clear before re-routing
                                 touch_session(session_id)
                                 saved_texts = []
@@ -676,6 +687,10 @@ async def apply_pending_resolution_reply(
     for as_said, cid in assignment.items():
         if cid in contacts_by_id:
             preresolved[as_said.lower()] = contacts_by_id[cid]
+    # Session-wide memory of the user's picks — never re-ask the same name
+    sess.confirmed_names.update(
+        {as_said.lower(): cid for as_said, cid in assignment.items()}
+    )
     primary = preresolved.get(pr.original_name.lower())
 
     parked_facts = pr.pending_shared_facts

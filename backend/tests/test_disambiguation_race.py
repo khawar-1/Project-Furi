@@ -14,9 +14,14 @@ Three defects conspired:
 
 Rules now:
 - meta-conversation facts are never stored (deterministic filter + prompt);
-- replies that don't attempt to name anyone leave the question parked;
+- a reply that settles none of the parked names NEVER destroys them — the
+  question stays parked until answered or TTL-expired;
 - after extraction parks a question, replies that arrived during extraction
-  are replayed against it (apply_pending_resolution_reply).
+  are replayed against it (apply_pending_resolution_reply);
+- a name the user confirmed once is remembered for the whole session
+  (ConversationSession.confirmed_names) and never re-asked;
+- the create-contact question is never suppressed by a resolved note from
+  the same turn.
 """
 import json
 
@@ -24,7 +29,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
-from app.api.chat import _looks_like_name_answer, apply_pending_resolution_reply
+from app.api.chat import _build_system_prompt, apply_pending_resolution_reply
 from app.db.models import ContactInteraction, SemanticMemory
 from app.memory.conversation_state import get_session
 from app.memory.extractor import is_meta_conversation_fact, run_extraction_pipeline
@@ -164,27 +169,16 @@ async def test_pipeline_drops_meta_facts_from_contact_new_facts(
 # 2. Non-name replies must not destroy a parked fact
 # ------------------------------------------------------------------
 
-def test_looks_like_name_answer():
-    assert _looks_like_name_answer("jamil")
-    assert _looks_like_name_answer("ali raza")
-    assert _looks_like_name_answer("i meant jamil ali khan")
-    # Affirmations, questions and long tangents are not name attempts
-    assert not _looks_like_name_answer("yes")
-    assert not _looks_like_name_answer("no")
-    assert not _looks_like_name_answer("ok sure")
-    assert not _looks_like_name_answer("what do u know about hamil?")
-    assert not _looks_like_name_answer(
-        "by the way did I tell you about the new project we started at work last month"
-    )
-
-
 @pytest.mark.asyncio
-async def test_yes_reply_keeps_fact_parked(engine, session_id, roster):
+@pytest.mark.parametrize("reply", ["yes", "its also happening", "what do u know about hamil?"])
+async def test_unmatched_reply_keeps_fact_parked(engine, session_id, roster, reply):
+    """No reply that fails to name a contact may destroy the parked fact
+    (live regressions: 'yes', then 'its also happening')."""
     parked = await engine.store_shared_fact(dict(GYM_FACT), session_id=session_id)
     assert parked is None  # "jamil" is ambiguous → parked
     assert get_session(session_id).pending_resolution is not None
 
-    saved = await apply_pending_resolution_reply(engine, session_id, "yes")
+    saved = await apply_pending_resolution_reply(engine, session_id, reply)
     assert saved == []
     assert get_session(session_id).pending_resolution is not None, (
         "a reply that names nobody must leave the question parked"
@@ -251,3 +245,80 @@ async def test_late_reply_with_full_name_resolves(engine, db_session, session_id
     ).scalars().all()
     assert len(log) == 1
     assert "Khawar" in log[0].description
+
+
+# ------------------------------------------------------------------
+# 4. Session-confirmed names must never re-ask (live regression:
+#    every fact about "jamil" re-parked behind "which jamil?")
+# ------------------------------------------------------------------
+
+BOXING_FACT = {
+    "fact_user_perspective": (
+        "Planning to join a boxing gym with {CONTACT:jamil} next month"
+    ),
+    "fact_contact_perspective": (
+        "Planning to join a boxing gym with {USER} next month"
+    ),
+    "subject": "shared",
+    "related_contacts": ["jamil"],
+    "event_date": None,
+    "category": "personal",
+}
+
+
+@pytest.mark.asyncio
+async def test_confirmed_name_is_not_reasked(engine, db_session, session_id, roster):
+    """After the user answers 'which jamil?' once, a later fact saying
+    'jamil' must save directly instead of parking again."""
+    await engine.store_shared_fact(dict(GYM_FACT), session_id=session_id)
+    assert await apply_pending_resolution_reply(engine, session_id, "jamil")
+
+    saved = await engine.store_shared_fact(dict(BOXING_FACT), session_id=session_id)
+    assert saved is not None, "session-confirmed 'jamil' must not park again"
+    assert get_session(session_id).pending_resolution is None
+    log = (
+        await db_session.execute(
+            select(ContactInteraction).where(
+                ContactInteraction.contact_id == roster["jamil"].id
+            )
+        )
+    ).scalars().all()
+    assert any("boxing" in i.description.lower() for i in log)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_name_plus_unknown_parks_creation(engine, session_id, roster):
+    """The live daud flow: 'jamil' is already confirmed, 'daud' is unknown —
+    the fact must park behind the CREATE question, not a re-ask of jamil."""
+    await engine.store_shared_fact(dict(GYM_FACT), session_id=session_id)
+    assert await apply_pending_resolution_reply(engine, session_id, "jamil")
+
+    fact = dict(BOXING_FACT)
+    fact["fact_user_perspective"] = (
+        "Planning to join a boxing gym with {CONTACT:jamil} and {CONTACT:daud} next month"
+    )
+    fact["related_contacts"] = ["jamil", "daud"]
+    saved = await engine.store_shared_fact(fact, session_id=session_id)
+    assert saved is None
+    sess = get_session(session_id)
+    assert sess.pending_resolution is None, "'jamil' must not re-park"
+    assert sess.pending_creation is not None
+    assert sess.pending_creation.name == "daud"
+
+
+def test_creation_question_not_suppressed_by_resolved_note():
+    """Resolving one question can park a create-contact question in the same
+    turn — the prompt must carry BOTH (live regression: 'add daud?' was
+    silently dropped and the parked fact expired unasked)."""
+    prompt = _build_system_prompt(
+        disambiguation_resolved_note="DISAMBIGUATION RESOLVED: The user meant: jamil.",
+        pending_creation={"name": "daud"},
+    )
+    assert "DISAMBIGUATION RESOLVED" in prompt
+    assert "daud isn't in your contacts — want me to add them?" in prompt
+    # A still-open disambiguation defers it (one clarifying question at a time)
+    prompt = _build_system_prompt(
+        pending_resolution={"original_name": "jamil", "candidates": [{"id": "1", "name": "jamil"}]},
+        pending_creation={"name": "daud"},
+    )
+    assert "PENDING CONTACT CREATION" not in prompt
