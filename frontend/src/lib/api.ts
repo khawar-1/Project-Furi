@@ -3,6 +3,8 @@
  * All backend communication goes through this module.
  */
 import type {
+  ActivityEntry,
+  AgentPlan,
   ChatMessage,
   ChatRequest,
   Contact,
@@ -11,12 +13,14 @@ import type {
   MemorySearchResult,
   MemoryStats,
   Preference,
+  Reminder,
+  ReminderStatus,
   SemanticMemory,
   StreamChunk,
 } from '@/types';
 
-// Resolve backend URL
-function getBaseUrl(): string {
+// Resolve backend URL (also used by lib/push.ts to derive the ws:// URL)
+export function getBaseUrl(): string {
   if (typeof window !== 'undefined' && window.__BACKEND_URL__) {
     return window.__BACKEND_URL__;
   }
@@ -173,6 +177,66 @@ export const episodesApi = {
 
   search: (q: string): Promise<Episode[]> =>
     apiFetch<Episode[]>(`/api/episodes/search?q=${encodeURIComponent(q)}`),
+};
+
+// ============================================================
+// Agent (Phase 3 — plan approval)
+// ============================================================
+export const agentApi = {
+  /** Approve or cancel a plan parked at the approval gate. Consumes the
+   *  pending plan — one answer per plan; returns the final plan state. */
+  approve: (planId: string, approved: boolean): Promise<AgentPlan> =>
+    apiFetch<AgentPlan>('/api/agent/approve', {
+      method: 'POST',
+      body: JSON.stringify({ plan_id: planId, approved }),
+    }),
+
+  /** Answer a plan's clarifying question ("which notes.txt?"). Also consumes
+   *  the pending plan; the answer only feeds the next planning round. */
+  choose: (planId: string, answer: string): Promise<AgentPlan> =>
+    apiFetch<AgentPlan>('/api/agent/choose', {
+      method: 'POST',
+      body: JSON.stringify({ plan_id: planId, answer }),
+    }),
+};
+
+// ============================================================
+// Background tasks (Phase 4, Parts 5-6)
+// ============================================================
+export const tasksApi = {
+  /** Cooperative mid-plan cancel (Part 6): sets the flag a running plan
+   *  checks between steps. The step currently executing finishes; the
+   *  cancelled outcome then arrives as a "task" push event. */
+  cancel: (
+    taskId: string
+  ): Promise<{ task_id: string; status: string; accepted: boolean; detail: string }> =>
+    apiFetch(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' }),
+};
+
+// ============================================================
+// Activity (Phase 3 — tool execution audit trail)
+// ============================================================
+export const activityApi = {
+  list: (limit = 100): Promise<ActivityEntry[]> =>
+    apiFetch<ActivityEntry[]>(`/api/activity?limit=${limit}`),
+
+  forSession: (sessionId: string, limit = 100): Promise<ActivityEntry[]> =>
+    apiFetch<ActivityEntry[]>(
+      `/api/activity/${encodeURIComponent(sessionId)}?limit=${limit}`
+    ),
+};
+
+// ============================================================
+// Reminders (Phase 4, Part 4)
+// ============================================================
+export const remindersApi = {
+  list: (status?: ReminderStatus): Promise<Reminder[]> => {
+    const query = status ? `?status=${status}` : '';
+    return apiFetch<Reminder[]>(`/api/reminders${query}`);
+  },
+
+  cancel: (id: string): Promise<{ cancelled: boolean }> =>
+    apiFetch(`/api/reminders/${id}`, { method: 'DELETE' }),
 };
 
 // ============================================================

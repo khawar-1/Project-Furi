@@ -4,21 +4,30 @@ dist/
 dist-electron/
 release/
 frontend/dist/
-frontend/node_modules/
 *.local
 
-# Python
+# Python — global catch-all (covers backend/, scripts, anywhere)
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
 backend/venv/
-backend/__pycache__/
-backend/**/__pycache__/
-backend/*.pyc
-backend/**/*.pyc
+backend/.venv/
 backend/.mypy_cache/
 backend/.pytest_cache/
+backend/.ruff_cache/
+backend/.coverage
+backend/htmlcov/
+
+# Database files (user-specific, never commit)
 backend/*.db
-backend/*.egg-info/
-backend/.env
+backend/*.db-journal
+backend/*.db-wal
+backend/*.db-shm
+
+# Environment variables (SECRETS — never commit)
 .env
+backend/.env
 !.env.example
 
 # Electron
@@ -33,11 +42,30 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+*.swo
+*~
+*.tsbuildinfo
+
+# Claude Code (commit .claude/skills, keep machine-local settings out)
+.claude/settings.local.json
+
+# Antigravity IDE (workspace customizations)
+.agents/
 
 # Qdrant data (embedded local disk mode + Docker volume)
 qdrant_storage/
+qdrant_data/
 backend/qdrant_data/
 
-# Voice models (large files)
+# Voice models (large binary files)
 backend/voices/*.onnx
 backend/voices/*.onnx.json
+
+# FastEmbed model cache (downloaded at runtime)
+backend/local_cache/
+
+# Debug/utility scripts (one-off, not part of the app)
+backend/check_contacts.py
+backend/delete_phantom.py
+backend/verify_db.py
+backend/migrate_*.py

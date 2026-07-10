@@ -32,6 +32,20 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def utc_iso(dt: datetime | None) -> str | None:
+    """Serialize a stored naive-UTC datetime with an explicit UTC offset.
+
+    The DB convention is naive UTC (utc_now above). A bare .isoformat() of
+    such a value has no timezone marker, so the frontend's `new Date(iso)`
+    reads it as LOCAL time — every displayed timestamp shifts by the user's
+    UTC offset. API serializers must use this instead of .isoformat()."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
 # Kept as the column default so existing call sites stay unchanged
 _now = utc_now
 
@@ -245,6 +259,127 @@ class EntityEdge(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+# ============================================================
+# Parked Plans — Persisted plans awaiting approval / an answer (Phase 3.5)
+# ============================================================
+class ParkedPlan(Base):
+    """
+    A plan paused for user approval or a clarifying-question answer,
+    persisted so a backend restart (or the in-memory cache TTL) never
+    silently destroys it. The in-memory plan_store stays the hot cache;
+    this table is the truth. Rows are deleted when the plan is consumed
+    (approved / cancelled / answered) or when expires_at passes.
+    """
+    __tablename__ = "parked_plans"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)  # AgentPlan.id
+    session_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(32))  # awaiting_approval | awaiting_choice
+    payload: Mapped[str] = mapped_column(Text)  # full AgentPlan JSON incl. planner inputs
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
+# ============================================================
+# Pending Session State — Persisted parked memory questions (Phase 3.5)
+# ============================================================
+class PendingSessionState(Base):
+    """
+    Snapshot of a ConversationSession's parked questions ("which jamil?" /
+    "add daud?") plus the names the user already confirmed. Restored when the
+    in-memory session is gone (restart) or TTL-evicted, so an unanswered
+    question survives a lunch break. The in-memory session stays authoritative
+    while it is alive; this row only resurrects cold sessions.
+    """
+    __tablename__ = "pending_resolutions"
+
+    session_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    resolution: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # PendingResolution JSON
+    creation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # PendingCreation JSON
+    confirmed_names: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # {as-said: contact_id}
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
+# ============================================================
+# Reminders — User-facing timed nudges (Phase 4, Part 4)
+# ============================================================
+class Reminder(Base):
+    """
+    A reminder the user asked for ("remind me at 6 to call Jamil"). This is
+    the user-facing record (text, due time, which chat session it belongs
+    to); the scheduled_jobs row it points at (job_id) is the actual timer.
+    The fire-vs-cancel race is settled once, at the scheduled_jobs level
+    (JarvisScheduler's own atomic claim) — this row's status is set to
+    mirror that outcome, not to re-arbitrate it.
+    session_id is the chat session that created it — a fired reminder's
+    message is persisted into that session's history so it's visible even
+    if no window was open to catch the push event.
+    """
+    __tablename__ = "reminders"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    due_at: Mapped[datetime] = mapped_column(DateTime, index=True)  # naive UTC
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)  # pending | fired | cancelled
+    job_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)  # scheduled_jobs.id
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    fired_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+# ============================================================
+# Background Tasks — Plans that escape the chat turn (Phase 4, Part 5)
+# ============================================================
+class Task(Base):
+    """
+    A user goal executing in the background, wrapping an AgentPlan. SQLite is
+    the truth for task state: the asyncio task running the plan is only the
+    engine, and a backend restart marks still-`running` rows failed at
+    startup (fail_interrupted_tasks) — steps may have run; ActivityLog is
+    the audit trail. A task paused for approval/answer survives a restart
+    through its parked_plans row (that table stays the resume truth);
+    plan_payload here is a display/audit snapshot, never resumed from.
+    """
+    __tablename__ = "tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    session_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    # running | awaiting_approval | awaiting_choice | completed | failed | cancelled
+    status: Mapped[str] = mapped_column(String(24), default="running", index=True)
+    plan_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    plan_payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # AgentPlan JSON snapshot
+    message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # final user-facing outcome
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+# ============================================================
+# Scheduled Jobs — Persisted timed work (Phase 4, Part 2)
+# ============================================================
+class ScheduledJob(Base):
+    """
+    One-shot timed job for the scheduler/event bus. SQLite is the truth:
+    the in-process APScheduler timers are rebuilt from pending rows at
+    startup, so a restart never loses a job — one whose run_at passed
+    while the backend was down fires immediately on boot (late=True).
+    Settled rows (fired/failed/cancelled) are kept for inspection and
+    purged after a retention window.
+    """
+    __tablename__ = "scheduled_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    kind: Mapped[str] = mapped_column(String(64), index=True)  # handler registry key
+    payload: Mapped[str] = mapped_column(Text, default="{}")  # JSON, handler-defined
+    run_at: Mapped[datetime] = mapped_column(DateTime, index=True)  # naive UTC
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    fired_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 # ============================================================

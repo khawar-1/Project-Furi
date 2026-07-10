@@ -7,6 +7,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Zap, User } from 'lucide-react';
 import type { ChatMessage } from '@/types';
+import { useChatStore } from '@/stores/chatStore';
+import { PlanCard } from './PlanCard';
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -23,6 +25,14 @@ function formatTime(date: Date): string {
 export function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
+  const respondToPlan = useChatStore((s) => s.respondToPlan);
+  const respondToChoice = useChatStore((s) => s.respondToChoice);
+  const cancelBackgroundTask = useChatStore((s) => s.cancelBackgroundTask);
+
+  // Phase 3: for plans that paused at the approval gate, the PlanCard IS the
+  // message — the streamed deterministic text repeats the same step list, so
+  // the text bubble is hidden (and would go stale once the plan resolves).
+  const hideTextBubble = Boolean(message.plan && message.planNeededApproval);
 
   return (
     <div
@@ -60,7 +70,21 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           </span>
         </div>
 
+        {/* Agent plan card (Phase 3 task turns) */}
+        {message.plan && (
+          <PlanCard
+            plan={message.plan}
+            responding={Boolean(message.planResponding)}
+            error={message.planError ?? null}
+            onRespond={(approved) => void respondToPlan(message.id, approved)}
+            onAnswer={(answer) => void respondToChoice(message.id, answer)}
+            cancelRequested={Boolean(message.planCancelRequested)}
+            onCancelTask={() => void cancelBackgroundTask(message.id)}
+          />
+        )}
+
         {/* Bubble */}
+        {!hideTextBubble && (
         <div
           className={clsx(
             'rounded-2xl px-4 py-3 text-sm leading-relaxed',
@@ -102,6 +126,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             </div>
           )}
         </div>
+        )}
       </div>
 
       {/* User Avatar */}

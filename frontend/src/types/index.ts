@@ -16,6 +16,19 @@ export interface ChatMessage {
   isStreaming?: boolean;
   model?: string;
   provider?: string;
+  /** Agent plan attached to this assistant message (Phase 3 task turns). */
+  plan?: AgentPlan;
+  /** True if the plan originally paused at the approval gate — the card
+   *  carries the approval UI, so the duplicate text bubble is hidden. */
+  planNeededApproval?: boolean;
+  /** An approve/cancel call for this message's plan is in flight. */
+  planResponding?: boolean;
+  /** Error from the approve/cancel call (e.g. plan expired). */
+  planError?: string | null;
+  /** A mid-plan cancel was requested for this message's background task
+   *  (Phase 4, Part 6) — the card shows "Cancelling…" until the cancelled
+   *  "task" push event resolves it. */
+  planCancelRequested?: boolean;
 }
 
 export interface StreamChunk {
@@ -24,6 +37,9 @@ export interface StreamChunk {
   session_id?: string;
   model?: string;
   provider?: string;
+  /** "plan" marks the special agent-plan message type (Phase 3). */
+  type?: string;
+  plan?: AgentPlan;
 }
 
 export interface ChatRequest {
@@ -143,17 +159,143 @@ export interface Preference {
 // ============================================================
 export type PermissionLevel = 'read' | 'write' | 'destructive';
 
+// ============================================================
+// Agent Plans (Phase 3 — serialized AgentPlan from the backend)
+// ============================================================
+export type PlanStatus =
+  | 'executing'
+  | 'awaiting_approval'
+  | 'awaiting_choice'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+/** A clarifying question the planner needs answered before it can continue
+ *  ("three files are named notes.txt — which one?"). Answering never
+ *  executes anything: any write step the answer produces still pauses for
+ *  approval. */
+export interface PlanQuestion {
+  text: string;
+  options: string[];
+}
+
+export type PlanStepStatus =
+  | 'pending'
+  /** Transient (Phase 4, Part 6): set by a live "plan_step" push event while
+   *  the step's tool call is in flight — the card shows a spinner. */
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'skipped';
+
+export interface PlanStepResult {
+  success: boolean;
+  output: unknown;
+  error: string | null;
+}
+
+export interface PlanStep {
+  id: string;
+  description: string;
+  tool: string;
+  parameters: Record<string, unknown>;
+  permission_level: PermissionLevel;
+  requires_approval: boolean;
+  status: PlanStepStatus;
+  result: PlanStepResult | null;
+  /** Code-derived verbatim rendering of what the step will do (exact
+   *  command / paths). Null for READ steps. Never written by the LLM. */
+  action_detail: string | null;
+}
+
+export interface AgentPlan {
+  id: string;
+  goal: string;
+  session_id: string | null;
+  /** Set when the plan belongs to a background Task (Phase 4, Part 5):
+   *  approving it resumes execution in the background, and the outcome
+   *  arrives as a "task" push event instead of in the approve response. */
+  task_id?: string | null;
+  steps: PlanStep[];
+  status: PlanStatus;
+  message: string | null;
+  created_at: string;
+  /** Convenience flag from the backend: status === "awaiting_approval". */
+  requires_approval: boolean;
+  /** Open clarifying question when status === "awaiting_choice". */
+  question: PlanQuestion | null;
+}
+
+/** Payload of a "task" push event (Phase 4, Part 5) — a background task
+ *  paused for approval/an answer, or finished. title/body feed the native
+ *  toast; plan lets a live window render the approval card in chat. */
+export interface TaskEventPayload {
+  task_id?: unknown;
+  status?: unknown;
+  session_id?: unknown;
+  goal?: unknown;
+  title?: unknown;
+  body?: unknown;
+  plan?: unknown;
+}
+
+/** Payload of a "plan_step" push event (Phase 4, Part 6) — one step of an
+ *  executing plan changed status (running → completed/failed). A live
+ *  PlanCard ticks its rows from these; they are best-effort narration, the
+ *  plan carried by the eventual "task"/approve response stays the truth. */
+export interface PlanStepEventPayload {
+  plan_id?: unknown;
+  task_id?: unknown;
+  session_id?: unknown;
+  step_id?: unknown;
+  step_index?: unknown;
+  step_count?: unknown;
+  status?: unknown;
+  description?: unknown;
+  tool?: unknown;
+  permission_level?: unknown;
+  error?: unknown;
+}
+
 export interface ActivityEntry {
   id: string;
-  sessionId: string | null;
-  toolName: string;
+  session_id: string | null;
+  tool_name: string;
   action: string;
-  parameters: string | null;
-  resultSummary: string | null;
+  parameters: Record<string, unknown> | string | null;
+  result_summary: string | null;
   success: boolean;
-  permissionLevel: PermissionLevel;
-  durationMs: number | null;
-  createdAt: Date;
+  permission_level: PermissionLevel;
+  duration_ms: number | null;
+  created_at: string;
+}
+
+// ============================================================
+// Push Channel (Phase 4 — server-initiated events over /ws)
+// ============================================================
+/** The envelope every server-pushed event uses. New event types are ADDED
+ *  over time; the dispatcher ignores types it has no handler for, so an
+ *  older frontend never breaks on a newer backend. */
+export interface PushEvent {
+  type: string;
+  payload: Record<string, unknown>;
+  ts: string;
+}
+
+// ============================================================
+// Reminders (Phase 4, Part 4 — "remind me at 6 to call Jamil")
+// ============================================================
+export type ReminderStatus = 'pending' | 'fired' | 'cancelled';
+
+export interface Reminder {
+  id: string;
+  text: string;
+  session_id: string | null;
+  due_at: string;
+  status: ReminderStatus;
+  job_id: string | null;
+  created_at: string;
+  fired_at: string | null;
 }
 
 // ============================================================
@@ -183,6 +325,7 @@ export type ActivePanel =
   | 'memory'
   | 'contacts'
   | 'timeline'
+  | 'reminders'
   | 'tools'
   | 'voice';
 
@@ -197,6 +340,9 @@ export interface JarvisElectronAPI {
   closeWindow: () => void;
   getPlatform: () => string;
   getAppVersion: () => Promise<string>;
+  /** Show a native OS notification (Phase 4, Part 3). The main process
+   *  creates the toast; clicking it summons the window. */
+  notify: (title: string, body: string) => void;
   onBackendReady: (callback: () => void) => void;
   onBackendError: (callback: (error: string) => void) => void;
   removeAllListeners: (channel: string) => void;

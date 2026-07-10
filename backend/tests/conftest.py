@@ -34,3 +34,18 @@ def session_id():
     sid = str(uuid.uuid4())
     yield sid
     CONVERSATION_SESSIONS.pop(sid, None)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_question_gate(tmp_path_factory):
+    """The planner's question self-resolution gate verifies questions with a
+    REAL filesystem search that defaults to the user's home directory. Tests
+    must never walk the real home: every test gets an empty scratch root
+    (gate finds nothing → questions pass through unchanged). Tests exercising
+    the gate point SEARCH_ROOTS at a populated tmp dir themselves."""
+    from app.agents import question_gate
+
+    original = question_gate.SEARCH_ROOTS
+    question_gate.SEARCH_ROOTS = [str(tmp_path_factory.mktemp("question-gate"))]
+    yield
+    question_gate.SEARCH_ROOTS = original

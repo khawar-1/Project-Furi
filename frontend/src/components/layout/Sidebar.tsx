@@ -8,6 +8,7 @@ import {
   Brain,
   Users,
   Activity,
+  Bell,
   Terminal,
   Mic,
   ChevronLeft,
@@ -28,6 +29,7 @@ const navItems: NavItem[] = [
   { id: 'memory', icon: <Brain size={20} />, label: 'About Me', phase: 2 },
   { id: 'contacts', icon: <Users size={20} />, label: 'Contacts', phase: 2 },
   { id: 'timeline', icon: <Activity size={20} />, label: 'Timeline', phase: 3 },
+  { id: 'reminders', icon: <Bell size={20} />, label: 'Reminders', phase: 4 },
   { id: 'tools', icon: <Terminal size={20} />, label: 'Tools', phase: 3 },
   { id: 'voice', icon: <Mic size={20} />, label: 'Voice', phase: 6 },
 ];

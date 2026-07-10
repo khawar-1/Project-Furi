@@ -14,6 +14,9 @@ from app.db.database import init_db
 from app.db.qdrant_client import init_qdrant
 from app.api import health, chat, memory
 from app.api import contacts, episodes, preferences
+from app.api import agent, activity
+from app.api import ws, schedule, reminders, tasks
+import app.core.reminders  # noqa: F401 — registers the "reminder" job handler at import time
 
 
 @asynccontextmanager
@@ -24,6 +27,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Initialize SQLite database (creates tables if not exist)
     await init_db()
     logger.info("✅ SQLite database initialized")
+
+    # Phase 3.5: drop parked plans / pending questions whose 24h window passed.
+    # Phase 4 Part 5: then reconcile background tasks against reality — a Task
+    # still `running` was killed by the restart, and a paused Task whose
+    # parked plan just got purged can never be answered (order matters:
+    # purge first, so fail_interrupted_tasks sees the surviving rows only).
+    try:
+        from app.agents import fail_interrupted_tasks, purge_expired_plans
+        from app.db.database import AsyncSessionLocal
+        from app.memory.session_persistence import purge_expired_pending_state
+        async with AsyncSessionLocal() as session:
+            await purge_expired_plans(session)
+            await purge_expired_pending_state(session)
+            await fail_interrupted_tasks(session)
+    except Exception as e:
+        logger.warning(f"⚠️  Expired-state purge failed (non-critical): {e}")
 
     # Initialize Qdrant connection (creates all Phase 2 collections)
     try:
@@ -47,12 +66,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     import asyncio
     asyncio.create_task(_prewarm_embedder())
 
+    # Phase 4: start the scheduler and rebuild timers from SQLite — jobs
+    # whose run_at passed while the backend was down fire immediately (late).
+    from app.core.scheduler import scheduler
+    try:
+        rehydrated = await scheduler.start()
+        logger.info(f"✅ Scheduler started ({rehydrated} pending job(s) rehydrated)")
+    except Exception as e:
+        logger.warning(f"⚠️  Scheduler failed to start (timed jobs disabled): {e}")
+
     logger.info(f"🤖 LLM Provider: {settings.LLM_PROVIDER}")
     logger.info(f"🌐 Backend ready at http://{settings.BACKEND_HOST}:{settings.BACKEND_PORT}")
 
     yield
 
     logger.info("🛑 Jarvis OS backend shutting down...")
+    await scheduler.shutdown()
 
 
 def create_app() -> FastAPI:
@@ -83,6 +112,16 @@ def create_app() -> FastAPI:
     app.include_router(contacts.router, prefix="/api/contacts", tags=["Contacts"])
     app.include_router(episodes.router, prefix="/api/episodes", tags=["Episodes"])
     app.include_router(preferences.router, prefix="/api/preferences", tags=["Preferences"])
+
+    # Phase 3 routes
+    app.include_router(agent.router, prefix="/api/agent", tags=["Agent"])
+    app.include_router(activity.router, prefix="/api/activity", tags=["Activity"])
+
+    # Phase 4 routes — push channel (WebSocket at /ws) + scheduler + reminders
+    app.include_router(ws.router, tags=["Push"])
+    app.include_router(schedule.router, prefix="/api/schedule", tags=["Schedule"])
+    app.include_router(reminders.router, prefix="/api/reminders", tags=["Reminders"])
+    app.include_router(tasks.router, prefix="/api/tasks", tags=["Tasks"])
 
     return app
 

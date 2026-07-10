@@ -5,9 +5,11 @@
 import { clsx } from 'clsx';
 import { Circle, Cpu, Wifi, WifiOff, RefreshCw } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
+import { usePushStore } from '@/stores/pushStore';
 
 export function StatusBar() {
   const { backendStatus, healthData, isCheckingHealth, checkBackendHealth } = useUIStore();
+  const pushConnected = usePushStore((s) => s.connected);
 
   const isConnected = backendStatus === 'ok';
   const isDegraded = backendStatus === 'degraded';
@@ -65,6 +67,20 @@ export function StatusBar() {
             </span>
           </div>
         )}
+
+        {/* Push channel status (Phase 4) */}
+        <div className="flex items-center gap-1" title="Server→client push channel">
+          <Circle
+            size={6}
+            className={clsx(
+              'fill-current',
+              pushConnected ? 'text-emerald-500' : 'text-muted'
+            )}
+          />
+          <span className="text-muted">
+            Push: {pushConnected ? 'Live' : 'Off'}
+          </span>
+        </div>
       </div>
 
       {/* Center: Model info */}

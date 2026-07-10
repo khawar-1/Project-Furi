@@ -24,6 +24,10 @@ export interface JarvisAPI {
   getPlatform: () => string;
   getAppVersion: () => Promise<string>;
 
+  // IPC: native notification (Phase 4, Part 3) — the main process shows the
+  // toast; clicking it summons the window. Plain strings only.
+  notify: (title: string, body: string) => void;
+
   // IPC: listen for backend events
   onBackendReady: (callback: () => void) => void;
   onBackendError: (callback: (error: string) => void) => void;
@@ -52,6 +56,10 @@ const jarvisAPI: JarvisAPI = {
   getPlatform: () => process.platform,
 
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+
+  notify: (title: string, body: string) => {
+    ipcRenderer.send('notify', { title, body });
+  },
 
   onBackendReady: (callback: () => void) => {
     ipcRenderer.on('backend-ready', () => callback());

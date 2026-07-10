@@ -58,7 +58,9 @@ class Settings(BaseSettings):
     QDRANT_COLLECTION: str = "jarvis_memory"
 
     # ------------------------------------------------------------------ Backend
-    BACKEND_HOST: str = "0.0.0.0"
+    # Loopback only — the API is unauthenticated; 0.0.0.0 would expose the
+    # tool system (file deletion, shell commands) to the whole network.
+    BACKEND_HOST: str = "127.0.0.1"
     BACKEND_PORT: int = 8000
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
 

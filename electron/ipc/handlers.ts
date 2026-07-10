@@ -3,9 +3,18 @@
  * All main-process IPC handlers are defined here.
  * Keep this file focused — one handler per capability.
  */
-import { IpcMain, app, shell, BrowserWindow } from 'electron';
+import { IpcMain, app, shell, BrowserWindow, Notification } from 'electron';
+import { appIcon } from '../icon';
 
-export function registerIpcHandlers(ipcMain: IpcMain): void {
+// Caps for renderer-supplied notification text: the renderer is the least
+// trusted process, so anything it sends is validated and truncated here.
+const NOTIFY_TITLE_MAX = 128;
+const NOTIFY_BODY_MAX = 512;
+
+export function registerIpcHandlers(
+  ipcMain: IpcMain,
+  summonWindow: () => Promise<void>
+): void {
   // ---- App version
   ipcMain.handle('get-app-version', () => {
     return app.getVersion();
@@ -34,5 +43,27 @@ export function registerIpcHandlers(ipcMain: IpcMain): void {
 
   ipcMain.on('window-close', () => {
     BrowserWindow.getFocusedWindow()?.close();
+  });
+
+  // ---- Native notification (Phase 4, Part 3)
+  // The renderer's push-event handler calls window.jarvis.notify(title, body);
+  // the toast itself is created HERE in the main process — the renderer never
+  // touches Node. Clicking the notification summons the window.
+  ipcMain.on('notify', (_, payload: unknown) => {
+    if (!Notification.isSupported()) return;
+    const raw = (payload ?? {}) as { title?: unknown; body?: unknown };
+    const title =
+      typeof raw.title === 'string' ? raw.title.trim().slice(0, NOTIFY_TITLE_MAX) : '';
+    const body =
+      typeof raw.body === 'string' ? raw.body.trim().slice(0, NOTIFY_BODY_MAX) : '';
+    if (!title && !body) return;
+
+    const notification = new Notification({
+      title: title || 'Jarvis',
+      body,
+      icon: appIcon(),
+    });
+    notification.on('click', () => void summonWindow());
+    notification.show();
   });
 }
