@@ -29,6 +29,7 @@ from app.db.models import (
     EntityEdge,
     utc_now,
 )
+from app.memory.contact_validation import normalize_birthday, normalize_email
 from app.memory.embedder import embed_text
 
 MIN_SCORE = settings.IDENTITY_MIN_SCORE
@@ -626,11 +627,12 @@ class MemoryEngine:
         
         contact = Contact(
             name=name,
-            email=details.get("email"),
+            email=normalize_email(details.get("email")),
             phone=details.get("phone"),
             organization=details.get("organization"),
             relationship_type=details.get("relationship_type", "other"),
             notes=details.get("notes"),
+            birthday=normalize_birthday(details.get("birthday")),
         )
         if "skills" in details and isinstance(details["skills"], list):
             contact.skills = json.dumps(details["skills"])
@@ -758,8 +760,22 @@ class MemoryEngine:
             
         return await self.update_contact(best_candidate.id, details)
 
-    async def update_contact(self, contact_id: str, updates: dict) -> Contact:
-        """Update fields on an existing contact."""
+    async def update_contact(
+        self,
+        contact_id: str,
+        updates: dict,
+        clear_empty: bool = False,
+        touch_interaction: bool = True,
+    ) -> Contact:
+        """
+        Update fields on an existing contact.
+
+        clear_empty: an explicit empty string erases the field — only the
+        manual /api/contacts PUT passes True (a human clearing a typo).
+        Extraction can never clear: post-validation fields are None, not "".
+        touch_interaction: the API edit path passes False — correcting a
+        field is not an interaction with the person.
+        """
         result = await self.db.execute(
             select(Contact).where(Contact.id == contact_id)
         )
@@ -767,7 +783,11 @@ class MemoryEngine:
         if not contact:
             raise ValueError(f"Contact {contact_id} not found")
 
-        # Scalar fields — only overwrite if new value is provided and different
+        # Scalar fields — only overwrite if new value is provided and passes
+        # the deterministic net (contact_validation.py): a value that fails
+        # normalization is skipped, never overwrites good data with junk.
+        normalizers = {"email": normalize_email, "birthday": normalize_birthday}
+        clearable = {"email", "phone", "organization", "birthday"}
         for key, field in {
             "email": "email",
             "phone": "phone",
@@ -776,8 +796,18 @@ class MemoryEngine:
             "relationship": "relationship_type",
             "birthday": "birthday",
         }.items():
-            if key in updates and updates[key]:
-                setattr(contact, field, updates[key])
+            if key not in updates:
+                continue
+            value = updates[key]
+            if not value:
+                if clear_empty and value == "" and field in clearable:
+                    setattr(contact, field, None)
+                continue
+            if field in normalizers:
+                value = normalizers[field](value)
+                if value is None:
+                    continue
+            setattr(contact, field, value)
 
         # Skills — merge (case-insensitive dedup)
         new_skills = updates.get("skills")
@@ -790,8 +820,9 @@ class MemoryEngine:
                     seen.add(sk.lower())
             contact.skills = json.dumps(existing_skills)
 
-        contact.interaction_count += 1
-        contact.last_interaction = utc_now()
+        if touch_interaction:
+            contact.interaction_count += 1
+            contact.last_interaction = utc_now()
         contact.updated_at = utc_now()
 
         # Add new facts as interactions — dedup by description to prevent repeated extraction

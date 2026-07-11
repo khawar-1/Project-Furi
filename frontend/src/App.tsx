@@ -10,6 +10,7 @@ import { MemoryExplorer } from '@/components/memory/MemoryExplorer';
 import { ContactsPanel } from '@/components/contacts/ContactsPanel';
 import { TimelinePanel } from '@/components/timeline/TimelinePanel';
 import { ReminderPanel } from '@/components/reminders/ReminderPanel';
+import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { useUIStore } from '@/stores/uiStore';
 import { connectPush, disconnectPush, onPush } from '@/lib/push';
 import { initNotifications } from '@/lib/notifications';
@@ -28,6 +29,8 @@ function PanelContent({ panel }: { panel: ActivePanel }) {
       return <TimelinePanel />;
     case 'reminders':
       return <ReminderPanel />;
+    case 'settings':
+      return <SettingsPanel />;
     default:
       return <ComingSoonPanel panel={panel} />;
   }
@@ -42,6 +45,7 @@ function ComingSoonPanel({ panel }: { panel: ActivePanel }) {
     reminders: 'Reminders',
     tools: 'Tool Execution Log',
     voice: 'Voice Controls',
+    settings: 'Settings',
   };
 
   const phases: Record<ActivePanel, string> = {
@@ -52,6 +56,7 @@ function ComingSoonPanel({ panel }: { panel: ActivePanel }) {
     reminders: '4',
     tools: '5',
     voice: '6',
+    settings: '5',
   };
 
   return (

@@ -49,7 +49,7 @@ Return ONLY valid JSON with this exact structure (no explanation, no markdown):
   "people_mentioned": [
     {{
       "name": "The name EXACTLY as the user wrote it in the CURRENT USER MESSAGE ('jamil' stays 'jamil' — do NOT expand it to a fuller saved contact name). Only exception: an explicit clarification per DISAMBIGUATION RULE 1.",
-      "email": "null or string",
+      "email": "null or string — copy an address VERBATIM from the user's message; never invent, complete, or correct an address the user did not fully type",
       "phone": "null or string",
       "relationship": "friend|colleague|client|family|recruiter|mentor|other",
       "skills": ["Python", "AI Engineering"],

@@ -3,9 +3,11 @@
  * List view + detail view with interaction history.
  */
 import { useEffect, useState } from 'react';
-import { Users, Search, Plus, X, ChevronRight, RefreshCw, Trash2, Mail, Phone, Building, MessageSquare, Cake, Calendar, Code2 } from 'lucide-react';
+import { Users, Search, Plus, ChevronRight, RefreshCw, Trash2, Pencil, Mail, Phone, Building, MessageSquare, Cake, Calendar, Code2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useContactsStore } from '@/stores/contactsStore';
+import { formatBirthday } from '@/lib/birthday';
+import { ContactFormModal } from './ContactFormModal';
 import type { ContactInteraction, RelationshipType } from '@/types';
 
 const REL_COLORS: Record<string, string> = {
@@ -87,6 +89,7 @@ function FactLogRow({ interaction, onDelete }: { interaction: ContactInteraction
 // ============================================================
 function ContactDetail() {
   const { selectedContact, clearSelected, deleteContact, deleteInteraction, isLoading } = useContactsStore();
+  const [editing, setEditing] = useState(false);
   if (!selectedContact) return null;
   const c = selectedContact;
 
@@ -109,10 +112,15 @@ function ContactDetail() {
           {c.organization && <p className="text-xs text-muted truncate">{c.organization}</p>}
         </div>
         <RelBadge type={c.relationship_type} />
+        <button onClick={() => setEditing(true)} className="p-1.5 text-muted hover:text-cyan-400 transition-colors" title="Edit contact">
+          <Pencil className="w-4 h-4" />
+        </button>
         <button onClick={handleDelete} className="p-1.5 text-red-400/50 hover:text-red-400 transition-colors">
           <Trash2 className="w-4 h-4" />
         </button>
       </div>
+
+      {editing && <ContactFormModal mode="edit" initial={c} onClose={() => setEditing(false)} />}
 
       {/* Details */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -139,7 +147,7 @@ function ContactDetail() {
           {c.birthday && (
             <div className="flex items-center gap-2 text-sm">
               <Cake className="w-4 h-4 text-muted" />
-              <span className="text-slate-300">Birthday: {c.birthday}</span>
+              <span className="text-slate-300">Birthday: {formatBirthday(c.birthday)}</span>
             </div>
           )}
         </div>
@@ -209,98 +217,6 @@ function ContactDetail() {
         <p className="text-xs text-muted text-center pt-2">
           Added {new Date(c.created_at).toLocaleDateString()}
         </p>
-      </div>
-    </div>
-  );
-}
-
-// ============================================================
-// New Contact Form
-// ============================================================
-function AddContactModal({ onClose }: { onClose: () => void }) {
-  const { createContact } = useContactsStore();
-  const [form, setForm] = useState({ name: '', email: '', organization: '', relationship_type: 'other' as RelationshipType, birthday: '' });
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!form.name.trim()) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await createContact(form);
-      onClose();
-    } catch (err: any) {
-      const msg = err.response?.data?.detail || err.message || 'Failed to create contact';
-      setError(msg);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-surface border border-surface-border rounded-2xl p-6 w-full max-w-md shadow-2xl">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-base font-semibold text-slate-200">Add Contact</h2>
-          <button onClick={onClose} className="p-1 text-muted hover:text-slate-300"><X className="w-4 h-4" /></button>
-        </div>
-        {error && (
-          <div className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
-            {error}
-          </div>
-        )}
-        <form onSubmit={handleSubmit} className="space-y-3">
-          {[
-            { field: 'name', label: 'Name *', placeholder: 'Full name' },
-            { field: 'email', label: 'Email', placeholder: 'email@example.com' },
-            { field: 'organization', label: 'Organization', placeholder: 'Company or team' },
-          ].map(({ field, label, placeholder }) => (
-            <div key={field}>
-              <label className="block text-xs text-muted mb-1">{label}</label>
-              <input
-                value={(form as any)[field]}
-                onChange={(e) => setForm({ ...form, [field]: e.target.value })}
-                placeholder={placeholder}
-                className="w-full bg-surface-2 border border-surface-border rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50"
-              />
-            </div>
-          ))}
-          <div>
-            <label className="block text-xs text-muted mb-1">Birthday</label>
-            <input
-              type="date"
-              value={form.birthday}
-              onChange={(e) => setForm({ ...form, birthday: e.target.value })}
-              className="w-full bg-surface-2 border border-surface-border rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50"
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-muted mb-1">Relationship</label>
-            <select
-              value={form.relationship_type}
-              onChange={(e) => setForm({ ...form, relationship_type: e.target.value as RelationshipType })}
-              className="w-full bg-surface-2 border border-surface-border rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none"
-            >
-              {['friend', 'colleague', 'client', 'recruiter', 'mentor', 'family', 'other'].map(r => (
-                <option key={r} value={r} className="capitalize">{r}</option>
-              ))}
-            </select>
-          </div>
-          <div className="flex gap-2 pt-2">
-            <button
-              type="submit"
-              disabled={saving || !form.name.trim()}
-              className="flex-1 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-sm rounded-lg transition-colors"
-            >
-              {saving ? 'Saving...' : 'Add Contact'}
-            </button>
-            <button type="button" onClick={onClose} className="px-4 py-2 text-muted hover:text-slate-300 text-sm">
-              Cancel
-            </button>
-          </div>
-        </form>
       </div>
     </div>
   );
@@ -402,7 +318,7 @@ export function ContactsPanel() {
         {selectedContact && <ContactDetail />}
       </div>
 
-      {showAdd && <AddContactModal onClose={() => setShowAdd(false)} />}
+      {showAdd && <ContactFormModal mode="create" onClose={() => setShowAdd(false)} />}
     </div>
   );
 }

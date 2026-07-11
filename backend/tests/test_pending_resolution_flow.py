@@ -69,6 +69,30 @@ async def test_store_contact_ambiguous_parks_resolution(engine, session_id):
     assert sess.pending_resolution.pending_update == {"phone": "111"}
 
 
+@pytest.mark.asyncio
+async def test_ambiguous_birthday_parks_and_merges_on_resolution(engine, session_id):
+    """"Jamil's birthday is March 4" with two Jamils saved: the birthday
+    (already normalized to 03-04 by the PersonMentioned belt) parks in
+    pending_update and lands on the confirmed contact — identity resolution
+    reused as-is, zero new resolution code (Phase 5 Part 2)."""
+    jamil_ali = await engine.create_contact_manual("Jamil Ali")
+    await engine.create_contact_manual("Jamil Khan")
+
+    result = await engine.store_contact(
+        "jamil", {"birthday": "03-04"}, session_id=session_id
+    )
+    assert result is None
+    sess = get_session(session_id)
+    assert sess.pending_resolution.pending_update == {"birthday": "03-04"}
+
+    # Next turn: the extractor re-extracts the clarified full name
+    updated = await engine.store_contact("Jamil Ali", {}, session_id=session_id)
+    assert updated is not None
+    assert updated.id == jamil_ali.id
+    assert updated.birthday == "03-04"
+    assert get_session(session_id).pending_resolution is None
+
+
 # ============================================================
 # Yes/no interpretation for pending contact creation
 # ============================================================

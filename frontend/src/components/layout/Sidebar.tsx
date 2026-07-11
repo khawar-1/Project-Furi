@@ -11,6 +11,7 @@ import {
   Bell,
   Terminal,
   Mic,
+  Settings,
   ChevronLeft,
   Zap,
 } from 'lucide-react';
@@ -32,6 +33,7 @@ const navItems: NavItem[] = [
   { id: 'reminders', icon: <Bell size={20} />, label: 'Reminders', phase: 4 },
   { id: 'tools', icon: <Terminal size={20} />, label: 'Tools', phase: 3 },
   { id: 'voice', icon: <Mic size={20} />, label: 'Voice', phase: 6 },
+  { id: 'settings', icon: <Settings size={20} />, label: 'Settings', phase: 5 },
 ];
 
 export function Sidebar() {

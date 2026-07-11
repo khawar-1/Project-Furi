@@ -121,12 +121,22 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
         "move_file", "rename_file", "delete_file",
         "create_file", "run_command", "execute_script",
         "recall_memory", "lookup_contact",
+        "search_emails", "read_email", "read_thread",
+        "create_email_draft", "send_email", "reply_email",
     }
     assert tools["read_file"]["permission_level"] == "read"
     assert tools["recall_memory"]["permission_level"] == "read"
     assert tools["lookup_contact"]["permission_level"] == "read"
     assert tools["create_file"]["permission_level"] == "write"
     assert tools["delete_file"]["permission_level"] == "destructive"
+    # Phase 5 Part 3: reading mail is read, drafting is a reversible write,
+    # anything that leaves the machine is destructive.
+    assert tools["search_emails"]["permission_level"] == "read"
+    assert tools["read_email"]["permission_level"] == "read"
+    assert tools["read_thread"]["permission_level"] == "read"
+    assert tools["create_email_draft"]["permission_level"] == "write"
+    assert tools["send_email"]["permission_level"] == "destructive"
+    assert tools["reply_email"]["permission_level"] == "destructive"
     assert "parameters" in tools["search_files"]
 
 

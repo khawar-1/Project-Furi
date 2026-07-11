@@ -12,9 +12,42 @@ from sqlalchemy.orm import selectinload
 
 from app.core.dependencies import get_db, get_qdrant
 from app.db.models import Contact, ContactInteraction
+from app.memory.contact_validation import normalize_birthday, normalize_email
 from app.memory.engine import MemoryEngine
 
 router = APIRouter()
+
+
+def _validate_contact_payload(payload: dict) -> dict:
+    """
+    Deterministic email/birthday validation for the manual paths. The engine
+    silently skips values that fail normalization — right for the LLM
+    extractor, wrong for a human edit, which deserves an explicit 400 instead
+    of a save that quietly didn't happen. Valid values are replaced by their
+    canonical forms; empty strings pass through (PUT clear semantics).
+    """
+    payload = dict(payload)
+    email = payload.get("email")
+    if email:
+        canonical = normalize_email(email)
+        if canonical is None:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid email address: '{email}'"
+            )
+        payload["email"] = canonical
+    birthday = payload.get("birthday")
+    if birthday:
+        canonical = normalize_birthday(birthday)
+        if canonical is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid birthday: '{birthday}' — use YYYY-MM-DD, "
+                    "or MM-DD when the year is unknown"
+                ),
+            )
+        payload["birthday"] = canonical
+    return payload
 
 
 def _contact_to_dict(c: Contact, include_interactions: bool = False) -> dict:
@@ -70,6 +103,7 @@ async def create_contact(
     name = payload.get("name", "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="name is required")
+    payload = _validate_contact_payload(payload)
 
     engine = MemoryEngine(db=db, qdrant=qdrant)
     try:
@@ -122,8 +156,14 @@ async def update_contact(
     db: AsyncSession = Depends(get_db),
     qdrant=Depends(get_qdrant),
 ) -> dict:
+    payload = _validate_contact_payload(payload)
     engine = MemoryEngine(db=db, qdrant=qdrant)
-    contact = await engine.update_contact(contact_id, payload)
+    try:
+        contact = await engine.update_contact(
+            contact_id, payload, clear_empty=True, touch_interaction=False
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Contact not found")
     return _contact_to_dict(contact)
 
 

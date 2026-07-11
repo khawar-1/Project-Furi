@@ -327,7 +327,26 @@ export type ActivePanel =
   | 'timeline'
   | 'reminders'
   | 'tools'
-  | 'voice';
+  | 'voice'
+  | 'settings';
+
+// ============================================================
+// Integrations (Phase 5, Part 1 — Google account)
+// ============================================================
+export interface GoogleIntegrationStatus {
+  configured: boolean;
+  connected: boolean;
+  connecting: boolean;
+  account_email: string | null;
+  scopes: string[];
+  detail: string | null;
+}
+
+export type GoogleConnectResult =
+  | 'pending'
+  | 'already_connected'
+  | 'in_progress'
+  | 'not_configured';
 
 // ============================================================
 // Electron Bridge (exposed by preload.ts)

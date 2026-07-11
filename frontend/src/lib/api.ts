@@ -9,6 +9,8 @@ import type {
   ChatRequest,
   Contact,
   Episode,
+  GoogleConnectResult,
+  GoogleIntegrationStatus,
   HealthResponse,
   MemorySearchResult,
   MemoryStats,
@@ -237,6 +239,24 @@ export const remindersApi = {
 
   cancel: (id: string): Promise<{ cancelled: boolean }> =>
     apiFetch(`/api/reminders/${id}`, { method: 'DELETE' }),
+};
+
+// ============================================================
+// Integrations (Phase 5, Part 1 — Google account)
+// ============================================================
+export const integrationsApi = {
+  /** Purely local on the backend (config + token file, no network) — safe to poll. */
+  googleStatus: (): Promise<GoogleIntegrationStatus> =>
+    apiFetch<GoogleIntegrationStatus>('/api/integrations/google/status'),
+
+  /** Starts the OAuth consent flow in the system browser; returns immediately.
+   *  Poll googleStatus() until `connected` (or the flow times out server-side). */
+  googleConnect: (): Promise<{ status: GoogleConnectResult }> =>
+    apiFetch('/api/integrations/google/connect', { method: 'POST' }),
+
+  /** Revokes at Google (best-effort) and deletes the local token. */
+  googleDisconnect: (): Promise<{ disconnected: boolean; revoked: boolean }> =>
+    apiFetch('/api/integrations/google/disconnect', { method: 'POST' }),
 };
 
 // ============================================================

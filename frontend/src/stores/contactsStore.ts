@@ -58,9 +58,14 @@ export const useContactsStore = create<ContactsState>((set, get) => ({
 
   updateContact: async (id, payload) => {
     const updated = await contactsApi.update(id, payload);
+    // Merge, don't replace: the PUT response has no `interactions`, and a
+    // straight swap would blank the selected contact's fact log.
     set((state) => ({
-      contacts: state.contacts.map((c) => (c.id === id ? updated : c)),
-      selectedContact: state.selectedContact?.id === id ? updated : state.selectedContact,
+      contacts: state.contacts.map((c) => (c.id === id ? { ...c, ...updated } : c)),
+      selectedContact:
+        state.selectedContact?.id === id
+          ? { ...state.selectedContact, ...updated }
+          : state.selectedContact,
     }));
   },
 

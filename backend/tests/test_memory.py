@@ -102,6 +102,41 @@ async def test_update_contact_merges_skills(engine, session_id):
 
 
 # ============================================================
+# 5a. Email/birthday validation net on the engine write paths
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_create_contact_manual_persists_birthday(engine):
+    """Regression: birthday was silently dropped on manual create."""
+    contact = await engine.create_contact_manual(
+        "Sara Ali", {"email": "Sara@Example.COM", "birthday": "March 4"}
+    )
+    assert contact.birthday == "03-04"
+    assert contact.email == "Sara@example.com"
+
+
+@pytest.mark.asyncio
+async def test_update_contact_skips_junk_without_touching_good_data(engine):
+    """Suspenders proof — engine called directly, bypassing the schema belt:
+    a value that fails normalization never overwrites good data."""
+    contact = await engine.create_contact_manual(
+        "Ali Raza", {"email": "ali@example.com", "birthday": "03-04"}
+    )
+    updated = await engine.update_contact(
+        contact.id, {"email": "not-an-email", "birthday": "02-30"}
+    )
+    assert updated.email == "ali@example.com"
+    assert updated.birthday == "03-04"
+
+
+@pytest.mark.asyncio
+async def test_update_contact_stores_canonical_birthday(engine):
+    contact = await engine.create_contact_manual("Ali Raza")
+    updated = await engine.update_contact(contact.id, {"birthday": "March 4, 1990"})
+    assert updated.birthday == "1990-03-04"
+
+
+# ============================================================
 # 5b. Deleting a contact cascades to their fact log
 # ============================================================
 

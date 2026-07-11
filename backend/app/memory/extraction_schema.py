@@ -11,6 +11,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.memory.contact_validation import normalize_birthday, normalize_email
+
 
 def _none_to_default(value, default):
     return default if value is None else value
@@ -49,6 +51,19 @@ class PersonMentioned(BaseModel):
     @classmethod
     def _lists(cls, v):
         return _none_to_default(v, [])
+
+    # Deterministic net (contact_validation.py): a hallucinated address or an
+    # impossible date becomes None here — it never reaches store_contact, so
+    # it never parks in a PendingResolution or triggers a create question.
+    @field_validator("email", mode="before")
+    @classmethod
+    def _email(cls, v):
+        return normalize_email(v)
+
+    @field_validator("birthday", mode="before")
+    @classmethod
+    def _birthday(cls, v):
+        return normalize_birthday(v)
 
 
 class RelationshipEdge(BaseModel):

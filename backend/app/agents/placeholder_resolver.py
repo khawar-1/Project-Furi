@@ -28,6 +28,16 @@ results — the same data the revise LLM would have been shown:
   exactly ONE candidate: a single folder whose name appears in the
   placeholder text, or the only folder found. Several plausible folders stay
   unresolved — code never picks between targets.
+- A recipient parameter (send_email / create_email_draft "to", Phase 5
+  Part 3) substitutes the email a completed lookup_contact step RESOLVED —
+  the designed "email Jamil" data flow (lookup first, "PENDING: Jamil's
+  email address" in the send step). Only when the results pin exactly ONE
+  address: a resolved contact whose name appears in the placeholder text,
+  or the only resolved contact at all. The substituted step gets a fresh
+  signature and a regenerated action_detail, so the approval card names the
+  real address. Addresses come EXCLUSIVELY from lookup_contact outputs here
+  — never from read email content — which keeps the planner's recipient-
+  grounding rule true on the code path too.
 
 Resolution is CONSERVATIVE: anything ambiguous returns None and the existing
 LLM replan path takes over (unchanged behavior). Extension tokens inside a
@@ -63,6 +73,14 @@ _DIR_PARAMS = {
     "search_files": "directory",
     "list_directory": "path",
     "run_command": "working_directory",
+}
+
+# Recipient parameters: substituted only from a lookup_contact result that
+# pins exactly one address (Phase 5 Part 3). cc placeholders stay on the LLM
+# path — conservative, like everything here.
+_EMAIL_TO_PARAMS = {
+    "send_email": "to",
+    "create_email_draft": "to",
 }
 
 # An explicitly-universal file request: "all (the) files", "every file",
@@ -234,6 +252,58 @@ def _substitute_folder(
     return [_concrete_step(template, key, pick, description=template.description)]
 
 
+def _resolved_lookup_email(step: PlanStep) -> Optional[tuple[str, str]]:
+    """(contact name, email) when a completed lookup_contact step RESOLVED a
+    contact that has an email on file. This is the ONLY source recipient
+    substitution draws from — read email content never reaches it."""
+    if step.tool != "lookup_contact" or step.status != StepStatus.COMPLETED:
+        return None
+    output = step.result.output if step.result else None
+    if not isinstance(output, dict) or output.get("status") != "resolved":
+        return None
+    contact = output.get("contact") or {}
+    email = str(contact.get("email") or "").strip()
+    if not email:
+        return None
+    return str(contact.get("name") or ""), email
+
+
+def _substitute_recipient(
+    template: PlanStep, key: str, completed: list[PlanStep]
+) -> Optional[list[PlanStep]]:
+    """The email-address mirror of _substitute_folder: fill the recipient
+    when the completed lookup_contact results pin exactly ONE address."""
+    candidates: list[tuple[str, str]] = []
+    for step in completed:
+        resolved = _resolved_lookup_email(step)
+        if resolved and resolved not in candidates:
+            candidates.append(resolved)
+    if not candidates:
+        return None
+    placeholder_text = str(template.parameters.get(key) or "").lower()
+    named = [
+        (name, email)
+        for name, email in candidates
+        # Word-boundary match so "Ali" never matches inside "email".
+        if any(
+            tok and re.search(rf"\b{re.escape(tok)}", placeholder_text)
+            for tok in name.lower().split()
+        )
+    ]
+    named_emails = {email for _, email in named}
+    all_emails = {email for _, email in candidates}
+    if len(named_emails) == 1:
+        pick = next(iter(named_emails))  # the placeholder names exactly one contact
+    elif len(all_emails) == 1:
+        pick = next(iter(all_emails))  # only one resolved address exists at all
+    else:
+        return None  # several plausible recipients — code never picks
+    # Substitution, not expansion: the step is still the one the LLM
+    # described — only its recipient became concrete. Fresh signature +
+    # regenerated action_detail: the user approves the real address.
+    return [_concrete_step(template, key, pick, description=template.description)]
+
+
 def resolve(plan: AgentPlan, index: int, max_new: int) -> Optional[list[PlanStep]]:
     """Replacement steps for plan.steps[index] (a step carrying a PENDING
     placeholder), derived purely from completed step results:
@@ -255,6 +325,8 @@ def resolve(plan: AgentPlan, index: int, max_new: int) -> Optional[list[PlanStep
             return _expand_files(plan, template, key, completed, max_new)
         if _DIR_PARAMS.get(template.tool) == key:
             return _substitute_folder(template, key, completed)
+        if _EMAIL_TO_PARAMS.get(template.tool) == key:
+            return _substitute_recipient(template, key, completed)
         return None
     except Exception as e:  # pragma: no cover — belt: never break the planner
         logger.warning(f"Placeholder resolution crashed (falling back to LLM): {e}")

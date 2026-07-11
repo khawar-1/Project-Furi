@@ -34,7 +34,7 @@ async def _seed(db) -> None:
     db.add_all([
         jamil,
         Contact(name="Jamil Khan", relationship_type="colleague"),
-        Contact(name="Sara", email="sara@example.com", organization="Acme"),
+        Contact(name="Sara", email="sara@example.com", organization="Acme", birthday="03-04"),
     ])
     await db.flush()
     db.add(ContactInteraction(
@@ -76,6 +76,9 @@ async def test_lookup_contact_resolves_unique_name(mem_db):
     assert result.output["status"] == "resolved"
     assert result.output["contact"]["name"] == "Sara"
     assert result.output["contact"]["email"] == "sara@example.com"
+    # Phase 5 Part 2: the planner resolves "email Jamil" / birthday briefings
+    # from this payload — both fields must surface
+    assert result.output["contact"]["birthday"] == "03-04"
 
 
 async def test_lookup_contact_includes_recent_facts(mem_db):

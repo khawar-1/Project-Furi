@@ -57,6 +57,17 @@ class Settings(BaseSettings):
     QDRANT_PORT: int = 6333
     QDRANT_COLLECTION: str = "jarvis_memory"
 
+    # ------------------------------------------------------------------ Google integration (Phase 5)
+    # OAuth client for the installed-app loopback flow. Create a "Desktop app"
+    # OAuth client in Google Cloud Console and paste its id/secret here.
+    # (For installed apps Google documents the client secret as
+    # non-confidential, but it still only ever lives in .env / Settings.)
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    # Where the OAuth token lands. Empty = ~/.jarvis/google_token.json —
+    # outside the repo, never committed, never logged.
+    GOOGLE_TOKEN_PATH: str = ""
+
     # ------------------------------------------------------------------ Backend
     # Loopback only — the API is unauthenticated; 0.0.0.0 would expose the
     # tool system (file deletion, shell commands) to the whole network.

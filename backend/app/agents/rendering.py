@@ -117,6 +117,52 @@ def _fmt_recall_memory(output: dict) -> str:
     return "From memory: " + " | ".join(rows)
 
 
+def _fmt_search_emails(output: dict) -> str:
+    emails = output.get("emails") or []
+    if not emails:
+        return "No emails matched."
+    lines = [f"Found {len(emails)} email(s):"]
+    for e in emails:
+        subject = str(e.get("subject") or "(no subject)")
+        unread = " · unread" if e.get("unread") else ""
+        snippet = str(e.get("snippet") or "").strip()
+        lines.append(
+            f"- **{subject}** — from {e.get('from') or '?'} "
+            f"({e.get('date') or '?'}{unread})"
+            + (f": {snippet}" if snippet else "")
+        )
+    if output.get("truncated"):
+        lines.append("- (more exist — the list was truncated)")
+    return "\n".join(lines)
+
+
+def _fmt_read_email(output: dict) -> str:
+    subject = str(output.get("subject") or "(no subject)")
+    head = (
+        f"Email **{subject}** — from {output.get('from') or '?'} "
+        f"to {output.get('to') or '?'} ({output.get('date') or '?'}):"
+    )
+    body = str(output.get("body") or "").strip()
+    if not body:
+        return head + "\n(The email has no readable text body.)"
+    return head + "\n" + _fence(body)
+
+
+def _fmt_read_thread(output: dict) -> str:
+    messages = output.get("messages") or []
+    subject = str(output.get("subject") or "(no subject)")
+    if not messages:
+        return f"Thread **{subject}** is empty."
+    blocks = [f"Thread **{subject}** — {output.get('count', len(messages))} message(s):"]
+    for m in messages:
+        body = str(m.get("body") or "").strip()
+        head = f"From {m.get('from') or '?'} ({m.get('date') or '?'}):"
+        blocks.append(head + ("\n" + _fence(body) if body else ""))
+    if output.get("truncated"):
+        blocks.append("(older messages not shown — the thread was truncated)")
+    return "\n\n".join(blocks)
+
+
 def _fmt_lookup_contact(output: dict) -> str:
     status = output.get("status")
     if status == "resolved":
@@ -138,6 +184,9 @@ _RESULT_FORMATTERS = {
     "execute_script": _fmt_shell,
     "recall_memory": _fmt_recall_memory,
     "lookup_contact": _fmt_lookup_contact,
+    "search_emails": _fmt_search_emails,
+    "read_email": _fmt_read_email,
+    "read_thread": _fmt_read_thread,
 }
 
 

@@ -16,6 +16,7 @@ from app.api import health, chat, memory
 from app.api import contacts, episodes, preferences
 from app.api import agent, activity
 from app.api import ws, schedule, reminders, tasks
+from app.api import integrations
 import app.core.reminders  # noqa: F401 — registers the "reminder" job handler at import time
 
 
@@ -122,6 +123,9 @@ def create_app() -> FastAPI:
     app.include_router(schedule.router, prefix="/api/schedule", tags=["Schedule"])
     app.include_router(reminders.router, prefix="/api/reminders", tags=["Reminders"])
     app.include_router(tasks.router, prefix="/api/tasks", tags=["Tasks"])
+
+    # Phase 5 routes — external integrations (Google OAuth foundation)
+    app.include_router(integrations.router, prefix="/api/integrations", tags=["Integrations"])
 
     return app
 

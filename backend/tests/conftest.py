@@ -49,3 +49,19 @@ def _hermetic_question_gate(tmp_path_factory):
     question_gate.SEARCH_ROOTS = [str(tmp_path_factory.mktemp("question-gate"))]
     yield
     question_gate.SEARCH_ROOTS = original
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_google_auth(tmp_path_factory):
+    """Google auth defaults its token file to the real ~/.jarvis directory.
+    Tests must never read/write it (or hit Google): every test gets a manager
+    pointed at an empty scratch token path — status is "not connected" unless
+    a test writes its own fake token there."""
+    from app.integrations import google_auth
+
+    original = google_auth.AUTH_MANAGER
+    google_auth.AUTH_MANAGER = google_auth.GoogleAuthManager(
+        token_path=tmp_path_factory.mktemp("google-auth") / "google_token.json"
+    )
+    yield
+    google_auth.AUTH_MANAGER = original
