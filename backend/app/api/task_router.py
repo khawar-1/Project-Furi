@@ -9,16 +9,26 @@ Detection is two-stage so normal chat pays ZERO extra cost:
    verb AND a computer-domain signal (file/folder/path/command/...). If the
    gate does not fire there is no LLM call at all: `maybe_handle_task`
    returns None and the message flows into the untouched Phase 2 chat path.
-2. LLM confirmation — one tiny temperature-0 call ("TASK or CHAT") that
-   rejects gate false-positives ("my brother deleted my save file" fires the
-   gate but is conversation). It judges the goal with any background-intent
-   phrase already stripped — "…and remind me when you are done" would read
-   as a reminder request (CHAT) and sink the real task.
+2. LLM classification — one tiny temperature-0 call returning a routing label
+   (TASK / EMAIL / CALENDAR / CHAT, Phase 5 Part 5) that rejects gate
+   false-positives ("my brother deleted my save file" fires the gate but is
+   conversation). It judges the goal with any background-intent phrase already
+   stripped — "…and remind me when you are done" would read as a reminder
+   request (CHAT) and sink the real task. All three ACTION labels feed the
+   SAME planner and the same approval gates — one execution path; the label
+   buys recall + telemetry and a seam for future per-domain handlers.
 
-Fail-open to chat: classifier says CHAT, classifier errors, or an open
-disambiguation / create-contact question is parked on the session — all fall
-through to normal chat. This router can only ever ADD the task path; it can
-never break the conversation path.
+Fail-open to chat: classifier says CHAT, classifier errors OR returns an
+unrecognized word, or an open disambiguation / create-contact question is
+parked on the session — all fall through to normal chat. This router can only
+ever ADD the task path; it can never break the conversation path.
+
+Precedence: reminder routing runs BEFORE this in chat.py (its hook is invoked
+first), and the reminder strong trigger requires the literal word
+"reminder(s)"/"alarm". So "remind me to email Jamil at 6" is a reminder (text
+"email Jamil"), while "schedule a meeting with Jamil at 3" is not a reminder
+and falls through to this router's CALENDAR path. Do not reorder the chat.py
+hooks without preserving that.
 
 Task turns stream Server-Sent Events like normal chat, plus ONE special
 chunk: {"type": "plan", "plan": {...}} carrying the serialized AgentPlan
@@ -82,12 +92,22 @@ _SSE_HEADERS = {
 # understands arbitrary wording, makes the real TASK/CHAT call. A false
 # fire costs one tiny LLM call; a miss used to cost an unrouted request.
 _STRONG_DOMAIN_RE = re.compile(
+    # Files / terminal (Phase 3).
     r"(\bfiles?\b|\bfolders?\b|\bdirector(?:y|ies)\b|\bsubfolders?\b|"
     r"\bdesktop\b|\bdownloads?\b|\bdocuments\b|"
     r"\bterminal\b|\bconsole\b|\bshell\b|\bpowershell\b|\bcmd\b|"
     r"\bcommands?\b|\bscripts?\b|"
     r"\b(?:npm|pip|git|python|node|docker|pytest)\b|"
-    r"\b[a-z]:[\\/])"
+    r"\b[a-z]:[\\/]|"
+    # Email domain (Phase 5, Part 5). Object-nouns fire the gate alone; the
+    # multi-class classifier makes the EMAIL/CHAT call ("I got an email from
+    # him" is a false fire that costs one temp-0 call answering CHAT — the
+    # recall-first trade-off). "schedule" is deliberately NOT here: it is a
+    # verb the reminder router already owns ("schedule a reminder") and it
+    # collides with small talk ("reschedule my day").
+    r"\bemails?\b|\binbox\b|\bgmail\b|\bsubject\b|"
+    # Calendar domain (Phase 5, Part 5).
+    r"\bcalendar\b|\bmeetings?\b|\bevents?\b|\binvites?\b)"
 )
 
 # Weak signals — common in ordinary conversation (media nouns, URLs, "e.g.",
@@ -129,18 +149,32 @@ def looks_like_task(text: str) -> bool:
 
 # ======================================================== LLM confirmation
 
-_CLASSIFY_PROMPT = """You route messages for Jarvis OS, a personal AI that can act on the user's computer with exactly these tools: search/read/list files and folders, create/move/rename/delete files, run terminal commands and scripts.
+_CLASSIFY_PROMPT = """You route messages for Jarvis OS, a personal AI that can act on the user's computer and accounts with exactly these tool groups:
+- FILES/SYSTEM: search/read/list files and folders, create/move/rename/delete files, run terminal commands and scripts.
+- EMAIL: search and read Gmail; draft, send, or reply to email.
+- CALENDAR: list/find Google Calendar events; create, update, or delete events.
 
 Reply with EXACTLY one word:
-TASK — the message asks Jarvis to perform one of those computer actions now.
-CHAT — anything else: conversation, questions, sharing information about their life, talking ABOUT past or hypothetical actions, requests those tools cannot do (email, web, reminders, calendar), or an answer to an earlier question.
+TASK — asks Jarvis to perform a FILES/SYSTEM action now.
+EMAIL — asks Jarvis to search, read, draft, send, or reply to email now.
+CALENDAR — asks Jarvis to look at or change calendar events now.
+CHAT — anything else: conversation, questions, sharing information about their life, talking ABOUT past or hypothetical actions, an answer to an earlier question, or a request none of these tools can do (web search, reminders — those are handled elsewhere).
 
-Judge the INTENT, not the vocabulary: "I sent him the files yesterday" or "my desktop is such a mess lately" is CHAT (mentioning files/folders while talking), while "get rid of the txt files in that folder" is TASK even though it names no tool — any wording that asks for one of those actions NOW is TASK.
+Judge the INTENT, not the vocabulary:
+- "I sent him the files yesterday" or "my desktop is such a mess" is CHAT (mentioning files while talking), while "get rid of the txt files in that folder" is TASK even though it names no tool.
+- "I emailed him yesterday" or "my inbox is out of control" is CHAT, while "email jamil about dinner" is EMAIL even though it names no tool.
+- "my calendar is packed this week" is CHAT, while "put a meeting with jamil on my calendar tomorrow at 3" is CALENDAR.
+Any wording that asks for one of those actions NOW gets its action label; anything else is CHAT.
 
 {context_block}USER MESSAGE:
 {message}
 
-One word (TASK or CHAT):"""
+One word (TASK, EMAIL, CALENDAR, or CHAT):"""
+
+# The recognized action labels. All three feed the SAME planner and the same
+# approval gates — there is one execution path. The label buys recall +
+# telemetry and is the clean seam for future per-domain handlers.
+_ACTION_LABELS = ("TASK", "EMAIL", "CALENDAR")
 
 # Shown to the classifier when the conversation has earlier turns. A message
 # is part of a conversation, not an island: "its in my downloads folder" after
@@ -155,10 +189,13 @@ A short follow-up that continues a computer task being discussed in that convers
 """
 
 
-async def _confirm_task(
+async def _classify_message(
     provider: LLMProvider, message: str, context: str = ""
-) -> bool:
-    """One tiny temperature-0 call. Any failure means CHAT — fail open."""
+) -> str:
+    """One tiny temperature-0 call returning a routing label: "TASK", "EMAIL",
+    "CALENDAR", or "CHAT". Any failure — an exception OR an unrecognized reply —
+    means CHAT (fail open): the message flows into the untouched Phase 2 chat
+    path, never a broken action route."""
     context_block = (
         _CLASSIFY_CONTEXT_TEMPLATE.format(context=context) if context else ""
     )
@@ -171,12 +208,16 @@ async def _confirm_task(
                 ),
             )],
             temperature=0.0,
-            max_tokens=5,
+            max_tokens=8,
         )
-        return response.content.strip().upper().startswith("TASK")
     except Exception as e:
-        logger.warning(f"Task classification failed — treating as chat: {e}")
-        return False
+        logger.warning(f"Message classification failed — treating as chat: {e}")
+        return "CHAT"
+    reply = response.content.strip().upper()
+    for label in _ACTION_LABELS:
+        if reply.startswith(label):
+            return label
+    return "CHAT"
 
 
 # ======================================================== background intent
@@ -306,12 +347,19 @@ async def maybe_handle_task(
     # LLM, which cannot act but promised to (live bug, 2026-07-10).
     conversation = conversation_context(request)
 
-    if not await _confirm_task(
+    # Multi-class routing (Phase 5, Part 5): TASK / EMAIL / CALENDAR / CHAT.
+    # CHAT fails open to Phase 2. The three action labels all route to the SAME
+    # planner below — the tool registry already contains the file, email, and
+    # calendar tools, so the planner picks the right ones from the goal. The
+    # label buys recall + telemetry and is the documented insertion point for
+    # future per-domain handlers (do not add a dispatcher until one is needed).
+    label = await _classify_message(
         provider, cleaned_goal if background else goal, conversation
-    ):
+    )
+    if label == "CHAT":
         return None
 
-    logger.info(f"Chat message routed to agent planner: '{goal[:80]}'")
+    logger.info(f"Chat message routed to agent planner [{label}]: '{goal[:80]}'")
 
     # Phase 3.5 "one brain": the planner sees the same long-term memory the
     # chat path would (people, preferences, facts) — as data, not instructions.

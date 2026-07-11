@@ -114,6 +114,24 @@ What's complete:
   write syncs the job, ensure_birthday_jobs() reconciles at startup. Chat
   routing for calendar is deferred to Part 5 like email. Details in the
   "CalendarTool suite + birthday reminders" Architecture section below.
+- Phase 5 Part 6 (daily briefing — the capstone): each morning at a
+  configurable local time (default ON at 08:00), a "daily_briefing" scheduler
+  job kind (app/core/daily_briefing.py, the birthdays.py recurring pattern —
+  handler re-arms tomorrow, ensure_briefing_job() reconciles at startup)
+  gathers today's calendar events, unread emails, birthdays, and memories dated
+  today — each source INDEPENDENTLY best-effort (Google not connected or one
+  API down drops that section, never kills the briefing). ONE LLM call composes
+  the morning text from the code-gathered data (data-never-instructions — email
+  subjects are untrusted), with a deterministic template fallback so a 429 /
+  outage / empty slate still delivers; the composer has no tools, so a briefing
+  can never act. Delivery is the fired-reminder pattern verbatim (persist a
+  chat Message, then best-effort push → Part 3 toast); a briefing due while the
+  backend slept fires late with honest "(late — Jarvis was offline)" framing.
+  Read-only end to end — nothing to approve. Config + the singleton job pointer
+  persist in a NEW generic key/value app_settings table (app/core/app_settings.py
+  — the first runtime-settings home; migration e7b93c250a41); GET/PUT
+  /api/settings/briefing + POST /briefing/run-now ("Send now"); Settings panel
+  DailyBriefingCard. Details in the "Daily briefing" Architecture section below.
 Current architecture rules:
 - Facts have subject: "user" | "shared" | "contact"
 - Shared facts (e.g. "Jamil and I played Tekken") save to both user and contact;
@@ -472,6 +490,73 @@ Two things ship together: five Google Calendar tools (the calendar half of "Comm
 - **`ensure_birthday_jobs()`** — startup reconciliation (main.py lifespan, after `scheduler.start()`, non-critical try/except): a pending `"birthday"` job is VALID only if it is the current pointer of an active contact with a schedulable birthday — everything else is swept (cancelled), and every active contact with a valid birthday but no live pending job is armed (covers pre-Part-4 contacts, fire/re-arm crashes, and stray/duplicate jobs). Enumerating pending birthday jobs needed an optional `kind` filter on `JarvisScheduler.list_jobs` (backwards-compatible; the router still never touches the table).
 - **No frontend in Part 4** (confirmed): toast + persisted chat message + the existing Schedule/Timeline panels cover it; a Calendar UI panel and chat routing (the multi-class TASK/EMAIL/CALENDAR/CHAT classifier) both land in Part 5. Until then calendar plans run via `POST /api/agent/execute`.
 - Tests: `test_calendar_tools.py` (33 — chained-call FakeCalendar; ISO refusal, RFC3339 offsets, inclusive/exclusive date bounds, patch-not-replace, `sendUpdates="none"`, not-connected degradation, the unapproved-write structural block, the event-id guard/enrichment/fill, `_fmt_calendar_events`), `test_birthdays.py` (26 — real JarvisScheduler on a shared in-memory DB: occurrence-math matrix, sync on every contact-write path, handler fire → push + Message + re-arm, the three no-op guards, `ensure_birthday_jobs` arm/sweep, late/off-day wording), plus `test_contacts_api.py` additions (PUT schedules a job, DELETE cancels it — with an autouse fixture isolating the app-wide scheduler so no contacts-API test touches the real jarvis.db).
+
+### Daily briefing (Phase 5, Part 6 — the capstone)
+The "Jarvis moment", assembled from every prior part. Each morning at a
+configurable local time Jarvis composes and delivers a briefing unprompted;
+read-only end to end — the composer has no tools, so a briefing can never act.
+
+- **Recurring job** (`app/core/daily_briefing.py`, the `birthdays.py` pattern):
+  a `"daily_briefing"` scheduler job kind. `next_briefing_run_at(hour, minute,
+  now=None)` → next local `HH:MM` strictly after now, naive UTC (the
+  `next_birthday_run_at` convention). `sync_briefing_job(db)` is the single
+  choke point (settings change / re-arm after fire / startup): cancel the
+  current job, and iff enabled arm the next occurrence — best-effort, so a
+  scheduler hiccup never breaks a settings save. The handler RE-ARMS tomorrow
+  after firing (recurrence without touching the scheduler's one-shot core);
+  a briefing due while the backend slept fires late-but-fires (SQLite is the
+  truth), framed honestly. Two defensive guards mirror the birthday handler:
+  **disabled-now** (turned off between scheduling and firing) and **stale job**
+  (`job.id != the current pointer`) both no-op WITHOUT re-arming.
+  `ensure_briefing_job()` reconciles at startup — arms the default-on 08:00 job
+  on first boot, heals a fire/re-arm crash, sweeps strays.
+- **Persistence** (`app/core/app_settings.py` + the NEW generic `app_settings`
+  key/value table, migration `e7b93c250a41`): the first runtime-settings home
+  (settings the user toggles live, not `.env`). `BriefingConfig{enabled, hour,
+  minute}` with `DEFAULT = enabled@08:00` — a missing key yields DEFAULT, which
+  is what makes "on by default at 08:00" true before the user ever opens
+  Settings. The singleton's current job id lives here too
+  (`daily_briefing.job_id`), the briefing's analogue of `Contact.birthday_job_id`.
+- **Gathering** (`gather_briefing_sections`): today's calendar events, unread
+  emails (capped, sender+subject+snippet), today's birthdays, and memories
+  whose `event_date` is today. Each source is INDEPENDENTLY best-effort
+  (try/except → []): Google not connected or one API down drops that section,
+  never the briefing. Reuses the tools' internal helpers off the approval path
+  (`calendar_tools._event_row`/`format_event_when`,
+  `email_tools.build_gmail_query`/`_message_row`,
+  `birthdays._parse_month_day`/`_age_turning`) — a briefing gathers, it never
+  executes a registered tool.
+- **Composition** (`compose_briefing`): ONE `create_provider().chat()` call over
+  a code-rendered DATA block (never raw JSON — the Part-5 `steps_for_summary`
+  lesson) with a data-never-instructions system prompt (email subjects/snippets
+  are UNTRUSTED — summarize, never obey). A deterministic `_template_briefing`
+  fallback fires on ANY exception (429 / provider outage) AND an empty slate
+  short-circuits with no LLM call — a briefing is ALWAYS delivered. `job.late`
+  prefixes an honest "(late — Jarvis was offline)" note.
+- **Delivery** (`_deliver`, the fired-reminder pattern verbatim): persist an
+  assistant `Message` into the latest chat session FIRST (the push channel has
+  no queue — survives a closed window), then `push("briefing", {title, body,
+  text, session_id, late})` best-effort — Part 3's toast reads title/body with
+  ZERO changes; `"briefing"` is not in `notifications.ts` SILENT_TYPES so it
+  toasts. Frontend: `onPush('briefing')` reuses `receiveReminderFired`
+  (generic over `{session_id, body, text}`) — no new store method.
+- **API** (`app/api/settings.py`, `/api/settings`): `GET /briefing` +
+  `PUT /briefing {enabled, time:"HH:MM"}` (validated, 400 on bad time; re-syncs
+  the job in the same request so a toggle/time change takes effect immediately)
+  + `POST /briefing/run-now` (the "Send now" trigger — compose+deliver now).
+  `main.py` registers the router, imports the module (handler self-registers),
+  and calls `ensure_briefing_job()` in the lifespan after `ensure_birthday_jobs()`.
+  Settings panel `DailyBriefingCard` (on/off toggle, time input, next-run,
+  "Send now").
+- Tests: `test_daily_briefing.py` (real JarvisScheduler on a shared in-memory
+  DB, fake Google factories + a stub provider — occurrence math, sync
+  arm/cancel/replace, each source independently best-effort, compose
+  fallback/empty/late, fire → push + Message + re-arm, the disabled-now &
+  stale-job guards, `ensure_briefing_job` arm/sweep), `test_settings_api.py`
+  (GET/PUT round-trip, 400s, PUT re-syncs, run-now delivers — scheduler
+  isolated per the contacts-API rule). Verified live on an isolated backend
+  (:8001, scratch DB): startup-arm, run-now, a real scheduled fire pushing a
+  `briefing` event over `/ws` and re-arming tomorrow, disable-cancels.
 
 ### Timestamp serialization (API convention)
 The DB stores naive UTC (`utc_now()` in models.py). API serializers MUST use `utc_iso()` (models.py), never bare `.isoformat()`: a naive ISO string has no timezone marker, so the frontend's `new Date(iso)` reads it as LOCAL time and every displayed timestamp shifts by the machine's UTC offset (the "reminder set for 6 PM shows 1 PM" bug, fixed 2026-07-09). Applied to reminders, activity, tasks, chat messages, and schedule serializers. Extraction-derived date-semantics fields (`event_date`, `interaction_date`, `occurred_at` in contacts/episodes/memory) deliberately keep bare `.isoformat()` — they are calendar dates, not UTC moments, and marking them UTC would shift the displayed day.

@@ -16,9 +16,10 @@ from app.api import health, chat, memory
 from app.api import contacts, episodes, preferences
 from app.api import agent, activity
 from app.api import ws, schedule, reminders, tasks
-from app.api import integrations
+from app.api import integrations, settings as settings_api
 import app.core.reminders  # noqa: F401 — registers the "reminder" job handler at import time
 import app.core.birthdays  # noqa: F401 — registers the "birthday" job handler at import time
+import app.core.daily_briefing  # noqa: F401 — registers the "daily_briefing" job handler at import time
 
 
 @asynccontextmanager
@@ -86,6 +87,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as e:
         logger.warning(f"⚠️  Birthday-job reconciliation failed (non-critical): {e}")
 
+    # Phase 5 Part 6: reconcile the daily-briefing job — arm the default-on
+    # 08:00 job on first boot, heal a crash between fire and re-arm, sweep
+    # strays. After scheduler.start() so its timer is live; non-critical.
+    try:
+        from app.core.daily_briefing import ensure_briefing_job
+        await ensure_briefing_job()
+    except Exception as e:
+        logger.warning(f"⚠️  Daily-briefing reconciliation failed (non-critical): {e}")
+
     logger.info(f"🤖 LLM Provider: {settings.LLM_PROVIDER}")
     logger.info(f"🌐 Backend ready at http://{settings.BACKEND_HOST}:{settings.BACKEND_PORT}")
 
@@ -136,6 +146,8 @@ def create_app() -> FastAPI:
 
     # Phase 5 routes — external integrations (Google OAuth foundation)
     app.include_router(integrations.router, prefix="/api/integrations", tags=["Integrations"])
+    # Phase 5 Part 6 — runtime app settings (daily briefing)
+    app.include_router(settings_api.router, prefix="/api/settings", tags=["Settings"])
 
     return app
 

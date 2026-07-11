@@ -7,9 +7,18 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { clsx } from 'clsx';
-import { CheckCircle2, Link2, Link2Off, Loader2, Settings as SettingsIcon, ShieldCheck } from 'lucide-react';
-import { integrationsApi } from '@/lib/api';
-import type { GoogleIntegrationStatus } from '@/types';
+import {
+  CheckCircle2,
+  Link2,
+  Link2Off,
+  Loader2,
+  Send,
+  Settings as SettingsIcon,
+  ShieldCheck,
+  Sunrise,
+} from 'lucide-react';
+import { integrationsApi, settingsApi } from '@/lib/api';
+import type { BriefingSettings, GoogleIntegrationStatus } from '@/types';
 
 const IDLE_POLL_MS = 15_000;
 const CONNECTING_POLL_MS = 2_000;
@@ -163,6 +172,126 @@ function GoogleAccountCard() {
   );
 }
 
+function DailyBriefingCard() {
+  const [settings, setSettings] = useState<BriefingSettings | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
+  const [justSent, setJustSent] = useState(false);
+
+  useEffect(() => {
+    settingsApi
+      .getBriefing()
+      .then(setSettings)
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load settings'));
+  }, []);
+
+  const save = async (update: { enabled: boolean; time: string }) => {
+    setIsBusy(true);
+    setError(null);
+    try {
+      setSettings(await settingsApi.updateBriefing(update));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleSendNow = async () => {
+    setIsBusy(true);
+    setError(null);
+    try {
+      await settingsApi.runBriefingNow();
+      setJustSent(true);
+      setTimeout(() => setJustSent(false), 2500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not send');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const enabled = settings?.enabled ?? false;
+  const time = settings?.time ?? '08:00';
+  const nextRun = settings?.next_run_at ? new Date(settings.next_run_at) : null;
+
+  return (
+    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
+      {/* Card header */}
+      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
+        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-amber-400/80">
+          <Sunrise size={15} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-sm font-semibold text-slate-200">Daily briefing</h2>
+          <p className="text-xs text-muted truncate">
+            {enabled
+              ? nextRun
+                ? `Next: ${nextRun.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}`
+                : `Every day at ${time}`
+              : 'A morning summary of your day — off'}
+          </p>
+        </div>
+        {/* Enable toggle */}
+        <button
+          role="switch"
+          aria-checked={enabled}
+          disabled={isBusy || !settings}
+          onClick={() => void save({ enabled: !enabled, time })}
+          className={clsx(
+            'relative w-10 h-5 rounded-full transition-colors flex-shrink-0 disabled:opacity-40',
+            enabled ? 'bg-cyan-500/70' : 'bg-surface-2 border border-surface-border'
+          )}
+        >
+          <span
+            className={clsx(
+              'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform',
+              enabled ? 'translate-x-5' : 'translate-x-0.5'
+            )}
+          />
+        </button>
+      </div>
+
+      {/* Card body */}
+      <div className="px-4 py-3.5 space-y-3">
+        <p className="text-xs text-slate-400">
+          Each morning Jarvis gathers today's calendar, unread email, birthdays, and notes
+          into one message. Read-only — nothing is sent or changed.
+        </p>
+
+        <div className="flex items-center gap-3">
+          <label className="text-xs text-slate-400" htmlFor="briefing-time">
+            Time
+          </label>
+          <input
+            id="briefing-time"
+            type="time"
+            value={time}
+            disabled={isBusy || !settings || !enabled}
+            onChange={(e) => void save({ enabled, time: e.target.value })}
+            className="px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+          />
+        </div>
+
+        {error && (
+          <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs">
+            {error}
+          </div>
+        )}
+
+        <button
+          onClick={() => void handleSendNow()}
+          disabled={isBusy}
+          className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 hover:bg-cyan-500/20 transition-colors disabled:opacity-40"
+        >
+          {justSent ? <CheckCircle2 size={12} /> : <Send size={12} />}
+          {justSent ? 'Briefing sent' : 'Send now'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function SettingsPanel() {
   return (
     <div className="flex flex-col h-full bg-surface overflow-hidden">
@@ -183,6 +312,8 @@ export function SettingsPanel() {
       <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3 max-w-2xl">
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1">Integrations</p>
         <GoogleAccountCard />
+        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Proactive</p>
+        <DailyBriefingCard />
       </div>
     </div>
   );

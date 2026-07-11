@@ -18,7 +18,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.tools  # noqa: F401 — registers the real file/terminal tools
 from app.agents import plan_store
-from app.api.task_router import conversation_context, looks_like_task, wants_background
+from app.api.chat import _SYSTEM_VOICE_RE
+from app.api.task_router import (
+    _classify_message,
+    conversation_context,
+    looks_like_task,
+    wants_background,
+)
 from app.core.dependencies import get_db, get_llm_provider, get_qdrant
 from app.db.database import Base
 from app.memory.conversation_state import (
@@ -188,6 +194,16 @@ async def client(tmp_path_factory, monkeypatch):
     "wipe out everything in my temp folder",
     "put every pdf from my desktop into one place",
     "can you take care of the mess in my downloads",
+    # Email / calendar object-nouns fire the gate alone (Phase 5, Part 5) —
+    # the multi-class classifier makes the EMAIL/CALENDAR/CHAT call.
+    "email jamil about the dinner tonight",
+    "any new emails in my inbox?",
+    "check my gmail",
+    "reply to that email with a yes",
+    "put a meeting with jamil on my calendar tomorrow at 3",
+    "what's on my calendar this week",
+    "delete the standup event",
+    "send jamil an invite for friday",
 ])
 def test_gate_fires_for_task_messages(message):
     assert looks_like_task(message) is True
@@ -246,6 +262,95 @@ async def test_unknown_verb_phrasing_reaches_the_approval_gate(client, tmp_path)
     plan = plan_events(events)[0]["plan"]
     assert plan["status"] == "awaiting_approval"
     assert victim.exists()  # nothing was deleted without approval
+
+
+# ===================================================== multi-class classifier
+
+@pytest.mark.parametrize("reply,expected", [
+    ("TASK", "TASK"),
+    ("EMAIL", "EMAIL"),
+    ("CALENDAR", "CALENDAR"),
+    ("CHAT", "CHAT"),
+    # Real models append stray text/punctuation — startswith parsing handles it.
+    ("EMAIL.", "EMAIL"),
+    ("calendar", "CALENDAR"),
+    ("  TASK\n", "TASK"),
+])
+async def test_classify_message_returns_label(reply, expected):
+    provider = FakeProvider([reply])
+    label = await _classify_message(provider, "some message", "")
+    assert label == expected
+    assert provider.chat_calls == 1  # still exactly one temp-0 call
+
+
+@pytest.mark.parametrize("reply", ["I think this is email", "", "unsure", "yes"])
+async def test_classify_message_unrecognized_fails_open_to_chat(reply):
+    # An unrecognized word is NOT an action label — fail open to CHAT, exactly
+    # as an exception would.
+    provider = FakeProvider([reply])
+    assert await _classify_message(provider, "some message", "") == "CHAT"
+
+
+async def test_classify_message_exception_fails_open_to_chat():
+    provider = FakeProvider([])  # chat() raises AssertionError when exhausted
+    assert await _classify_message(provider, "some message", "") == "CHAT"
+
+
+async def test_email_intent_routes_to_planner(client, tmp_path):
+    """End to end: an EMAIL classification routes to the SAME planner (a plan
+    chunk is streamed), and a send step pauses at the structural approval gate
+    — the recipient lock means nothing leaves the machine unapproved. The
+    address is in the user's own words, so the recipient-grounding guard
+    passes (that guard is exercised in test_email_tools.py)."""
+    steps = [step(
+        "Email jamil@example.com about dinner", "send_email",
+        to="jamil@example.com", subject="Dinner", body="Dinner tonight?",
+    )]
+    use_provider(responses=["EMAIL", plan_json(steps), plan_json(steps)])
+
+    events = await post_chat(
+        client, "email jamil@example.com about dinner tonight", "s-email-e2e"
+    )
+    plan = plan_events(events)[0]["plan"]
+    assert plan["status"] == "awaiting_approval"
+
+
+async def test_chat_label_yields_no_plan_chunk(client):
+    """A CHAT classification falls open to the Phase 2 chat path — no plan
+    chunk, just streamed conversation text."""
+    # Gate fires on "email", classifier answers CHAT, then Phase 2 streams.
+    use_provider(responses=["CHAT"], streams=["I can help with that — just say the word."])
+    events = await post_chat(client, "i got an email from jamil yesterday", "s-chat-open")
+    assert plan_events(events) == []
+
+
+# ================================================ impersonation guard (email/cal)
+
+@pytest.mark.parametrize("text", [
+    "Email sent — to jamil@example.com.",
+    "Your email has been sent to Jamil.",
+    "I've sent the email to Jamil about dinner.",
+    "Done. The draft was saved to your drafts.",
+    "Event created — Dinner with Jamil, tomorrow 7pm.",
+    "The event has been created on your calendar.",
+    "I've added the meeting to your calendar for 3pm.",
+    "I added it to your calendar.",
+    "The invite was sent to the team.",
+])
+def test_impersonation_guard_catches_email_calendar_fabrications(text):
+    assert _SYSTEM_VOICE_RE.search(text) is not None
+
+
+@pytest.mark.parametrize("text", [
+    # Capability statements must NOT trip the guard — a routing miss should ask
+    # the user to rephrase, not get cut.
+    "I can send an email for you — just say 'email Jamil about dinner'.",
+    "Would you like me to create a calendar event for that meeting?",
+    "I can add that meeting to your calendar if you tell me the time.",
+    "Do you want me to email Jamil about it?",
+])
+def test_impersonation_guard_allows_capability_statements(text):
+    assert _SYSTEM_VOICE_RE.search(text) is None
 
 
 # ========================================================== background intent
@@ -697,8 +802,12 @@ def test_chat_prompt_carries_capabilities_and_task_outcome_honesty():
 
     prompt = _build_system_prompt()
     # Round 5: never deny access, never pretend a missed task ran
-    assert "Never claim you lack file-system or computer access" in prompt
+    assert "Never claim you lack file-system, email, calendar, or computer access" in prompt
     assert "do NOT pretend you did it" in prompt
+    # Phase 5 Part 5: email + calendar are real capabilities now
+    assert "read and send email" in prompt
+    assert "manage the user's Google Calendar" in prompt
+    assert '"Email sent — …"' in prompt and '"Event created — …"' in prompt
     # Round 7: never embellish task outcomes
     assert "TASK OUTCOME HONESTY" in prompt
     assert "Never add, infer, or embellish results" in prompt
@@ -797,7 +906,7 @@ async def test_impersonated_reminder_confirmation_is_corrected(client):
 
     text = streamed_text(events)
     assert "Correction from the Jarvis system" in text
-    assert "no reminder was created" in text
+    assert "no reminder or calendar event was created" in text
 
 
 async def test_impersonated_task_initiation_claim_is_corrected(client):

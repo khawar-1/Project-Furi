@@ -348,6 +348,13 @@ export type GoogleConnectResult =
   | 'in_progress'
   | 'not_configured';
 
+// Phase 5 Part 6 — daily briefing settings
+export interface BriefingSettings {
+  enabled: boolean;
+  time: string; // "HH:MM" local
+  next_run_at: string | null;
+}
+
 // ============================================================
 // Electron Bridge (exposed by preload.ts)
 // ============================================================

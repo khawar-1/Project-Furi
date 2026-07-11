@@ -5,6 +5,7 @@
 import type {
   ActivityEntry,
   AgentPlan,
+  BriefingSettings,
   ChatMessage,
   ChatRequest,
   Contact,
@@ -257,6 +258,24 @@ export const integrationsApi = {
   /** Revokes at Google (best-effort) and deletes the local token. */
   googleDisconnect: (): Promise<{ disconnected: boolean; revoked: boolean }> =>
     apiFetch('/api/integrations/google/disconnect', { method: 'POST' }),
+};
+
+// ============================================================
+// App settings (Phase 5, Part 6 — daily briefing)
+// ============================================================
+export const settingsApi = {
+  getBriefing: (): Promise<BriefingSettings> =>
+    apiFetch<BriefingSettings>('/api/settings/briefing'),
+
+  updateBriefing: (update: { enabled: boolean; time: string }): Promise<BriefingSettings> =>
+    apiFetch<BriefingSettings>('/api/settings/briefing', {
+      method: 'PUT',
+      body: JSON.stringify(update),
+    }),
+
+  /** Compose + deliver a briefing immediately ("Send now"). Read-only. */
+  runBriefingNow: (): Promise<{ delivered: boolean; message: string }> =>
+    apiFetch('/api/settings/briefing/run-now', { method: 'POST' }),
 };
 
 // ============================================================

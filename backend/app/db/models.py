@@ -387,6 +387,25 @@ class ScheduledJob(Base):
 
 
 # ============================================================
+# App Settings — Generic key/value runtime configuration (Phase 5, Part 6)
+# ============================================================
+class AppSetting(Base):
+    """
+    A single runtime-configurable app setting, keyed by a dotted name with a
+    JSON-encoded value. The first reusable home for settings the user toggles
+    at runtime (rather than .env, which needs a restart) — Part 6's daily
+    briefing config/pointer live here, and future settings can too. The ONE
+    accessor is app/core/app_settings.py; call sites never touch this table
+    directly (the reminders-router rule: modules own their domain).
+    """
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)  # JSON-encoded
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+# ============================================================
 # Agent Activity Log — Audit trail of all tool executions
 # ============================================================
 class ActivityLog(Base):

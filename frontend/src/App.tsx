@@ -105,7 +105,14 @@ export default function App() {
     const stopSteps = onPush('plan_step', (event) => {
       useChatStore.getState().receiveStepEvent(event.payload);
     });
+    // Phase 5 Part 6: a daily briefing fires unprompted — show it live in chat
+    // if it belongs to the open session (and always as a toast via notifications).
+    // receiveReminderFired is generic over {session_id, body, text} — reused as-is.
+    const stopBriefing = onPush('briefing', (event) => {
+      useChatStore.getState().receiveReminderFired(event.payload);
+    });
     return () => {
+      stopBriefing();
       stopSteps();
       stopTasks();
       stopReminders();
