@@ -8,6 +8,7 @@ from app.tools.registry import ToolRegistry, execute_tool, register_tool, regist
 
 # Built-in tool modules are imported here as they are added, so that
 # `import app.tools` registers everything:
+from app.tools import calendar_tools  # noqa: F401, E402
 from app.tools import email_tools  # noqa: F401, E402
 from app.tools import file_tools  # noqa: F401, E402
 from app.tools import memory_tools  # noqa: F401, E402

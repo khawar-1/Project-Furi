@@ -112,6 +112,10 @@ class Contact(Base):
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     skills: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON array: ["Python", "AI", "React"]
     birthday: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Phase 5 Part 4: the pending scheduled_jobs row for this contact's next
+    # birthday reminder (mirrors Reminder.job_id). Internal plumbing — not
+    # serialized to the API. sync_contact_birthday_job keeps it current.
+    birthday_job_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)  # scheduled_jobs.id
     important_dates: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON dictionary or list
     last_interaction: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     interaction_count: Mapped[int] = mapped_column(Integer, default=0)

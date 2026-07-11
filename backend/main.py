@@ -18,6 +18,7 @@ from app.api import agent, activity
 from app.api import ws, schedule, reminders, tasks
 from app.api import integrations
 import app.core.reminders  # noqa: F401 — registers the "reminder" job handler at import time
+import app.core.birthdays  # noqa: F401 — registers the "birthday" job handler at import time
 
 
 @asynccontextmanager
@@ -75,6 +76,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info(f"✅ Scheduler started ({rehydrated} pending job(s) rehydrated)")
     except Exception as e:
         logger.warning(f"⚠️  Scheduler failed to start (timed jobs disabled): {e}")
+
+    # Phase 5 Part 4: reconcile birthday reminders against the contacts table —
+    # arm missing jobs (pre-Part-4 contacts, fire/re-arm crashes) and sweep
+    # orphans. After scheduler.start() so its timers are live; non-critical.
+    try:
+        from app.core.birthdays import ensure_birthday_jobs
+        await ensure_birthday_jobs()
+    except Exception as e:
+        logger.warning(f"⚠️  Birthday-job reconciliation failed (non-critical): {e}")
 
     logger.info(f"🤖 LLM Provider: {settings.LLM_PROVIDER}")
     logger.info(f"🌐 Backend ready at http://{settings.BACKEND_HOST}:{settings.BACKEND_PORT}")

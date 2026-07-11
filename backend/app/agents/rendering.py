@@ -163,6 +163,27 @@ def _fmt_read_thread(output: dict) -> str:
     return "\n\n".join(blocks)
 
 
+def _fmt_calendar_events(output: dict) -> str:
+    from app.tools.calendar_tools import format_event_when  # local: avoid import cycle
+
+    events = output.get("events") or []
+    if not events:
+        return "No events found."
+    lines = [f"Found {len(events)} event(s):"]
+    for e in events[:_MAX_NAMES]:
+        summary = str(e.get("summary") or "(no title)")
+        when = format_event_when(e)
+        loc = str(e.get("location") or "").strip()
+        line = f"• {summary} — {when}" if when else f"• {summary}"
+        if loc:
+            line += f", {loc}"
+        lines.append(line)
+    extra = len(events) - _MAX_NAMES
+    if extra > 0:
+        lines.append(f"… and {extra} more")
+    return "\n".join(lines)
+
+
 def _fmt_lookup_contact(output: dict) -> str:
     status = output.get("status")
     if status == "resolved":
@@ -187,6 +208,8 @@ _RESULT_FORMATTERS = {
     "search_emails": _fmt_search_emails,
     "read_email": _fmt_read_email,
     "read_thread": _fmt_read_thread,
+    "list_events": _fmt_calendar_events,
+    "find_events": _fmt_calendar_events,
 }
 
 

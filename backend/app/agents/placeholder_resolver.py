@@ -83,6 +83,16 @@ _EMAIL_TO_PARAMS = {
     "create_email_draft": "to",
 }
 
+# Event-id parameters: substituted only from a calendar read (list_events /
+# find_events) that pins exactly one event (Phase 5 Part 4). Mirror of the
+# recipient path — ids come EXCLUSIVELY from read-step results, so the
+# planner's event-id grounding rule holds on the code path too.
+_EVENT_ID_PARAMS = {
+    "update_event": "event_id",
+    "delete_event": "event_id",
+}
+_CALENDAR_READ_TOOLS = ("list_events", "find_events")
+
 # An explicitly-universal file request: "all (the) files", "every file",
 # "all file/folders", "everything". When the goal says this, no extension
 # filter the user never mentioned may narrow it. Shared with the planner's
@@ -304,6 +314,74 @@ def _substitute_recipient(
     return [_concrete_step(template, key, pick, description=template.description)]
 
 
+def _events_from_step(step: PlanStep) -> list[dict]:
+    """Event rows a COMPLETED list_events/find_events step returned — the only
+    source event-id substitution draws from (never LLM text)."""
+    if (
+        step.tool not in _CALENDAR_READ_TOOLS
+        or step.status != StepStatus.COMPLETED
+        or step.result is None
+    ):
+        return []
+    output = step.result.output
+    if not isinstance(output, dict):
+        return []
+    return [
+        e for e in output.get("events") or []
+        if isinstance(e, dict) and e.get("id")
+    ]
+
+
+def _event_summary_matches(event: dict, placeholder_text: str) -> bool:
+    """True when a word from the event's summary appears in the placeholder
+    text (word-boundary, like _substitute_recipient's name match)."""
+    summary = str(event.get("summary") or "").lower()
+    return any(
+        tok and re.search(rf"\b{re.escape(tok)}", placeholder_text)
+        for tok in summary.split()
+    )
+
+
+def _substitute_event_id(
+    template: PlanStep, key: str, completed: list[PlanStep]
+) -> Optional[list[PlanStep]]:
+    """The calendar mirror of _substitute_recipient: fill the PENDING event_id
+    when the completed calendar reads pin exactly ONE event — one whose
+    summary words match the placeholder text, or the only event found.
+    Several candidates ⇒ None, code never picks."""
+    from app.tools.calendar_tools import format_event_when  # runtime — no cycle
+
+    events: list[dict] = []
+    seen: set[str] = set()
+    for step in completed:
+        for e in _events_from_step(step):
+            eid = str(e["id"])
+            if eid not in seen:
+                seen.add(eid)
+                events.append(e)
+    if not events:
+        return None
+    placeholder_text = str(template.parameters.get(key) or "").lower()
+    named = [e for e in events if _event_summary_matches(e, placeholder_text)]
+    named_ids = {str(e["id"]) for e in named}
+    if len(named_ids) == 1:
+        pick = named[0]  # the placeholder names exactly one found event
+    elif len(events) == 1:
+        pick = events[0]  # only one candidate exists at all
+    else:
+        return None  # several plausible events — code never picks
+    verb = "Delete" if template.tool == "delete_event" else "Update"
+    when = format_event_when(pick)
+    desc = (
+        f"{verb} event '{pick.get('summary') or '(no title)'}'"
+        + (f" — {when}" if when else "")
+    )
+    # Substitution, not expansion: the step is still the one the LLM described
+    # — only its event_id became concrete. Fresh signature + regenerated
+    # action_detail: the user approves the real event.
+    return [_concrete_step(template, key, str(pick["id"]), description=desc)]
+
+
 def resolve(plan: AgentPlan, index: int, max_new: int) -> Optional[list[PlanStep]]:
     """Replacement steps for plan.steps[index] (a step carrying a PENDING
     placeholder), derived purely from completed step results:
@@ -327,6 +405,8 @@ def resolve(plan: AgentPlan, index: int, max_new: int) -> Optional[list[PlanStep
             return _substitute_folder(template, key, completed)
         if _EMAIL_TO_PARAMS.get(template.tool) == key:
             return _substitute_recipient(template, key, completed)
+        if _EVENT_ID_PARAMS.get(template.tool) == key:
+            return _substitute_event_id(template, key, completed)
         return None
     except Exception as e:  # pragma: no cover — belt: never break the planner
         logger.warning(f"Placeholder resolution crashed (falling back to LLM): {e}")

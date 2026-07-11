@@ -9,11 +9,41 @@ never counts as an interaction.
 """
 import httpx
 import pytest_asyncio
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.dependencies import get_db, get_qdrant
+from app.core.scheduler import JarvisScheduler
 from app.db.database import Base
 from main import app
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _isolate_scheduler(monkeypatch):
+    """Phase 5 Part 4: creating/updating a contact with a birthday now calls
+    sync_contact_birthday_job, which uses the app-wide scheduler + its DB.
+    Isolate BOTH onto a throwaway in-memory scheduler so no contacts-API test
+    ever touches the real jarvis.db or arms a real timer. Yielded so the
+    birthday tests can inspect the jobs it scheduled."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    sched = JarvisScheduler(session_factory=factory)
+
+    import app.core.birthdays as bday
+    import app.core.scheduler as scheduler_module
+    monkeypatch.setattr("app.db.database.AsyncSessionLocal", factory)
+    monkeypatch.setattr(bday, "scheduler", sched)
+    monkeypatch.setattr(scheduler_module, "scheduler", sched)
+    sched.register_handler(bday.BIRTHDAY_JOB_KIND, bday._birthday_job_handler)
+    yield sched
+    await sched.shutdown()
+    await engine.dispose()
 
 
 @pytest_asyncio.fixture
@@ -148,3 +178,28 @@ async def test_put_unknown_contact_is_404(client):
         "/api/contacts/no-such-id", json={"email": "jamil@example.com"}
     )
     assert response.status_code == 404
+
+
+# =============================================== birthday reminder scheduling
+async def test_put_birthday_schedules_a_reminder_job(client, _isolate_scheduler):
+    sched = _isolate_scheduler
+    created = await create(client, name="Jamil Ali")
+    assert await sched.list_jobs(status="pending", kind="birthday") == []
+
+    response = await client.put(
+        f"/api/contacts/{created['id']}", json={"birthday": "07-14"}
+    )
+    assert response.status_code == 200
+    jobs = await sched.list_jobs(status="pending", kind="birthday")
+    assert len(jobs) == 1
+    assert jobs[0]["payload"]["contact_id"] == created["id"]
+
+
+async def test_delete_cancels_the_birthday_job(client, _isolate_scheduler):
+    sched = _isolate_scheduler
+    created = await create(client, name="Jamil Ali", birthday="07-14")
+    assert len(await sched.list_jobs(status="pending", kind="birthday")) == 1
+
+    response = await client.delete(f"/api/contacts/{created['id']}")
+    assert response.status_code == 200
+    assert await sched.list_jobs(status="pending", kind="birthday") == []

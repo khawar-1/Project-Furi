@@ -661,6 +661,14 @@ class MemoryEngine:
                 
         await self.db.commit()
         await self.db.refresh(contact)
+
+        # Phase 5 Part 4: schedule the birthday reminder if one was given.
+        # create_contact_manual is the ONLY place a Contact row is constructed
+        # (extraction and the parked-creation confirmation both funnel here).
+        if contact.birthday:
+            from app.core.birthdays import sync_contact_birthday_job
+            await sync_contact_birthday_job(self.db, contact)
+
         logger.info(f"Manually created contact: '{name}'")
         return contact
 
@@ -783,6 +791,11 @@ class MemoryEngine:
         if not contact:
             raise ValueError(f"Contact {contact_id} not found")
 
+        # Phase 5 Part 4: remember the birthday BEFORE the field loop so we can
+        # re-sync the reminder job only when it actually changes (set,
+        # replaced, or cleared) — no job churn on unrelated edits.
+        old_birthday = contact.birthday
+
         # Scalar fields — only overwrite if new value is provided and passes
         # the deterministic net (contact_validation.py): a value that fails
         # normalization is skipped, never overwrites good data with junk.
@@ -839,6 +852,14 @@ class MemoryEngine:
 
         await self.db.commit()
         await self.db.refresh(contact)
+
+        # Phase 5 Part 4: (re)schedule or cancel the birthday reminder only
+        # when the birthday actually changed — covers extraction merges,
+        # parked-resolution merges, and the manual PUT (which may clear it).
+        if contact.birthday != old_birthday:
+            from app.core.birthdays import sync_contact_birthday_job
+            await sync_contact_birthday_job(self.db, contact)
+
         return contact
 
     async def add_contact_fact(
@@ -1251,7 +1272,13 @@ class MemoryEngine:
             select(Contact).where(func.lower(Contact.name) == name.lower())
         )
         contacts = list(result.scalars().all())
+        # Phase 5 Part 4: cancel any pending birthday reminder before the row
+        # is gone (the cascade drops the contact, but the scheduled_jobs row
+        # lives in its own table).
         for contact in contacts:
+            if contact.birthday_job_id:
+                from app.core.scheduler import scheduler
+                await scheduler.cancel(contact.birthday_job_id)
             await self.db.delete(contact)
         if contacts:
             await self.db.commit()

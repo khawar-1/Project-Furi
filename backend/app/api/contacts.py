@@ -178,6 +178,10 @@ async def delete_contact(
         raise HTTPException(status_code=404, detail="Contact not found")
     contact.is_active = False
     await db.commit()
+    # Phase 5 Part 4: cancel the pending birthday reminder — sync no-ops the
+    # schedule for an inactive contact, leaving only the cancel.
+    from app.core.birthdays import sync_contact_birthday_job
+    await sync_contact_birthday_job(db, contact)
     return {"deleted": contact_id}
 
 

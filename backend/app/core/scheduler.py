@@ -175,12 +175,21 @@ class JarvisScheduler:
             pass  # timer already gone (fired, or never armed in this process)
         return bool(result.rowcount)
 
-    async def list_jobs(self, status: Optional[str] = None, limit: int = 50) -> list[dict]:
-        """Jobs as plain dicts, soonest run_at first."""
+    async def list_jobs(
+        self,
+        status: Optional[str] = None,
+        limit: int = 50,
+        kind: Optional[str] = None,
+    ) -> list[dict]:
+        """Jobs as plain dicts, soonest run_at first. The optional `kind`
+        filter lets a feature enumerate only its own jobs (e.g. the birthday
+        reconciliation sweep) without reaching into the table itself."""
         async with self._factory()() as session:
             query = select(ScheduledJob).order_by(ScheduledJob.run_at).limit(limit)
             if status is not None:
                 query = query.where(ScheduledJob.status == status)
+            if kind is not None:
+                query = query.where(ScheduledJob.kind == kind)
             result = await session.execute(query)
             rows = result.scalars().all()
         return [

@@ -123,6 +123,8 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
         "recall_memory", "lookup_contact",
         "search_emails", "read_email", "read_thread",
         "create_email_draft", "send_email", "reply_email",
+        "list_events", "find_events",
+        "create_event", "update_event", "delete_event",
     }
     assert tools["read_file"]["permission_level"] == "read"
     assert tools["recall_memory"]["permission_level"] == "read"
@@ -137,6 +139,13 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
     assert tools["create_email_draft"]["permission_level"] == "write"
     assert tools["send_email"]["permission_level"] == "destructive"
     assert tools["reply_email"]["permission_level"] == "destructive"
+    # Phase 5 Part 4: calendar reads are read, create/update are write,
+    # deleting an event is destructive.
+    assert tools["list_events"]["permission_level"] == "read"
+    assert tools["find_events"]["permission_level"] == "read"
+    assert tools["create_event"]["permission_level"] == "write"
+    assert tools["update_event"]["permission_level"] == "write"
+    assert tools["delete_event"]["permission_level"] == "destructive"
     assert "parameters" in tools["search_files"]
 
 
