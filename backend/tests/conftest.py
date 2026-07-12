@@ -52,6 +52,21 @@ def _hermetic_question_gate(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_folder_resolver(tmp_path_factory):
+    """The same-named-folder guard probes the machine's home + drive roots for
+    duplicate well-known folders. Tests must never touch real drives: every
+    test gets an empty scratch home and no drives (guard finds nothing → no
+    action). Tests exercising the guard set HOME/DRIVES themselves."""
+    from app.agents import folder_resolver
+
+    home, drives = folder_resolver.HOME, folder_resolver.DRIVES
+    folder_resolver.HOME = tmp_path_factory.mktemp("folder-resolver-home")
+    folder_resolver.DRIVES = []
+    yield
+    folder_resolver.HOME, folder_resolver.DRIVES = home, drives
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_google_auth(tmp_path_factory):
     """Google auth defaults its token file to the real ~/.jarvis directory.
     Tests must never read/write it (or hit Google): every test gets a manager

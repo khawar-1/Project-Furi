@@ -112,7 +112,7 @@ from langgraph.graph import END, START, StateGraph
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents import placeholder_resolver, question_gate
+from app.agents import folder_resolver, placeholder_resolver, question_gate
 from app.agents.cancellation import apply_cancellation, log_cancellation
 from app.agents.narration import narrate_step
 from app.agents.schemas import (
@@ -157,7 +157,7 @@ _PLAN_RULES = """RULES:
 5. Keep the plan minimal — no redundant steps, at most 30 steps.
 6. Write each description as one short sentence a non-technical user understands, stating exactly WHAT will happen and to WHICH files or folders (e.g. "Delete report-draft.docx from the Desktop", never just "Clean up files"). For run_command / execute_script, the description must say what the command will actually do to the system.
 7. If the goal cannot be achieved with these tools, return {"steps": [], "unachievable_reason": "<short explanation>"}.
-8. ALWAYS prefer the dedicated tools over run_command / execute_script: listing, searching (by name/metadata — for finding files by their CONTENT or meaning use semantic_file_search, rule 17), and reading files (including their sizes, creation and modified times) must use list_directory / search_files / read_file. run_command counts as a destructive step the user has to approve — use it ONLY when no dedicated tool can do the job.
+8. ALWAYS prefer the dedicated tools over run_command / execute_script: listing, searching (by name/metadata — for finding files by their CONTENT or meaning use semantic_file_search, rule 17), and reading files (including their sizes, creation and modified times) must use list_directory / search_files / read_file. run_command counts as a destructive step the user has to approve — use it ONLY when no dedicated tool can do the job. A question ABOUT the results — how many there are, which is the largest / smallest, the total size, the newest / oldest — is answered from the search_files / list_directory results themselves (every match carries its size and dates); do NOT add a run_command (or any extra step) to count, measure, or compare files a search already returned. Often a single search_files step is the whole plan.
 9. NEVER delete, move, rename, or create files or folders through run_command / execute_script — always use delete_file / move_file / rename_file / create_file. delete_file backs the file up to a recoverable trash; a shell delete is unrecoverable and will not be approved.
 10. Every date parameter must be ISO format YYYY-MM-DD. Convert the user's wording using the current date in CONTEXT ("after july 1" with no year → the current year; "last week" → concrete dates). If the user's date is genuinely ambiguous (e.g. "03/04/2026" could be March 4 or April 3), ask via a question (rule 11) — never guess. Date and size filtering must be done with search_files parameters (created_after, min_size, ...), never by eyeballing results.
 11. Ask the user via "question" (see the output shape) when you cannot proceed correctly without their input: several files/folders match a name and only one should be acted on, an ambiguous date format, or a vague target ("that file") the conversation does not resolve. Put the concrete candidates in "options" (full paths). Options must be REAL values you have seen in the conversation, memory, or an executed step's results — NEVER invent a path as an option (invented paths are rejected in code). If you do not know where something is, that is not a question — search_files for it (rule 3). NEVER ask the user where a file or folder is or for its full path: a real search is run in code against every question and a question the search can answer is rejected. NEVER pick one of several matches yourself for a move/rename/delete step. Do NOT ask when the goal already covers all matches ("read all of them", "delete every .tmp file") or when only one candidate exists.
@@ -1290,6 +1290,28 @@ class AgentPlanner:
                 await narrate_step(plan, step, idx)
                 pause = "failed_step"
                 break
+
+            # Same-named folder disambiguation (2026-07-12): a well-known
+            # folder the user named without a drive ("downloads") may exist on
+            # several drives. Before a read step scopes itself to the DEFAULT
+            # home copy, probe the drives; two or more matches pause the plan so
+            # the user picks the real one (rather than silently searching the
+            # wrong Downloads and reporting nothing), exactly one non-home match
+            # fixes the guessed path in code. Read-level and best-effort.
+            folder_choice = folder_resolver.detect(step, plan.goal, plan.user_answers)
+            if folder_choice is not None:
+                if folder_choice.action == "substitute":
+                    step.parameters[folder_choice.key] = folder_choice.paths[0]
+                    logger.info(
+                        f"Folder '{folder_choice.name}' resolved in code to "
+                        f"{folder_choice.paths[0]} (only existing copy)"
+                    )
+                elif plan.questions_asked < MAX_QUESTIONS:
+                    self._pause_on_question(
+                        plan, folder_resolver.build_question(folder_choice)
+                    )
+                    return {"plan": plan, "pause_reason": None}
+                # question budget exhausted → fall through, search the home copy
 
             if step.requires_approval and not approved:
                 # Name the real calendar event on the approval card (Part 4):
