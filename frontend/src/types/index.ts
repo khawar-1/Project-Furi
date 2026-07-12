@@ -299,6 +299,19 @@ export interface Reminder {
 }
 
 // ============================================================
+// Routines (Phase 6, Part 5 — teachable procedural memory)
+// ============================================================
+export interface Routine {
+  id: string;
+  name: string;
+  normalized_name: string;
+  goal_template: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
 // Health / Backend Status
 // ============================================================
 export type HealthStatus = 'ok' | 'degraded' | 'error';
@@ -326,6 +339,7 @@ export type ActivePanel =
   | 'contacts'
   | 'timeline'
   | 'reminders'
+  | 'routines'
   | 'tools'
   | 'voice'
   | 'settings';

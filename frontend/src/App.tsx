@@ -10,6 +10,7 @@ import { MemoryExplorer } from '@/components/memory/MemoryExplorer';
 import { ContactsPanel } from '@/components/contacts/ContactsPanel';
 import { TimelinePanel } from '@/components/timeline/TimelinePanel';
 import { ReminderPanel } from '@/components/reminders/ReminderPanel';
+import { RoutinesPanel } from '@/components/routines/RoutinesPanel';
 import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { useUIStore } from '@/stores/uiStore';
 import { connectPush, disconnectPush, onPush } from '@/lib/push';
@@ -29,6 +30,8 @@ function PanelContent({ panel }: { panel: ActivePanel }) {
       return <TimelinePanel />;
     case 'reminders':
       return <ReminderPanel />;
+    case 'routines':
+      return <RoutinesPanel />;
     case 'settings':
       return <SettingsPanel />;
     default:
@@ -43,6 +46,7 @@ function ComingSoonPanel({ panel }: { panel: ActivePanel }) {
     contacts: 'Contacts',
     timeline: 'Activity Timeline',
     reminders: 'Reminders',
+    routines: 'Routines',
     tools: 'Tool Execution Log',
     voice: 'Voice Controls',
     settings: 'Settings',
@@ -54,6 +58,7 @@ function ComingSoonPanel({ panel }: { panel: ActivePanel }) {
     contacts: '2',
     timeline: '3',
     reminders: '4',
+    routines: '6',
     tools: '5',
     voice: '6',
     settings: '5',
@@ -111,7 +116,14 @@ export default function App() {
     const stopBriefing = onPush('briefing', (event) => {
       useChatStore.getState().receiveReminderFired(event.payload);
     });
+    // Phase 6 Part 5: a recurring goal earns an "offer to save this as a
+    // routine" — show it live in chat if it's this session (and always as a
+    // toast). Same generic {session_id, body, text} handler.
+    const stopRoutineOffer = onPush('routine_offer', (event) => {
+      useChatStore.getState().receiveReminderFired(event.payload);
+    });
     return () => {
+      stopRoutineOffer();
       stopBriefing();
       stopSteps();
       stopTasks();

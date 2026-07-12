@@ -314,6 +314,18 @@ async def chat_stream(
     if reminder_response is not None:
         return reminder_response
 
+    # --- Phase 6 Part 5: routine routing (app/api/routine_router.py). Runs
+    # BETWEEN reminders and tasks — a bare routine name ("clean my desktop")
+    # must be intercepted here before the task gate re-plans it as a one-off.
+    # TEACH is deterministic (no planner); RUN starts a background Task, so the
+    # approval gate and path guards re-apply on the fresh plan automatically.
+    from app.api.routine_router import maybe_handle_routine
+    routine_response = await maybe_handle_routine(
+        request=request, session_id=session_id, db=db, provider=provider
+    )
+    if routine_response is not None:
+        return routine_response
+
     # --- Phase 3: task-request routing (app/api/task_router.py). Returns a
     # response ONLY for confirmed task requests; None (the overwhelmingly
     # common case — the deterministic gate makes no LLM call) continues into

@@ -176,8 +176,28 @@ What's complete:
   merge-rank — each match carries type "file" | "conversation"; a file-specific
   refiner scopes to files only. PRIVACY: the SAME FileIndexConfig.enabled toggle
   gates conversation embedding (local fastembed — text never leaves the machine).
-  Parts 5-6 (Teachable Routines; File Intelligence) are NOT built. Details in the
-  "Conversation search" Architecture section below.
+  Details in the "Conversation search" Architecture section below.
+- Phase 6 Part 5 (Teachable Routines — procedural memory): a NEW routine_router.py
+  (mirrors reminder_router.py; inserted in chat.py BETWEEN the reminder and task
+  routers, same precedence + open-question deference) teaches and runs named
+  procedures. TEACH ("save this as a routine called X") is deterministic — no
+  LLM, no planner — and captures the goal from an inline procedure or the most
+  recent task-shaped prior turn (conversation_context). RUN ("run my X routine",
+  or a bare name that exactly matches a saved routine) loads the stored
+  goal_template and starts a BACKGROUND Task (start_task) — we store the goal
+  STRING, never a plan, so every run is replanned fresh and the approval gate /
+  path guards / recipient+event-id locks all re-apply automatically (a routine
+  can never smuggle a pre-approved destructive plan past the gate). Routine table
+  (migration a1b2c3d4e5f6: name/normalized_name unique key/goal_template/is_active),
+  domain module app/core/routines.py (the reminders pattern — the router never
+  touches the table). Offer-to-save: when the same COMPLETED goal recurs
+  ROUTINE_OFFER_THRESHOLD=3 times (counted over Task.goal rows, the Preference
+  occurrence_count pattern), _settle best-effort pushes a "routine_offer" +
+  persists a chat message spelling out the teach phrase (no yes/no state machine —
+  confirmation reuses the TEACH trigger), throttled once per goal via app_settings
+  ("routines.offered"). API GET/POST/DELETE /api/routines + POST /{id}/run;
+  Routines panel (list/run/delete). Part 6 (File Intelligence) is NOT built.
+  Details in the "Teachable routines" Architecture section below.
 Current architecture rules:
 - Facts have subject: "user" | "shared" | "contact"
 - Shared facts (e.g. "Jamil and I played Tekken") save to both user and contact;
@@ -760,8 +780,68 @@ Rules, all in code:
   `StaticPool :memory:` — embed-on-write, disabled/system/empty/no-qdrant no-ops,
   incremental vs full backfill, run enable/qdrant gates, summary), `test_semantic_
   file_search.py` +4 (cross-source files+chats, ranked-together, file-refiner-
-  excludes-chats, conv formatter). Parts 5-6 (Teachable Routines; File Intelligence)
-  are NOT built.
+  excludes-chats, conv formatter). Part 6 (File Intelligence) is NOT built.
+
+### Teachable routines (Phase 6, Part 5 — procedural memory)
+The user teaches a repeatable procedure once and invokes it by name. The core
+safety property: we store the goal STRING (`Routine.goal_template`), NEVER a
+plan — every run is replanned fresh through the agent planner, so the approval
+gate, path guards, and recipient/event-id locks all re-apply automatically. A
+routine can never smuggle a pre-approved destructive plan past the gate. Rules,
+all in code:
+- **The router** (`app/api/routine_router.py`, mirrors `reminder_router.py`):
+  `maybe_handle_routine(request, session_id, db, provider)` hooked into
+  `chat_stream` BETWEEN the reminder and task routers (precedence: reminder →
+  routine → task → Phase 2 chat). It MUST sit ahead of the task router because a
+  bare routine name ("clean my desktop") would otherwise be caught by the task
+  gate's strong-noun rule and re-planned as a one-off. Deterministic (no LLM for
+  teach; the RUN ack/failure texts are literal), short-circuits the turn (no
+  memory extraction — a routine command is not autobiography), and defers to an
+  already-open memory/agent question exactly like the reminder router (peek
+  `CONVERSATION_SESSIONS.get()` + `get_choice_plan_for_session`).
+- **TEACH** — tight literal anchors (`_TEACH_PATTERNS`): "save/remember this [as
+  a] routine [called|named|as] X" and the quoted "remember this as 'X'" form.
+  Requires the literal word "routine" OR a quoted name, so "remember that meeting
+  is at 3" matches neither. The goal_template is an inline procedure split off the
+  name span (`_INLINE_SPLIT_RE`: "… that: <steps>") or, more commonly, the most
+  recent task-shaped prior USER turn (`_capture_prior_goal`, reusing
+  `task_router.looks_like_task`). No capturable goal → deterministic clarifying
+  text, creates nothing.
+- **RUN** — explicit ("run my X routine" / "run routine X", `_RUN_PATTERNS`,
+  requires the word "routine") or an exact normalized-name match against a saved
+  routine. Loads `goal_template` → `planner_memory_context` + `conversation_context`
+  → `start_task(...)` (BACKGROUND Task path) → deterministic ack. An explicit
+  "run …" that names no saved routine returns None (falls through — may still be a
+  real task).
+- **Domain module** (`app/core/routines.py` — the reminders pattern; the router
+  and API never touch the table). `normalize_name` (strip quotes/punctuation,
+  lowercase, collapse ws) is the ONE normalization for BOTH the lookup key and
+  goal-recurrence matching. `create_routine` UPSERTS on `normalized_name`
+  (re-teach replaces goal_template, never duplicates). `Routine` table (migration
+  `a1b2c3d4e5f6`, down_revision `d4e5f6a7b8c9`: `name` display / `normalized_name`
+  unique key / `goal_template` Text / `is_active`).
+- **Offer-to-save** (`maybe_offer_routine`, best-effort, called from
+  `task_runner._settle` on terminal COMPLETED only, in its own try/except): when a
+  goal has completed `ROUTINE_OFFER_THRESHOLD = 3` times (counted over `Task.goal`
+  rows — the cleaner signal than raw ActivityLog, mirroring
+  `Preference.occurrence_count`), and it is not already a routine and not already
+  offered, persist an assistant `Message` (durable copy) + `push("routine_offer",
+  …)` (fired-reminder delivery; `routine_offer` is NOT in `notifications.ts`
+  SILENT_TYPES so it toasts, and `App.tsx` reuses `receiveReminderFired`). The
+  offer SPELLS OUT the teach phrase — confirmation reuses the TEACH trigger, so
+  there is no new yes/no state machine. Throttled once per goal via app_settings
+  key `routines.offered`.
+- **API** (`app/api/routines.py`, `/api/routines`): GET (list active), POST
+  (`{name, goal_template}` — manual/UI create; chat is primary), DELETE (hard
+  delete), POST `/{id}/run` (deps `get_db` + `get_llm_provider`; optional
+  `session_id`; starts a background Task, returns `{task_id, status}`; 404 on
+  missing/inactive). `utc_iso` timestamps per the API convention.
+- **Frontend**: `Routine` type, `routinesApi`, `routinesStore`, `RoutinesPanel`
+  (list / Run / Delete, 15s poll), Sidebar nav item, `onPush('routine_offer')`.
+- Tests: `test_routines.py` (normalization matrix; create/upsert/get/delete; TEACH
+  & RUN parse; goal capture from history; the replan-fresh-keeps-approval
+  invariant via `start_task`; offer threshold/throttle/suppression),
+  `test_routines_api.py` (CRUD round-trip, upsert, run starts a Task, 404).
 
 ### Timestamp serialization (API convention)
 The DB stores naive UTC (`utc_now()` in models.py). API serializers MUST use `utc_iso()` (models.py), never bare `.isoformat()`: a naive ISO string has no timezone marker, so the frontend's `new Date(iso)` reads it as LOCAL time and every displayed timestamp shifts by the machine's UTC offset (the "reminder set for 6 PM shows 1 PM" bug, fixed 2026-07-09). Applied to reminders, activity, tasks, chat messages, and schedule serializers. Extraction-derived date-semantics fields (`event_date`, `interaction_date`, `occurred_at` in contacts/episodes/memory) deliberately keep bare `.isoformat()` — they are calendar dates, not UTC moments, and marking them UTC would shift the displayed day.

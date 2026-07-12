@@ -18,6 +18,7 @@ from app.api import agent, activity
 from app.api import ws, schedule, reminders, tasks
 from app.api import integrations, settings as settings_api
 from app.api import index as index_api
+from app.api import routines as routines_api
 import app.core.reminders  # noqa: F401 — registers the "reminder" job handler at import time
 import app.core.birthdays  # noqa: F401 — registers the "birthday" job handler at import time
 import app.core.daily_briefing  # noqa: F401 — registers the "daily_briefing" job handler at import time
@@ -162,6 +163,9 @@ def create_app() -> FastAPI:
 
     # Phase 6 Part 2 — semantic file index (config + manual rebuild)
     app.include_router(index_api.router, prefix="/api/index", tags=["File Index"])
+
+    # Phase 6 Part 5 — teachable routines (procedural memory)
+    app.include_router(routines_api.router, prefix="/api/routines", tags=["Routines"])
 
     return app
 

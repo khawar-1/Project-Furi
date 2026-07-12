@@ -20,6 +20,7 @@ import type {
   Preference,
   Reminder,
   ReminderStatus,
+  Routine,
   SemanticMemory,
   StreamChunk,
 } from '@/types';
@@ -242,6 +243,27 @@ export const remindersApi = {
 
   cancel: (id: string): Promise<{ cancelled: boolean }> =>
     apiFetch(`/api/reminders/${id}`, { method: 'DELETE' }),
+};
+
+// ============================================================
+// Routines (Phase 6, Part 5 — teachable procedural memory)
+// ============================================================
+export const routinesApi = {
+  list: (): Promise<Routine[]> => apiFetch<Routine[]>('/api/routines'),
+
+  create: (payload: { name: string; goal_template: string }): Promise<Routine> =>
+    apiFetch<Routine>('/api/routines', { method: 'POST', body: JSON.stringify(payload) }),
+
+  delete: (id: string): Promise<{ deleted: boolean }> =>
+    apiFetch(`/api/routines/${id}`, { method: 'DELETE' }),
+
+  /** Run a routine now — starts a background Task (approval gates still apply);
+   *  the outcome arrives as a push event / toast. */
+  run: (id: string, sessionId?: string): Promise<{ task_id: string; status: string }> =>
+    apiFetch(`/api/routines/${id}/run`, {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId ?? null }),
+    }),
 };
 
 // ============================================================

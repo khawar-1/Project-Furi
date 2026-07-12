@@ -368,6 +368,36 @@ class Task(Base):
 
 
 # ============================================================
+# Routines — Teachable procedural memory (Phase 6, Part 5)
+# ============================================================
+class Routine(Base):
+    """
+    A named, repeatable procedure the user taught once ("save this as a
+    routine called 'clean desktop'") and later invokes by name ("run my clean
+    desktop routine"). We store the GOAL STRING (goal_template), never a frozen
+    plan: every run is replanned fresh through the agent planner, so the
+    structural approval gate, path guards, and recipient/event-id locks all
+    re-apply automatically — a routine can never smuggle a pre-approved
+    destructive plan past the gate.
+
+    normalized_name is the lookup key (lowercased, punctuation-stripped) so
+    "Clean Desktop", "clean desktop!", and "clean  desktop" all resolve to the
+    same routine; name keeps the user's own casing for display. Teaching an
+    existing name replaces its goal_template (re-teach, not duplicate). The ONE
+    accessor is app/core/routines.py — the router never touches this table.
+    """
+    __tablename__ = "routines"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)  # display, user's casing
+    normalized_name: Mapped[str] = mapped_column(String(256), nullable=False, unique=True, index=True)
+    goal_template: Mapped[str] = mapped_column(Text, nullable=False)  # raw goal re-fed to the planner
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+# ============================================================
 # Scheduled Jobs — Persisted timed work (Phase 4, Part 2)
 # ============================================================
 class ScheduledJob(Base):

@@ -328,6 +328,18 @@ async def _settle(db: AsyncSession, task: Task, plan: AgentPlan, notify: bool = 
             "body": body,
             "plan": serialize_plan_for_api(plan),
         })
+
+    # Phase 6 Part 5: a goal that keeps completing earns an offer to be saved
+    # as a reusable routine. Best-effort and completed-only — recurrence is
+    # measured over completed Task rows (this one is already committed above),
+    # and the offer must never affect settling.
+    if status == "completed" and task.session_id:
+        try:
+            from app.core.routines import maybe_offer_routine
+            await maybe_offer_routine(db, task.goal, task.session_id)
+        except Exception as e:
+            logger.warning(f"Routine offer-to-save check failed (non-critical): {e}")
+
     logger.info(f"Background task {task.id} → {status}")
 
 
