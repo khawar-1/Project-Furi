@@ -121,10 +121,12 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
         "move_file", "rename_file", "delete_file",
         "create_file", "run_command", "execute_script",
         "recall_memory", "lookup_contact",
+        "semantic_file_search",
         "search_emails", "read_email", "read_thread",
         "create_email_draft", "send_email", "reply_email",
         "list_events", "find_events",
         "create_event", "update_event", "delete_event",
+        "web_search", "read_webpage",
     }
     assert tools["read_file"]["permission_level"] == "read"
     assert tools["recall_memory"]["permission_level"] == "read"

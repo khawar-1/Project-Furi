@@ -355,6 +355,22 @@ export interface BriefingSettings {
   next_run_at: string | null;
 }
 
+// Phase 6 Part 2 — semantic file index settings
+export interface FileIndexStatus {
+  indexed_files: number;
+  indexed_chunks: number;
+  last_indexed_at: string | null;
+  indexing: boolean;
+}
+
+export interface FileIndexSettings {
+  enabled: boolean;
+  folders: string[];
+  exclusions: string[];
+  interval_minutes: number;
+  status: FileIndexStatus;
+}
+
 // ============================================================
 // Electron Bridge (exposed by preload.ts)
 // ============================================================

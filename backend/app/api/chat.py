@@ -149,8 +149,8 @@ IDENTITY:
 - Never refer to yourself as an AI, assistant, or chatbot. You are Jarvis.
 
 CAPABILITIES:
-- You CAN act on the user's computer and accounts through a separate tool system: search/read/list files and folders, create/move/rename/delete files, run terminal commands and scripts, read and send email, manage the user's Google Calendar, set reminders, and run long tasks in the background. Never claim you lack file-system, email, calendar, or computer access.
-- Action requests are detected and routed to that system BEFORE the message reaches you. If a request to act still reaches you here, it was not recognized as a task: do NOT pretend you did it and do NOT deny you can — tell the user you can do it and ask them to rephrase it as a direct instruction (e.g. "list the files in <folder>", "email Jamil about dinner").
+- You CAN act on the user's computer and accounts through a separate tool system: search/read/list files and folders, create/move/rename/delete files, run terminal commands and scripts, read and send email, manage the user's Google Calendar, search the web and read web pages, set reminders, and run long tasks in the background. Never claim you lack file-system, email, calendar, web, or computer access.
+- Action requests are detected and routed to that system BEFORE the message reaches you. If a request to act still reaches you here, it was not recognized as a task: do NOT pretend you did it and do NOT deny you can — tell the user you can do it and ask them to rephrase it as a direct instruction (e.g. "list the files in <folder>", "email Jamil about dinner", "search the web for X").
 - TASK OUTCOME HONESTY: task and background-task outcome messages in this conversation are the COMPLETE record of what was done and found. Never add, infer, or embellish results (file names, counts, contents, emails, events) beyond what those messages literally state. If an outcome message does not contain the answer the user wants, say the task did not report it and offer to run it again — never fill the gap yourself.
 - NEVER imitate system-generated messages ("Finished the background task…", "I've started working on that in the background…", "Reminder set — …", "Done — N step(s) completed.", "Email sent — …", "Event created — …", approval prompts). Those texts are produced by the backend only, after real actions — writing them yourself is claiming actions that never happened.
 - You cannot start, queue, or schedule any action from this conversation — not a file operation, not an email send, not a calendar event. Never say you "will" perform an action, that a task "has been initiated", that an email "has been sent", that an event "has been created", or otherwise promise action — nothing you write here makes anything happen. When the user wants an action, the ONLY honest reply is to ask them to say it as one direct instruction (e.g. "delete the .txt files in the phase3test folder on my desktop", "email Jamil that I'll be late").
@@ -274,6 +274,13 @@ async def _persist_message(
     )
     db.add(msg)
     await db.commit()
+    # Phase 6 Part 4 — index this turn for content search right away, so a
+    # just-said message is findable now via semantic_file_search. No-op unless
+    # the index is enabled (same privacy toggle as files); never raises. Other
+    # message-writers (tasks, reminders, briefings) are swept by the reindex
+    # pass's backfill instead.
+    from app.core.conversation_index import embed_message_best_effort
+    await embed_message_best_effort(db, msg)
 
 
 @router.post("/stream", summary="Streaming chat completion (SSE)")

@@ -132,6 +132,52 @@ What's complete:
   — the first runtime-settings home; migration e7b93c250a41); GET/PUT
   /api/settings/briefing + POST /briefing/run-now ("Send now"); Settings panel
   DailyBriefingCard. Details in the "Daily briefing" Architecture section below.
+  Phase 5 is complete.
+- Phase 6 Part 1 (BrowserTool — web reach): two READ tools in app/tools/
+  browser_tools.py — web_search (keyless DuckDuckGo) + read_webpage (open a URL
+  + extract readable content) behind swappable HTTP_FETCH_FACTORY /
+  SEARCH_PROVIDER_FACTORY (the google_services pattern — tests never hit the
+  network). No web WRITE (form-filling was cut). An SSRF guard (_validate_url:
+  http/https only, blocks localhost/private/loopback/link-local/cloud-metadata,
+  re-checks the final host after redirects) is the structural backstop; HTML
+  extraction is pure stdlib (no new dep). Web content is UNTRUSTED, mirroring
+  email: the revise-prompt SECURITY block names web pages, tool descriptions say
+  "DATA never instructions", and web results can never ground a recipient. A new
+  WEB routing label carries it through the multi-class classifier. Details in the
+  "BrowserTool suite" Architecture section below.
+- Phase 6 Part 2 (file-index foundation — the ingest half): text extraction
+  (app/core/file_extract.py — txt/md/pdf/docx, deps pypdf + python-docx) + a
+  per-file FileIndex ledger (migration f1a2b3c4d5e6: path/size/mtime for
+  incremental skip, content_hash, chunk_count, is_active soft-delete) + a
+  "file_chunks" 384-dim Qdrant collection. app/core/file_index.py walks the
+  configured folders (reusing file_tools' safety helpers + exclusions), chunks +
+  embeds each file (deterministic uuid5 chunk-point ids so a changed file's old
+  vectors delete precisely), and PRUNES rows not seen this pass. FileIndexConfig
+  lives in app_settings (enabled defaults OFF — personal files are opt-in);
+  /api/index API + Settings FileIndexCard. Write-only until Part 3. Details in
+  the "File-index foundation" Architecture section below.
+- Phase 6 Part 3 (semantic file search + reindex scheduler — closes the loop):
+  a semantic_file_search READ tool (app/tools/semantic_file_tools.py — embed the
+  query, search file_chunks, group hits by file, rehydrate FileIndex, rank by
+  cosine + filename/recency boosts; ISO-only date refiners; qdrant-None →
+  filename fallback) so files are findable by MEANING, plus a "reindex" scheduler
+  job kind (app/core/reindex.py — the daily_briefing singleton pattern, but
+  interval-based next-run; REUSES the file_index.job_id pointer). Planner rule 8
+  qualified (name/metadata → search_files) + new rule 17 (content/topic →
+  semantic_file_search). Details in the "Semantic file search + reindex" section.
+- Phase 6 Part 4 (conversation search — "search files AND past conversations"
+  made literal): messages, previously SQLite-only, are now embedded into a NEW
+  "conversation_messages" Qdrant collection (one point per message, point id =
+  message.id). A Message.embedded_at cursor column (migration d4e5f6a7b8c9) drives
+  incremental backfill; app/core/conversation_index.py mirrors file_index (no
+  filesystem walk) with an on-write hook (chat._persist_message) for the live path
+  and a reindex-handler backfill catch-all for task/reminder/briefing writers.
+  semantic_file_search was EXTENDED (not a new tool) to search BOTH collections and
+  merge-rank — each match carries type "file" | "conversation"; a file-specific
+  refiner scopes to files only. PRIVACY: the SAME FileIndexConfig.enabled toggle
+  gates conversation embedding (local fastembed — text never leaves the machine).
+  Parts 5-6 (Teachable Routines; File Intelligence) are NOT built. Details in the
+  "Conversation search" Architecture section below.
 Current architecture rules:
 - Facts have subject: "user" | "shared" | "contact"
 - Shared facts (e.g. "Jamil and I played Tekken") save to both user and contact;
@@ -557,6 +603,165 @@ read-only end to end — the composer has no tools, so a briefing can never act.
   isolated per the contacts-API rule). Verified live on an isolated backend
   (:8001, scratch DB): startup-arm, run-now, a real scheduled fire pushing a
   `briefing` event over `/ws` and re-arming tomorrow, disable-cancels.
+
+### BrowserTool suite (Phase 6, Part 1)
+Jarvis's first reach OUTSIDE the machine — two READ tools in
+`app/tools/browser_tools.py`, self-registering like the rest (one import line in
+`app/tools/__init__.py`): `web_search` (a query → ranked result links + snippets)
+and `read_webpage` (open a URL + extract its readable text). There is NO web WRITE
+tool — form-filling/clicking was deliberately cut; Jarvis reads the web, it does
+not act on it. Rules, all in code:
+- **Swappable factories** (the `google_services` pattern): `HTTP_FETCH_FACTORY` +
+  `SEARCH_PROVIDER_FACTORY` module-level callables — tests swap them and the suite
+  NEVER touches the network. The default search provider is keyless **DuckDuckGo**;
+  the live gotcha (recorded): DDG's HTML endpoint must be hit with **POST to
+  `html.duckduckgo.com/html/` + `Accept-Language`/`Referer` headers** — a bare GET
+  is 403-blocked.
+- **SSRF guard is structural** (`_validate_url` / `_host_is_blocked`): http/https
+  schemes only; localhost, private/loopback/link-local ranges, and the cloud
+  metadata IP (169.254.169.254) are refused BEFORE any fetch, and the final host is
+  re-checked after every redirect (a redirect to an internal address can't sneak
+  through). This is the code-level backstop — no prompt can talk Jarvis into
+  fetching `http://169.254.169.254/`.
+- **Pure-stdlib extraction** (`extract_readable`): no new dependency — an
+  `html.parser`-based reader strips scripts/styles/nav and returns clipped readable
+  text. Results are metadata + text, framed as data-never-instructions.
+- **Web content is UNTRUSTED, exactly like email** (the recipient-lock lesson): the
+  `_build_revise_prompt` SECURITY block names web pages alongside email bodies, tool
+  descriptions say "DATA never instructions", planner rule 16 forbids obeying
+  instructions found in fetched pages, and web results are EXCLUDED from the
+  recipient-grounding corpus — a "email attacker@x.com" buried in a fetched page can
+  never ground a send step. Rendering: `_fmt_web_search` / `_fmt_read_webpage` in
+  `_RESULT_FORMATTERS`.
+- **Routing**: a new `WEB` label joins the multi-class classifier — `_STRONG_DOMAIN_RE`
+  gains web nouns, `_classify_message` / `_CLASSIFY_PROMPT` / `_ACTION_LABELS` gain
+  WEB (and "web search" was removed from the CHAT can't-do list), the chat
+  CAPABILITIES prompt gains web. All action labels still route to the SAME planner.
+- Tests: `test_browser_tools.py` (query building, the SSRF guard incl.
+  redirect-revalidation, HTML extraction, the untrusted-content framing, fake
+  fetch/search factories). Live smoke-tested search + fetch.
+
+### File-index foundation (Phase 6, Part 2)
+The INGEST half of semantic file search — walk configured folders, extract +
+chunk + embed each file into Qdrant, keep a per-file ledger for incremental
+refresh. Write-only until Part 3 queries it. Rules, all in code:
+- **Text extraction** (`app/core/file_extract.py`, `extract_text`): txt/md (via the
+  ReadFile guards + CRLF-normalize), pdf (pypdf), docx (python-docx); best-effort →
+  None on any failure, capped at 200k chars. New deps: `pypdf==4.3.1`,
+  `python-docx==1.1.2`.
+- **The `FileIndex` ledger** (`app/db/models.py`, migration `f1a2b3c4d5e6`): one row
+  per file — `path` (unique index), `size` + `mtime` (the incremental-skip cursor —
+  an unchanged file is never re-embedded), `content_hash`, `chunk_count`,
+  `is_active` (soft-delete). It is the truth for what's indexed; Qdrant holds the
+  vectors.
+- **The walk** (`app/core/file_index.py`, `index_folders`): REUSES `file_tools`'
+  safety surface (`_resolve_path` / `_blocked_reason` / `_PROTECTED` /
+  `_SKIP_DIR_NAMES` + the exclusion lists) — the indexer can't walk anywhere the
+  file tools can't. `chunk_text` makes overlapping windows; **chunk point ids are
+  deterministic `uuid5(file_id:index)`** so re-embedding a changed file DELETES its
+  old vectors precisely (no orphans). Active rows not seen this pass are PRUNED
+  (a deleted/moved file leaves the index). `embed` is injectable (`embed_batch`);
+  Qdrant is REQUIRED here (the runner guards a None client). `run_index` /
+  `start_index_in_background` run a single detached pass (`SESSION_FACTORY` pattern,
+  `_INDEXING` flag).
+- **The `file_chunks` collection** (384-dim COSINE) is added to
+  `qdrant_client.COLLECTIONS` (auto-created at startup).
+- **Config** (`FileIndexConfig` in `app_settings`): **`enabled` defaults OFF** —
+  indexing personal files is strictly opt-in; `folders` prefilled
+  Desktop/Documents/Downloads, `exclusions`, `interval_minutes` clamped 15..10080.
+- **API** (`app/api/index.py`, `/api/index`): GET, GET `/status`, PUT `/config`
+  (400 on a root/protected folder), POST `/rebuild` (background). Frontend
+  `FileIndexCard` in `SettingsPanel` (folder/exclusion editors, enable toggle,
+  interval, Index-now + status poll) + `indexApi`.
+- Tests: `test_file_extract.py`, `test_file_index.py` (real `:memory:` Qdrant + a
+  fake 384-dim embed), `test_index_api.py`. Live-verified that REAL fastembed →
+  Qdrant ranking is meaningful. NO search tool + NO scheduler yet (Part 3).
+
+### Semantic file search + reindex scheduler (Phase 6, Part 3)
+Closes the Part 2 loop: a READ tool to FIND files by meaning, and a recurring job
+to keep the index fresh. Rules, all in code:
+- **`semantic_file_search`** (`app/tools/semantic_file_tools.py`, the `memory_tools`
+  READ-tool seam — `SESSION_FACTORY` + `_qdrant()` resolved at call time): embed the
+  query → `qdrant.search("file_chunks")` → **group chunk hits by `payload["file_id"]`**
+  (the point id is the uuid5 CHUNK id, never a row id — rehydrate `FileIndex` via the
+  payload) → keep the best chunk score + snippet per file → **combined rank** =
+  cosine base + boosts (a query token in the filename, recency ≤30d). Optional
+  refiners `filename_contains` / `folder` / `modified_after|before` HARD-filter
+  (reusing `file_tools`' ISO-only `_parse_date_bound` — non-ISO refused, the planner
+  asks on ambiguity, never guesses). **Qdrant None → filename fallback** over the
+  `FileIndex` rows (the memory-engine "degraded but useful" philosophy); an empty
+  index sets an explanatory `note`. Full paths are returned so the question_gate can
+  offer them as VERIFIED options. Strictly READ (no approval).
+- **The `"reindex"` scheduler job** (`app/core/reindex.py`): the `daily_briefing`
+  singleton pattern verbatim EXCEPT interval-based — `next_reindex_run_at(interval,
+  now) = now + timedelta(minutes=interval)` (a pure interval needs no wall-clock
+  dance). It **REUSES Part 2's `get/set_file_index_job_id` pointer** (key
+  `file_index.job_id`) — no new app_settings key. `sync_reindex_job(db)` is the single
+  choke point (cancel current → iff enabled arm next → store id); the handler has the
+  disabled-now + stale-job guards, calls `run_index(full=False)` (a None qdrant is a
+  safe no-op), then re-arms; `ensure_reindex_job()` reconciles at startup (arm/heal/
+  sweep). Wiring: `main.py` imports the module + calls `ensure_reindex_job()` after
+  `ensure_briefing_job()`; `index.py` PUT `/config` calls `sync_reindex_job` so a
+  toggle/interval change re-arms immediately.
+- **Planner routing**: rule 8 qualified (name/metadata → `search_files`), new rule 17
+  (a file by its CONTENT / topic / description → `semantic_file_search`; read-level,
+  feed a chosen path into later steps via `PENDING:`, ask via rule 11 when several
+  match and a write must target one). Rendering: `_fmt_semantic_file_search`
+  (group-by-folder + fenced snippets). No migration, no frontend (Part 2's
+  `FileIndexCard` already exposes enabled/folders/interval — the interval now
+  actually drives the scheduler). Multi-match disambiguation reuses the EXISTING
+  question_gate / AWAITING_CHOICE machinery — no new disambiguation code. Also fixed
+  a stale `task_router._CLASSIFY_PROMPT` closing line (it omitted WEB).
+- Tests: `test_semantic_file_search.py` (fake qdrant + stub embed), `test_reindex.py`
+  (real `JarvisScheduler` on `:memory:`; `run_index` is a no-op without qdrant).
+
+### Conversation search (Phase 6, Part 4)
+Makes "search files AND past conversations" literally true. Messages were the one
+memory surface that was SQLite-only — searchable by session, never by MEANING. Now
+each chat `Message` is embedded into a NEW `"conversation_messages"` Qdrant
+collection (384-dim, **one point per message, point id = `message.id`**), and
+`semantic_file_search` returns ranked matches from files AND prior chats in one ask.
+Rules, all in code:
+- **The cursor** (`Message.embedded_at`, migration `d4e5f6a7b8c9`, down_revision
+  `f1a2b3c4d5e6`): NULL = not yet embedded — the Message row IS the ledger (no
+  separate table), mirroring `FileIndex`'s size/mtime skip. A re-embed upserts the
+  same id, so there are never duplicates.
+- **The service** (`app/core/conversation_index.py`, the `file_index` pattern but no
+  filesystem walk): `index_conversations(db, qdrant, *, full, embed)` — INCREMENTAL
+  (only `embedded_at IS NULL` unless `full`), only role ∈ {user, assistant} with
+  non-empty content (system/scaffolding skipped), batched embed + upsert
+  `PointStruct(id=msg.id, payload={message_id, session_id, role, text≤2000,
+  created_at})`, best-effort per batch. `embed_message_best_effort(db, msg)` is the
+  **ON-WRITE hook** (a single just-said turn, best-effort, no-op when disabled /
+  no-qdrant, NEVER raises — `expire_on_commit=False` makes reading `msg.content`
+  post-commit safe). `run_conversation_index(*, full)` opens its own session and is
+  gated on the enable toggle + a live qdrant. Plus `start_..._in_background` /
+  `get_conversation_index_summary`.
+- **Two-tier coverage** (there is no single choke point for Message creation — ~10
+  write sites): the on-write hook covers the main chat path (`chat._persist_message`
+  after commit); the **reindex handler ALSO runs `run_conversation_index(full=False)`**
+  each interval as the BACKFILL catch-all for task/reminder/briefing turns the hook
+  doesn't touch. `index.py` `/rebuild` also reindexes chats; GET `/status` merges
+  `indexed_messages` / `unindexed_messages`.
+- **Unified recall** — `semantic_file_search` was **EXTENDED, not renamed** (no new
+  tool → no manifest churn): embed the query ONCE, search BOTH `file_chunks` +
+  `conversation_messages`, merge + rank together — each match tagged
+  `type: "file" | "conversation"`. `include_conversations = not filename_contains and
+  folder is None` (a file-specific refiner ⇒ files only; date bounds apply to both);
+  `_recency_boost` now takes `now` (files=local, chats=naive-UTC). Conversation hits
+  aren't path-like, so the question_gate treats them as free-text options —
+  cross-source disambiguation reuses the EXISTING AWAITING_CHOICE flow with zero new
+  code. `_fmt_semantic_file_search` renders a "matching conversation message(s)"
+  section (role + date + fenced snippet); planner rule 17 broadened to "what did we
+  discuss about X" / "the chat where I mentioned Y".
+- **PRIVACY**: conversation embedding is gated on the SAME `FileIndexConfig.enabled`
+  toggle (opt-in) and is local (fastembed) — message text never leaves the machine.
+- Tests: `test_conversation_index.py` (fake qdrant capturing upserts + stub embed,
+  `StaticPool :memory:` — embed-on-write, disabled/system/empty/no-qdrant no-ops,
+  incremental vs full backfill, run enable/qdrant gates, summary), `test_semantic_
+  file_search.py` +4 (cross-source files+chats, ranked-together, file-refiner-
+  excludes-chats, conv formatter). Parts 5-6 (Teachable Routines; File Intelligence)
+  are NOT built.
 
 ### Timestamp serialization (API convention)
 The DB stores naive UTC (`utc_now()` in models.py). API serializers MUST use `utc_iso()` (models.py), never bare `.isoformat()`: a naive ISO string has no timezone marker, so the frontend's `new Date(iso)` reads it as LOCAL time and every displayed timestamp shifts by the machine's UTC offset (the "reminder set for 6 PM shows 1 PM" bug, fixed 2026-07-09). Applied to reminders, activity, tasks, chat messages, and schedule serializers. Extraction-derived date-semantics fields (`event_date`, `interaction_date`, `occurred_at` in contacts/episodes/memory) deliberately keep bare `.isoformat()` — they are calendar dates, not UTC moments, and marking them UTC would shift the displayed day.

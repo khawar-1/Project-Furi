@@ -295,12 +295,17 @@ async def test_fire_reschedules_next_year(factory, sched):
 async def test_fire_with_known_year_states_the_age(factory, sched):
     sock = FakeSocket()
     await push_manager.connect(sock)
+    # Fire ON the day (run_at = now) so this is not a late/off-day fire — the
+    # age branch only applies to an on-time birthday. Date-relative so a day
+    # rollover never flips it into the "missed while offline" wording.
+    now = datetime.now()
     _, job_id = await _insert_contact_with_job(
-        factory, sched, name="Jamil Ali", birthday="1990-07-11",
-        run_at=to_naive_utc(datetime(2026, 7, 11, 9, 0).astimezone()),
+        factory, sched, name="Jamil Ali",
+        birthday=f"1990-{now.month:02d}-{now.day:02d}",
+        run_at=to_naive_utc(now.replace(hour=9, minute=0, second=0, microsecond=0).astimezone()),
     )
     await sched._fire(job_id)
-    assert "turn 36" in sock.sent[0]["payload"]["body"]
+    assert f"turn {now.year - 1990}" in sock.sent[0]["payload"]["body"]
 
 
 async def test_off_day_fire_is_honest(factory, sched):

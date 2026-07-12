@@ -64,6 +64,11 @@ class Message(Base):
     model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     tokens_used: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    # Phase 6 Part 4 — set once this message's content has been embedded into
+    # the "conversation_messages" Qdrant collection. NULL = not yet indexed; it
+    # is the incremental cursor the backfill pass reads (mirrors FileIndex's
+    # size/mtime skip). Never leaves the machine — fastembed is local.
+    embedded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 # ============================================================
@@ -424,3 +429,35 @@ class ActivityLog(Base):
     permission_level: Mapped[str] = mapped_column(String(32), default="read")
     duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+# ============================================================
+# File Index — the semantic-file-search ledger (Phase 6, Part 2)
+# ============================================================
+class FileIndex(Base):
+    """
+    One row per indexed file — the incremental-reindex ledger and the
+    rehydration target for a vector search. SQLite is the truth; the file's
+    text lives as chunk points in the Qdrant "file_chunks" collection, each
+    point carrying this row's id in its payload (file_id). A reindex skips a
+    file whose size AND mtime are unchanged; a changed file's old chunks are
+    deleted (deterministic ids, 0..chunk_count-1) before the new ones upsert.
+    is_active=False is a soft delete (file removed, folder de-configured, or
+    now excluded) — the row and its vectors are cleared, not orphaned.
+    The ONE accessor is app/core/file_index.py.
+    """
+    __tablename__ = "file_index"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    path: Mapped[str] = mapped_column(String(1024), nullable=False, unique=True, index=True)
+    folder_root: Mapped[str] = mapped_column(String(1024), nullable=False)  # configured folder it came from
+    filename: Mapped[str] = mapped_column(String(512), default="")           # basename (name search, Part 3)
+    ext: Mapped[str] = mapped_column(String(32), default="")
+    size: Mapped[int] = mapped_column(Integer, default=0)                    # bytes (incremental skip)
+    mtime: Mapped[float] = mapped_column(Float, default=0.0)                 # st_mtime (incremental skip)
+    content_hash: Mapped[str] = mapped_column(String(64), default="")        # sha256 of extracted text
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0)             # vectors written for this file
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    indexed_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)

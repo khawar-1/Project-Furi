@@ -14,6 +14,7 @@ Settings.
 """
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from loguru import logger
@@ -25,6 +26,8 @@ from app.db.models import AppSetting
 # ------------------------------------------------------------------ keys
 BRIEFING_CONFIG_KEY = "daily_briefing.config"
 BRIEFING_JOB_ID_KEY = "daily_briefing.job_id"
+FILE_INDEX_CONFIG_KEY = "file_index.config"
+FILE_INDEX_JOB_ID_KEY = "file_index.job_id"
 
 
 # --------------------------------------------------------- generic accessor
@@ -118,3 +121,94 @@ async def get_briefing_job_id(db: AsyncSession) -> Optional[str]:
 
 async def set_briefing_job_id(db: AsyncSession, job_id: Optional[str]) -> None:
     await set_setting(db, BRIEFING_JOB_ID_KEY, job_id)
+
+
+# ------------------------------------------------- file-index config (Phase 6)
+
+# Bounds for the reindex interval (used in Part 3's scheduler; validated here so
+# a hand-edited row can never arm an absurd timer).
+FILE_INDEX_MIN_INTERVAL = 15        # minutes
+FILE_INDEX_MAX_INTERVAL = 7 * 24 * 60
+
+
+def _default_index_folders() -> list[str]:
+    """The three suggested folders (Desktop/Documents/Downloads under home) —
+    prefilled so enabling the index 'just works', but NEVER whole drives. Only
+    the ones that exist on this machine are offered."""
+    home = Path.home()
+    return [str(home / name) for name in ("Desktop", "Documents", "Downloads")
+            if (home / name).is_dir()]
+
+
+@dataclass(frozen=True)
+class FileIndexConfig:
+    """Which folders the semantic file index covers, plus its reindex cadence.
+    enabled defaults OFF — indexing personal files is opt-in (privacy); the
+    folders list is prefilled so the user only has to flip the switch."""
+    enabled: bool
+    folders: tuple[str, ...]
+    exclusions: tuple[str, ...]
+    interval_minutes: int
+
+
+def default_file_index_config() -> FileIndexConfig:
+    return FileIndexConfig(
+        enabled=False,
+        folders=tuple(_default_index_folders()),
+        exclusions=(),
+        interval_minutes=360,  # every 6 hours
+    )
+
+
+def _clean_paths(raw: Any) -> tuple[str, ...]:
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    out: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return tuple(out)
+
+
+def _coerce_file_index(raw: Any) -> FileIndexConfig:
+    default = default_file_index_config()
+    if not isinstance(raw, dict):
+        return default
+    try:
+        interval = int(raw.get("interval_minutes", default.interval_minutes))
+    except (TypeError, ValueError):
+        interval = default.interval_minutes
+    interval = max(FILE_INDEX_MIN_INTERVAL, min(interval, FILE_INDEX_MAX_INTERVAL))
+    folders = _clean_paths(raw.get("folders"))
+    return FileIndexConfig(
+        enabled=bool(raw.get("enabled", default.enabled)),
+        folders=folders if folders else default.folders,
+        exclusions=_clean_paths(raw.get("exclusions")),
+        interval_minutes=interval,
+    )
+
+
+async def get_file_index_config(db: AsyncSession) -> FileIndexConfig:
+    raw = await get_setting(db, FILE_INDEX_CONFIG_KEY, default=None)
+    if raw is None:
+        return default_file_index_config()
+    return _coerce_file_index(raw)
+
+
+async def set_file_index_config(db: AsyncSession, config: FileIndexConfig) -> None:
+    await set_setting(db, FILE_INDEX_CONFIG_KEY, {
+        "enabled": config.enabled,
+        "folders": list(config.folders),
+        "exclusions": list(config.exclusions),
+        "interval_minutes": config.interval_minutes,
+    })
+
+
+async def get_file_index_job_id(db: AsyncSession) -> Optional[str]:
+    value = await get_setting(db, FILE_INDEX_JOB_ID_KEY, default=None)
+    return value if isinstance(value, str) and value else None
+
+
+async def set_file_index_job_id(db: AsyncSession, job_id: Optional[str]) -> None:
+    await set_setting(db, FILE_INDEX_JOB_ID_KEY, job_id)

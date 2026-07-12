@@ -10,6 +10,8 @@ import type {
   ChatRequest,
   Contact,
   Episode,
+  FileIndexSettings,
+  FileIndexStatus,
   GoogleConnectResult,
   GoogleIntegrationStatus,
   HealthResponse,
@@ -276,6 +278,30 @@ export const settingsApi = {
   /** Compose + deliver a briefing immediately ("Send now"). Read-only. */
   runBriefingNow: (): Promise<{ delivered: boolean; message: string }> =>
     apiFetch('/api/settings/briefing/run-now', { method: 'POST' }),
+};
+
+// ============================================================
+// Semantic file index (Phase 6, Part 2)
+// ============================================================
+export const indexApi = {
+  get: (): Promise<FileIndexSettings> => apiFetch<FileIndexSettings>('/api/index'),
+
+  status: (): Promise<FileIndexStatus> => apiFetch<FileIndexStatus>('/api/index/status'),
+
+  updateConfig: (update: {
+    enabled: boolean;
+    folders: string[];
+    exclusions: string[];
+    interval_minutes: number;
+  }): Promise<FileIndexSettings> =>
+    apiFetch<FileIndexSettings>('/api/index/config', {
+      method: 'PUT',
+      body: JSON.stringify(update),
+    }),
+
+  /** Start a background index pass. Poll status() until `indexing` is false. */
+  rebuild: (full = false): Promise<{ started: boolean; indexing: boolean }> =>
+    apiFetch('/api/index/rebuild', { method: 'POST', body: JSON.stringify({ full }) }),
 };
 
 // ============================================================

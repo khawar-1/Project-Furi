@@ -92,6 +92,54 @@ def _fmt_search_files(output: dict) -> str:
     return "\n".join(lines)
 
 
+def _fmt_semantic_file_search(output: dict) -> str:
+    matches = output.get("matches") or []
+    note = str(output.get("note") or "").strip()
+    if not matches:
+        return note or "No matching files or conversations found."
+
+    files = [m for m in matches if m.get("type") != "conversation"]
+    convos = [m for m in matches if m.get("type") == "conversation"]
+    lines: list[str] = []
+
+    if files:
+        # Group by parent folder (the _fmt_search_files shape), but each file
+        # also shows the matching content snippet in a fence.
+        order: list[str] = []
+        groups: dict[str, list[dict]] = {}
+        for m in files:
+            p = PurePath(str(m.get("path", "?")))
+            parent = str(p.parent)
+            if parent not in groups:
+                groups[parent] = []
+                order.append(parent)
+            groups[parent].append(m)
+        lines.append(f"Found {len(files)} matching file(s):")
+        for parent in order:
+            lines.append(f"- In `{parent}`:")
+            for m in groups[parent]:
+                name = PurePath(str(m.get("path", "?"))).name or "?"
+                lines.append(f"  - **{name}**")
+                snippet = str(m.get("snippet") or "").strip()
+                if snippet:
+                    lines.append(_fence(snippet))
+
+    if convos:
+        lines.append(f"Found {len(convos)} matching conversation message(s):")
+        for m in convos:
+            when = str(m.get("created") or "")[:10]  # YYYY-MM-DD
+            role = str(m.get("role") or "message")
+            head = f"- **{role}**" + (f" ({when})" if when else "") + ":"
+            lines.append(head)
+            snippet = str(m.get("snippet") or "").strip()
+            if snippet:
+                lines.append(_fence(snippet))
+
+    if note:
+        lines.append(f"- ({note})")
+    return "\n".join(lines)
+
+
 def _fmt_read_file(output: dict) -> str:
     content = str(output.get("content") or "").strip()
     path = output.get("path", "?")
@@ -184,6 +232,32 @@ def _fmt_calendar_events(output: dict) -> str:
     return "\n".join(lines)
 
 
+def _fmt_web_search(output: dict) -> str:
+    results = output.get("results") or []
+    if not results:
+        return "No web results found."
+    lines = [f"Found {len(results)} web result(s):"]
+    for r in results[:_MAX_NAMES]:
+        title = str(r.get("title") or r.get("url") or "(untitled)")
+        url = str(r.get("url") or "")
+        snippet = str(r.get("snippet") or "").strip()
+        line = f"- **{title}** — {url}" if url else f"- **{title}**"
+        if snippet:
+            line += f": {snippet}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _fmt_read_webpage(output: dict) -> str:
+    title = str(output.get("title") or "").strip()
+    url = str(output.get("url") or "")
+    head = f"Web page **{title}** — {url}" if title else f"Web page {url}"
+    content = str(output.get("content") or "").strip()
+    if not content:
+        return head + "\n(The page has no readable text.)"
+    return head + "\n" + _fence(content)
+
+
 def _fmt_lookup_contact(output: dict) -> str:
     status = output.get("status")
     if status == "resolved":
@@ -200,6 +274,7 @@ def _fmt_lookup_contact(output: dict) -> str:
 _RESULT_FORMATTERS = {
     "list_directory": _fmt_list_directory,
     "search_files": _fmt_search_files,
+    "semantic_file_search": _fmt_semantic_file_search,
     "read_file": _fmt_read_file,
     "run_command": _fmt_shell,
     "execute_script": _fmt_shell,
@@ -210,6 +285,8 @@ _RESULT_FORMATTERS = {
     "read_thread": _fmt_read_thread,
     "list_events": _fmt_calendar_events,
     "find_events": _fmt_calendar_events,
+    "web_search": _fmt_web_search,
+    "read_webpage": _fmt_read_webpage,
 }
 
 

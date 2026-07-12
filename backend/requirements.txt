@@ -26,6 +26,11 @@ qdrant-client==1.7.3
 # Local embeddings (app/memory/embedder.py — BAAI/bge-small-en-v1.5, 384 dims)
 fastembed==0.8.0
 
+# File content extraction (Phase 6 Part 2 — semantic file index: pdf + docx;
+# .txt/.md read as plain text)
+pypdf==4.3.1
+python-docx==1.1.2
+
 # Google integration (Phase 5 Part 1 — OAuth loopback flow + Gmail/Calendar clients)
 google-auth==2.35.0
 google-auth-oauthlib==1.2.1

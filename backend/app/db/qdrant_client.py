@@ -22,6 +22,8 @@ COLLECTIONS = [
     "semantic_memory",
     "contacts",
     "episodes",
+    "file_chunks",  # Phase 6 Part 2 — semantic file index (one point per doc chunk)
+    "conversation_messages",  # Phase 6 Part 4 — past-chat search (one point per message)
 ]
 
 

@@ -200,10 +200,22 @@ async def client(tmp_path_factory, monkeypatch):
     "any new emails in my inbox?",
     "check my gmail",
     "reply to that email with a yes",
+    # "mail"/"e-mail" nouns + send/reply/forward verbs (fix 2026-07-12 — these
+    # missed the gate and the message fell to plain chat, which then imitated a
+    # real approval message)
+    "now send a new mail to that same address",
+    "send jamil a mail saying i'll be late",
+    "e-mail ali the report when you can",
+    "forward that email to my manager",
     "put a meeting with jamil on my calendar tomorrow at 3",
     "what's on my calendar this week",
     "delete the standup event",
     "send jamil an invite for friday",
+    # Web domain (Phase 6 Part 1) — strong web nouns / a bare URL fire alone.
+    "search the web for the latest langgraph release",
+    "look this up online",
+    "open https://example.com and summarize it",
+    "find a good pizza recipe on the internet",
 ])
 def test_gate_fires_for_task_messages(message):
     assert looks_like_task(message) is True
@@ -270,10 +282,12 @@ async def test_unknown_verb_phrasing_reaches_the_approval_gate(client, tmp_path)
     ("TASK", "TASK"),
     ("EMAIL", "EMAIL"),
     ("CALENDAR", "CALENDAR"),
+    ("WEB", "WEB"),
     ("CHAT", "CHAT"),
     # Real models append stray text/punctuation — startswith parsing handles it.
     ("EMAIL.", "EMAIL"),
     ("calendar", "CALENDAR"),
+    ("web", "WEB"),
     ("  TASK\n", "TASK"),
 ])
 async def test_classify_message_returns_label(reply, expected):
@@ -802,11 +816,13 @@ def test_chat_prompt_carries_capabilities_and_task_outcome_honesty():
 
     prompt = _build_system_prompt()
     # Round 5: never deny access, never pretend a missed task ran
-    assert "Never claim you lack file-system, email, calendar, or computer access" in prompt
+    assert "Never claim you lack file-system, email, calendar, web, or computer access" in prompt
     assert "do NOT pretend you did it" in prompt
     # Phase 5 Part 5: email + calendar are real capabilities now
     assert "read and send email" in prompt
     assert "manage the user's Google Calendar" in prompt
+    # Phase 6 Part 1: web search is a real capability now
+    assert "search the web and read web pages" in prompt
     assert '"Email sent — …"' in prompt and '"Event created — …"' in prompt
     # Round 7: never embellish task outcomes
     assert "TASK OUTCOME HONESTY" in prompt

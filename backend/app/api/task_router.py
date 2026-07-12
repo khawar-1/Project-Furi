@@ -10,13 +10,13 @@ Detection is two-stage so normal chat pays ZERO extra cost:
    gate does not fire there is no LLM call at all: `maybe_handle_task`
    returns None and the message flows into the untouched Phase 2 chat path.
 2. LLM classification — one tiny temperature-0 call returning a routing label
-   (TASK / EMAIL / CALENDAR / CHAT, Phase 5 Part 5) that rejects gate
-   false-positives ("my brother deleted my save file" fires the gate but is
+   (TASK / EMAIL / CALENDAR / WEB / CHAT; WEB added Phase 6 Part 1) that rejects
+   gate false-positives ("my brother deleted my save file" fires the gate but is
    conversation). It judges the goal with any background-intent phrase already
    stripped — "…and remind me when you are done" would read as a reminder
-   request (CHAT) and sink the real task. All three ACTION labels feed the
-   SAME planner and the same approval gates — one execution path; the label
-   buys recall + telemetry and a seam for future per-domain handlers.
+   request (CHAT) and sink the real task. All ACTION labels feed the SAME
+   planner and the same approval gates — one execution path; the label buys
+   recall + telemetry and a seam for future per-domain handlers.
 
 Fail-open to chat: classifier says CHAT, classifier errors OR returns an
 unrecognized word, or an open disambiguation / create-contact question is
@@ -105,9 +105,17 @@ _STRONG_DOMAIN_RE = re.compile(
     # recall-first trade-off). "schedule" is deliberately NOT here: it is a
     # verb the reminder router already owns ("schedule a reminder") and it
     # collides with small talk ("reschedule my day").
-    r"\bemails?\b|\binbox\b|\bgmail\b|\bsubject\b|"
+    # "mail"/"e-mail" join "email" as strong nouns — "send a new mail to …"
+    # missed the gate and fell to plain chat, whose model then imitated a real
+    # approval message (caught by _SYSTEM_VOICE_RE, live 2026-07-12).
+    r"\be-?mails?\b|\bmails?\b|\binbox\b|\bgmail\b|\bsubject\b|"
     # Calendar domain (Phase 5, Part 5).
-    r"\bcalendar\b|\bmeetings?\b|\bevents?\b|\binvites?\b)"
+    r"\bcalendar\b|\bmeetings?\b|\bevents?\b|\binvites?\b|"
+    # Web domain (Phase 6, Part 1). Object-nouns fire the gate alone; the
+    # multi-class classifier makes the WEB/CHAT call ("I saw a website" is a
+    # false fire costing one temp-0 call). A bare URL is a strong signal.
+    r"\bweb\b|\bwebsites?\b|\bweb\s?pages?\b|\bonline\b|\binternet\b|"
+    r"\bgoogle\b|\burls?\b|https?://)"
 )
 
 # Weak signals — common in ordinary conversation (media nouns, URLs, "e.g.",
@@ -133,6 +141,10 @@ _ACTION_VERB_RE = re.compile(
     r"listing|read|reads|reading|open|opens|opened|opening|show|shows|showing|"
     r"check|checks|checking|look|"
     r"tell|tells|telling|count|counts|counted|counting|"
+    # Email verbs (Phase 5) — "send"/"reply"/"forward"/"draft" were absent, so
+    # a weak-noun email request ("send that mail", "forward it") never fired.
+    r"send|sends|sending|sent|reply|replies|replied|replying|"
+    r"forward|forwards|forwarded|forwarding|draft|drafts|drafted|drafting|"
     r"del|rm|rmdir|mkdir|mv|cp|trash|trashes|trashed|trashing)\b"
 )
 
@@ -153,28 +165,32 @@ _CLASSIFY_PROMPT = """You route messages for Jarvis OS, a personal AI that can a
 - FILES/SYSTEM: search/read/list files and folders, create/move/rename/delete files, run terminal commands and scripts.
 - EMAIL: search and read Gmail; draft, send, or reply to email.
 - CALENDAR: list/find Google Calendar events; create, update, or delete events.
+- WEB: search the web and open/read a web page to look up online information.
 
 Reply with EXACTLY one word:
 TASK — asks Jarvis to perform a FILES/SYSTEM action now.
 EMAIL — asks Jarvis to search, read, draft, send, or reply to email now.
 CALENDAR — asks Jarvis to look at or change calendar events now.
-CHAT — anything else: conversation, questions, sharing information about their life, talking ABOUT past or hypothetical actions, an answer to an earlier question, or a request none of these tools can do (web search, reminders — those are handled elsewhere).
+WEB — asks Jarvis to search the web or open/read a web page now.
+CHAT — anything else: conversation, questions Jarvis can answer from its own knowledge, sharing information about their life, talking ABOUT past or hypothetical actions, an answer to an earlier question, or a request none of these tools can do (reminders — handled elsewhere).
 
 Judge the INTENT, not the vocabulary:
 - "I sent him the files yesterday" or "my desktop is such a mess" is CHAT (mentioning files while talking), while "get rid of the txt files in that folder" is TASK even though it names no tool.
 - "I emailed him yesterday" or "my inbox is out of control" is CHAT, while "email jamil about dinner" is EMAIL even though it names no tool.
+- An instruction to SEND is EMAIL even when the text to send reads like a statement or is written on someone's behalf: "email i221538@nu.edu.pk that the report is done", "send Ali a mail saying I'll be late", and "email him that this is Furi writing on behalf of my master" are all EMAIL, not CHAT.
 - "my calendar is packed this week" is CHAT, while "put a meeting with jamil on my calendar tomorrow at 3" is CALENDAR.
+- "what do you think of vector databases?" is CHAT (answerable from knowledge), while "search the web for the latest LangGraph release" or "look up who won the match today" or "open https://example.com and summarize it" is WEB.
 Any wording that asks for one of those actions NOW gets its action label; anything else is CHAT.
 
 {context_block}USER MESSAGE:
 {message}
 
-One word (TASK, EMAIL, CALENDAR, or CHAT):"""
+One word (TASK, EMAIL, CALENDAR, WEB, or CHAT):"""
 
 # The recognized action labels. All three feed the SAME planner and the same
 # approval gates — there is one execution path. The label buys recall +
 # telemetry and is the clean seam for future per-domain handlers.
-_ACTION_LABELS = ("TASK", "EMAIL", "CALENDAR")
+_ACTION_LABELS = ("TASK", "EMAIL", "CALENDAR", "WEB")
 
 # Shown to the classifier when the conversation has earlier turns. A message
 # is part of a conversation, not an island: "its in my downloads folder" after
@@ -193,7 +209,7 @@ async def _classify_message(
     provider: LLMProvider, message: str, context: str = ""
 ) -> str:
     """One tiny temperature-0 call returning a routing label: "TASK", "EMAIL",
-    "CALENDAR", or "CHAT". Any failure — an exception OR an unrecognized reply —
+    "CALENDAR", "WEB", or "CHAT". Any failure — an exception OR an unrecognized reply —
     means CHAT (fail open): the message flows into the untouched Phase 2 chat
     path, never a broken action route."""
     context_block = (
