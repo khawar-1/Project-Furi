@@ -12,6 +12,7 @@ import type {
   Episode,
   FileIndexSettings,
   FileIndexStatus,
+  FrequentFolder,
   GoogleConnectResult,
   GoogleIntegrationStatus,
   HealthResponse,
@@ -324,6 +325,10 @@ export const indexApi = {
   /** Start a background index pass. Poll status() until `indexing` is false. */
   rebuild: (full = false): Promise<{ started: boolean; indexing: boolean }> =>
     apiFetch('/api/index/rebuild', { method: 'POST', body: JSON.stringify({ full }) }),
+
+  /** Phase 6 Part 6: the learned save/move destinations (read-only). */
+  frequentFolders: (limit = 5): Promise<{ folders: FrequentFolder[] }> =>
+    apiFetch<{ folders: FrequentFolder[] }>(`/api/index/frequent-folders?limit=${limit}`),
 };
 
 // ============================================================

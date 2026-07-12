@@ -26,6 +26,7 @@ import { indexApi, integrationsApi, settingsApi } from '@/lib/api';
 import type {
   BriefingSettings,
   FileIndexSettings,
+  FrequentFolder,
   GoogleIntegrationStatus,
 } from '@/types';
 
@@ -381,7 +382,16 @@ function FileIndexCard() {
   const [enabled, setEnabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
+  const [frequent, setFrequent] = useState<FrequentFolder[]>([]);
   const pollRef = useRef<ReturnType<typeof setTimeout>>();
+
+  // Phase 6 Part 6 — the learned save/move destinations (best-effort display).
+  const loadFrequent = useCallback(() => {
+    indexApi
+      .frequentFolders()
+      .then((r) => setFrequent(r.folders))
+      .catch(() => setFrequent([]));
+  }, []);
 
   const apply = useCallback((c: FileIndexSettings) => {
     setConfig(c);
@@ -396,8 +406,9 @@ function FileIndexCard() {
       .get()
       .then(apply)
       .catch((e) => setError(e instanceof Error ? e.message : 'Could not load settings'));
+    loadFrequent();
     return () => clearTimeout(pollRef.current);
-  }, [apply]);
+  }, [apply, loadFrequent]);
 
   const dirty =
     !!config &&
@@ -547,6 +558,33 @@ function FileIndexCard() {
               hour: '2-digit',
               minute: '2-digit',
             })}`}
+          </div>
+        )}
+
+        {frequent.length > 0 && (
+          <div className="space-y-1.5 pt-1 border-t border-surface-border/60">
+            <p className="text-[11px] uppercase tracking-wide text-slate-600 pt-2.5">
+              Folders you use most
+            </p>
+            <p className="text-[11px] text-slate-500">
+              Learned from your past file actions — Jarvis may suggest the top one when
+              you save or move a file without saying where (you still approve it).
+            </p>
+            <ul className="space-y-1">
+              {frequent.map((f) => (
+                <li
+                  key={f.folder}
+                  className="flex items-center gap-2 text-xs text-slate-400"
+                >
+                  <span className="font-mono truncate" title={f.folder}>
+                    {f.folder}
+                  </span>
+                  <span className="ml-auto flex-shrink-0 text-[10px] text-slate-600">
+                    {f.count}×
+                  </span>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 

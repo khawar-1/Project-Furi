@@ -196,8 +196,27 @@ What's complete:
   persists a chat message spelling out the teach phrase (no yes/no state machine —
   confirmation reuses the TEACH trigger), throttled once per goal via app_settings
   ("routines.offered"). API GET/POST/DELETE /api/routines + POST /{id}/run;
-  Routines panel (list/run/delete). Part 6 (File Intelligence) is NOT built.
+  Routines panel (list/run/delete).
   Details in the "Teachable routines" Architecture section below.
+- Phase 6 Part 6 (File Intelligence — the phase capstone): learns the user's
+  folder HABITS so the planner can SUGGEST a save/move destination when the goal
+  names none. app/core/file_intelligence.py aggregates the destination FOLDER of
+  every SUCCESSFUL move_file/create_file/rename_file from the ActivityLog audit
+  trail (read-only, ON DEMAND — no new table, no job, nothing that can act),
+  ranked by frequency with recency breaking ties; the tool RESULT's real path
+  (moved_to/renamed_to/created) is preferred over the requested parameter,
+  folder keys are OS-normalized, and ~/.jarvis/trash is never suggested. The
+  signal rides into the planner as a "FREQUENTLY USED FOLDERS" DATA block (the
+  planner_memory_context pattern — loaded once per run by _load_folder_signal,
+  best-effort, existing folders only) governed by new plan RULE 18: use the top
+  folder as a destination ONLY when a create/move goal names none, never
+  override a stated location, never invent one. A suggested location is still a
+  WRITE step, so it passes the SAME structural approval gate — the signal can
+  never bypass it, and web/email/memory content can never plant a folder (the
+  aggregation reads only our own file tools' audited outcomes). Read API GET
+  /api/index/frequent-folders + a read-only "Folders you use most" list in the
+  Settings FileIndexCard. NO migration, NO scheduler job. PHASE 6 COMPLETE.
+  Details in the "File Intelligence" Architecture section below.
 Current architecture rules:
 - Facts have subject: "user" | "shared" | "contact"
 - Shared facts (e.g. "Jamil and I played Tekken") save to both user and contact;
@@ -780,7 +799,7 @@ Rules, all in code:
   `StaticPool :memory:` — embed-on-write, disabled/system/empty/no-qdrant no-ops,
   incremental vs full backfill, run enable/qdrant gates, summary), `test_semantic_
   file_search.py` +4 (cross-source files+chats, ranked-together, file-refiner-
-  excludes-chats, conv formatter). Part 6 (File Intelligence) is NOT built.
+  excludes-chats, conv formatter).
 
 ### Teachable routines (Phase 6, Part 5 — procedural memory)
 The user teaches a repeatable procedure once and invokes it by name. The core
@@ -842,6 +861,46 @@ all in code:
   & RUN parse; goal capture from history; the replan-fresh-keeps-approval
   invariant via `start_task`; offer threshold/throttle/suppression),
   `test_routines_api.py` (CRUD round-trip, upsert, run starts a Task, 404).
+
+### File Intelligence (Phase 6, Part 6 — the phase capstone)
+The smallest, most heuristic Intelligence feature: Jarvis learns which folders
+the user saves/moves files into and can SUGGEST a destination when the goal
+names none ("save these notes", "organize this screenshot"). A read-only signal
+derived on demand — no new table, no scheduler job, nothing that can act.
+- **The signal** (`app/core/file_intelligence.py`, `frequent_folders`): reads
+  the ActivityLog audit trail for SUCCESSFUL `move_file` / `create_file` /
+  `rename_file` rows, extracts each one's destination FOLDER, and ranks folders
+  by use count (recency breaks ties). The tool RESULT's real final path
+  (`moved_to` / `renamed_to` / `created`) is preferred over the requested
+  parameter — move_file's `destination` may be a folder the file landed INSIDE,
+  so its parent would be wrong; the result's parent is always the true folder.
+  Folder keys are OS-normalized (`os.path.normcase(normpath())` — case-
+  insensitive on Windows; first-seen casing displayed); `~/.jarvis/trash` is
+  never suggested; `existing_only=True` (what the planner passes) drops folders
+  that no longer exist. Best-effort throughout — a query/parse failure yields [].
+- **Surfacing** (planner): the ranked folders render (`format_frequent_folders`)
+  into a `FREQUENTLY USED FOLDERS` DATA block injected into every planner prompt
+  alongside memory/conversation (`_folders_block`). Loaded ONCE per run by
+  `AgentPlanner._load_folder_signal` (called in `start`/`resume`/`answer`, cached
+  on `self._folders`, best-effort, `existing_only=True`) — zero call-site
+  plumbing, the `planner_memory_context` "compute on demand" philosophy. New plan
+  **RULE 18**: use the top folder as a destination ONLY when a create/move goal
+  names none and neither conversation nor memory says where; never override a
+  stated location, never invent a folder not in the list, ask (rule 11) when
+  there is no list. Framed as data-never-instructions like memory.
+- **The gate is untouched**: a suggested location lands on a `create_file` /
+  `move_file` step, which is a WRITE step — it pauses for signature approval
+  exactly like any other, so the learned signal can never bypass the approval
+  gate. And because the aggregation reads only our own file tools' AUDITED
+  outcomes, web/email/memory content can never plant a suggested folder.
+- **API + UI**: `GET /api/index/frequent-folders?limit=` (read-only, existing
+  folders only, `utc_iso` timestamps) exposes the same signal; the Settings
+  `FileIndexCard` shows a read-only "Folders you use most" list (folder + N×).
+- No migration, no scheduler job, no new dependency. Tests:
+  `test_file_intelligence.py` (aggregation ranking, recency tiebreak, move
+  result-vs-param folder, failed/read rows ignored, trash excluded, path
+  normalization, limit, existing-only filter, formatter, and the planner
+  surfacing/absence of the block).
 
 ### Timestamp serialization (API convention)
 The DB stores naive UTC (`utc_now()` in models.py). API serializers MUST use `utc_iso()` (models.py), never bare `.isoformat()`: a naive ISO string has no timezone marker, so the frontend's `new Date(iso)` reads it as LOCAL time and every displayed timestamp shifts by the machine's UTC offset (the "reminder set for 6 PM shows 1 PM" bug, fixed 2026-07-09). Applied to reminders, activity, tasks, chat messages, and schedule serializers. Extraction-derived date-semantics fields (`event_date`, `interaction_date`, `occurred_at` in contacts/episodes/memory) deliberately keep bare `.isoformat()` — they are calendar dates, not UTC moments, and marking them UTC would shift the displayed day.

@@ -107,6 +107,27 @@ async def put_config(update: IndexConfigUpdate, db=Depends(get_db)) -> dict:
     return await _payload(db)
 
 
+@router.get("/frequent-folders", summary="Learned save/move destinations (Phase 6 Part 6)")
+async def get_frequent_folders(limit: int = 5, db=Depends(get_db)) -> dict:
+    """The folders the user saves/moves files into most often — the same
+    read-only signal the planner uses to suggest a save location. Existing
+    folders only (a stale suggestion is worse than none)."""
+    from app.core.file_intelligence import frequent_folders
+    limit = max(1, min(limit, 20))
+    folders = await frequent_folders(db, limit=limit, existing_only=True)
+    from app.db.models import utc_iso
+    return {
+        "folders": [
+            {
+                "folder": u.folder,
+                "count": u.count,
+                "last_used": utc_iso(u.last_used),
+            }
+            for u in folders
+        ]
+    }
+
+
 @router.post("/rebuild", summary="Index the configured folders now (background)")
 async def post_rebuild(request: RebuildRequest | None = None, db=Depends(get_db)) -> dict:
     full = bool(request.full) if request else False

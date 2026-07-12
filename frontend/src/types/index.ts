@@ -385,6 +385,13 @@ export interface FileIndexSettings {
   status: FileIndexStatus;
 }
 
+/** Phase 6 Part 6 — a learned save/move destination (File Intelligence). */
+export interface FrequentFolder {
+  folder: string;
+  count: number;
+  last_used: string | null;
+}
+
 // ============================================================
 // Electron Bridge (exposed by preload.ts)
 // ============================================================
