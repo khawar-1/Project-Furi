@@ -450,6 +450,34 @@ function FileIndexCard() {
     }, 2000);
   }, []);
 
+  // The toggle persists IMMEDIATELY (the DailyBriefingCard behavior). It used
+  // to flip local state only and silently require a separate "Save changes"
+  // click — the user saw it on, it was never saved, and reopening the panel
+  // showed it off again (live bug 2026-07-13). Turning it on also starts an
+  // index build server-side, so poll the counts.
+  const toggleEnabled = async () => {
+    const next = !enabled;
+    setEnabled(next); // optimistic — apply() below settles it from the server
+    setIsBusy(true);
+    setError(null);
+    try {
+      apply(
+        await indexApi.updateConfig({
+          enabled: next,
+          folders,
+          exclusions,
+          interval_minutes: interval,
+        })
+      );
+      if (next) pollStatus();
+    } catch (e) {
+      setEnabled(!next); // revert — the server still holds the old value
+      setError(e instanceof Error ? e.message : 'Could not save');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
   const rebuild = async () => {
     setIsBusy(true);
     setError(null);
@@ -488,7 +516,7 @@ function FileIndexCard() {
           role="switch"
           aria-checked={enabled}
           disabled={isBusy || !config}
-          onClick={() => setEnabled((v) => !v)}
+          onClick={() => void toggleEnabled()}
           className={clsx(
             'relative w-10 h-5 rounded-full transition-colors flex-shrink-0 disabled:opacity-40',
             enabled ? 'bg-cyan-500/70' : 'bg-surface-2 border border-surface-border'

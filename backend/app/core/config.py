@@ -37,9 +37,20 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_MODEL: str = "anthropic/claude-3.5-sonnet"
 
+    # DeepSeek — OpenAI-compatible cloud API. Use MODEL=deepseek-chat (V3, a
+    # non-reasoning model); deepseek-reasoner (R1) would re-trigger the
+    # classifier's empty-output problem on thinking models. Driven through the
+    # shared GroqProvider base_url path (the Groq SDK is OpenAI-compatible).
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+
     # Ollama
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "llama3.2"
+    OLLAMA_MODEL: str = "qwen2.5:7b"
+    # HTTP timeout for Ollama calls — generous for a cold model load / long
+    # planner generations on a local GPU (the 120s hardcoded default was tight).
+    OLLAMA_TIMEOUT_SECONDS: int = 300
 
     # ------------------------------------------------------------------ Identity resolution / memory
     # Minimum fuzzy score for a contact-name match to count as a candidate

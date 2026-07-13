@@ -85,6 +85,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # garbage-collected mid-flight, silently cancelling the warmup.
     app.state.embedder_warmup = asyncio.create_task(_prewarm_embedder())
 
+    # Pre-warm the LLM — ONLY on Ollama. A local model cold-loads into VRAM on
+    # the first request (many seconds on a laptop GPU), so without this the
+    # first real chat/classify call absorbs that latency. Gated on provider so
+    # a cloud provider never spends quota on boot — the whole reason we moved
+    # to local. Best-effort; a 1-token chat is enough to trigger the load.
+    async def _prewarm_llm():
+        try:
+            from app.providers.base import LLMMessage
+            from app.providers.factory import create_provider
+            provider = create_provider()
+            await provider.chat([LLMMessage(role="user", content="hi")], max_tokens=1)
+            logger.info(f"✅ Ollama model '{provider.model_name}' pre-warmed and ready")
+        except Exception as e:
+            logger.warning(f"⚠️  LLM pre-warm failed (non-critical): {e}")
+
+    if settings.LLM_PROVIDER.strip().lower() == "ollama":
+        app.state.llm_warmup = asyncio.create_task(_prewarm_llm())
+
     # Phase 4: start the scheduler and rebuild timers from SQLite — jobs
     # whose run_at passed while the backend was down fire immediately (late).
     from app.core.scheduler import scheduler

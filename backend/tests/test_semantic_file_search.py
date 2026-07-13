@@ -191,13 +191,33 @@ async def test_no_vector_store_falls_back_to_filename(idx_db, monkeypatch):
 
 # ------------------------------------------------------------- empty index
 
-async def test_empty_index_note(idx_db, monkeypatch):
+async def test_empty_index_zero_matches_fails_with_recovery(idx_db, monkeypatch):
+    """Zero matches over an EMPTY index is an unavailable capability, not an
+    answer — the tool FAILS so the replan loop recovers to a search_files name
+    search instead of completing on a Settings hint (live bug 2026-07-13)."""
     # No rows seeded; fake qdrant returns nothing.
     _wire_semantic(monkeypatch, [])
     result = await _run(query="whatever")
+    assert result.success is False
+    assert "search_files" in result.error
+    assert "empty or disabled" in result.error.lower()
+
+
+async def test_empty_index_fallback_fails_with_recovery(idx_db, monkeypatch):
+    """The qdrant-None fallback over an empty ledger fails the same way."""
+    monkeypatch.setattr(semantic_file_tools, "_qdrant", lambda: None)
+    result = await _run(query="whatever")
+    assert result.success is False
+    assert "search_files" in result.error
+
+
+async def test_healthy_index_zero_matches_stays_success(idx_db, monkeypatch):
+    """A populated index with no hits is a REAL 'nothing matches' answer."""
+    await _seed(idx_db)
+    _wire_semantic(monkeypatch, [])
+    result = await _run(query="quantum knitting")
     assert result.success is True
     assert result.output["count"] == 0
-    assert "index is empty" in result.output["note"].lower()
 
 
 # ------------------------------------------------ read-level, no approval

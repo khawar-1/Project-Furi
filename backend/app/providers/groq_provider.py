@@ -21,27 +21,38 @@ class GroqProvider(LLMProvider):
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        provider_name: str = "groq",
     ) -> None:
+        # The Groq SDK speaks the OpenAI-compatible chat-completions API, so the
+        # same client drives any OpenAI-compatible endpoint (OpenRouter,
+        # DeepSeek) by overriding base_url + api_key — no separate class.
         self._api_key = api_key or settings.GROQ_API_KEY
         self._model_name = model or settings.GROQ_MODEL
+        self._provider_name = provider_name
 
         if not self._api_key:
             raise ValueError(
-                "GROQ_API_KEY is not set. "
-                "Add it to your .env file or set LLM_PROVIDER=gemini."
+                f"API key is not set for provider '{provider_name}'. "
+                "Add the matching key to your .env file, or set LLM_PROVIDER=gemini."
             )
 
         try:
             from groq import AsyncGroq
-            self._client = AsyncGroq(api_key=self._api_key)
+            self._client = (
+                AsyncGroq(api_key=self._api_key, base_url=base_url)
+                if base_url
+                else AsyncGroq(api_key=self._api_key)
+            )
         except ImportError:
             raise ImportError("groq package not installed. Run: pip install groq")
 
-        logger.info(f"Groq provider initialized: {self._model_name}")
+        logger.info(f"{provider_name} provider initialized: {self._model_name}"
+                    + (f" @ {base_url}" if base_url else ""))
 
     @property
     def provider_name(self) -> str:
-        return "groq"
+        return self._provider_name
 
     @property
     def model_name(self) -> str:

@@ -120,7 +120,7 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
         "search_files", "read_file", "list_directory",
         "move_file", "rename_file", "delete_file", "create_folder",
         "create_file", "run_command", "execute_script",
-        "recall_memory", "lookup_contact",
+        "recall_memory", "lookup_contact", "recall_actions",
         "semantic_file_search",
         "search_emails", "read_email", "read_thread",
         "create_email_draft", "send_email", "reply_email",

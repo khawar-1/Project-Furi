@@ -145,8 +145,12 @@ async def index_conversations(
         for m in batch:
             m.embedded_at = now
         stats.embedded += written
-
-    if rows:
+        # COMMIT PER BATCH, never once per pass (the file_index 2026-07-13
+        # lesson): a pass-wide transaction holds SQLite's write lock for the
+        # whole backfill, starving every concurrent chat/audit write — and one
+        # lock collision at the end used to roll back the ENTIRE pass's
+        # embedded_at cursor (this pass ran during the file build, lost the
+        # race, and 0 of 456 messages were marked embedded).
         await db.commit()
     logger.info(
         f"conversation_index pass: scanned={stats.scanned} "

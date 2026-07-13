@@ -93,6 +93,7 @@ async def put_config(update: IndexConfigUpdate, db=Depends(get_db)) -> dict:
     interval = max(FILE_INDEX_MIN_INTERVAL, min(update.interval_minutes, FILE_INDEX_MAX_INTERVAL))
     folders = tuple(f.strip() for f in update.folders if f.strip())
     exclusions = tuple(e.strip() for e in update.exclusions if e.strip())
+    was_enabled = (await get_file_index_config(db)).enabled
     await set_file_index_config(db, FileIndexConfig(
         enabled=update.enabled,
         folders=folders,
@@ -104,6 +105,14 @@ async def put_config(update: IndexConfigUpdate, db=Depends(get_db)) -> dict:
     # PUT /briefing in-request re-sync pattern).
     from app.core.reindex import sync_reindex_job
     await sync_reindex_job(db)
+    # Turning the index ON starts a build right away — the same pair /rebuild
+    # runs. Without this, enabling indexed NOTHING until the user also pressed
+    # "Index now" or the first reindex interval (hours) fired: an enabled-but-
+    # empty index, and every content search dead-ended (live bug 2026-07-13).
+    if update.enabled and not was_enabled:
+        await start_index_in_background(full=False)
+        from app.core.conversation_index import start_conversation_index_in_background
+        await start_conversation_index_in_background(full=False)
     return await _payload(db)
 
 

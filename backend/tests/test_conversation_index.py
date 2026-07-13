@@ -205,6 +205,32 @@ async def test_backfill_embeds_unembedded_only(db):
         assert m.embedded_at is not None
 
 
+async def test_backfill_commits_per_batch(db, monkeypatch):
+    """The embedded_at cursor commits per BATCH, never once per pass: a
+    pass-wide transaction held the write lock for the whole backfill AND one
+    lock collision at the end rolled back every batch's cursor (live incident
+    2026-07-13 — the pass lost the lock race to the concurrent file build and
+    0 of 456 messages were marked embedded)."""
+    monkeypatch.setattr(ci, "BATCH_SIZE", 2)
+    for i in range(5):
+        await _add(db, role="user", content=f"turn {i}")
+
+    commits = 0
+    real_commit = db.commit
+
+    async def counting_commit():
+        nonlocal commits
+        commits += 1
+        await real_commit()
+
+    monkeypatch.setattr(db, "commit", counting_commit)
+
+    fake = _FakeQdrant()
+    stats = await ci.index_conversations(db, fake, full=False, embed=_fake_embed_batch)
+    assert stats.embedded == 5
+    assert commits >= 3   # ceil(5 / batch of 2) commits, one per batch
+
+
 async def test_backfill_full_reembeds_all_turns(db):
     a = await _add(db, role="user", content="alpha", embedded=True)
     b = await _add(db, role="assistant", content="beta", embedded=True)

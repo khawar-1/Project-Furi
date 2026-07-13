@@ -150,6 +150,23 @@ _ACTION_VERB_RE = re.compile(
 )
 
 
+# Questions about Jarvis's OWN actions ("what have you done today?", "did you
+# delete anything?") often name no domain noun at all — the object is Jarvis's
+# action record, not a file. With recall_actions available they are TASK-class,
+# so a second-person action phrase is a strong signal in its own right (live
+# bug 2026-07-13: "what was the name of folder that u created?" reached the
+# classifier only because it happened to say "folder"; the chat LLM then
+# asserted a wrong folder from memory and denied the real one). Two tiers,
+# like the reminder triggers: a phrase that EMBEDS the action verb ("you
+# created", "what did you do") fires alone; a bare auxiliary ("did you …")
+# is everyday conversation ("did you know…?") and needs an action verb too.
+_OWN_ACTION_RE = re.compile(
+    r"\b(?:you|u)\s+(?:created?|deleted?|made|moved|renamed|removed|ran|sent|did)\b|"
+    r"\bwhat\s+(?:did|have)\s+(?:you|u)\s+(?:do|done)\b"
+)
+_OWN_ACTION_AUX_RE = re.compile(r"\b(?:did|have|had)\s+(?:you|u)\b")
+
+
 def looks_like_task(text: str) -> bool:
     """Deterministic pre-filter, tuned for RECALL: a strong computer-domain
     noun fires alone (any verb, any phrasing); weak signals need an action
@@ -157,23 +174,53 @@ def looks_like_task(text: str) -> bool:
     t = text.lower()
     if _STRONG_DOMAIN_RE.search(t):
         return True
+    if _OWN_ACTION_RE.search(t):
+        return True
+    if _OWN_ACTION_AUX_RE.search(t) and _ACTION_VERB_RE.search(t):
+        return True
     return bool(_ACTION_VERB_RE.search(t)) and bool(_WEAK_DOMAIN_RE.search(t))
+
+
+# A short follow-up steering an action under discussion names NO object of its
+# own ("send it", "delete them", "run it now") — the gate above can never fire
+# on it, so it fell to plain chat, whose LLM cannot act but fabricated that it
+# had ("I've started working on that in the background", live bug 2026-07-13,
+# caught by _SYSTEM_VOICE_RE). The object lives in the CONVERSATION, so the
+# recall-first rule extends there: a short message with an action verb, in a
+# conversation carrying a strong domain signal, reaches the classifier — which
+# judges it WITH that conversation (the round-9 context rule). A false fire
+# costs one temp-0 call; the word cap keeps this to genuine follow-ups (a real
+# new task names its object and fires the normal gate on its own words).
+_FOLLOWUP_MAX_WORDS = 8
+
+
+def is_action_followup(goal: str, conversation: str) -> bool:
+    """Deterministic: does this short message look like it steers a computer
+    action the conversation was just discussing?"""
+    if not conversation:
+        return False
+    words = goal.split()
+    if not words or len(words) > _FOLLOWUP_MAX_WORDS:
+        return False
+    if not _ACTION_VERB_RE.search(goal.lower()):
+        return False
+    return bool(_STRONG_DOMAIN_RE.search(conversation.lower()))
 
 
 # ======================================================== LLM confirmation
 
 _CLASSIFY_PROMPT = """You route messages for Jarvis OS, a personal AI that can act on the user's computer and accounts with exactly these tool groups:
-- FILES/SYSTEM: search/read/list files and folders, create/move/rename/delete files, run terminal commands and scripts.
+- FILES/SYSTEM: search/read/list files and folders, create/move/rename/delete files, run terminal commands and scripts, and recall Jarvis's OWN past actions from its audit log (what it created, deleted, moved, sent, or ran).
 - EMAIL: search and read Gmail; draft, send, or reply to email.
 - CALENDAR: list/find Google Calendar events; create, update, or delete events.
 - WEB: search the web and open/read a web page to look up online information.
 
 Reply with EXACTLY one word:
-TASK — asks Jarvis to perform a FILES/SYSTEM action now.
+TASK — asks Jarvis to perform a FILES/SYSTEM action now, OR asks what Jarvis ITSELF did on the machine (the folder/file it created, what it deleted, what it has done today).
 EMAIL — asks Jarvis to search, read, draft, send, or reply to email now.
 CALENDAR — asks Jarvis to look at or change calendar events now.
 WEB — asks Jarvis to search the web or open/read a web page now.
-CHAT — anything else: conversation, questions Jarvis can answer from its own knowledge, sharing information about their life, talking ABOUT past or hypothetical actions, an answer to an earlier question, or a request none of these tools can do (reminders — handled elsewhere).
+CHAT — anything else: conversation, questions Jarvis can answer from its own knowledge, sharing information about their life, talking ABOUT the user's own past or hypothetical actions, an answer to an earlier question, or a request none of these tools can do (reminders — handled elsewhere).
 
 Judge the INTENT, not the vocabulary:
 - "I sent him the files yesterday" or "my desktop is such a mess" is CHAT (mentioning files while talking), while "get rid of the txt files in that folder" is TASK even though it names no tool.
@@ -181,7 +228,8 @@ Judge the INTENT, not the vocabulary:
 - An instruction to SEND is EMAIL even when the text to send reads like a statement or is written on someone's behalf: "email i221538@nu.edu.pk that the report is done", "send Ali a mail saying I'll be late", and "email him that this is Furi writing on behalf of my master" are all EMAIL, not CHAT.
 - "my calendar is packed this week" is CHAT, while "put a meeting with jamil on my calendar tomorrow at 3" is CALENDAR.
 - "what do you think of vector databases?" is CHAT (answerable from knowledge), while "search the web for the latest LangGraph release" or "look up who won the match today" or "open https://example.com and summarize it" is WEB.
-Any wording that asks for one of those actions NOW gets its action label; anything else is CHAT.
+- A question about JARVIS'S OWN actions is TASK, not CHAT — Jarvis answers it from its action record, never from memory: "what was the name of the folder you created?", "did you delete anything today?", "who created the jarvis_test folder?" (Jarvis may have) are all TASK; "I deleted a bunch of files yesterday" is CHAT (the user talking about their own actions).
+Any wording that asks for one of those actions now — or asks about actions Jarvis itself performed — gets its action label; anything else is CHAT.
 
 {context_block}USER MESSAGE:
 {message}
@@ -201,7 +249,7 @@ _ACTION_LABELS = ("TASK", "EMAIL", "CALENDAR", "WEB")
 _CLASSIFY_CONTEXT_TEMPLATE = """RECENT CONVERSATION (context only — the user message below is the NEXT message in it):
 {context}
 
-A short follow-up that continues a computer task being discussed in that conversation — supplying a detail it was missing ("its in my downloads folder"), correcting it, or telling Jarvis to go ahead with it — is TASK. A message merely commenting on a finished task ("thanks, that worked") is CHAT.
+A short follow-up that continues an action being discussed in that conversation — supplying a detail it was missing ("its in my downloads folder"), correcting it, or telling Jarvis to go ahead with it ("send it", "yes do that") — gets that action's label (TASK, EMAIL, CALENDAR, or WEB): "send it" after an email was being discussed is EMAIL. A message merely commenting on a finished action ("thanks, that worked") is CHAT.
 
 """
 
@@ -341,7 +389,15 @@ async def maybe_handle_task(
             logger.info(f"Chat message routed as the answer to plan {plan.id}'s question")
             return _stream_answer(goal, plan, session_id, db, provider)
 
-    if not looks_like_task(goal):
+    # Built before the gate: the follow-up check reads it, and the classifier
+    # below judges the message IN its conversation either way. Pure string
+    # work — no LLM, no DB.
+    conversation = conversation_context(request)
+
+    # The gate fires on the message's own words; a short follow-up steering an
+    # action under discussion ("send it") borrows its object from the
+    # conversation instead. Either way the classifier makes the real call.
+    if not looks_like_task(goal) and not is_action_followup(goal, conversation):
         return None
 
     # Never hijack a reply to a parked question ("which jamil?" / "add daud?").
@@ -362,12 +418,6 @@ async def maybe_handle_task(
     # CHAT) — a real file task fell open to the chat path, whose LLM then
     # denied having file access (live bug, 2026-07-09).
     background, cleaned_goal = wants_background(goal)
-
-    # The classifier judges the message IN its conversation — the same view
-    # the planner gets. A follow-up steering a task ("its in my downloads
-    # folder") reads as CHAT in isolation and used to fall open to the chat
-    # LLM, which cannot act but promised to (live bug, 2026-07-10).
-    conversation = conversation_context(request)
 
     # Multi-class routing (Phase 5, Part 5): TASK / EMAIL / CALENDAR / CHAT.
     # CHAT fails open to Phase 2. The three action labels all route to the SAME

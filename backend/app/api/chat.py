@@ -153,6 +153,7 @@ CAPABILITIES:
 - You CAN act on the user's computer and accounts through a separate tool system: search/read/list files and folders, create/move/rename/delete files, run terminal commands and scripts, read and send email, manage the user's Google Calendar, search the web and read web pages, set reminders, and run long tasks in the background. Never claim you lack file-system, email, calendar, web, or computer access.
 - Action requests are detected and routed to that system BEFORE the message reaches you. If a request to act still reaches you here, it was not recognized as a task: do NOT pretend you did it and do NOT deny you can — tell the user you can do it and ask them to rephrase it as a direct instruction (e.g. "list the files in <folder>", "email Jamil about dinner", "search the web for X").
 - TASK OUTCOME HONESTY: task and background-task outcome messages in this conversation are the COMPLETE record of what was done and found. Never add, infer, or embellish results (file names, counts, contents, emails, events) beyond what those messages literally state. If an outcome message does not contain the answer the user wants, say the task did not report it and offer to run it again — never fill the gap yourself.
+- OWN-ACTION HONESTY: Jarvis's own action history lives in an audit log this conversation cannot see. Never assert or deny from memory what Jarvis itself created, deleted, moved, renamed, sent, or ran ("the folder you created", "did you delete X?") — memory holds the user's life, not Jarvis's actions, and a name found there may be stale or wrong. Say you need to check the action record and ask the user to say it as a direct question (e.g. "tell me what you created today"), which routes to that record.
 - NEVER imitate system-generated messages ("Finished the background task…", "I've started working on that in the background…", "Reminder set — …", "Done — N step(s) completed.", "Email sent — …", "Event created — …", approval prompts). Those texts are produced by the backend only, after real actions — writing them yourself is claiming actions that never happened.
 - You cannot start, queue, or schedule any action from this conversation — not a file operation, not an email send, not a calendar event. Never say you "will" perform an action, that a task "has been initiated", that an email "has been sent", that an event "has been created", or otherwise promise action — nothing you write here makes anything happen. When the user wants an action, the ONLY honest reply is to ask them to say it as one direct instruction (e.g. "delete the .txt files in the phase3test folder on my desktop", "email Jamil that I'll be late").
 
@@ -255,6 +256,25 @@ Do not save or assume anything about this person until the user answers. If the 
 """
 
     return base
+
+
+# The provider sees a WINDOW of the conversation, never the unbounded whole:
+# the frontend sends the full session history every turn, so a long chat grew
+# the prompt linearly until every reply was noticeably slow (live complaint
+# 2026-07-13). Durable long-range recall is the memory engine's job (MEMORY
+# CONTEXT + conversation search), not the raw transcript's. Oldest messages
+# are trimmed first; the latest message is always kept.
+_HISTORY_MAX_MESSAGES = 30
+_HISTORY_MAX_CHARS = 24_000
+
+
+def _provider_history(request_messages) -> list[LLMMessage]:
+    """The capped slice of the request's history that goes to the LLM."""
+    window = list(request_messages)[-_HISTORY_MAX_MESSAGES:]
+    total = sum(len(m.content or "") for m in window)
+    while len(window) > 1 and total > _HISTORY_MAX_CHARS:
+        total -= len(window.pop(0).content or "")
+    return [LLMMessage(role=m.role, content=m.content) for m in window]
 
 
 async def _persist_message(
@@ -692,8 +712,7 @@ async def chat_stream(
             ambiguous_mentions=ambiguous_mentions,
         ))
     ]
-    for msg in request.messages:
-        messages.append(LLMMessage(role=msg.role, content=msg.content))
+    messages.extend(_provider_history(request.messages))
 
     # Persist the user's message. The timestamp anchors the late-reply check:
     # any user message persisted AFTER this moment arrived while the
@@ -986,8 +1005,7 @@ async def chat(
     messages: list[LLMMessage] = [
         LLMMessage(role="system", content=_build_system_prompt(memory_context, pending_resolution))
     ]
-    for msg in request.messages:
-        messages.append(LLMMessage(role=msg.role, content=msg.content))
+    messages.extend(_provider_history(request.messages))
 
     if last_user_msg:
         await _persist_message(db, session_id, "user", last_user_msg.content)

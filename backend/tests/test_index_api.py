@@ -49,6 +49,8 @@ async def client(monkeypatch):
         yield c
     app.dependency_overrides.clear()
     await file_index.wait_for_index()
+    from app.core.conversation_index import wait_for_conversation_index
+    await wait_for_conversation_index()
     await engine.dispose()
 
 
@@ -92,6 +94,47 @@ async def test_put_config_clamps_interval(client, tmp_path):
         "enabled": True, "folders": [str(tmp_path)], "exclusions": [], "interval_minutes": 1,
     })
     assert r.json()["interval_minutes"] == file_index_min()
+
+
+async def test_enabling_kicks_an_index_pass(client, tmp_path, monkeypatch):
+    """Turning the index ON builds it right away — enabling used to index
+    NOTHING until a manual 'Index now' or the first interval fired, so every
+    content search dead-ended on an empty index (live bug 2026-07-13)."""
+    import app.api.index as index_api
+
+    file_kicks, conv_kicks = [], []
+
+    async def _fake_file_start(*, full=False):
+        file_kicks.append(full)
+        return True
+
+    async def _fake_conv_start(*, full=False):
+        conv_kicks.append(full)
+        return True
+
+    monkeypatch.setattr(index_api, "start_index_in_background", _fake_file_start)
+    monkeypatch.setattr(
+        "app.core.conversation_index.start_conversation_index_in_background",
+        _fake_conv_start,
+    )
+
+    def _put(enabled: bool):
+        return client.put("/api/index/config", json={
+            "enabled": enabled, "folders": [str(tmp_path)],
+            "exclusions": [], "interval_minutes": 360,
+        })
+
+    # disabled → enabled: kicks both passes.
+    assert (await _put(True)).status_code == 200
+    assert file_kicks == [False] and conv_kicks == [False]
+
+    # enabled → enabled (a folder edit while on): no new kick.
+    assert (await _put(True)).status_code == 200
+    assert file_kicks == [False]
+
+    # enabled → disabled: no kick.
+    assert (await _put(False)).status_code == 200
+    assert file_kicks == [False]
 
 
 async def test_rebuild_starts_background_pass(client):

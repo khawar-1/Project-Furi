@@ -228,6 +228,82 @@ def _fmt_recall_memory(output: dict) -> str:
     return "From memory: " + " | ".join(rows)
 
 
+# recall_actions rows → one readable line each. Phrases are code-derived from
+# the audited tool + parameters; for move/rename the RESULT's real final path
+# (moved_to / renamed_to) beats the requested parameter (the file_intelligence
+# rule — a move "destination" may be the folder the file landed INSIDE).
+_ACTION_LINE_KEYS = {
+    "create_folder": ("created folder", "path", None),
+    "create_file": ("created file", "path", None),
+    "delete_file": ("deleted", "path", None),
+    "move_file": ("moved", "source", "destination"),
+    "rename_file": ("renamed", "path", "new_name"),
+    "send_email": ("sent an email to", "to", "subject"),
+    "create_email_draft": ("drafted an email to", "to", "subject"),
+    "reply_email": ("replied to email", "message_id", None),
+    "create_event": ("created calendar event", "summary", None),
+    "update_event": ("updated calendar event", "event_id", None),
+    "delete_event": ("deleted calendar event", "event_id", None),
+    "run_command": ("ran command", "command", None),
+    "execute_script": ("ran script", "script_path", None),
+}
+
+
+def _action_line(row: dict) -> str:
+    tool = str(row.get("tool") or "?")
+    params = row.get("parameters") if isinstance(row.get("parameters"), dict) else {}
+    result = row.get("result")
+    result_data: dict = {}
+    if isinstance(result, str) and result.startswith("{"):
+        try:
+            parsed = json.loads(result)
+            if isinstance(parsed, dict):
+                result_data = parsed
+        except (ValueError, TypeError):
+            pass
+
+    # Local wall-clock time — the stored ISO string carries a UTC offset.
+    when = ""
+    time_str = str(row.get("time") or "")
+    if time_str:
+        try:
+            from datetime import datetime
+            when = datetime.fromisoformat(time_str).astimezone().strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            when = time_str
+
+    phrase = _ACTION_LINE_KEYS.get(tool)
+    if phrase:
+        verb, first_key, second_key = phrase
+        first = str(params.get(first_key) or "?")
+        text = f"{verb} `{first}`"
+        if tool == "move_file":
+            dest = str(result_data.get("moved_to") or params.get("destination") or "?")
+            text += f" → `{dest}`"
+        elif tool == "rename_file":
+            dest = str(result_data.get("renamed_to") or params.get("new_name") or "?")
+            text += f" → `{dest}`"
+        elif second_key and params.get(second_key):
+            text += f" — {params.get(second_key)}"
+    else:
+        text = str(row.get("action") or tool)
+
+    line = f"{when} — {text}" if when else text
+    if row.get("success") is False:
+        line += " (FAILED)"
+    return line
+
+
+def _fmt_recall_actions(output: dict) -> str:
+    actions = output.get("actions") or []
+    if not actions:
+        return "No recorded actions matched — Jarvis has not performed any matching action."
+    lines = [f"Jarvis performed {len(actions)} recorded action(s) (newest first):"]
+    for row in actions:
+        lines.append(f"- {_action_line(row)}")
+    return "\n".join(lines)
+
+
 def _fmt_search_emails(output: dict) -> str:
     emails = output.get("emails") or []
     if not emails:
@@ -342,6 +418,7 @@ _RESULT_FORMATTERS = {
     "run_command": _fmt_shell,
     "execute_script": _fmt_shell,
     "recall_memory": _fmt_recall_memory,
+    "recall_actions": _fmt_recall_actions,
     "lookup_contact": _fmt_lookup_contact,
     "search_emails": _fmt_search_emails,
     "read_email": _fmt_read_email,

@@ -187,6 +187,31 @@ async def test_point_payload_shape(db_session, qmem, tmp_path):
     assert "searchable snippet" in payload["text"]
 
 
+async def test_commits_per_file_never_one_pass_transaction(
+    db_session, qmem, tmp_path, monkeypatch
+):
+    """The SQLite write lock must be held per FILE, never for the whole pass:
+    a pass-wide transaction starved every concurrent chat/audit write for the
+    entire build (24 minutes live) and their best-effort writers DROPPED them —
+    a whole conversation vanished from history (live incident 2026-07-13)."""
+    for i in range(3):
+        (tmp_path / f"f{i}.txt").write_text(f"content {i}", encoding="utf-8")
+
+    commits = 0
+    real_commit = db_session.commit
+
+    async def counting_commit():
+        nonlocal commits
+        commits += 1
+        await real_commit()
+
+    monkeypatch.setattr(db_session, "commit", counting_commit)
+
+    stats = await _run(db_session, qmem, cfg([tmp_path]))
+    assert stats.indexed == 3
+    assert commits >= 4  # one per indexed file + the prune/final commit
+
+
 async def test_summary_reports_counts(db_session, qmem, tmp_path):
     (tmp_path / "a.txt").write_text("content", encoding="utf-8")
     await _run(db_session, qmem, cfg([tmp_path]))

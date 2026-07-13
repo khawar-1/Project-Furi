@@ -35,28 +35,34 @@ def create_provider() -> LLMProvider:
         return OllamaProvider()
 
     elif provider_name == "openrouter":
-        # OpenRouter uses the OpenAI-compatible API — implemented as Groq-style
-        # with a different base URL and API key
-        try:
-            from groq import AsyncGroq
-            import app.providers.groq_provider as groq_mod
-            # Monkey-patch for OpenRouter compatibility
-            provider = groq_mod.GroqProvider.__new__(groq_mod.GroqProvider)
-            provider._api_key = settings.OPENROUTER_API_KEY
-            provider._model_name = settings.OPENROUTER_MODEL
-            from groq import AsyncGroq
-            provider._client = AsyncGroq(
-                api_key=settings.OPENROUTER_API_KEY,
-                base_url="https://openrouter.ai/api/v1",
-            )
-            return provider
-        except Exception as e:
-            raise ValueError(f"Failed to initialize OpenRouter provider: {e}")
+        # OpenRouter is OpenAI-compatible — the httpx client that targets the
+        # standard /chat/completions path (NOT the Groq SDK, which bakes in
+        # /openai/v1 and would 404 here).
+        from app.providers.openai_compat import OpenAICompatProvider
+        return OpenAICompatProvider(
+            api_key=settings.OPENROUTER_API_KEY,
+            model=settings.OPENROUTER_MODEL,
+            base_url="https://openrouter.ai/api/v1",
+            provider_name="openrouter",
+        )
+
+    elif provider_name == "deepseek":
+        # DeepSeek is OpenAI-compatible. Use the httpx client that POSTs to
+        # {base_url}/chat/completions — the Groq SDK bakes in /openai/v1 and
+        # would 404 against DeepSeek. Use deepseek-chat (V3); deepseek-reasoner
+        # (R1) is a thinking model that would starve the classifier's 512-token cap.
+        from app.providers.openai_compat import OpenAICompatProvider
+        return OpenAICompatProvider(
+            api_key=settings.DEEPSEEK_API_KEY,
+            model=settings.DEEPSEEK_MODEL,
+            base_url=settings.DEEPSEEK_BASE_URL,
+            provider_name="deepseek",
+        )
 
     else:
         raise ValueError(
             f"Unknown LLM provider: '{provider_name}'. "
-            f"Valid options: gemini, groq, ollama, openrouter. "
+            f"Valid options: gemini, groq, ollama, openrouter, deepseek. "
             f"Check LLM_PROVIDER in your .env file."
         )
 

@@ -26,7 +26,12 @@ class OllamaProvider(LLMProvider):
     ) -> None:
         self._base_url = (base_url or settings.OLLAMA_BASE_URL).rstrip("/")
         self._model_name = model or settings.OLLAMA_MODEL
-        self._client = httpx.AsyncClient(timeout=120.0)
+        # A generous read timeout so a cold model load or a long first-token on
+        # streaming doesn't ReadTimeout; a short connect timeout still fails fast
+        # if the Ollama server isn't running.
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(settings.OLLAMA_TIMEOUT_SECONDS, connect=10.0)
+        )
         logger.info(f"Ollama provider initialized: {self._model_name} @ {self._base_url}")
 
     @property
@@ -47,11 +52,16 @@ class OllamaProvider(LLMProvider):
         max_tokens: Optional[int] = None,
     ) -> LLMResponse:
         """Non-streaming chat via Ollama /api/chat."""
+        options = {"temperature": temperature}
+        # Ollama's output cap is `num_predict`; without it a caller's max_tokens
+        # is silently ignored and the model runs to EOS.
+        if max_tokens:
+            options["num_predict"] = max_tokens
         payload = {
             "model": self._model_name,
             "messages": self._to_ollama_messages(messages),
             "stream": False,
-            "options": {"temperature": temperature},
+            "options": options,
         }
 
         response = await self._client.post(
@@ -75,11 +85,14 @@ class OllamaProvider(LLMProvider):
         max_tokens: Optional[int] = None,
     ) -> AsyncIterator[str]:
         """Streaming chat via Ollama — parses NDJSON stream."""
+        options = {"temperature": temperature}
+        if max_tokens:
+            options["num_predict"] = max_tokens
         payload = {
             "model": self._model_name,
             "messages": self._to_ollama_messages(messages),
             "stream": True,
-            "options": {"temperature": temperature},
+            "options": options,
         }
 
         async with self._client.stream(

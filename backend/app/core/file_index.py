@@ -283,6 +283,7 @@ async def index_folders(
             if row is not None and row.is_active:
                 await _clear_row(db, qdrant, row)
                 stats.removed += 1
+                await db.commit()
             else:
                 stats.skipped += 1
             continue
@@ -318,6 +319,13 @@ async def index_folders(
         stats.chunks += written
         stats.indexed += 1 if new_row else 0
         stats.updated += 0 if new_row else 1
+        # COMMIT PER FILE, never once per pass (live incident 2026-07-13): a
+        # single pass-wide transaction held SQLite's write lock for the whole
+        # 24-minute build, so every concurrent chat/audit write stalled 30s on
+        # the busy timeout and was then DROPPED by its best-effort writer — an
+        # entire conversation vanished from history. Short transactions keep
+        # the rest of Jarvis writable while a pass runs.
+        await db.commit()
 
     # Prune: active rows we did not encounter this pass are gone / de-scoped.
     active = await db.execute(select(FileIndex).where(FileIndex.is_active.is_(True)))

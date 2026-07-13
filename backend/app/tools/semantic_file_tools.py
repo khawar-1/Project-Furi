@@ -68,6 +68,21 @@ _RECENCY_WINDOW_DAYS = 30
 
 _WORD_RE = re.compile(r"[a-z0-9]{3,}")
 
+# When the index has nothing behind it, "no matches" is NOT an answer — it is
+# an unavailable capability, and completing on it dead-ends the plan (live bug
+# 2026-07-13: "find the pdf about cloud computing" with the index never built
+# returned a Settings hint as a SUCCESSFUL result, and the plan finished
+# without ever looking for the file). Failing instead drops into the replan
+# loop, and this code-authored error carries the recovery (_missing_target
+# philosophy) — the revision searches by NAME and actually finds the file.
+_EMPTY_INDEX_ERROR = (
+    "The semantic index is empty or disabled, so content search cannot see any "
+    "files yet. Search by NAME instead: use search_files with the topic words "
+    "as the query (and file_type if the user named an extension). Mention to "
+    "the user that the index can be enabled in Settings → File search index "
+    "for content-based search."
+)
+
 
 def _query_tokens(query: str) -> set[str]:
     return set(_WORD_RE.findall(query.lower()))
@@ -210,9 +225,10 @@ class SemanticFileSearchTool(BaseTool):
 
         matches = file_matches + convo_matches
         matches.sort(key=lambda m: m["score"], reverse=True)
-        return self._ok(await self._payload(
-            db, query, matches[:limit], include_conversations
-        ))
+        top = matches[:limit]
+        if not top and await self._index_is_empty(db, include_conversations):
+            return self._fail(_EMPTY_INDEX_ERROR)
+        return self._ok(self._payload(query, top))
 
     # ---------------------------------------------------------- file search
 
@@ -353,10 +369,16 @@ class SemanticFileSearchTool(BaseTool):
             matches.append(self._row_out(row, modified, score, ""))
 
         matches.sort(key=lambda m: m["score"], reverse=True)
-        payload = await self._payload(db, query, matches[:limit])
+        top = matches[:limit]
+        # An empty ledger means there is nothing to match names against either —
+        # same recovery as the semantic path (search by name with search_files).
+        if not top and await self._index_is_empty(db, include_conversations=False):
+            return self._fail(_EMPTY_INDEX_ERROR)
+        payload = self._payload(query, top)
         payload["note"] = (
-            (payload.get("note") + " ") if payload.get("note") else ""
-        ) + "Content search is unavailable (vector store offline) — matched on file names only."
+            "Content search is unavailable (vector store offline) — matched on "
+            "file names only."
+        )
         return self._ok(payload)
 
     # --------------------------------------------------------------- helpers
@@ -392,32 +414,32 @@ class SemanticFileSearchTool(BaseTool):
             "snippet": snippet,
         }
 
-    async def _payload(
-        self, db, query: str, matches: list[dict], include_conversations: bool = False
-    ) -> dict:
-        out: dict = {"query": query, "matches": matches, "count": len(matches)}
-        if not matches:
-            from app.db.models import FileIndex, Message
+    async def _index_is_empty(self, db, include_conversations: bool) -> bool:
+        """True when the index holds NOTHING searchable — no active file rows
+        and (when chats are in scope) no embedded messages. Zero matches over
+        an empty index is an unavailable capability, not an answer — the
+        caller FAILS with the recovery instruction instead of completing."""
+        from app.db.models import FileIndex, Message
 
-            active = await db.scalar(
-                select(func.count()).select_from(FileIndex).where(
-                    FileIndex.is_active.is_(True)
-                )
+        active = await db.scalar(
+            select(func.count()).select_from(FileIndex).where(
+                FileIndex.is_active.is_(True)
             )
-            embedded = 0
-            if include_conversations:
-                embedded = await db.scalar(
-                    select(func.count()).select_from(Message).where(
-                        Message.embedded_at.is_not(None)
-                    )
-                ) or 0
-            if not active and not embedded:
-                out["note"] = (
-                    "The index is empty or turned off — enable it and build the "
-                    "index in Settings before content search can find files or "
-                    "past conversations."
+        )
+        if active:
+            return False
+        if include_conversations:
+            embedded = await db.scalar(
+                select(func.count()).select_from(Message).where(
+                    Message.embedded_at.is_not(None)
                 )
-        return out
+            ) or 0
+            if embedded:
+                return False
+        return True
+
+    def _payload(self, query: str, matches: list[dict]) -> dict:
+        return {"query": query, "matches": matches, "count": len(matches)}
 
     def definition(self) -> ToolDefinition:
         return ToolDefinition(

@@ -22,6 +22,7 @@ from app.api.chat import _SYSTEM_VOICE_RE
 from app.api.task_router import (
     _classify_message,
     conversation_context,
+    is_action_followup,
     looks_like_task,
     wants_background,
 )
@@ -257,6 +258,110 @@ def test_gate_weak_signals_still_need_a_verb():
     assert looks_like_task("check out youtube.com/watch for the trailer") is True  # verb "check"
     assert looks_like_task("that video was e.g. 3.5 hours long") is False
     assert looks_like_task("i love music and videos") is False
+
+
+def test_gate_fires_on_own_action_questions():
+    # Questions about Jarvis's OWN actions name no domain noun ("what have
+    # you done today?") — the object is Jarvis's action record. Live bug
+    # 2026-07-13: "what was the name of folder that u created?" only reached
+    # the classifier because it said "folder"; the chat LLM then asserted a
+    # wrong folder from memory and denied the real jarvis_test one.
+    assert looks_like_task("what was the name of the thing u created a while ago?") is True
+    assert looks_like_task("what have you done today?") is True
+    assert looks_like_task("did you delete anything today?") is True
+    assert looks_like_task("you created something yesterday, what was it?") is True
+
+
+def test_gate_bare_did_you_still_needs_an_action_verb():
+    # "did you …" is everyday conversation — without an action verb it must
+    # not cost a classifier call.
+    assert looks_like_task("did you know giraffes only sleep 30 minutes?") is False
+    assert looks_like_task("have you heard the new album?") is False
+
+
+def test_classify_prompt_routes_own_action_questions_to_task():
+    # The classifier is TOLD that questions about Jarvis's own actions are
+    # TASK — before this, its CHAT line ("talking ABOUT past actions") made
+    # it route them to chat, which cannot see the audit log.
+    from app.api.task_router import _CLASSIFY_PROMPT
+    assert "JARVIS'S OWN actions is TASK" in _CLASSIFY_PROMPT
+    assert "audit log" in _CLASSIFY_PROMPT
+
+
+# --------------------------------------------------- short action follow-ups
+
+_EMAIL_CONVO = (
+    "user: mail anas that testing is complete\n"
+    "assistant: Here is the draft email I'll send to anas@example.com — "
+    "subject: Testing complete."
+)
+
+
+def test_followup_fires_for_short_steer_with_domain_conversation():
+    # "send it" names no object of its own — the object lives in the
+    # conversation (live bug 2026-07-13: it fell to plain chat, which
+    # fabricated "I've started working on that in the background").
+    assert is_action_followup("send it", _EMAIL_CONVO) is True
+    assert is_action_followup("delete them", "assistant: found 3 files on your desktop") is True
+    assert is_action_followup("yes, send it now please", _EMAIL_CONVO) is True
+
+
+def test_followup_needs_a_conversation_with_a_domain_signal():
+    assert is_action_followup("send it", "") is False
+    assert is_action_followup("send it", "user: how are you\nassistant: great!") is False
+
+
+def test_followup_needs_an_action_verb():
+    assert is_action_followup("thanks, that worked", _EMAIL_CONVO) is False
+    assert is_action_followup("nice", _EMAIL_CONVO) is False
+
+
+def test_followup_ignores_long_messages():
+    # A real new task names its object and fires the normal gate on its own
+    # words — nine-plus words is not a follow-up steer.
+    long_msg = "please send my warmest regards to everyone attending the party tonight"
+    assert is_action_followup(long_msg, _EMAIL_CONVO) is False
+
+
+async def test_followup_send_it_reaches_the_classifier(client):
+    """End to end: 'send it' after an email-flavored conversation reaches the
+    classifier (which judges it WITH that conversation) instead of falling
+    open to the chat path unheard (live bug 2026-07-13)."""
+    provider = use_provider(responses=["CHAT"], streams=["Okay."])
+    response = await client.post(
+        "/chat/stream",
+        json={
+            "messages": [
+                {"role": "user", "content": "mail anas that testing is complete"},
+                {"role": "assistant", "content": "Here is the draft email I'll send."},
+                {"role": "user", "content": "send it"},
+            ],
+            "session_id": "s-followup-send-it",
+        },
+    )
+    assert response.status_code == 200
+    assert provider.chat_calls == 1  # the classifier saw it
+    assert "RECENT CONVERSATION" in provider.prompts[0]
+    assert "send it" in provider.prompts[0]
+
+
+async def test_followup_without_domain_conversation_never_costs_a_call(client):
+    """'send it' in a conversation that never mentioned an actionable domain
+    stays on the zero-cost chat path — the gate economics are preserved."""
+    provider = use_provider(streams=["Send what?"])
+    response = await client.post(
+        "/chat/stream",
+        json={
+            "messages": [
+                {"role": "user", "content": "i had a great day"},
+                {"role": "assistant", "content": "Glad to hear it!"},
+                {"role": "user", "content": "send it"},
+            ],
+            "session_id": "s-followup-no-domain",
+        },
+    )
+    assert response.status_code == 200
+    assert provider.chat_calls == 0
 
 
 async def test_unknown_verb_phrasing_reaches_the_approval_gate(client, tmp_path):
