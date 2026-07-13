@@ -185,6 +185,32 @@ async def embed_message_best_effort(db: AsyncSession, message: Message) -> bool:
         return False
 
 
+def schedule_message_embed(message_id: str) -> None:
+    """Fire-and-forget embed of ONE freshly-persisted message, OFF the chat
+    turn's critical path (latency, 2026-07-13: the on-write embed + vector
+    upsert used to be awaited in chat._persist_message BEFORE the SSE stream
+    started). Opens its OWN session — the request session closes when the
+    response ends and must never be handed to a detached task. Never raises;
+    anything skipped here (no loop, embed failure) is picked up by the
+    reindex pass's backfill, exactly like the other message writers."""
+    async def _embed_one() -> None:
+        try:
+            factory = _session_factory()
+            async with factory() as db:
+                msg = await db.get(Message, message_id)
+                if msg is not None:
+                    await embed_message_best_effort(db, msg)
+        except Exception as e:
+            logger.debug(f"conversation_index: deferred on-write embed skipped ({e})")
+
+    try:
+        task = asyncio.create_task(_embed_one())
+        _RUNNING.add(task)  # referenced like every detached task; awaited by
+        task.add_done_callback(_RUNNING.discard)  # wait_for_conversation_index
+    except RuntimeError:
+        pass  # no running loop — backfill covers it
+
+
 # ------------------------------------------------------- runner + status
 
 async def run_conversation_index(*, full: bool = False) -> ConversationIndexStats:

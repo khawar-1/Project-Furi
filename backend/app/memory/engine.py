@@ -1592,9 +1592,12 @@ class MemoryEngine:
     # ==============================================================
 
     async def search_semantic_memory(
-        self, query: str, limit: int = 5
+        self, query: str, limit: int = 5,
+        vector: Optional[list[float]] = None,
     ) -> list[SemanticMemory]:
-        """Vector similarity search over semantic memories."""
+        """Vector similarity search over semantic memories. A precomputed
+        `vector` for the query skips the embed (retrieve_context embeds the
+        turn text ONCE and shares it across all three vector searches)."""
         if not self.qdrant:
             # Fallback: return recent memories
             result = await self.db.execute(
@@ -1606,7 +1609,8 @@ class MemoryEngine:
             return list(result.scalars().all())
 
         try:
-            vector = await embed_text(query)
+            if vector is None:
+                vector = await embed_text(query)
             search_result = await self.qdrant.search(
                 collection_name="semantic_memory",
                 query_vector=vector,
@@ -1628,8 +1632,11 @@ class MemoryEngine:
             logger.warning(f"Semantic memory search failed: {e}")
             return []
 
-    async def find_contact(self, name: str) -> list[Contact]:
-        """Fuzzy contact search by name via Qdrant similarity."""
+    async def find_contact(
+        self, name: str, vector: Optional[list[float]] = None
+    ) -> list[Contact]:
+        """Fuzzy contact search by name via Qdrant similarity. A precomputed
+        `vector` for `name` skips the embed (shared-turn-embed path)."""
         if not self.qdrant:
             result = await self.db.execute(
                 select(Contact).where(
@@ -1640,7 +1647,8 @@ class MemoryEngine:
             return list(result.scalars().all())
 
         try:
-            vector = await embed_text(name)
+            if vector is None:
+                vector = await embed_text(name)
             search_result = await self.qdrant.search(
                 collection_name="contacts",
                 query_vector=vector,
@@ -1678,8 +1686,12 @@ class MemoryEngine:
         )
         return list(result.scalars().all())
 
-    async def search_episodes(self, query: str, limit: int = 5) -> list[Episode]:
-        """Vector similarity search for episodes."""
+    async def search_episodes(
+        self, query: str, limit: int = 5,
+        vector: Optional[list[float]] = None,
+    ) -> list[Episode]:
+        """Vector similarity search for episodes. A precomputed `vector` for
+        the query skips the embed (shared-turn-embed path)."""
         if not self.qdrant:
             result = await self.db.execute(
                 select(Episode).order_by(desc(Episode.created_at)).limit(limit)
@@ -1687,7 +1699,8 @@ class MemoryEngine:
             return list(result.scalars().all())
 
         try:
-            vector = await embed_text(query)
+            if vector is None:
+                vector = await embed_text(query)
             search_result = await self.qdrant.search(
                 collection_name="episodes",
                 query_vector=vector,
@@ -1798,15 +1811,28 @@ class MemoryEngine:
         # 0. UserProfile (Phase 2.5)
         profile = await self.get_user_profile()
 
+        # Embed the turn text ONCE and share the vector across all three
+        # vector searches below — they all query with `user_message`, and each
+        # embed is its own thread-pool round trip (latency, 2026-07-13).
+        # Best-effort: on failure the searches embed for themselves as before.
+        query_vector: Optional[list[float]] = None
+        if self.qdrant:
+            try:
+                query_vector = await embed_text(user_message)
+            except Exception as e:
+                logger.warning(f"Shared turn embed failed (per-search fallback): {e}")
+
         # 1. Semantic memories
-        memories = await self.search_semantic_memory(user_message, limit=5)
+        memories = await self.search_semantic_memory(
+            user_message, limit=5, vector=query_vector
+        )
 
         # 2. Known people (lexical and semantic filtering).
         # Name-mention scanning runs on the CURRENT message only.
         all_contacts = await self.get_all_contacts()
         scan_text = current_message if current_message is not None else user_message
         lexical_contacts, ambiguous_mentions = self._scan_message_names(scan_text, all_contacts)
-        semantic_contacts = await self.find_contact(user_message)
+        semantic_contacts = await self.find_contact(user_message, vector=query_vector)
 
         # Merge lexical and semantic matches uniquely; ambiguous candidates are
         # included for display so the LLM can list them, but never as resolved.
@@ -1836,7 +1862,9 @@ class MemoryEngine:
         prefs = await self.get_preferences()
 
         # 4. Relevant past episodes
-        episodes = await self.search_episodes(user_message, limit=3)
+        episodes = await self.search_episodes(
+            user_message, limit=3, vector=query_vector
+        )
 
         return RetrievedContext(
             resolved_entities=resolved_entities,
@@ -1892,6 +1920,19 @@ class MemoryEngine:
                 if len(bundle.resolved_entities) == 1:
                     focus_id = bundle.resolved_entities[0].id
 
+            # ONE facts query for all contacts in the bundle (was one query
+            # per contact — N+1, latency 2026-07-13). The global
+            # interaction_date ordering preserves each contact's own order,
+            # so the rendered block is identical to the per-contact queries.
+            facts_result = await self.db.execute(
+                select(ContactInteraction)
+                .where(ContactInteraction.contact_id.in_([c.id for c in bundle.contacts]))
+                .order_by(ContactInteraction.interaction_date.asc())
+            )
+            facts_by_contact: dict[str, list[ContactInteraction]] = {}
+            for f in facts_result.scalars().all():
+                facts_by_contact.setdefault(f.contact_id, []).append(f)
+
             people_lines = []
             for c in bundle.contacts:
                 rel = c.relationship_type or "contact"
@@ -1929,14 +1970,8 @@ class MemoryEngine:
                     marker = ""
 
                 line = f"- {c.name} ({rel.title()}){marker}{details_str} — {last}"
-                
-                # Fetch facts (interactions)
-                result = await self.db.execute(
-                    select(ContactInteraction)
-                    .where(ContactInteraction.contact_id == c.id)
-                    .order_by(ContactInteraction.interaction_date.asc())
-                )
-                facts = result.scalars().all()
+
+                facts = facts_by_contact.get(c.id, [])
                 if facts:
                     # event_date is when it happened; interaction_date is only when it was recorded
                     fact_lines = [

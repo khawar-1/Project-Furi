@@ -103,6 +103,7 @@ import os
 import platform
 import re
 import string
+import time
 from datetime import datetime
 from email.utils import parseaddr
 from pathlib import Path, PurePath
@@ -1187,6 +1188,7 @@ class AgentPlanner:
 
     async def _plan_node(self, state: AgentState) -> dict:
         plan = state["plan"]
+        _t0 = time.perf_counter()
         steps, reason, question, error = await self._generate_steps(
             _build_plan_prompt(plan.goal, self.conversation, self.memory, self._folders),
             allow_empty=False,
@@ -1206,13 +1208,31 @@ class AgentPlanner:
             plan.message = reason
         else:
             plan.steps = steps or []
-            logger.info(f"Plan drafted for goal '{plan.goal[:60]}': {len(plan.steps)} step(s)")
+            logger.info(
+                f"Plan drafted for goal '{plan.goal[:60]}': {len(plan.steps)} "
+                f"step(s) in {(time.perf_counter() - _t0) * 1000:.0f}ms"
+            )
         return {"plan": plan}
 
     async def _reflect_node(self, state: AgentState) -> dict:
         """Self-review. Best-effort: an invalid reflection keeps the draft.
         Reflection is a review pass — a question from it is ignored too."""
         plan = state["plan"]
+        # Latency: an all-READ draft skips the reflection LLM round trip
+        # entirely (2026-07-13). Reflection is a quality pass, and a weak
+        # read-only draft can't touch anything — a failed read lands in the
+        # existing revise loop. Every structural validator already ran on the
+        # draft in _generate_steps, and any plan with a WRITE/DESTRUCTIVE step
+        # keeps its full reflection round; permission levels come from the
+        # tool registry, never the LLM, so this gate can't be steered.
+        if plan.steps and all(
+            s.permission_level == PermissionLevel.READ for s in plan.steps
+        ):
+            logger.info(
+                f"Reflection skipped: all {len(plan.steps)} drafted step(s) are read-level"
+            )
+            return {"plan": plan}
+        _t0 = time.perf_counter()
         steps, reason, question, error = await self._generate_steps(
             _build_reflect_prompt(plan, self.conversation, self.memory, self._folders),
             allow_empty=False,
@@ -1221,9 +1241,15 @@ class AgentPlanner:
             recipient_grounding=_recipient_grounding(plan, self.conversation),
             event_ids=_event_id_grounding(plan),
         )
+        _ms = (time.perf_counter() - _t0) * 1000
         if steps:
             if len(steps) != len(plan.steps):
-                logger.info(f"Reflection revised the plan: {len(plan.steps)} → {len(steps)} step(s)")
+                logger.info(
+                    f"Reflection revised the plan: {len(plan.steps)} → "
+                    f"{len(steps)} step(s) in {_ms:.0f}ms"
+                )
+            else:
+                logger.info(f"Reflection kept the plan ({_ms:.0f}ms)")
             plan.steps = steps
         else:
             logger.warning(
@@ -1370,7 +1396,25 @@ class AgentPlanner:
                 break
 
         if pause is None and plan.status != PlanStatus.CANCELLED:
-            plan.status = PlanStatus.COMPLETED
+            # COMPLETED requires that something actually ran: at least one
+            # step finished (or was visibly SKIPPED as a zero-match outcome).
+            # A plan whose step list emptied out without ever executing
+            # anything FAILS honestly — the structural backstop behind the
+            # allow_empty gate in _revise_node (live bug 2026-07-13: a 0-step
+            # plan reported COMPLETED and the summary LLM invented results
+            # for it).
+            if any(
+                s.status in (StepStatus.COMPLETED, StepStatus.SKIPPED)
+                for s in plan.steps
+            ):
+                plan.status = PlanStatus.COMPLETED
+            else:
+                plan.status = PlanStatus.FAILED
+                plan.message = plan.message or (
+                    "I couldn't turn this into a runnable plan — no step was "
+                    "ever executed, so nothing was done. Please rephrase the "
+                    "request (exact paths help)."
+                )
         return {"plan": plan, "pause_reason": pause}
 
     async def _revise_node(self, state: AgentState) -> dict:
@@ -1426,9 +1470,18 @@ class AgentPlanner:
             for s in plan.steps
             if s.status == StepStatus.FAILED and s.result is not None
         }
+        _t0 = time.perf_counter()
         steps, reason, question, error = await self._generate_steps(
             _build_revise_prompt(plan, failed_step, self.conversation, self.memory, self._folders),
-            allow_empty=True,
+            # An empty revision means "the executed results already accomplish
+            # the goal" — only possible when something actually produced
+            # results. With nothing completed it is rejected like invalid JSON
+            # (live bug 2026-07-13: a post-answer revise returned [] on a plan
+            # with ZERO executed steps and the plan 'completed' doing nothing).
+            allow_empty=any(
+                s.status in (StepStatus.COMPLETED, StepStatus.SKIPPED)
+                for s in plan.steps
+            ),
             failed_signatures=failed_signatures,
             goal=plan.goal,
             # At revise time the executed results are the user-visible world:
@@ -1522,7 +1575,7 @@ class AgentPlanner:
         plan.status = PlanStatus.EXECUTING
         logger.info(
             f"Plan revised ({'replan' if is_failure else 'refine'}): "
-            f"{len(steps)} remaining step(s)"
+            f"{len(steps)} remaining step(s) in {(time.perf_counter() - _t0) * 1000:.0f}ms"
         )
         return {
             "plan": plan, "revised": True,
@@ -1613,7 +1666,12 @@ class AgentPlanner:
                 elif not draft.steps:
                     if allow_empty:
                         return [], None, None, None
-                    error = "the plan contains no steps and no unachievable_reason"
+                    error = (
+                        "the plan contains no steps and no unachievable_reason "
+                        "— nothing has produced results yet, so an empty plan "
+                        "cannot have accomplished the goal. Return the steps "
+                        "that do the work"
+                    )
                 else:
                     steps, error = self._draft_to_steps(draft)
                     if steps is not None:
@@ -1653,8 +1711,27 @@ class AgentPlanner:
         ones are dropped; when EVERY option is invented, the first attempt is
         rejected outright (retry feedback pushes the model to search instead),
         and the second attempt keeps the question but strips the fake options
-        — an honest free-form question beats fabricated clickable 'facts'."""
+        — an honest free-form question beats fabricated clickable 'facts'.
+        A question carrying the planner's own 'PENDING:' placeholder syntax is
+        rejected on EVERY attempt (live bug 2026-07-13: the draft asked 'Which
+        pdf file is the largest?' with the lone option 'PENDING: largest pdf
+        file path' — the model asking the USER to compute the plan's own
+        answer; the click fed an empty revision and the plan 'completed'
+        having done nothing)."""
         options = list(qdraft.options)
+        if _PLACEHOLDER_MARK in (qdraft.text or "") or any(
+            _PLACEHOLDER_MARK in o for o in options
+        ):
+            return None, (
+                '"PENDING: ..." placeholders belong in STEP PARAMETERS, never '
+                "in a clarifying question or its options. A question may only "
+                "ask for something the USER knows; anything the machine can "
+                "determine (which file is largest, how many, where something "
+                "is) must be answered by STEPS instead — search_files/"
+                "list_directory produce the data, and aggregate answers "
+                "(largest/smallest/newest/how many/total size) are read from "
+                "those step results."
+            )
         dead = [o for o in options if _option_is_dead_path(o)]
         if dead and len(dead) == len(options) and attempt == 1:
             return None, (

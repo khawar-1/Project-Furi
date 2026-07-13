@@ -41,8 +41,16 @@ async def stream_completed_summary(provider: LLMProvider, plan: AgentPlan):
     the deterministic text if the LLM stream fails before producing anything.
     The step results are handed over as code-rendered readable text
     (steps_for_summary), NEVER raw JSON — the LLM cannot paste JSON it never
-    received (live display bug, 2026-07-10)."""
-    prompt = SUMMARY_PROMPT.format(goal=plan.goal, steps=steps_for_summary(plan))
+    received (live display bug, 2026-07-10). A plan with NOTHING rendered to
+    report (no completed step produced output — e.g. every step was a
+    zero-match SKIP) never reaches the LLM at all: asking a model to 'report
+    the outcome' of an empty record invites invention (live bug 2026-07-13:
+    it fabricated file1/2/3.pdf for a 0-step plan)."""
+    rendered = steps_for_summary(plan)
+    if not rendered.strip():
+        yield deterministic_plan_text(plan)
+        return
+    prompt = SUMMARY_PROMPT.format(goal=plan.goal, steps=rendered)
     produced = False
     try:
         async for delta in provider.stream_chat(

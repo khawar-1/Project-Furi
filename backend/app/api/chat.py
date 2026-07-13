@@ -274,13 +274,15 @@ async def _persist_message(
     )
     if msg is None:
         return
-    # Phase 6 Part 4 — index this turn for content search right away, so a
-    # just-said message is findable now via semantic_file_search. No-op unless
-    # the index is enabled (same privacy toggle as files); never raises. Other
-    # message-writers (tasks, reminders, briefings) are swept by the reindex
-    # pass's backfill instead.
-    from app.core.conversation_index import embed_message_best_effort
-    await embed_message_best_effort(db, msg)
+    # Phase 6 Part 4 — index this turn for content search, so a just-said
+    # message is findable via semantic_file_search. Scheduled as a DETACHED
+    # task with its own session (latency, 2026-07-13: awaiting the embed +
+    # vector upsert here delayed the first streamed token every turn). No-op
+    # unless the index is enabled (same privacy toggle as files); never
+    # raises; anything missed is swept by the reindex pass's backfill, like
+    # the other message writers (tasks, reminders, briefings).
+    from app.core.conversation_index import schedule_message_embed
+    schedule_message_embed(msg.id)
 
 
 @router.post("/stream", summary="Streaming chat completion (SSE)")
@@ -298,11 +300,17 @@ async def chat_stream(
     """
     session_id = request.session_id or str(uuid.uuid4())
 
+    # Per-stage latency observability (2026-07-13, "Jarvis feels slow"): one
+    # summary INFO line per turn. Best-effort by construction — see timing.py.
+    from app.core.timing import TurnTimer
+    timer = TurnTimer("chat turn", session_id)
+
     # --- Phase 3.5: resurrect a cold session's parked questions from SQLite
     # BEFORE anything peeks at the session — the task gate below defers to an
     # open memory question, so it must see a restored one too.
     from app.memory.session_persistence import restore_pending_state, save_pending_state
-    await restore_pending_state(db, session_id)
+    with timer.stage("restore"):
+        await restore_pending_state(db, session_id)
 
     # --- Phase 4 Part 4: reminder detection (app/api/reminder_router.py).
     # Runs BEFORE task routing — "remind me to delete my temp files at 6" is
@@ -310,8 +318,10 @@ async def chat_stream(
     # response for a recognized reminder trigger (clean or ambiguous alike);
     # None falls through unchanged to task routing then Phase 2 chat.
     from app.api.reminder_router import maybe_handle_reminder
-    reminder_response = await maybe_handle_reminder(request=request, session_id=session_id, db=db)
+    with timer.stage("reminder_route"):
+        reminder_response = await maybe_handle_reminder(request=request, session_id=session_id, db=db)
     if reminder_response is not None:
+        timer.log()
         return reminder_response
 
     # --- Phase 6 Part 5: routine routing (app/api/routine_router.py). Runs
@@ -320,21 +330,26 @@ async def chat_stream(
     # TEACH is deterministic (no planner); RUN starts a background Task, so the
     # approval gate and path guards re-apply on the fresh plan automatically.
     from app.api.routine_router import maybe_handle_routine
-    routine_response = await maybe_handle_routine(
-        request=request, session_id=session_id, db=db, provider=provider
-    )
+    with timer.stage("routine_route"):
+        routine_response = await maybe_handle_routine(
+            request=request, session_id=session_id, db=db, provider=provider
+        )
     if routine_response is not None:
+        timer.log()
         return routine_response
 
     # --- Phase 3: task-request routing (app/api/task_router.py). Returns a
     # response ONLY for confirmed task requests; None (the overwhelmingly
     # common case — the deterministic gate makes no LLM call) continues into
-    # the Phase 2 path below, which is untouched.
+    # the Phase 2 path below, which is untouched. When the gate fires, this
+    # stage's duration is dominated by the classify∥memory gather.
     from app.api.task_router import maybe_handle_task
-    task_response = await maybe_handle_task(
-        request=request, session_id=session_id, db=db, provider=provider
-    )
+    with timer.stage("task_route"):
+        task_response = await maybe_handle_task(
+            request=request, session_id=session_id, db=db, provider=provider
+        )
     if task_response is not None:
+        timer.log()
         return task_response
 
     # --- Phase 2: Build memory context and update state
@@ -352,6 +367,7 @@ async def chat_stream(
     ambiguous_mentions = []
     disambiguation_resolved_note = None  # Injected into system prompt when resolved
 
+    timer.start("context")  # retrieve + disambiguation + format + snapshot
     if recent_user_text:
         try:
             bundle = await memory_engine.retrieve_context(
@@ -666,6 +682,7 @@ async def chat_stream(
         # Phase 3.5: snapshot the pending state as it now stands (consumed,
         # re-parked, or unchanged) so a restart never loses an open question.
         await save_pending_state(db, session_id)
+    timer.stop("context")
 
     # Build message history with memory-enhanced system prompt
     messages: list[LLMMessage] = [
@@ -685,7 +702,8 @@ async def chat_stream(
     last_user_msg = user_msgs[-1] if user_msgs else None
     user_msg_persisted_at = None
     if last_user_msg:
-        await _persist_message(db, session_id, "user", last_user_msg)
+        with timer.stage("persist"):
+            await _persist_message(db, session_id, "user", last_user_msg)
         user_msg_persisted_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     async def event_generator():
@@ -695,6 +713,8 @@ async def chat_stream(
 
         try:
             async for delta in provider.stream_chat(messages):
+                if not full_response:
+                    timer.mark("ttft")  # request start → first model delta
                 full_response.append(delta)
                 chunk = StreamChunk(
                     delta=delta,
@@ -726,6 +746,7 @@ async def chat_stream(
                 session_id=session_id,
             )
             yield f"data: {error_chunk.model_dump_json()}\n\n"
+            timer.log()
             return
 
         if impersonation:
@@ -748,6 +769,7 @@ async def chat_stream(
             provider=provider.provider_name,
         )
         yield f"data: {done_chunk.model_dump_json()}\n\n"
+        timer.log()
 
         # Persist the complete assistant response
         complete_response = "".join(full_response)

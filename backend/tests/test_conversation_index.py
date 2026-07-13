@@ -156,6 +156,36 @@ async def test_embed_on_write_noop_without_qdrant(db, monkeypatch):
     assert msg.embedded_at is None
 
 
+async def test_schedule_message_embed_runs_detached(db, factory, monkeypatch):
+    """The chat hook (latency 2026-07-13): _persist_message no longer awaits
+    the embed — schedule_message_embed runs it as a detached task with its
+    OWN session and the same guards/cursor semantics."""
+    await _enable(db)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(ci, "get_qdrant_client", lambda: fake)
+    monkeypatch.setattr(ci, "embed_text", _fake_embed_text)
+
+    msg = await _add(db, role="assistant", content="deferred embed works")
+    ci.schedule_message_embed(msg.id)          # returns immediately
+    await ci.wait_for_conversation_index()     # drain the detached task
+
+    assert fake.point_ids == [msg.id]
+    async with factory() as check:
+        fresh = await check.get(Message, msg.id)
+        assert fresh.embedded_at is not None   # cursor stamped by the task
+
+
+async def test_schedule_message_embed_missing_row_is_noop(db, monkeypatch):
+    await _enable(db)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(ci, "get_qdrant_client", lambda: fake)
+    monkeypatch.setattr(ci, "embed_text", _fake_embed_text)
+
+    ci.schedule_message_embed("no-such-message-id")
+    await ci.wait_for_conversation_index()
+    assert fake.upserts == []
+
+
 # ============================================================ backfill
 
 async def test_backfill_embeds_unembedded_only(db):

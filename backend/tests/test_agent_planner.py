@@ -112,7 +112,7 @@ def test_action_detail_is_code_derived_never_llm():
 async def test_read_only_plan_runs_to_completion(db_session, tmp_path):
     (tmp_path / "a.txt").write_text("x")
     steps = [step("List the files", "list_directory", path=str(tmp_path))]
-    provider = FakeProvider([plan_json(steps), plan_json(steps)])  # plan, reflect
+    provider = FakeProvider([plan_json(steps)])  # plan only
 
     planner = AgentPlanner(db_session, provider, session_id="s-read")
     plan = await planner.start("list my files")
@@ -120,7 +120,10 @@ async def test_read_only_plan_runs_to_completion(db_session, tmp_path):
     assert plan.status == PlanStatus.COMPLETED
     assert plan.steps[0].status == StepStatus.COMPLETED
     assert plan.steps[0].result.output["count"] == 1
-    assert provider.calls == 2  # plan + reflect, no refine needed
+    # ONE call: the reflection round trip is skipped for an all-READ draft
+    # (latency, 2026-07-13) — write plans still reflect, see
+    # test_write_step_pauses_before_executing_anything (calls == 2).
+    assert provider.calls == 1
 
 
 async def test_empty_goal_fails_without_llm_calls(db_session):
@@ -277,25 +280,30 @@ async def test_search_with_no_matches_skips_the_template_honestly(db_session, tm
 async def test_unknown_tool_fed_back_and_corrected(db_session, tmp_path):
     bad = [step("Wave the wand", "magic_wand", spell="ls")]
     good = [step("List files", "list_directory", path=str(tmp_path))]
-    provider = FakeProvider([plan_json(bad), plan_json(good), plan_json(good)])
+    provider = FakeProvider([plan_json(bad), plan_json(good)])
 
     plan = await AgentPlanner(db_session, provider).start("list my files")
 
     assert plan.status == PlanStatus.COMPLETED
-    assert provider.calls == 3  # plan (invalid), plan retry, reflect
+    assert provider.calls == 2  # plan (invalid), plan retry; all-READ → no reflect
 
 
 async def test_broken_reflection_keeps_draft_plan(db_session, tmp_path):
-    steps = [step("List files", "list_directory", path=str(tmp_path))]
+    # A WRITE step, so the reflection round actually runs (all-READ drafts
+    # skip it since 2026-07-13) — this test is about reflection resilience.
+    target = tmp_path / "notes.txt"
+    steps = [step("Create notes.txt", "create_file", path=str(target), content="hi")]
     provider = FakeProvider([
         plan_json(steps),
         "this is not json at all",  # reflect attempt 1
         "still not json",           # reflect retry
     ])
 
-    plan = await AgentPlanner(db_session, provider).start("list my files")
+    plan = await AgentPlanner(db_session, provider).start("create notes.txt")
 
-    assert plan.status == PlanStatus.COMPLETED  # draft survived
+    # Draft survived the broken reflection and paused for its approval
+    assert plan.status == PlanStatus.AWAITING_APPROVAL
+    assert plan.pending_steps()[0].parameters["path"] == str(target)
     assert provider.calls == 3
 
 
@@ -388,15 +396,14 @@ async def test_revision_repeating_failed_step_rejected_structurally(db_session, 
     fixed = [step("List the folder instead", "list_directory", path=str(folder))]
 
     provider = FakeProvider([
-        plan_json(doomed),  # plan
-        plan_json(doomed),  # reflect (no failures yet — repeats are fine here)
+        plan_json(doomed),  # plan (all-READ → no reflect round)
         plan_json(doomed),  # revise attempt 1 — verbatim repeat → rejected in code
         plan_json(fixed),   # revise attempt 2 — corrected after the feedback
     ])
     plan = await AgentPlanner(db_session, provider).start("read ghost.txt")
 
     assert plan.status == PlanStatus.COMPLETED
-    assert provider.calls == 4
+    assert provider.calls == 3
     failed = [s for s in plan.steps if s.status == StepStatus.FAILED]
     assert len(failed) == 1  # the repeat never executed a second time
 
@@ -560,18 +567,20 @@ async def test_path_guard_allows_paths_created_by_earlier_steps(db_session, tmp_
 
 
 async def test_conversation_context_reaches_every_planner_prompt(db_session, tmp_path):
-    (tmp_path / "a.txt").write_text("x")
-    steps = [step("List the files", "list_directory", path=str(tmp_path))]
+    # A WRITE step keeps the reflect round alive (all-READ drafts skip it,
+    # 2026-07-13) — this test must see the context in BOTH prompt kinds.
+    steps = [step("Create a note", "create_file",
+                  path=str(tmp_path / "note.txt"), content="hi")]
     provider = FakeProvider([plan_json(steps), plan_json(steps)])
     convo = (
         f"user: where is my stuff?\nassistant: Your files are in {tmp_path}."
     )
 
     plan = await AgentPlanner(db_session, provider, conversation=convo).start(
-        "list the files in that folder"
+        "save a note in that folder"
     )
 
-    assert plan.status == PlanStatus.COMPLETED
+    assert plan.status == PlanStatus.AWAITING_APPROVAL
     assert len(provider.prompts) == 2  # plan + reflect
     for prompt in provider.prompts:
         assert "RECENT CONVERSATION" in prompt
@@ -791,7 +800,6 @@ async def test_invented_path_options_reject_the_question_and_push_to_search(
                       [str(tmp_path / "wrong" / "phase3test"),
                        str(tmp_path / "also-wrong" / "phase3test")]),
         plan_json(search),  # retry after the structural rejection
-        plan_json(search),  # reflect
     ])
     plan = await AgentPlanner(db_session, provider).start(
         "delete the txt files in phase3test"
@@ -802,7 +810,7 @@ async def test_invented_path_options_reject_the_question_and_push_to_search(
     assert plan.question is None
     assert plan.steps[0].tool == "search_files"
     assert plan.steps[0].result.output["count"] == 1
-    assert provider.calls == 3  # draft, structural-rejection retry, reflect
+    assert provider.calls == 2  # draft, structural-rejection retry; no reflect (all-READ)
 
 
 async def test_question_drops_only_the_invented_path_options(db_session, tmp_path):
@@ -896,7 +904,7 @@ async def test_replan_cap_on_missing_path_asks_instead_of_failing(db_session, tm
     than failing — the user can still rescue the plan."""
     bad_dir = str(tmp_path / "missing" / "phase3test")
     bad = [step("Search", "search_files", directory=bad_dir, file_type=".txt")]
-    provider = FakeProvider([plan_json(bad)] * (2 + MAX_REPLANS))
+    provider = FakeProvider([plan_json(bad)] * (1 + MAX_REPLANS))
 
     plan = await AgentPlanner(db_session, provider).start(
         "find the txt files in phase3test"
@@ -904,7 +912,7 @@ async def test_replan_cap_on_missing_path_asks_instead_of_failing(db_session, tm
 
     assert plan.status == PlanStatus.AWAITING_CHOICE
     assert "couldn't find 'phase3test'" in plan.question.text
-    assert provider.calls == 2 + MAX_REPLANS
+    assert provider.calls == 1 + MAX_REPLANS  # draft + replans; no reflect (all-READ)
 
 
 # ----------------------------------------------------------------- plan store
@@ -966,15 +974,17 @@ async def test_plan_store_db_expiry_is_final(db_session, monkeypatch):
 async def test_memory_context_reaches_every_planner_prompt(db_session, tmp_path):
     """Phase 3.5 "one brain": the rendered memory context is injected into the
     plan AND reflect prompts with data-never-instructions framing, and is
-    stamped on the plan so post-approval replans keep it."""
-    steps = [step("List the files", "list_directory", path=str(tmp_path))]
+    stamped on the plan so post-approval replans keep it. A WRITE step keeps
+    the reflect round alive (all-READ drafts skip it, 2026-07-13)."""
+    steps = [step("Create a note", "create_file",
+                  path=str(tmp_path / "note.txt"), content="hi")]
     provider = FakeProvider([plan_json(steps), plan_json(steps)])
     planner = AgentPlanner(
         db_session, provider, memory="Jamil Ali is the user's gym friend"
     )
-    plan = await planner.start("list my files")
+    plan = await planner.start("save a note")
 
-    assert plan.status == PlanStatus.COMPLETED
+    assert plan.status == PlanStatus.AWAITING_APPROVAL
     assert plan.memory_context == "Jamil Ali is the user's gym friend"
     assert len(provider.prompts) == 2  # draft + reflect
     for prompt in provider.prompts:
@@ -1008,3 +1018,132 @@ async def test_choice_plan_lookup_survives_cache_loss(db_session):
     assert found is not None
     assert found.question is not None and found.question.text == "Which file?"
     assert (await plan_store.get_choice_plan_for_session(db_session, "s-other")) is None
+
+
+# ------------------------- the 0-step "completed" hallucination (2026-07-13)
+# Live incident: "find all the pdf files in downloads and tell me the name of
+# the largest" — the draft asked "Which pdf file is the largest?" with the
+# lone option "PENDING: largest pdf file path"; the click fed an empty
+# revision, the plan COMPLETED with zero steps ever executed, and the summary
+# LLM invented file1/2/3.pdf. Three structural gates now each stop it alone.
+
+async def test_pending_placeholder_question_is_rejected_and_retried(
+    db_session, tmp_path
+):
+    """A question carrying the planner's own 'PENDING:' syntax never reaches
+    the user — the retry feedback pushes the model to return steps."""
+    (tmp_path / "a.pdf").write_bytes(b"x" * 10)
+    search = [step("Find the PDFs", "search_files", file_type=".pdf",
+                   directory=str(tmp_path))]
+    provider = FakeProvider([
+        question_json("Which pdf file is the largest?",
+                      ["PENDING: largest pdf file path"]),
+        plan_json(search),  # retry after the structural rejection
+    ])
+    plan = await AgentPlanner(db_session, provider).start(
+        "find all the pdf files and tell me the name of the largest"
+    )
+
+    assert plan.status == PlanStatus.COMPLETED
+    assert plan.question is None
+    assert plan.steps[0].tool == "search_files"
+    assert plan.steps[0].status == StepStatus.COMPLETED
+    # draft + rejection retry only; no reflect (all-READ). The retry feedback
+    # wording is pinned by test_pending_in_question_text_is_rejected_too.
+    assert provider.calls == 2
+
+
+async def test_persistent_pending_question_fails_honestly(db_session):
+    """A model that keeps asking the PENDING-question fails the plan instead
+    of surfacing it — an honest failure beats a do-my-job-for-me question."""
+    q = question_json("Which file is the largest?", ["PENDING: largest file"])
+    provider = FakeProvider([q, q])
+    plan = await AgentPlanner(db_session, provider).start("find the largest file")
+
+    assert plan.status == PlanStatus.FAILED
+    assert plan.question is None
+    assert "Planning failed" in plan.message
+
+
+def test_pending_in_question_text_is_rejected_too():
+    from app.agents.schemas import QuestionDraft
+
+    qdraft = QuestionDraft(
+        text="Should I use PENDING: the found path?", options=["yes", "no"]
+    )
+    question, error = AgentPlanner._validated_question(qdraft, attempt=2)
+    assert question is None
+    assert "STEP PARAMETERS" in error
+
+
+async def test_empty_revision_with_nothing_executed_is_rejected(
+    db_session, tmp_path
+):
+    """An empty revision means 'the executed results already accomplish the
+    goal' — with ZERO executed steps it is rejected like invalid JSON and the
+    retry produces the real steps."""
+    the_file = tmp_path / "notes.txt"
+    the_file.write_text("the notes")
+    read_step = [step("Read notes.txt", "read_file", path=str(the_file))]
+    provider = FakeProvider([
+        question_json("Which notes.txt?", [str(the_file)]),
+        plan_json([]),        # post-answer revise returns EMPTY — rejected
+        plan_json(read_step), # retry does the work
+    ])
+    planner = AgentPlanner(db_session, provider, session_id="s-empty-rev")
+
+    plan = await planner.start("read notes.txt")
+    assert plan.status == PlanStatus.AWAITING_CHOICE
+    plan = await planner.answer(plan, str(the_file))
+
+    assert plan.status == PlanStatus.COMPLETED
+    assert plan.steps[0].status == StepStatus.COMPLETED
+    assert plan.steps[0].result.output["content"] == "the notes"
+    # draft-question + revise attempt 1 (empty, rejected) + retry = 3 calls
+    assert provider.calls == 3
+
+
+async def test_plan_never_completes_with_zero_executed_steps(db_session, tmp_path):
+    """The hard backstop: a plan whose step list emptied out without ever
+    executing anything FAILS honestly — never COMPLETED (the live incident's
+    'Completed — 0 steps ran.')."""
+    the_file = tmp_path / "notes.txt"
+    the_file.write_text("x")
+    provider = FakeProvider([
+        question_json("Which notes.txt?", [str(the_file)]),
+        plan_json([]),  # empty revision, attempt 1 — rejected
+        plan_json([]),  # empty again, attempt 2 — revise output unusable
+    ])
+    planner = AgentPlanner(db_session, provider, session_id="s-zero-steps")
+
+    plan = await planner.start("read notes.txt")
+    plan = await planner.answer(plan, str(the_file))
+
+    assert plan.status == PlanStatus.FAILED
+    assert plan.status != PlanStatus.COMPLETED
+    assert "nothing was done" in plan.message.lower() or "no step" in plan.message.lower()
+
+
+async def test_summary_llm_never_sees_an_empty_record(db_session):
+    """A completed plan with nothing rendered to report gets the
+    deterministic text — the summary LLM is never invoked over an empty
+    record it could fill with fiction."""
+    from app.agents.summary import completed_plan_text
+
+    streamed = {"calls": 0}
+
+    class RecordingProvider(FakeProvider):
+        # A stream exception would be swallowed by design (deterministic
+        # fallback), so an exploding provider can't prove the guard — a
+        # call COUNTER plus a poisoned payload can.
+        async def stream_chat(self, messages, temperature=0.7, max_tokens=None):
+            streamed["calls"] += 1
+            yield "The largest PDF file is: file3.pdf"  # the hallucination
+
+    plan = AgentPlan(goal="find the pdfs", status=PlanStatus.COMPLETED)
+    plan.message = "No matching files were found — nothing to do."
+    text = await completed_plan_text(RecordingProvider([]), plan)
+
+    assert streamed["calls"] == 0  # the LLM was never asked
+    assert "file3.pdf" not in text  # nothing invented
+    assert "No matching files were found" in text

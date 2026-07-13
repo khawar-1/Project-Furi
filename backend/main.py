@@ -81,7 +81,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.warning(f"⚠️  fastembed pre-warm failed (non-critical): {e}")
 
     import asyncio
-    asyncio.create_task(_prewarm_embedder())
+    # Reference kept on app.state: an unreferenced asyncio task may be
+    # garbage-collected mid-flight, silently cancelling the warmup.
+    app.state.embedder_warmup = asyncio.create_task(_prewarm_embedder())
 
     # Phase 4: start the scheduler and rebuild timers from SQLite — jobs
     # whose run_at passed while the backend was down fire immediately (late).

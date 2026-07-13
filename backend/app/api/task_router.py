@@ -47,6 +47,7 @@ session is routed as the answer (typed answers and clicked options are
 equivalent). A plan question takes precedence over a parked Phase 2 memory
 question — it is the one the user just saw.
 """
+import asyncio
 import re
 from typing import Optional
 
@@ -374,17 +375,24 @@ async def maybe_handle_task(
     # calendar tools, so the planner picks the right ones from the goal. The
     # label buys recall + telemetry and is the documented insertion point for
     # future per-domain handlers (do not add a dispatcher until one is needed).
-    label = await _classify_message(
-        provider, cleaned_goal if background else goal, conversation
+    #
+    # The classifier round trip and the planner's memory context ("one brain",
+    # Phase 3.5) run CONCURRENTLY: the classifier never touches the request's
+    # DB session and the context build makes no LLM call, so exactly one of
+    # them uses each contended resource — gather is safe, and the memory build
+    # (embeds + queries) is hidden inside the classifier's network wait. On a
+    # CHAT label the memory string is discarded; that wasted work is local and
+    # cheap, while the saved wall time is paid on every action turn. Neither
+    # coroutine raises by contract (classify fails to CHAT, memory to "").
+    effective_goal = cleaned_goal if background else goal
+    label, memory = await asyncio.gather(
+        _classify_message(provider, effective_goal, conversation),
+        planner_memory_context(db, effective_goal),
     )
     if label == "CHAT":
         return None
 
     logger.info(f"Chat message routed to agent planner [{label}]: '{goal[:80]}'")
-
-    # Phase 3.5 "one brain": the planner sees the same long-term memory the
-    # chat path would (people, preferences, facts) — as data, not instructions.
-    memory = await planner_memory_context(db, cleaned_goal if background else goal)
 
     if background:
         return _stream_task_background(
