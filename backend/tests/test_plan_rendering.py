@@ -250,3 +250,111 @@ def test_name_lists_are_clipped_by_item_never_mid_name():
     assert "file119.txt" in text          # 120 shown
     assert "file120.txt" not in text
     assert "… and 80 more" in text
+
+
+# --------------------------------------------- size/date aggregates (2026-07-12)
+
+def test_search_aggregates_answer_largest_newest_total():
+    """The live regression: 'find all PDF files in downloads ... what the
+    largest one is called'. The raw matches carry size_bytes/modified, but
+    the rendered record used to drop them — neither the summary LLM nor the
+    deterministic fallback could name the largest file without inventing it.
+    The aggregates are computed IN CODE, never in the LLM's head."""
+    plan = completed_plan(done_step("search_files", {
+        "matches": [
+            {"path": "D:\\Downloads\\small.pdf", "type": "file",
+             "size_bytes": 1024, "modified": "2026-07-01T10:00:00"},
+            {"path": "D:\\Downloads\\big.pdf", "type": "file",
+             "size_bytes": 5 * 1024 * 1024, "modified": "2026-06-01T10:00:00"},
+            {"path": "D:\\Downloads\\recent.pdf", "type": "file",
+             "size_bytes": 2048, "modified": "2026-07-11T09:30:00"},
+        ],
+        "count": 3,
+        "truncated": False,
+    }))
+    text = completed_results_text(plan)
+    assert "Largest: big.pdf (5.0 MB)" in text
+    assert "Smallest: small.pdf (1.0 KB)" in text
+    assert "Newest: recent.pdf (modified 2026-07-11)" in text
+    assert "across 3 file(s)" in text
+    # Per-item sizes ride along in the grouped list
+    assert "small.pdf (1.0 KB)" in text
+    assert "big.pdf (5.0 MB)" in text
+
+
+def test_search_aggregates_exclude_folders():
+    """Folders have no size; a folder match must never win 'largest' or
+    'newest', and a lone file alongside folders needs no aggregate line
+    (its size already shows inline)."""
+    plan = completed_plan(done_step("search_files", {
+        "matches": [
+            {"path": "C:\\x\\only.pdf", "type": "file",
+             "size_bytes": 10, "modified": "2026-07-01T00:00:00"},
+            {"path": "C:\\x\\stuff", "type": "folder",
+             "size_bytes": None, "modified": "2026-07-12T00:00:00"},
+        ],
+        "count": 2,
+    }))
+    text = completed_results_text(plan)
+    assert "Largest:" not in text          # a single file → no aggregate line
+    assert "only.pdf (10 B)" in text       # but its own size shows inline
+    assert "stuff (folder)" in text        # folders never get a size
+
+
+def test_search_without_sizes_degrades_gracefully():
+    """Old-shape rows (no size_bytes/modified) must render exactly as before:
+    bare names, no aggregate line, no crash."""
+    plan = completed_plan(done_step("search_files", {
+        "matches": [
+            {"path": "C:\\a\\one.txt", "type": "file"},
+            {"path": "C:\\a\\two.txt", "type": "file"},
+        ],
+        "count": 2,
+    }))
+    text = completed_results_text(plan)
+    assert "- In `C:\\a`: one.txt, two.txt" in text
+    assert "Largest:" not in text
+    assert "Total:" not in text
+
+
+def test_list_directory_aggregates_and_sizes():
+    plan = completed_plan(done_step("list_directory", {
+        "path": "C:\\proj",
+        "entries": [
+            {"name": "app.log", "type": "file",
+             "size_bytes": 3 * 1024 * 1024 * 1024, "modified": "2026-05-01T00:00:00"},
+            {"name": "readme.md", "type": "file",
+             "size_bytes": 512, "modified": "2026-07-10T08:00:00"},
+            {"name": "src", "type": "directory",
+             "size_bytes": None, "modified": "2026-07-12T00:00:00"},
+        ],
+        "count": 3,
+    }))
+    text = completed_results_text(plan)
+    assert "app.log (3.0 GB)" in text
+    assert "Largest: app.log (3.0 GB)" in text
+    assert "Smallest: readme.md (512 B)" in text
+    assert "Newest: readme.md (modified 2026-07-10)" in text   # dirs excluded
+    assert "Total: 3.0 GB across 2 file(s)" in text
+
+
+def test_aggregates_survive_the_step_cap_on_huge_listings():
+    """Live verify 2026-07-13: 80 sized names pushed the step render past the
+    per-step cap and the clip cut through the trailing aggregate footer —
+    the summary reported the largest file as a half-cut name. The aggregate
+    line renders FIRST so a clip can only ever eat list tail, never the
+    answer."""
+    matches = [
+        {"path": f"D:\\dl\\a-realistically-long-assignment-report-name-{i:03}.pdf",
+         "type": "file", "size_bytes": 1000 + i, "modified": "2026-07-01T00:00:00"}
+        for i in range(200)
+    ]
+    matches.append({"path": "D:\\dl\\the-biggest-file-of-all.pdf", "type": "file",
+                    "size_bytes": 99 * 1024 * 1024, "modified": "2026-07-12T12:00:00"})
+    text = completed_results_text(completed_plan(done_step("search_files", {
+        "matches": matches, "count": len(matches),
+    })))
+    assert "(truncated)" in text  # the cap did fire on this listing
+    assert "Largest: the-biggest-file-of-all.pdf (99.0 MB)" in text
+    assert "Newest: the-biggest-file-of-all.pdf (modified 2026-07-12)" in text
+    assert text.index("Largest:") < text.index("In `D:\\dl`")  # answer first

@@ -43,6 +43,52 @@ def _fence(text: str) -> str:
     return f"{marker}\n{text}\n{marker}"
 
 
+def _human_size(n: int | float) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"  # unreachable; keeps type checkers honest
+
+
+def _sized_name(name: str, row: dict) -> str:
+    """A file name with its human-readable size when the row carries one."""
+    size = row.get("size_bytes")
+    if isinstance(size, (int, float)):
+        return f"{name} ({_human_size(size)})"
+    return name
+
+
+def _file_aggregates(rows: list[dict], name_of) -> str | None:
+    """Deterministic aggregate line over FILE rows carrying size_bytes /
+    modified. Plan RULE 8 promises that "how many / largest / smallest /
+    newest / total size" questions are answered from the search/list results
+    themselves — so the RENDERED record must carry the data. Live bug
+    2026-07-12: names-only rendering meant neither the summary LLM nor the
+    deterministic fallback could name the largest PDF without inventing it.
+    Computed in code, never in the LLM's head (the search_files-filters
+    philosophy: comparing 52 sizes is exactly what LLMs get wrong)."""
+    if len(rows) < 2:
+        return None  # a single file already shows its own size inline
+    parts: list[str] = []
+    sized = [r for r in rows if isinstance(r.get("size_bytes"), (int, float))]
+    if sized:
+        largest = max(sized, key=lambda r: r["size_bytes"])
+        smallest = min(sized, key=lambda r: r["size_bytes"])
+        parts.append(f"Largest: {name_of(largest)} ({_human_size(largest['size_bytes'])})")
+        parts.append(f"Smallest: {name_of(smallest)} ({_human_size(smallest['size_bytes'])})")
+    dated = [r for r in rows if r.get("modified")]
+    if dated:
+        # ISO timestamps compare correctly as strings; show the date part.
+        newest = max(dated, key=lambda r: str(r["modified"]))
+        parts.append(f"Newest: {name_of(newest)} (modified {str(newest['modified'])[:10]})")
+    if sized:
+        total = sum(r["size_bytes"] for r in sized)
+        parts.append(f"Total: {_human_size(total)} across {len(sized)} file(s)")
+    return " · ".join(parts) if parts else None
+
+
 # Per-tool renderings of a completed step's real output — code-derived from
 # each tool's own result dict, never an LLM's retelling. Shapes match the
 # tools' _ok payloads exactly (file_tools / terminal_tools / memory_tools).
@@ -54,9 +100,14 @@ def _fmt_list_directory(output: dict) -> str:
     path = output.get("path", "?")
     if not entries:
         return f"`{path}` is empty."
-    files = [str(e.get("name", "?")) for e in entries if e.get("type") == "file"]
+    file_rows = [e for e in entries if e.get("type") == "file"]
+    files = [_sized_name(str(e.get("name", "?")), e) for e in file_rows]
     folders = [str(e.get("name", "?")) for e in entries if e.get("type") != "file"]
     lines = [f"`{path}` contains {len(folders)} folder(s) and {len(files)} file(s)."]
+    # Aggregates first — the clip must never eat them (see _fmt_search_files).
+    aggregates = _file_aggregates(file_rows, lambda e: str(e.get("name", "?")))
+    if aggregates:
+        lines.append(f"- {aggregates}")
     if folders:
         lines.append(f"- Folders: {_names(folders)}")
     if files:
@@ -80,11 +131,23 @@ def _fmt_search_files(output: dict) -> str:
         name = p.name or str(p)
         if m.get("type") == "folder":
             name += " (folder)"
+        else:
+            name = _sized_name(name, m)
         if parent not in groups:
             groups[parent] = []
             order.append(parent)
         groups[parent].append(name)
     lines = [f"Found {len(matches)} match(es):"]
+    # The aggregate line comes FIRST — a long listing can hit the per-step
+    # character cap, and the clip must never eat the densest line (live
+    # verify 2026-07-13: 80 sized names pushed the trailing footer into the
+    # cap and 'Largest:' arrived half-cut as "AWS Cloud Que… (truncated)").
+    file_rows = [m for m in matches if m.get("type") == "file"]
+    aggregates = _file_aggregates(
+        file_rows, lambda m: PurePath(str(m.get("path", "?"))).name or "?"
+    )
+    if aggregates:
+        lines.append(f"- {aggregates}")
     for parent in order:
         lines.append(f"- In `{parent}`: {_names(groups[parent])}")
     if output.get("truncated"):

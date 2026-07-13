@@ -158,7 +158,7 @@ _PLAN_RULES = """RULES:
 6. Write each description as one short sentence a non-technical user understands, stating exactly WHAT will happen and to WHICH files or folders (e.g. "Delete report-draft.docx from the Desktop", never just "Clean up files"). For run_command / execute_script, the description must say what the command will actually do to the system.
 7. If the goal cannot be achieved with these tools, return {"steps": [], "unachievable_reason": "<short explanation>"}.
 8. ALWAYS prefer the dedicated tools over run_command / execute_script: listing, searching (by name/metadata — for finding files by their CONTENT or meaning use semantic_file_search, rule 17), and reading files (including their sizes, creation and modified times) must use list_directory / search_files / read_file. run_command counts as a destructive step the user has to approve — use it ONLY when no dedicated tool can do the job. A question ABOUT the results — how many there are, which is the largest / smallest, the total size, the newest / oldest — is answered from the search_files / list_directory results themselves (every match carries its size and dates); do NOT add a run_command (or any extra step) to count, measure, or compare files a search already returned. Often a single search_files step is the whole plan.
-9. NEVER delete, move, rename, or create files or folders through run_command / execute_script — always use delete_file / move_file / rename_file / create_file. delete_file backs the file up to a recoverable trash; a shell delete is unrecoverable and will not be approved.
+9. NEVER delete, move, rename, or create files or folders through run_command / execute_script — always use delete_file / move_file / rename_file / create_file / create_folder. Creating a FOLDER is create_folder ONLY — create_file makes a text FILE (a 0-byte create_file is never a folder, and files created "inside" it will fail). delete_file backs the file up to a recoverable trash; a shell delete is unrecoverable and will not be approved.
 10. Every date parameter must be ISO format YYYY-MM-DD. Convert the user's wording using the current date in CONTEXT ("after july 1" with no year → the current year; "last week" → concrete dates). If the user's date is genuinely ambiguous (e.g. "03/04/2026" could be March 4 or April 3), ask via a question (rule 11) — never guess. Date and size filtering must be done with search_files parameters (created_after, min_size, ...), never by eyeballing results.
 11. Ask the user via "question" (see the output shape) when you cannot proceed correctly without their input: several files/folders match a name and only one should be acted on, an ambiguous date format, or a vague target ("that file") the conversation does not resolve. Put the concrete candidates in "options" (full paths). Options must be REAL values you have seen in the conversation, memory, or an executed step's results — NEVER invent a path as an option (invented paths are rejected in code). If you do not know where something is, that is not a question — search_files for it (rule 3). NEVER ask the user where a file or folder is or for its full path: a real search is run in code against every question and a question the search can answer is rejected. NEVER pick one of several matches yourself for a move/rename/delete step. Do NOT ask when the goal already covers all matches ("read all of them", "delete every .tmp file") or when only one candidate exists.
 12. When the goal refers to a person by name or to something Jarvis may remember ("the folder I always use", "the project I told you about"), and LONG-TERM MEMORY above does not already answer it, add a lookup_contact / recall_memory step instead of guessing. If lookup_contact reports the name is ambiguous, ask the user via a question (rule 11) with the candidate names as options.
@@ -440,6 +440,8 @@ def _step_action_detail(tool: str, params: dict[str, Any]) -> Optional[str]:
     if tool == "create_file":
         size = len(str(params.get("content") or "").encode("utf-8"))
         return f"new file: {p('path')} ({size} bytes)"
+    if tool == "create_folder":
+        return f"new folder: {p('path')}"
     if tool in ("send_email", "create_email_draft"):
         # The full contract — To/Cc, subject, COMPLETE body, never clipped:
         # the approval card shows exactly what leaves the machine, and the
@@ -543,13 +545,23 @@ def _nonexistent_path_error(tool: str, params: dict[str, Any]) -> Optional[str]:
     key = _PARENT_MUST_EXIST_PARAMS.get(tool)
     if key is not None:
         target = value_of(key)
-        if target is not None and not target.exists() and not target.parent.exists():
-            return (
-                f"the folder '{target.parent}' does not exist, so "
-                f"'{target}' cannot be created or moved there — never guess "
-                f"a path. Search or list first, or create the missing folder "
-                f"explicitly."
-            )
+        if target is not None and not target.exists():
+            if not target.parent.exists():
+                return (
+                    f"the folder '{target.parent}' does not exist, so "
+                    f"'{target}' cannot be created or moved there — never guess "
+                    f"a path. Search or list first, or create the missing folder "
+                    f"explicitly with create_folder."
+                )
+            if not target.parent.is_dir():
+                # Live bug 2026-07-12: a 0-byte create_file faked the folder,
+                # so the parent EXISTED — as a file — and this guard passed;
+                # every file created "inside" it then failed at the tool.
+                return (
+                    f"'{target.parent}' exists but is a FILE, not a folder — "
+                    f"nothing can be created inside it. Create a real folder "
+                    f"with create_folder (a create_file is never a folder)."
+                )
     return None
 
 
@@ -594,11 +606,20 @@ _MISSING_PATH_ERROR_RE = re.compile(
 )
 
 
+_CREATE_TOOLS = {"create_file", "create_folder"}
+
+
 def _missing_target(failed_step: Optional[PlanStep]) -> Optional[tuple[str, str]]:
     """(path, leaf name) when a step failed because a path it was given does
     not exist — the one failure class with a deterministic recovery: search
-    for the thing by name instead of failing or asking. None otherwise."""
+    for the thing by name instead of failing or asking. None otherwise.
+    CREATE steps are excluded: their target doesn't exist BY DESIGN, so
+    "search for it" is never the recovery (live bug 2026-07-12: after
+    notes.txt failed to create inside a fake folder, the replan SEARCHED for
+    notes.txt — a file that was never supposed to exist yet)."""
     if failed_step is None or failed_step.result is None:
+        return None
+    if failed_step.tool in _CREATE_TOOLS:
         return None
     error = failed_step.result.error or ""
     if not _MISSING_PATH_ERROR_RE.search(error):
@@ -1301,10 +1322,13 @@ class AgentPlanner:
             folder_choice = folder_resolver.detect(step, plan.goal, plan.user_answers)
             if folder_choice is not None:
                 if folder_choice.action == "substitute":
+                    # Either the only existing copy, or the copy the user's
+                    # own words explicitly chose (a picked option is enforced
+                    # here in code — never left to the revise LLM to honor).
                     step.parameters[folder_choice.key] = folder_choice.paths[0]
                     logger.info(
                         f"Folder '{folder_choice.name}' resolved in code to "
-                        f"{folder_choice.paths[0]} (only existing copy)"
+                        f"{folder_choice.paths[0]}"
                     )
                 elif plan.questions_asked < MAX_QUESTIONS:
                     self._pause_on_question(

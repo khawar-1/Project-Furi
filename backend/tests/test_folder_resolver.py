@@ -105,15 +105,81 @@ def test_none_when_drive_qualifier_in_goal(tmp_path, monkeypatch):
     assert detect(step, "find pdfs in the downloads on d drive", []) is None
 
 
-def test_none_when_answer_carries_a_path(tmp_path, monkeypatch):
-    """A picked option / typed path is a drive qualifier → the re-plan loop
-    terminates (the guard stands down once the user has chosen)."""
+def test_answer_path_is_enforced_not_trusted(tmp_path, monkeypatch):
+    """A picked option / typed full path is ENFORCED in code: a step still
+    heading for a different same-named copy gets the user's path substituted.
+    The original design stood the guard down and trusted the revise LLM to
+    fill the choice — live failure 2026-07-12: the user picked D:\\Downloads,
+    the revision kept the home copy, and Jarvis searched the wrong folder."""
     home, d = tmp_path / "home", tmp_path / "d"
     _mkdir(home / "downloads", d / "downloads")
     _wire(monkeypatch, home, [d])
     step = _read_step("search_files", directory="downloads")
     answer = str(d / "downloads")
-    assert detect(step, "find pdfs in downloads", [answer]) is None
+
+    res = detect(step, "find pdfs in downloads", [answer])
+
+    assert res is not None and res.action == "substitute"
+    assert res.paths == [answer]
+
+
+def test_answer_path_matching_step_stands_down(tmp_path, monkeypatch):
+    """A step already targeting the user's chosen copy is correct — no action
+    (this is what terminates the answer→re-plan loop)."""
+    home, d = tmp_path / "home", tmp_path / "d"
+    _mkdir(home / "downloads", d / "downloads")
+    _wire(monkeypatch, home, [d])
+    chosen = str(d / "downloads")
+    step = _read_step("search_files", directory=chosen)
+    assert detect(step, "find pdfs in downloads", [chosen]) is None
+
+
+def test_home_copy_chosen_explicitly_stands_down(tmp_path, monkeypatch):
+    """Picking the HOME copy is as binding as picking a drive copy — the step
+    already targets it, so nothing happens (and nothing re-asks)."""
+    home, d = tmp_path / "home", tmp_path / "d"
+    _mkdir(home / "downloads", d / "downloads")
+    _wire(monkeypatch, home, [d])
+    chosen = str(home / "downloads")
+    step = _read_step("search_files", directory="downloads")  # resolves to home
+    assert detect(step, "find pdfs in downloads", [chosen]) is None
+
+
+def test_embedded_answer_path_substitutes(tmp_path, monkeypatch):
+    """A typed sentence carrying the path ('its the D:\\... one') pins the
+    choice too — same enforcement as a clicked option."""
+    home, d = tmp_path / "home", tmp_path / "d"
+    _mkdir(home / "downloads", d / "downloads")
+    _wire(monkeypatch, home, [d])
+    step = _read_step("search_files", directory="downloads")
+    answer = f"i meant {d / 'downloads'}, that one"
+
+    res = detect(step, "find pdfs in downloads", [answer])
+
+    assert res is not None and res.action == "substitute"
+    assert res.paths == [str(d / "downloads")]
+
+
+def test_two_conflicting_answer_paths_never_pick(tmp_path, monkeypatch):
+    """Two DIFFERENT same-named paths in the user's words: code never picks —
+    the guard falls back to standing down (the drive qualifier rule)."""
+    home, d, e = tmp_path / "home", tmp_path / "d", tmp_path / "e"
+    _mkdir(home / "downloads", d / "downloads", e / "downloads")
+    _wire(monkeypatch, home, [d, e])
+    step = _read_step("search_files", directory="downloads")
+    answers = [str(d / "downloads"), str(e / "downloads")]
+    assert detect(step, "find pdfs in downloads", answers) is None
+
+
+def test_nonexistent_answer_path_falls_through(tmp_path, monkeypatch):
+    """An answer path that doesn't exist on disk pins nothing — the guard
+    behaves exactly as before (drive qualifier present → stands down)."""
+    home, d = tmp_path / "home", tmp_path / "d"
+    _mkdir(home / "downloads", d / "downloads")
+    _wire(monkeypatch, home, [d])
+    step = _read_step("search_files", directory="downloads")
+    ghost = str(d / "gone" / "downloads")
+    assert detect(step, "find pdfs in downloads", [ghost]) is None
 
 
 def test_none_when_not_well_known(tmp_path, monkeypatch):
@@ -253,3 +319,36 @@ async def test_planner_substitutes_single_non_home_copy(db_session, tmp_path, mo
     assert plan.status == PlanStatus.COMPLETED
     assert plan.steps[0].parameters["directory"] == str(d / "downloads")
     assert plan.steps[0].result.output["count"] == 1
+
+
+async def test_answered_choice_is_enforced_against_disobedient_revision(
+    db_session, tmp_path, monkeypatch
+):
+    """The 2026-07-12 verification failure, end to end: the plan pauses on
+    the which-downloads question, the user picks the drive copy, and the
+    revise LLM DISOBEYS the answer (keeps the bare home-resolving name).
+    The execute node must enforce the picked path in code — the search runs
+    against the folder the user chose, never the home copy the model kept."""
+    home, d = tmp_path / "home", tmp_path / "d"
+    _mkdir(home / "downloads", d / "downloads")
+    (d / "downloads" / "report.pdf").write_text("x")  # only the D copy has PDFs
+
+    _wire(monkeypatch, home, [d])
+
+    steps = [{"description": "Search PDFs in downloads", "tool": "search_files",
+              "parameters": {"directory": "downloads", "file_type": "pdf"}}]
+    # draft + reflect (pause), then the DISOBEDIENT post-answer revision:
+    # identical bare-name step, exactly what groq/llama produced live.
+    provider = _FakeProvider([_plan_json(steps), _plan_json(steps), _plan_json(steps)])
+
+    planner = AgentPlanner(db_session, provider, session_id="s-fold3")
+    plan = await planner.start("find all pdf files in downloads and count them")
+    assert plan.status == PlanStatus.AWAITING_CHOICE
+
+    final = await planner.answer(plan, str(d / "downloads"))
+
+    assert final.status == PlanStatus.COMPLETED
+    search = final.steps[-1]
+    assert search.parameters["directory"] == str(d / "downloads")
+    assert search.result.output["count"] == 1
+    assert "report.pdf" in search.result.output["matches"][0]["path"]

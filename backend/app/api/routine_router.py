@@ -35,7 +35,7 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.routines import create_routine, get_routine_by_name
-from app.db.models import Message
+from app.db.persist import persist_message_best_effort
 from app.db.schemas import ChatRequest, StreamChunk
 from app.providers.base import LLMProvider
 
@@ -235,11 +235,9 @@ def _stream_run(
     conversation = conversation_context(request)
 
     async def event_generator():
-        try:
-            db.add(Message(session_id=session_id, role="user", content=goal))
-            await db.commit()
-        except Exception as e:
-            logger.warning(f"Persisting routine-run user message failed (non-critical): {e}")
+        await persist_message_best_effort(
+            db, session_id, "user", goal, what="routine-run user message",
+        )
 
         try:
             memory = await planner_memory_context(db, goal_template)
@@ -274,14 +272,10 @@ def _stream_run(
         )
         yield f"data: {done.model_dump_json()}\n\n"
 
-        try:
-            db.add(Message(
-                session_id=session_id, role="assistant",
-                content=text, model=provider.model_name,
-            ))
-            await db.commit()
-        except Exception as e:
-            logger.warning(f"Persisting routine-run response failed (non-critical): {e}")
+        await persist_message_best_effort(
+            db, session_id, "assistant", text,
+            model=provider.model_name, what="routine-run response",
+        )
 
     return StreamingResponse(
         event_generator(), media_type="text/event-stream", headers=_SSE_HEADERS
@@ -297,22 +291,18 @@ def _stream_text(
     LLM paraphrase of a confirmation of something that may not have been saved."""
 
     async def event_generator():
-        try:
-            db.add(Message(session_id=session_id, role="user", content=persist_user))
-            await db.commit()
-        except Exception as e:
-            logger.warning(f"Persisting routine-turn user message failed (non-critical): {e}")
+        await persist_message_best_effort(
+            db, session_id, "user", persist_user, what="routine-turn user message",
+        )
 
         chunk = StreamChunk(delta=text, done=False, session_id=session_id)
         yield f"data: {chunk.model_dump_json()}\n\n"
         done_chunk = StreamChunk(delta="", done=True, session_id=session_id)
         yield f"data: {done_chunk.model_dump_json()}\n\n"
 
-        try:
-            db.add(Message(session_id=session_id, role="assistant", content=text))
-            await db.commit()
-        except Exception as e:
-            logger.warning(f"Persisting routine-turn assistant message failed (non-critical): {e}")
+        await persist_message_best_effort(
+            db, session_id, "assistant", text, what="routine-turn assistant message",
+        )
 
     return StreamingResponse(
         event_generator(), media_type="text/event-stream", headers=_SSE_HEADERS

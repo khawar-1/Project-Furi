@@ -31,13 +31,16 @@ from app.agents import (
     AgentPlanner,
     PlanStatus,
     answer_task_in_background,
+    deterministic_plan_text,
     planner_memory_context,
     pop_plan,
     put_plan,
     resume_task_in_background,
     settle_cancelled_task,
 )
+from app.agents.summary import completed_plan_text
 from app.core.dependencies import get_db, get_llm_provider
+from app.db.persist import persist_message_best_effort
 from app.providers.base import LLMProvider
 from app.tools.registry import registry
 
@@ -59,11 +62,76 @@ class ChooseRequest(BaseModel):
     answer: str = Field(..., min_length=1, max_length=2000)
 
 
-def _plan_response(plan: AgentPlan) -> dict:
+def _plan_response(plan: AgentPlan, outcome_text: Optional[str] = None) -> dict:
     data = plan.model_dump(mode="json")
     # Convenience flag so the frontend never string-compares the status enum
     data["requires_approval"] = plan.status == PlanStatus.AWAITING_APPROVAL
+    # The readable outcome of an INLINE plan that reached a terminal state
+    # through this endpoint (clicked option / Approve button). The chat SSE
+    # path streams this text; the endpoints must return it or the answer is
+    # never delivered (live bug 2026-07-12: "find all PDF files … tell me how
+    # many" → folder question → click → silence).
+    data["outcome_text"] = outcome_text
     return data
+
+
+async def _persist_plan_message(
+    db: AsyncSession, session_id: str, role: str, content: str
+) -> None:
+    """Best-effort chat-history write: the plan's outcome must never be lost
+    to a persistence hiccup — the HTTP response still carries it. Delegates
+    to the shared helper, whose rollback keeps the session usable."""
+    await persist_message_best_effort(
+        db, session_id, role, content, what="plan outcome message",
+    )
+
+
+async def _finalize_inline_plan(
+    db: AsyncSession,
+    provider: LLMProvider,
+    plan: AgentPlan,
+    user_reply: Optional[str] = None,
+) -> Optional[str]:
+    """Deliver an INLINE plan's outcome after a resume/answer through these
+    endpoints — the mirror of what _stream_plan_run does for typed chat
+    answers, so clicked options and typed replies are equivalent END TO END
+    (the stated invariant; before 2026-07-12 it held only for the pause, not
+    the outcome). Task-owned plans never come here: their outcome arrives by
+    push via _settle.
+
+    Returns the text the frontend should append as an assistant message, or
+    None when the live PlanCard already carries the state (pauses re-park and
+    the card shows the question/approval; a cancel shows its banner).
+    Everything is also persisted to chat history so a reload still has the
+    answer — inline PlanCards don't survive reloads, the Message rows do.
+    """
+    session_id = plan.session_id
+    if session_id and user_reply:
+        # The clicked option is the user's answer — the typed path persists
+        # it, so this path must too (history parity).
+        await _persist_plan_message(db, session_id, "user", user_reply)
+
+    if plan.status == PlanStatus.COMPLETED:
+        text = await completed_plan_text(provider, plan)
+        if session_id and text:
+            await _persist_plan_message(db, session_id, "assistant", text)
+        return text or None
+    if plan.status == PlanStatus.FAILED:
+        text = deterministic_plan_text(plan)  # failures are never paraphrased
+        if session_id and text:
+            await _persist_plan_message(db, session_id, "assistant", text)
+        return text or None
+
+    # Cancelled: the card's "Cancelled — nothing was changed" banner is the
+    # live feedback; persist for history honesty but return nothing.
+    # Re-paused (fresh approval / follow-up question): the card carries the
+    # interaction live; persist the deterministic text so the pending ask
+    # survives a reload, exactly as the streamed path persists pause texts.
+    if session_id:
+        text = deterministic_plan_text(plan)
+        if text:
+            await _persist_plan_message(db, session_id, "assistant", text)
+    return None
 
 
 def _executing_snapshot(plan: AgentPlan) -> dict:
@@ -155,7 +223,11 @@ async def approve_plan(
         # cancelling runs nothing). No push: the user cancelled from the UI,
         # this response is the feedback.
         await settle_cancelled_task(db, plan)
-    return _plan_response(plan)
+    outcome = (
+        await _finalize_inline_plan(db, provider, plan)
+        if plan.task_id is None else None
+    )
+    return _plan_response(plan, outcome)
 
 
 @router.post("/choose", summary="Answer a plan's clarifying question")
@@ -196,7 +268,11 @@ async def choose_option(
         )
     if plan.status in (PlanStatus.AWAITING_APPROVAL, PlanStatus.AWAITING_CHOICE):
         await put_plan(db, plan)  # paused again: fresh approval or a follow-up question
-    return _plan_response(plan)
+    outcome = (
+        await _finalize_inline_plan(db, provider, plan, user_reply=request.answer)
+        if plan.task_id is None else None
+    )
+    return _plan_response(plan, outcome)
 
 
 @router.get("/tools", summary="List all registered tools")

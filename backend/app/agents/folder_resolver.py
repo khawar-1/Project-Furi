@@ -31,9 +31,18 @@ drives for duplicates.
 
 Grounding: we only disambiguate a folder the USER named by a bare name. If the
 goal (or the user's later answer) carries an explicit drive/path qualifier
-("D:\\Downloads", "the downloads on d drive"), the user was specific — the guard
-stands down, which also makes the answer→re-plan loop terminate (the chosen
-path IS a drive qualifier).
+("D:\\Downloads", "the downloads on d drive"), the user was specific.
+
+When that qualifier is a CONCRETE existing path for this same folder name (a
+clicked option is exactly that), the choice is ENFORCED in code: a step still
+heading for a different same-named copy gets the user's path substituted.
+Standing down and trusting the revise LLM to fill the picked option was the
+original design — live failure 2026-07-12 (verification run): the user picked
+D:\\Downloads, the revise round kept C:\\Users\\DELL\\Downloads, the stood-down
+guard let it run, and Jarvis reported "no PDF files" from the wrong folder.
+A vaguer qualifier ("the one on d drive") still just stands the guard down.
+Either way the answer→re-plan loop terminates: a substituted (or obeyed) step
+targets the chosen path, so the next detect() pass returns no action.
 
 The probe is a handful of os.path.isdir() checks (home\\<Name> plus <drive>\\<Name>
 for each drive) — no filesystem walk, no scan cap, essentially free. Everything
@@ -133,6 +142,47 @@ def _user_was_explicit(goal: str, user_answers) -> bool:
     return bool(_DRIVE_QUALIFIER_RE.search(corpus))
 
 
+# A drive-rooted path embedded in a sentence — conservative (stops at
+# whitespace/quotes), because free text gives no reliable path boundary. A
+# clicked option arrives as the WHOLE answer, which is handled separately and
+# may contain spaces.
+_EMBEDDED_PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"',;]+")
+
+
+def _explicit_folder_choice(name: str, goal: str, user_answers) -> Optional[str]:
+    """The ONE concrete folder the user's own words pin for `name`: a
+    drive-rooted EXISTING directory whose basename is this well-known name.
+    Answers are checked whole-string first (a clicked option IS the path,
+    spaces and all), then both answers and goal are scanned for embedded
+    paths. Several different matches → None: code never picks between them.
+    Grounded exclusively in goal + user answers — memory, web, or email
+    content can never plant a location here."""
+    texts = [str(a) for a in (user_answers or [])] + [goal or ""]
+    found: dict[str, str] = {}
+
+    def consider(raw: str) -> None:
+        cand = raw.strip().rstrip("\\/").rstrip(".,;:!?)\"'")
+        if not cand:
+            return
+        path = Path(cand)
+        try:
+            if path.name.lower() != name.lower() or not path.is_dir():
+                return
+        except OSError:
+            return
+        found.setdefault(_normkey(path), str(path))
+
+    for text in texts:
+        whole = text.strip().strip("\"'")
+        if re.match(r"^[A-Za-z]:[\\/]", whole):
+            consider(whole)
+        for token in _EMBEDDED_PATH_RE.findall(text):
+            consider(token)
+    if len(found) == 1:
+        return next(iter(found.values()))
+    return None
+
+
 def _named_in_words(name: str, goal: str, user_answers) -> bool:
     corpus = " ".join([goal or ""] + [str(a) for a in (user_answers or [])])
     return re.search(rf"(?i)\b{re.escape(name)}\b", corpus) is not None
@@ -171,13 +221,23 @@ def detect(step, goal: str, user_answers) -> Optional[FolderResolution]:
         name = resolved.name
         if name.lower() not in WELL_KNOWN_FOLDERS:
             return None
+        # The user's own words pin a CONCRETE existing copy of this folder
+        # (a clicked option, a typed full path): enforce it in code. Trusting
+        # the revise LLM to fill the picked option failed live 2026-07-12 —
+        # it kept the home copy and the stood-down guard let the wrong
+        # search run. A step already targeting the chosen copy is correct.
+        chosen = _explicit_folder_choice(name, goal, user_answers)
+        if chosen is not None:
+            if _normkey(chosen) != _normkey(resolved):
+                return FolderResolution("substitute", key, name.lower(), [chosen])
+            return None
         # Only intervene when the step is heading for the home copy — a step
         # already scoped to a specific drive is the model being correct.
         if _normkey(resolved.parent) != _normkey(_home()):
             return None
         # Ground in the user's own words: they must have named the folder, and
-        # must NOT have qualified it with a drive (which would be an explicit
-        # choice — and is exactly what a picked option feeds back).
+        # must NOT have qualified it with a drive (a vague qualifier like
+        # "the one on d drive" — no concrete path — still stands down).
         if _user_was_explicit(goal, user_answers):
             return None
         if not _named_in_words(name, goal, user_answers):

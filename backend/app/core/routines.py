@@ -207,4 +207,8 @@ async def maybe_offer_routine(
         return True
     except Exception as e:
         logger.warning(f"Routine offer-to-save failed (non-critical): {e}")
+        try:
+            await db.rollback()  # never leave the caller's session poisoned
+        except Exception:
+            pass
         return False

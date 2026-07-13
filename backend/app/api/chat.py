@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_db, get_llm_provider, get_qdrant
 from app.db.models import Message, utc_iso
+from app.db.persist import persist_message_best_effort
 from app.db.schemas import ChatRequest, ChatResponse, StreamChunk
 from app.memory.engine import MemoryEngine, substitute_placeholders
 from app.memory.extractor import run_extraction_pipeline
@@ -264,16 +265,15 @@ async def _persist_message(
     model: Optional[str] = None,
     tokens_used: Optional[int] = None,
 ) -> None:
-    """Save a message to the SQLite messages table."""
-    msg = Message(
-        session_id=session_id,
-        role=role,
-        content=content,
-        model=model,
-        tokens_used=tokens_used,
+    """Save a message to the SQLite messages table — best-effort: a failed
+    history write must never 500 the chat turn or poison the session for the
+    work that follows it (live bug 2026-07-12: a schema-drifted messages
+    table made this raise, killing whole turns; see app/db/persist.py)."""
+    msg = await persist_message_best_effort(
+        db, session_id, role, content, model=model, tokens_used=tokens_used,
     )
-    db.add(msg)
-    await db.commit()
+    if msg is None:
+        return
     # Phase 6 Part 4 — index this turn for content search right away, so a
     # just-said message is findable now via semantic_file_search. No-op unless
     # the index is enabled (same privacy toggle as files); never raises. Other

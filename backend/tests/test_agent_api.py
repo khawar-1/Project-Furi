@@ -118,7 +118,7 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
     tools = {t["name"]: t for t in response.json()}
     assert set(tools) == {
         "search_files", "read_file", "list_directory",
-        "move_file", "rename_file", "delete_file",
+        "move_file", "rename_file", "delete_file", "create_folder",
         "create_file", "run_command", "execute_script",
         "recall_memory", "lookup_contact",
         "semantic_file_search",
@@ -132,6 +132,7 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
     assert tools["recall_memory"]["permission_level"] == "read"
     assert tools["lookup_contact"]["permission_level"] == "read"
     assert tools["create_file"]["permission_level"] == "write"
+    assert tools["create_folder"]["permission_level"] == "write"
     assert tools["delete_file"]["permission_level"] == "destructive"
     # Phase 5 Part 3: reading mail is read, drafting is a reversible write,
     # anything that leaves the machine is destructive.
@@ -371,3 +372,223 @@ async def test_blocked_unapproved_attempt_is_audited(client, tmp_path):
     assert rows[0]["tool_name"] == "create_file"
     assert rows[0]["success"] is True
     assert rows[0]["permission_level"] == "write"
+
+
+# =============================== inline outcome delivery (live bug 2026-07-12)
+# "find all PDF files in downloads ... tell me how many" paused on a folder
+# question; the user CLICKED an option; the plan completed and the answer
+# arrived NOWHERE — the summary/persistence machinery lived only in the
+# typed-chat SSE path. The approve/choose endpoints must return the outcome
+# (outcome_text) and persist it, so clicked and typed answers are equivalent
+# end to end.
+
+class StreamingFakeProvider(FakeProvider):
+    """FakeProvider whose stream_chat yields real deltas — exercises the
+    LLM-summary path of completed_plan_text (base class yields '' → fallback)."""
+
+    def __init__(self, responses: List[str], stream_deltas: List[str]) -> None:
+        super().__init__(responses)
+        self._stream_deltas = list(stream_deltas)
+
+    async def stream_chat(self, messages, temperature=0.7, max_tokens=None):
+        for delta in self._stream_deltas:
+            yield delta
+
+
+def question_json(text: str, options: list) -> str:
+    return json.dumps({"steps": [], "question": {"text": text, "options": options}})
+
+
+async def history(client, session_id: str) -> list:
+    return (await client.get(f"/chat/sessions/{session_id}/messages")).json()
+
+
+async def park_question_plan(client, tmp_path, session_id: str, provider_cls=None, **kw):
+    """Execute a goal whose draft pauses on a which-folder question with two
+    REAL directories as options (invented option paths are rejected in code)."""
+    dir_a = tmp_path / "DownloadsA"
+    dir_b = tmp_path / "DownloadsB"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    (dir_a / "one.pdf").write_bytes(b"x" * 10)
+    (dir_a / "two.pdf").write_bytes(b"y" * 999)
+    list_step = [step("List the chosen folder", "list_directory", path=str(dir_a))]
+    responses = [
+        question_json("Which folder did you mean?", [str(dir_a), str(dir_b)]),
+        plan_json(list_step),  # the revise round the answer feeds
+    ]
+    if provider_cls is None:
+        use_provider(responses)
+    else:
+        provider = provider_cls(responses, **kw)
+        app.dependency_overrides[get_llm_provider] = lambda: provider
+    plan = (await client.post(
+        "/api/agent/execute",
+        json={"goal": "how many pdf files are in my downloads folder", "session_id": session_id},
+    )).json()
+    assert plan["status"] == "awaiting_choice"
+    assert plan["outcome_text"] is None  # paused — the card carries the question
+    return plan, dir_a
+
+
+async def test_choose_completed_returns_outcome_and_persists_history(client, tmp_path):
+    plan, dir_a = await park_question_plan(client, tmp_path, "s-choose-done")
+
+    final = (await client.post(
+        "/api/agent/choose", json={"plan_id": plan["id"], "answer": str(dir_a)}
+    )).json()
+    assert final["status"] == "completed"
+    # The outcome text IS the answer (deterministic fallback here — the fake
+    # provider streams nothing): it must carry the real results.
+    assert final["outcome_text"]
+    assert "one.pdf" in final["outcome_text"]
+    assert "two.pdf" in final["outcome_text"]
+
+    # History parity with the typed path: the clicked answer as a user
+    # message, the outcome as an assistant message — a reload still has both.
+    rows = await history(client, "s-choose-done")
+    assert [r["role"] for r in rows] == ["user", "assistant"]
+    assert rows[0]["content"] == str(dir_a)
+    assert "one.pdf" in rows[1]["content"]
+
+
+async def test_choose_outcome_uses_llm_summary_when_available(client, tmp_path):
+    plan, dir_a = await park_question_plan(
+        client, tmp_path, "s-choose-llm",
+        provider_cls=StreamingFakeProvider,
+        stream_deltas=["There are 2 PDFs — ", "the largest is two.pdf."],
+    )
+    final = (await client.post(
+        "/api/agent/choose", json={"plan_id": plan["id"], "answer": str(dir_a)}
+    )).json()
+    assert final["status"] == "completed"
+    assert final["outcome_text"] == "There are 2 PDFs — the largest is two.pdf."
+    rows = await history(client, "s-choose-llm")
+    assert rows[-1]["content"] == "There are 2 PDFs — the largest is two.pdf."
+
+
+async def test_choose_leading_to_approval_pause_has_no_outcome_yet(client, tmp_path):
+    """Answer → revise emits a WRITE step → the plan re-parks for approval:
+    no outcome_text (the card carries the ask live), but the deterministic
+    approval text is persisted so a reload still shows the pending ask.
+    Approving then delivers the outcome."""
+    dir_a = tmp_path / "A"
+    dir_b = tmp_path / "B"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    target = dir_a / "notes.txt"
+    use_provider([
+        question_json("Which folder?", [str(dir_a), str(dir_b)]),
+        plan_json([step("Create notes.txt", "create_file", path=str(target), content="hi")]),
+    ])
+    plan = (await client.post(
+        "/api/agent/execute",
+        json={"goal": "create notes.txt in the right folder", "session_id": "s-repause"},
+    )).json()
+
+    paused = (await client.post(
+        "/api/agent/choose", json={"plan_id": plan["id"], "answer": str(dir_a)}
+    )).json()
+    assert paused["status"] == "awaiting_approval"
+    assert paused["outcome_text"] is None
+    rows = await history(client, "s-repause")
+    assert rows[0]["content"] == str(dir_a)                    # the answer
+    assert "needs your approval" in rows[1]["content"]         # the pending ask
+    assert not target.exists()
+
+    final = (await client.post(
+        "/api/agent/approve", json={"plan_id": paused["id"], "approved": True}
+    )).json()
+    assert final["status"] == "completed"
+    assert final["outcome_text"]
+    assert target.read_text(encoding="utf-8") == "hi"
+    rows = await history(client, "s-repause")
+    assert rows[-1]["role"] == "assistant"
+    assert rows[-1]["content"] == final["outcome_text"]
+
+
+async def test_approve_completed_returns_outcome_without_user_message(client, tmp_path):
+    """The Approve button is not an utterance — only the assistant outcome is
+    persisted (the choose path persists the clicked answer, this one does not)."""
+    target = tmp_path / "made.txt"
+    steps = [step("Create made.txt", "create_file", path=str(target), content="ok")]
+    use_provider([plan_json(steps), plan_json(steps)])
+    plan = (await client.post(
+        "/api/agent/execute", json={"goal": "create made.txt", "session_id": "s-approve-out"}
+    )).json()
+
+    final = (await client.post(
+        "/api/agent/approve", json={"plan_id": plan["id"], "approved": True}
+    )).json()
+    assert final["status"] == "completed"
+    assert final["outcome_text"]
+    rows = await history(client, "s-approve-out")
+    assert [r["role"] for r in rows] == ["assistant"]
+    assert rows[0]["content"] == final["outcome_text"]
+
+
+async def test_cancel_persists_text_but_returns_no_outcome(client, tmp_path):
+    """The cancelled banner on the card is the live feedback (no duplicate
+    bubble), but history still records that nothing ran."""
+    target = tmp_path / "never.txt"
+    steps = [step("Create never.txt", "create_file", path=str(target), content="x")]
+    use_provider([plan_json(steps), plan_json(steps)])
+    plan = (await client.post(
+        "/api/agent/execute", json={"goal": "create never.txt", "session_id": "s-cancel-out"}
+    )).json()
+
+    final = (await client.post(
+        "/api/agent/approve", json={"plan_id": plan["id"], "approved": False}
+    )).json()
+    assert final["status"] == "cancelled"
+    assert final["outcome_text"] is None
+    rows = await history(client, "s-cancel-out")
+    assert len(rows) == 1
+    assert "cancel" in rows[0]["content"].lower()
+    assert not target.exists()
+
+
+async def test_sessionless_plan_returns_outcome_without_persistence(client, tmp_path):
+    """Direct API callers (no session) still get the answer in the response;
+    nothing is written to any chat history."""
+    target = tmp_path / "nosess.txt"
+    steps = [step("Create nosess.txt", "create_file", path=str(target), content="x")]
+    use_provider([plan_json(steps), plan_json(steps)])
+    plan = (await client.post(
+        "/api/agent/execute", json={"goal": "create nosess.txt"}
+    )).json()
+
+    final = (await client.post(
+        "/api/agent/approve", json={"plan_id": plan["id"], "approved": True}
+    )).json()
+    assert final["status"] == "completed"
+    assert final["outcome_text"]
+
+
+async def test_choose_failed_plan_returns_deterministic_failure(client, tmp_path):
+    """A step that fails after the answer (read_file on a directory — a
+    non-recoverable class, no ask-not-fail) and a replan that declares the
+    goal impossible fail the plan: the failure text (never LLM-paraphrased)
+    must arrive as the outcome."""
+    dir_a = tmp_path / "FA"
+    dir_b = tmp_path / "FB"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    use_provider([
+        question_json("Which folder?", [str(dir_a), str(dir_b)]),
+        plan_json([step("Read the folder", "read_file", path=str(dir_a))]),
+        plan_json([], reason="That folder cannot be processed."),
+    ])
+    plan = (await client.post(
+        "/api/agent/execute",
+        json={"goal": "process the folder", "session_id": "s-choose-fail"},
+    )).json()
+
+    final = (await client.post(
+        "/api/agent/choose", json={"plan_id": plan["id"], "answer": str(dir_a)}
+    )).json()
+    assert final["status"] == "failed"
+    assert final["outcome_text"]
+    assert "couldn't" in final["outcome_text"].lower()
+    rows = await history(client, "s-choose-fail")
+    assert rows[-1]["content"] == final["outcome_text"]

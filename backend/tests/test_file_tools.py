@@ -576,3 +576,54 @@ async def test_delete_via_registry_requires_approval(db_session, tmp_path, monke
     )
     assert approved.success is True
     assert not target.exists()
+
+
+# --------------------------------------------------------------- create_folder
+# Live bug 2026-07-12: with no folder tool, the planner faked "create a folder
+# called jarvis_test" with a 0-byte create_file — a FILE — and every file
+# created "inside" it then failed, with the replan searching for the files it
+# was supposed to create.
+
+async def test_create_folder_creates_with_parents(db_session, tmp_path):
+    target = tmp_path / "projects" / "2026" / "reports"
+    result = await execute_tool(
+        "create_folder", {"path": str(target)}, db_session, approved=True,
+    )
+    assert result.success
+    assert target.is_dir()
+    assert result.output["created"] == str(target)
+    assert result.output["already_existed"] is False
+
+
+async def test_create_folder_is_idempotent(db_session, tmp_path):
+    target = tmp_path / "existing"
+    target.mkdir()
+    result = await execute_tool(
+        "create_folder", {"path": str(target)}, db_session, approved=True,
+    )
+    assert result.success
+    assert result.output["already_existed"] is True
+
+
+async def test_create_folder_refuses_existing_file(db_session, tmp_path):
+    imposter = tmp_path / "jarvis_test"
+    imposter.write_text("")  # the exact live artifact: a 0-byte file
+    result = await execute_tool(
+        "create_folder", {"path": str(imposter)}, db_session, approved=True,
+    )
+    assert not result.success
+    assert "FILE" in result.error
+    assert imposter.is_file()  # untouched
+
+
+async def test_create_folder_is_write_gated(db_session, tmp_path):
+    target = tmp_path / "gated"
+    result = await execute_tool("create_folder", {"path": str(target)}, db_session)
+    assert not result.success  # structurally refused without approval
+    assert not target.exists()
+
+
+def test_create_folder_registered_as_write():
+    tool = registry.get("create_folder")
+    assert tool is not None
+    assert tool.permission_level == PermissionLevel.WRITE

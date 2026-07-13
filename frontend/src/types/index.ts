@@ -224,6 +224,12 @@ export interface AgentPlan {
   requires_approval: boolean;
   /** Open clarifying question when status === "awaiting_choice". */
   question: PlanQuestion | null;
+  /** Readable outcome of an INLINE plan that reached a terminal state via
+   *  the approve/choose endpoints (clicked option / Approve button). The
+   *  store appends it as an assistant message — without it the answer to
+   *  "…then tell me how many" was never delivered (live bug 2026-07-12).
+   *  Null while paused/cancelled (the card carries those states live). */
+  outcome_text?: string | null;
 }
 
 /** Payload of a "task" push event (Phase 4, Part 5) — a background task

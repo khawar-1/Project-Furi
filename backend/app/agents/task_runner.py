@@ -312,11 +312,11 @@ async def _settle(db: AsyncSession, task: Task, plan: AgentPlan, notify: bool = 
 
     # Chat message first (the durable copy), push second (best-effort).
     if task.session_id:
-        try:
-            db.add(Message(session_id=task.session_id, role="assistant", content=body))
-            await db.commit()
-        except Exception as e:
-            logger.warning(f"Persisting task {task.id} message failed (non-critical): {e}")
+        from app.db.persist import persist_message_best_effort
+        await persist_message_best_effort(
+            db, task.session_id, "assistant", body,
+            what=f"task {task.id} message",
+        )
 
     if notify:
         await push(TASK_EVENT, {

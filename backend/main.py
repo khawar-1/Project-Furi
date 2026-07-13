@@ -30,9 +30,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup and shutdown lifecycle management."""
     logger.info("🚀 Jarvis OS backend starting...")
 
+    # Apply schema migrations FIRST (2026-07-13): nobody runs alembic by hand
+    # on a desktop app. create_all below only adds missing TABLES — a new
+    # COLUMN on an existing table lands only here (live incident: a missing
+    # messages.embedded_at silently killed chat history AND background tasks).
+    from app.db.migrate import ensure_schema, verify_schema
+    await ensure_schema()
+
     # Initialize SQLite database (creates tables if not exist)
     await init_db()
     logger.info("✅ SQLite database initialized")
+
+    # The drift alarm: any ORM column missing from the live DB is a CRITICAL
+    # log line at boot — this class of silent failure must never hide again.
+    await verify_schema()
 
     # Phase 3.5: drop parked plans / pending questions whose 24h window passed.
     # Phase 4 Part 5: then reconcile background tasks against reality — a Task

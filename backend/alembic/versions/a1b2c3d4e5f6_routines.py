@@ -19,6 +19,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Idempotent: init_db()'s create_all may already have built this table
+    # (the create_all-vs-alembic drift the startup auto-migration tolerates).
+    if sa.inspect(op.get_bind()).has_table('routines'):
+        return
     op.create_table('routines',
     sa.Column('id', sa.String(length=36), nullable=False),
     sa.Column('name', sa.String(length=256), nullable=False),

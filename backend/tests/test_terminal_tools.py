@@ -206,6 +206,20 @@ async def test_create_file_missing_parent(tmp_path):
     assert "Parent folder" in result.error
 
 
+async def test_create_file_parent_is_a_file_names_the_problem(tmp_path):
+    """Live bug 2026-07-12: a 0-byte create_file posed as the jarvis_test
+    folder; files created 'inside' it failed with an OS-level error that sent
+    the replan searching. The tool now names the real problem — and the fix."""
+    imposter = tmp_path / "jarvis_test"
+    imposter.write_text("")
+    result = await CreateFileTool().execute(
+        path=str(imposter / "notes.txt"), content="test note",
+    )
+    assert result.success is False
+    assert "FILE, not a folder" in result.error
+    assert "create_folder" in result.error
+
+
 async def test_create_file_empty_content_allowed(tmp_path):
     target = tmp_path / "empty.txt"
     result = await CreateFileTool().execute(path=str(target))

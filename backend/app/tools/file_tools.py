@@ -500,6 +500,64 @@ class ListDirectoryTool(BaseTool):
 # ============================================================== WRITE tools
 
 @register_tool
+class CreateFolderTool(BaseTool):
+    """Create a folder (and any missing parents). Live bug 2026-07-12:
+    with no folder tool, the planner faked "create a folder called
+    jarvis_test" with a 0-byte create_file — a FILE named jarvis_test —
+    and every file created inside it then failed."""
+
+    @property
+    def name(self) -> str:
+        return "create_folder"
+
+    @property
+    def permission_level(self) -> PermissionLevel:
+        return PermissionLevel.WRITE
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        try:
+            path = _resolve_path(kwargs.get("path"))
+        except ValueError as e:
+            return _fail(self, str(e))
+        if reason := _blocked_reason(path):
+            return _fail(self, reason)
+        return await asyncio.to_thread(self._create, path)
+
+    def _create(self, path: Path) -> ToolResult:
+        if path.is_dir():
+            # Idempotent: "make sure the folder exists" is the user's intent,
+            # and a replan re-running this step must not die on it.
+            return _ok(self, {"created": str(path), "already_existed": True})
+        if path.exists():
+            return _fail(
+                self,
+                f"A FILE named '{path}' already exists — a folder cannot be "
+                f"created over it. Delete or rename the file first."
+            )
+        path.mkdir(parents=True)
+        return _ok(self, {"created": str(path), "already_existed": False})
+
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description=(
+                "Create a folder (missing parent folders are created too). "
+                "Succeeds if the folder already exists. This is the ONLY way "
+                "to create a folder — never use create_file (that makes a "
+                "text FILE) and never mkdir through the shell."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path of the folder to create"},
+                },
+                "required": ["path"],
+            },
+            permission_level=self.permission_level,
+        )
+
+
+@register_tool
 class MoveFileTool(BaseTool):
     """Move a single file to a new location. Never overwrites."""
 

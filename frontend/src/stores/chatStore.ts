@@ -54,7 +54,22 @@ interface ChatState {
   setDraftMessage: (message: string) => void;
 }
 
-export const useChatStore = create<ChatState>((set, get) => ({
+export const useChatStore = create<ChatState>((set, get) => {
+  /** Append a terminal inline plan's readable outcome (approve/choose
+   *  response `outcome_text`) as a normal assistant message. No-op while
+   *  the plan is paused or cancelled — the card carries those states. */
+  const appendOutcomeText = (plan: AgentPlan) => {
+    const text = plan.outcome_text;
+    if (!text) return;
+    set((state) => ({
+      messages: [
+        ...state.messages,
+        { id: uuidv4(), role: 'assistant', content: text, createdAt: new Date() },
+      ],
+    }));
+  };
+
+  return {
   // ---- Initial State
   messages: [],
   sessionId: uuidv4(),
@@ -203,6 +218,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // The returned plan is final (or re-paused with replanned steps, in
       // which case the card shows the approval buttons again).
       patch({ plan: updated, planResponding: false });
+      // A terminal inline plan carries its readable outcome (the same words
+      // the typed-chat path streams) — render it as a normal assistant
+      // message below the card. The backend already persisted it, so this
+      // matches what a reload shows (live bug 2026-07-12: without it, a
+      // "…then tell me how many" goal completed silently).
+      appendOutcomeText(updated);
     } catch (e) {
       // The approval was consumed (or expired) — don't offer the buttons
       // again; the Activity timeline holds the audit trail.
@@ -233,7 +254,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // continuation (often paused again at the approval gate — the same
       // card then shows the concrete steps and the Approve button).
       const updated = await agentApi.choose(planId, answer);
+      // Echo the clicked answer as a user bubble — the backend persisted it
+      // (clicked options and typed replies are equivalent), so the live view
+      // matches what a reload shows.
+      set((state) => ({
+        messages: [
+          ...state.messages,
+          { id: uuidv4(), role: 'user', content: answer, createdAt: new Date() },
+        ],
+      }));
       patch({ plan: updated, planResponding: false });
+      // Terminal outcome (count, contents, failure reason…) below the card —
+      // see respondToPlan; without this a completed answer arrived nowhere.
+      appendOutcomeText(updated);
     } catch (e) {
       patch({
         planResponding: false,
@@ -410,4 +443,5 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setDraftMessage: (message: string) => {
     set({ draftMessage: message });
   },
-}));
+  };
+});

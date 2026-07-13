@@ -53,7 +53,7 @@ from app.core.reminder_parser import (
     parse_time_reply,
 )
 from app.core.reminders import create_reminder
-from app.db.models import Message
+from app.db.persist import persist_message_best_effort
 from app.db.schemas import ChatRequest, StreamChunk
 
 _SSE_HEADERS = {
@@ -301,22 +301,18 @@ def _stream_text(
     have actually been scheduled."""
 
     async def event_generator():
-        try:
-            db.add(Message(session_id=session_id, role="user", content=persist_user))
-            await db.commit()
-        except Exception as e:
-            logger.warning(f"Persisting reminder-turn user message failed (non-critical): {e}")
+        await persist_message_best_effort(
+            db, session_id, "user", persist_user, what="reminder-turn user message",
+        )
 
         chunk = StreamChunk(delta=text, done=False, session_id=session_id)
         yield f"data: {chunk.model_dump_json()}\n\n"
         done_chunk = StreamChunk(delta="", done=True, session_id=session_id)
         yield f"data: {done_chunk.model_dump_json()}\n\n"
 
-        try:
-            db.add(Message(session_id=session_id, role="assistant", content=text))
-            await db.commit()
-        except Exception as e:
-            logger.warning(f"Persisting reminder-turn assistant message failed (non-critical): {e}")
+        await persist_message_best_effort(
+            db, session_id, "assistant", text, what="reminder-turn assistant message",
+        )
 
     return StreamingResponse(
         event_generator(), media_type="text/event-stream", headers=_SSE_HEADERS

@@ -66,10 +66,10 @@ from app.agents import (
     pop_plan,
     put_plan,
     start_task,
-    steps_for_summary,
 )
+from app.agents.summary import stream_completed_summary
 from app.api.agent import _plan_response
-from app.db.models import Message
+from app.db.persist import persist_message_best_effort
 from app.db.schemas import ChatRequest, StreamChunk
 from app.providers.base import LLMMessage, LLMProvider
 
@@ -224,7 +224,12 @@ async def _classify_message(
                 ),
             )],
             temperature=0.0,
-            max_tokens=8,
+            # NOT a tiny cap: on thinking models (gemini-2.5-*) reasoning
+            # tokens count against max_tokens, so 8 produced ZERO output
+            # (finish_reason=MAX_TOKENS) and EVERY message fell open to chat —
+            # Jarvis stopped doing tasks entirely on Gemini (found 2026-07-13).
+            # The parser only reads the first word; temp-0 keeps replies short.
+            max_tokens=512,
         )
     except Exception as e:
         logger.warning(f"Message classification failed — treating as chat: {e}")
@@ -452,11 +457,9 @@ def _stream_static_text(
     user message, compute/emit the reply, persist it. The background-task
     paths use this — their real output arrives later, by push."""
     async def event_generator():
-        try:
-            db.add(Message(session_id=session_id, role="user", content=user_text))
-            await db.commit()
-        except Exception as e:
-            logger.warning(f"Persisting task message failed (non-critical): {e}")
+        await persist_message_best_effort(
+            db, session_id, "user", user_text, what="task user message",
+        )
 
         text = await reply()
         chunk = StreamChunk(
@@ -470,14 +473,10 @@ def _stream_static_text(
         )
         yield f"data: {done.model_dump_json()}\n\n"
 
-        try:
-            db.add(Message(
-                session_id=session_id, role="assistant",
-                content=text, model=provider.model_name,
-            ))
-            await db.commit()
-        except Exception as e:
-            logger.warning(f"Persisting task response failed (non-critical): {e}")
+        await persist_message_best_effort(
+            db, session_id, "assistant", text,
+            model=provider.model_name, what="task response",
+        )
 
     return StreamingResponse(
         event_generator(), media_type="text/event-stream", headers=_SSE_HEADERS,
@@ -565,11 +564,9 @@ def _stream_plan_run(
     async def event_generator():
         # Persist the user message here — the Phase 2 path that normally does
         # this was bypassed. Same Message row it would have written.
-        try:
-            db.add(Message(session_id=session_id, role="user", content=user_text))
-            await db.commit()
-        except Exception as e:
-            logger.warning(f"Persisting task message failed (non-critical): {e}")
+        await persist_message_best_effort(
+            db, session_id, "user", user_text, what="task user message",
+        )
 
         try:
             planner = AgentPlanner(
@@ -612,14 +609,10 @@ def _stream_plan_run(
 
         assistant_text = "".join(collected)
         if assistant_text:
-            try:
-                db.add(Message(
-                    session_id=session_id, role="assistant",
-                    content=assistant_text, model=provider.model_name,
-                ))
-                await db.commit()
-            except Exception as e:
-                logger.warning(f"Persisting task response failed (non-critical): {e}")
+            await persist_message_best_effort(
+                db, session_id, "assistant", assistant_text,
+                model=provider.model_name, what="task response",
+            )
 
     return StreamingResponse(
         event_generator(), media_type="text/event-stream", headers=_SSE_HEADERS,
@@ -633,37 +626,8 @@ def _stream_plan_run(
 _deterministic_text = deterministic_plan_text
 
 
-_SUMMARY_PROMPT = """You are Jarvis, the user's personal AI. You just finished executing a task for them. Report the outcome.
-
-THE USER ASKED:
-{goal}
-
-WHAT WAS DONE AND WHAT IT FOUND (already rendered as readable text — this is the COMPLETE record):
-{steps}
-
-Write the reply to the user:
-- Start with one short first-person sentence saying what was done.
-- When the user asked to SEE data (file/folder names, file contents, command output), present ALL of it from the results above: names as a markdown bullet list (you may group folders and files), file contents and command output in a fenced code block. Never summarize the data away.
-- Copy names, paths, numbers, and contents EXACTLY as written above — never invent, drop, round, or embellish anything.
-- Only call a list truncated if the results above literally say so — otherwise it is complete.
-- Never output JSON, curly braces, or escaped backslashes; do not mention tools, steps, or plans."""
-
-
-async def _summarize_completed(provider: LLMProvider, plan: AgentPlan):
-    """Stream a natural-language summary of a completed plan. Falls back to
-    the deterministic text if the LLM stream fails before producing anything.
-    The step results are handed over as code-rendered readable text
-    (steps_for_summary), NEVER raw JSON — the LLM cannot paste JSON it never
-    received (live display bug, 2026-07-10)."""
-    prompt = _SUMMARY_PROMPT.format(goal=plan.goal, steps=steps_for_summary(plan))
-    produced = False
-    try:
-        async for delta in provider.stream_chat(
-            messages=[LLMMessage(role="user", content=prompt)], temperature=0.3,
-        ):
-            produced = True
-            yield delta
-    except Exception as e:
-        logger.warning(f"Task summary stream failed: {e}")
-    if not produced:
-        yield _deterministic_text(plan)
+# Moved to app/agents/summary.py (2026-07-12) so the agent HTTP endpoints —
+# /api/agent/choose (clicked options) and /approve — can render the SAME
+# completion words this streaming path does; the alias keeps this module's
+# public shape for the tests that patch it here.
+_summarize_completed = stream_completed_summary

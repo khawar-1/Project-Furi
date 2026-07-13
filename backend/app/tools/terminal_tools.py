@@ -262,7 +262,20 @@ class CreateFileTool(BaseTool):
         if path.exists():
             return _fail(self, f"Refusing to overwrite: '{path}' already exists")
         if not path.parent.exists():
-            return _fail(self, f"Parent folder does not exist: '{path.parent}'")
+            return _fail(
+                self,
+                f"Parent folder does not exist: '{path.parent}' — create it "
+                f"first with create_folder"
+            )
+        if not path.parent.is_dir():
+            # A 0-byte create_file posing as a folder (live bug 2026-07-12):
+            # the parent EXISTS but is a file — name the real problem so the
+            # replan reaches for create_folder instead of searching.
+            return _fail(
+                self,
+                f"'{path.parent}' is a FILE, not a folder — nothing can be "
+                f"created inside it. Create a real folder with create_folder."
+            )
         path.write_bytes(encoded)
         return _ok(self, {"created": str(path), "size_bytes": len(encoded)})
 

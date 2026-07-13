@@ -135,12 +135,13 @@ async def _reminder_job_handler(job: FiredJob) -> None:
         })
 
         if reminder.session_id:
-            db.add(Message(
-                session_id=reminder.session_id,
-                role="assistant",
-                content=body,
-            ))
-            await db.commit()
+            # Best-effort: the toast already fired and the reminder is marked
+            # fired — a failed history write must not fail the job.
+            from app.db.persist import persist_message_best_effort
+            await persist_message_best_effort(
+                db, reminder.session_id, "assistant", body,
+                what="fired-reminder message",
+            )
 
 
 def register() -> None:

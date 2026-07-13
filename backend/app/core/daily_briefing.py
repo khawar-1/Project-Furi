@@ -317,8 +317,12 @@ async def _deliver(db: AsyncSession, body: str, *, late: bool) -> Optional[str]:
     closed window), then push best-effort (Part 3 raises the toast)."""
     session_id = await _latest_session_id(db)
     if session_id:
-        db.add(Message(session_id=session_id, role="assistant", content=body))
-        await db.commit()
+        # Best-effort with rollback — a failed history write must not swallow
+        # the briefing (the push/toast below still delivers it).
+        from app.db.persist import persist_message_best_effort
+        await persist_message_best_effort(
+            db, session_id, "assistant", body, what="daily briefing message",
+        )
     await push("briefing", {
         "title": "Jarvis",
         "body": body,

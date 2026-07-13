@@ -104,9 +104,15 @@ class GeminiProvider(LLMProvider):
         """Full (non-streaming) chat completion via Gemini."""
         history, current_message = self._to_gemini_history(messages)
 
+        # Thinking models (gemini-2.5-*) spend reasoning tokens against
+        # max_output_tokens BEFORE emitting any text — a small caller cap
+        # (e.g. the router's one-word classification) yields an empty
+        # response with finish_reason=MAX_TOKENS. Clamp to a working floor;
+        # callers that want brevity get it from their prompt, not the cap.
+        effective_max = max(max_tokens, 512) if max_tokens else 8192
         generation_config = genai.GenerationConfig(
             temperature=temperature,
-            max_output_tokens=max_tokens or 8192,
+            max_output_tokens=effective_max,
         )
 
         model = genai.GenerativeModel(
@@ -123,13 +129,40 @@ class GeminiProvider(LLMProvider):
         )
 
         return LLMResponse(
-            content=response.text,
+            content=self._response_text(response),
             model=self._model_name,
             provider=self.provider_name,
             tokens_used=response.usage_metadata.total_token_count
             if hasattr(response, "usage_metadata")
             else None,
         )
+
+    @staticmethod
+    def _response_text(response) -> str:
+        """The `.text` quick accessor RAISES when the response has no parts
+        (thinking exhausted the token budget, or a safety block). Extract
+        defensively and raise a CLEAN error naming the finish reason —
+        callers fail open on exceptions, they must never crash on Gemini's
+        accessor semantics."""
+        try:
+            return response.text
+        except Exception:
+            parts: list[str] = []
+            for candidate in getattr(response, "candidates", None) or []:
+                content = getattr(candidate, "content", None)
+                for part in getattr(content, "parts", None) or []:
+                    text = getattr(part, "text", "")
+                    if text:
+                        parts.append(text)
+            if parts:
+                return "".join(parts)
+            candidates = getattr(response, "candidates", None) or []
+            finish = getattr(candidates[0], "finish_reason", "?") if candidates else "?"
+            raise ValueError(
+                f"Gemini returned no text (finish_reason={finish}) — "
+                f"likely the output-token cap was consumed by reasoning, "
+                f"or the reply was safety-blocked"
+            )
 
     async def stream_chat(
         self,
@@ -143,9 +176,11 @@ class GeminiProvider(LLMProvider):
         """
         history, current_message = self._to_gemini_history(messages)
 
+        # Same thinking-model floor as chat() — see the comment there.
+        effective_max = max(max_tokens, 512) if max_tokens else 8192
         generation_config = genai.GenerationConfig(
             temperature=temperature,
-            max_output_tokens=max_tokens or 8192,
+            max_output_tokens=effective_max,
         )
 
         model = genai.GenerativeModel(

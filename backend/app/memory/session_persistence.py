@@ -122,6 +122,10 @@ async def save_pending_state(db: AsyncSession, session_id: str) -> None:
         await db.commit()
     except Exception as e:
         logger.warning(f"Persisting pending session state failed (non-critical): {e}")
+        try:
+            await db.rollback()  # never leave the caller's session poisoned
+        except Exception:
+            pass
 
 
 async def restore_pending_state(db: AsyncSession, session_id: str) -> None:
