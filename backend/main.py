@@ -19,6 +19,7 @@ from app.api import ws, schedule, reminders, tasks
 from app.api import integrations, settings as settings_api
 from app.api import index as index_api
 from app.api import routines as routines_api
+from app.api import voice as voice_api
 import app.core.reminders  # noqa: F401 — registers the "reminder" job handler at import time
 import app.core.birthdays  # noqa: F401 — registers the "birthday" job handler at import time
 import app.core.daily_briefing  # noqa: F401 — registers the "daily_briefing" job handler at import time
@@ -29,6 +30,16 @@ import app.core.reindex  # noqa: F401 — registers the "reindex" job handler at
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup and shutdown lifecycle management."""
     logger.info("🚀 Jarvis OS backend starting...")
+
+    # Register CUDA DLL directories FIRST, before anything imports onnxruntime
+    # or the voice engines — the GPU voice path (ctranslate2 STT / onnxruntime
+    # TTS) resolves cuDNN/cuBLAS/cudart from here. Best-effort, no-op without a
+    # GPU (the CPU path stays the fallback). See app/core/gpu_bootstrap.py.
+    try:
+        from app.core.gpu_bootstrap import register_cuda_dll_dirs
+        register_cuda_dll_dirs()
+    except Exception as e:
+        logger.warning(f"⚠️  CUDA DLL registration failed (voice uses CPU): {e}")
 
     # Apply schema migrations FIRST (2026-07-13): nobody runs alembic by hand
     # on a desktop app. create_all below only adds missing TABLES — a new
@@ -103,6 +114,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if settings.LLM_PROVIDER.strip().lower() == "ollama":
         app.state.llm_warmup = asyncio.create_task(_prewarm_llm())
 
+    # Phase 7 Parts 1+3: warm-load the local voice models when voice is
+    # enabled, so the first push-to-talk (and the first spoken reply) after a
+    # restart never waits for a model load. Both ensure_* calls kick a
+    # background task and return immediately (each module keeps its task
+    # ref); best-effort like every warmup here.
+    try:
+        from app.core.app_settings import get_voice_config
+        from app.core.voice_stt import ensure_model_loaded
+        from app.core.voice_tts import ensure_engine_loaded
+        from app.db.database import AsyncSessionLocal as _VoiceSessionLocal
+        async with _VoiceSessionLocal() as session:
+            voice_config = await get_voice_config(session)
+        if voice_config.enabled:
+            await ensure_model_loaded(
+                voice_config.stt_model,
+                voice_config.stt_device,
+                voice_config.stt_compute_type,
+            )
+            logger.info(
+                f"🎙️ Voice STT model '{voice_config.stt_model}' loading in background "
+                f"(device={voice_config.stt_device})"
+            )
+            if voice_config.output_enabled:
+                await ensure_engine_loaded(voice_config.tts_device)
+                logger.info(
+                    f"🔊 Voice TTS engine (Kokoro) loading in background "
+                    f"(device={voice_config.tts_device})"
+                )
+    except Exception as e:
+        logger.warning(f"⚠️  Voice warm-load failed (non-critical): {e}")
+
     # Phase 4: start the scheduler and rebuild timers from SQLite — jobs
     # whose run_at passed while the backend was down fire immediately (late).
     from app.core.scheduler import scheduler
@@ -165,6 +207,10 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # /api/voice/speak/stream carries its PCM sample rate in a custom
+        # header — without exposing it the cross-origin Vite renderer reads
+        # null and would guess the rate.
+        expose_headers=["X-Sample-Rate", "X-Audio-Format"],
     )
 
     # Phase 1 routes
@@ -197,6 +243,9 @@ def create_app() -> FastAPI:
 
     # Phase 6 Part 5 — teachable routines (procedural memory)
     app.include_router(routines_api.router, prefix="/api/routines", tags=["Routines"])
+
+    # Phase 7 Part 1 — local voice (push-to-talk transcription)
+    app.include_router(voice_api.router, prefix="/api/voice", tags=["Voice"])
 
     return app
 

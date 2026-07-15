@@ -28,6 +28,7 @@ BRIEFING_CONFIG_KEY = "daily_briefing.config"
 BRIEFING_JOB_ID_KEY = "daily_briefing.job_id"
 FILE_INDEX_CONFIG_KEY = "file_index.config"
 FILE_INDEX_JOB_ID_KEY = "file_index.job_id"
+VOICE_CONFIG_KEY = "voice.config"
 
 
 # --------------------------------------------------------- generic accessor
@@ -212,3 +213,185 @@ async def get_file_index_job_id(db: AsyncSession) -> Optional[str]:
 
 async def set_file_index_job_id(db: AsyncSession, job_id: Optional[str]) -> None:
     await set_setting(db, FILE_INDEX_JOB_ID_KEY, job_id)
+
+
+# ---------------------------------------------------- voice config (Phase 7)
+
+#: Whitelisted faster-whisper model ids. Anything else coerces to the default —
+#: a hand-edited row can never point the loader at an arbitrary HuggingFace repo
+#: id. Includes multilingual sizes AND English-optimized variants (the `.en` /
+#: distil models are ~2x faster and more accurate on English; distil-large-v3
+#: rivals large-v3 quality at small-model speed). faster-whisper downloads each
+#: on first use.
+VOICE_STT_MODELS = (
+    "tiny",
+    "base",
+    "base.en",
+    "small",
+    "small.en",
+    "distil-small.en",
+    "medium",
+    "distil-large-v3",
+    "large-v3",
+)
+
+#: Where an engine runs. "auto" resolves to CUDA when a GPU is present, else CPU
+#: (see gpu_bootstrap.cuda_available); "cpu"/"cuda" force it, with a CPU fallback
+#: in code if a forced CUDA load fails — voice must never wedge on a bad device.
+VOICE_DEVICES = ("auto", "cpu", "cuda")
+
+#: faster-whisper compute types. "auto" derives from the resolved device
+#: (CUDA → int8_float16, the VRAM-safe near-float16 default; CPU → int8).
+VOICE_STT_COMPUTE_TYPES = ("auto", "float16", "int8_float16", "int8")
+
+#: Curated Kokoro preset voices (id → display label). Kokoro ships ~54 voices
+#: across 8 languages; we expose a focused English set. `voice` is validated
+#: against these ids — a hand-edited row can never name a voice the pack does
+#: not contain. Ids follow Kokoro's `[lang][gender]_[name]` scheme (a=American
+#: English, b=British English).
+VOICE_TTS_VOICES = (
+    ("af_heart", "Heart — US, female"),
+    ("af_bella", "Bella — US, female"),
+    ("af_sarah", "Sarah — US, female"),
+    ("af_nicole", "Nicole — US, female"),
+    ("am_michael", "Michael — US, male"),
+    ("am_adam", "Adam — US, male"),
+    ("am_fenrir", "Fenrir — US, male"),
+    ("bf_emma", "Emma — UK, female"),
+    ("bf_isabella", "Isabella — UK, female"),
+    ("bm_george", "George — UK, male"),
+    ("bm_lewis", "Lewis — UK, male"),
+)
+
+#: The ids alone, for validation.
+VOICE_TTS_VOICE_IDS = tuple(v for v, _ in VOICE_TTS_VOICES)
+
+#: Default speaking voice (must be in VOICE_TTS_VOICE_IDS).
+DEFAULT_VOICE_ID = "af_heart"
+
+#: Speaking-speed bounds (Kokoro `speed`; 1.0 = natural).
+VOICE_TTS_MIN_SPEED = 0.5
+VOICE_TTS_MAX_SPEED = 2.0
+
+
+@dataclass(frozen=True)
+class VoiceConfig:
+    """Phase 7 voice settings. `enabled` is the master switch for voice
+    (push-to-talk in, speech out) and defaults OFF — enabling triggers a
+    large local model download, so it is strictly opt-in like the file index.
+    Part 3 output fields: `output_enabled` defaults ON but is always gated on
+    the master `enabled` at the API layer, so nothing speaks until voice
+    itself is opted in; `speak_all_responses` (Part 4) covers typed turns;
+    `speak_proactive` (Part 5) covers server-initiated pushes;
+    `listen_on_summon` (Part 5) starts a hands-free recording when the global
+    hotkey summons the window — strictly opt-in, like `enabled` itself.
+
+    `voice` is a Kokoro preset voice id (validated against VOICE_TTS_VOICE_IDS,
+    default af_heart) — Kokoro has fixed preset voices, no cloning. `tts_speed`
+    is the speaking speed (VOICE_TTS_MIN_SPEED..MAX_SPEED, 1.0 = natural).
+
+    `stt_device`/`tts_device` select CPU vs GPU per engine (default "auto" =
+    GPU-when-present, else CPU); `stt_compute_type` tunes whisper's precision
+    ("auto" derives it from the device). All coerce to their default when a
+    stored row carries an out-of-whitelist value, so a pre-GPU-round config
+    deserializes cleanly."""
+    enabled: bool
+    stt_model: str
+    review_before_send: bool
+    output_enabled: bool
+    voice: str
+    speak_proactive: bool
+    speak_all_responses: bool
+    listen_on_summon: bool
+    tts_speed: float
+    stt_device: str
+    tts_device: str
+    stt_compute_type: str
+
+
+def default_voice_config() -> VoiceConfig:
+    return VoiceConfig(
+        enabled=False,
+        stt_model="small",
+        review_before_send=False,
+        output_enabled=True,
+        voice=DEFAULT_VOICE_ID,
+        speak_proactive=False,
+        speak_all_responses=False,
+        listen_on_summon=False,
+        tts_speed=1.0,
+        stt_device="auto",
+        tts_device="auto",
+        stt_compute_type="auto",
+    )
+
+
+def _clamp_speed(value: Any, fallback: float) -> float:
+    try:
+        return max(VOICE_TTS_MIN_SPEED, min(VOICE_TTS_MAX_SPEED, float(value)))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _coerce_voice(raw: Any) -> VoiceConfig:
+    """A stored dict → VoiceConfig. Unknown keys are ignored, so an existing
+    row still carrying the removed Chatterbox fields (tts_exaggeration /
+    tts_cfg_weight / tts_device / tts_fast, or a clone-id `voice`) deserializes
+    cleanly on upgrade — an out-of-whitelist `voice` simply falls back to the
+    default preset."""
+    default = default_voice_config()
+    if not isinstance(raw, dict):
+        return default
+    stt_model = raw.get("stt_model", default.stt_model)
+    if stt_model not in VOICE_STT_MODELS:
+        stt_model = default.stt_model
+    voice = raw.get("voice", default.voice)
+    if voice not in VOICE_TTS_VOICE_IDS:
+        voice = default.voice
+    stt_device = raw.get("stt_device", default.stt_device)
+    if stt_device not in VOICE_DEVICES:
+        stt_device = default.stt_device
+    tts_device = raw.get("tts_device", default.tts_device)
+    if tts_device not in VOICE_DEVICES:
+        tts_device = default.tts_device
+    stt_compute_type = raw.get("stt_compute_type", default.stt_compute_type)
+    if stt_compute_type not in VOICE_STT_COMPUTE_TYPES:
+        stt_compute_type = default.stt_compute_type
+    return VoiceConfig(
+        enabled=bool(raw.get("enabled", default.enabled)),
+        stt_model=stt_model,
+        review_before_send=bool(raw.get("review_before_send", default.review_before_send)),
+        output_enabled=bool(raw.get("output_enabled", default.output_enabled)),
+        voice=voice,
+        speak_proactive=bool(raw.get("speak_proactive", default.speak_proactive)),
+        speak_all_responses=bool(raw.get("speak_all_responses", default.speak_all_responses)),
+        listen_on_summon=bool(raw.get("listen_on_summon", default.listen_on_summon)),
+        tts_speed=_clamp_speed(raw.get("tts_speed", default.tts_speed), default.tts_speed),
+        stt_device=stt_device,
+        tts_device=tts_device,
+        stt_compute_type=stt_compute_type,
+    )
+
+
+async def get_voice_config(db: AsyncSession) -> VoiceConfig:
+    raw = await get_setting(db, VOICE_CONFIG_KEY, default=None)
+    if raw is None:
+        return default_voice_config()
+    return _coerce_voice(raw)
+
+
+async def set_voice_config(db: AsyncSession, config: VoiceConfig) -> None:
+    await set_setting(db, VOICE_CONFIG_KEY, {
+        "enabled": config.enabled,
+        "stt_model": config.stt_model,
+        "review_before_send": config.review_before_send,
+        "output_enabled": config.output_enabled,
+        "voice": config.voice,
+        "speak_proactive": config.speak_proactive,
+        "speak_all_responses": config.speak_all_responses,
+        "listen_on_summon": config.listen_on_summon,
+        "tts_speed": config.tts_speed,
+        "stt_device": config.stt_device,
+        "tts_device": config.tts_device,
+        "stt_compute_type": config.stt_compute_type,
+    })

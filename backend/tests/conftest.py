@@ -67,6 +67,40 @@ def _hermetic_folder_resolver(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_voice_stt():
+    """voice_stt's default factory downloads a ~500MB whisper model on first
+    load. Tests must never trigger that: every test starts with pristine
+    module state and a factory that refuses outright. Voice tests swap in
+    their own fakes on top."""
+    from app.core import voice_stt
+
+    def _refuse(model_name: str):
+        raise RuntimeError("test tried to load a real STT model")
+
+    voice_stt.reset_stt()
+    voice_stt.STT_MODEL_FACTORY = _refuse
+    yield
+    voice_stt.reset_stt()
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_voice_tts():
+    """voice_tts's default factory imports onnxruntime + downloads the Kokoro
+    model on first load. Tests must never trigger that: every test starts with
+    pristine module state and a factory that refuses outright. Voice tests swap
+    in their own fakes on top. (The factory takes no arguments.)"""
+    from app.core import voice_tts
+
+    def _refuse():
+        raise RuntimeError("test tried to load a real TTS engine")
+
+    voice_tts.reset_tts()
+    voice_tts.TTS_ENGINE_FACTORY = _refuse
+    yield
+    voice_tts.reset_tts()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_google_auth(tmp_path_factory):
     """Google auth defaults its token file to the real ~/.jarvis directory.
     Tests must never read/write it (or hit Google): every test gets a manager

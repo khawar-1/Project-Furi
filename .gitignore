@@ -24,6 +24,10 @@ backend/*.db
 backend/*.db-journal
 backend/*.db-wal
 backend/*.db-shm
+# DB backups/snapshots (e.g. jarvis.db.backup-kokoro-20260715-172614) — the
+# `*.db` rule above only matches names ENDING in .db, so backups slip through.
+backend/*.db.backup*
+backend/*.db.bak
 
 # Environment variables (SECRETS — never commit)
 .env

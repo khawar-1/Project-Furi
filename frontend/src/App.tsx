@@ -15,7 +15,9 @@ import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { useUIStore } from '@/stores/uiStore';
 import { connectPush, disconnectPush, onPush } from '@/lib/push';
 import { initNotifications } from '@/lib/notifications';
+import { initVoiceAnnounce } from '@/lib/voiceAnnounce';
 import { useChatStore } from '@/stores/chatStore';
+import { useVoiceStore } from '@/stores/voiceStore';
 import type { ActivePanel } from '@/types';
 
 function PanelContent({ panel }: { panel: ActivePanel }) {
@@ -90,11 +92,46 @@ export default function App() {
     return () => clearInterval(interval);
   }, [checkBackendHealth]);
 
+  // Phase 7: voice settings — one fetch so the mic button knows whether
+  // voice is enabled and whether the STT model is ready. Belt: fetchSettings
+  // is a one-shot and swallows failures, so if it loses the startup race with
+  // a still-booting backend, retry once so voice doesn't stay permanently
+  // "unavailable" (the other startup fetches self-heal via polling).
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      await useVoiceStore.getState().fetchSettings();
+      if (cancelled || useVoiceStore.getState().settings !== null) return;
+      setTimeout(() => {
+        if (!cancelled && useVoiceStore.getState().settings === null) {
+          void useVoiceStore.getState().fetchSettings();
+        }
+      }, 2_000);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Phase 7 Part 5: the "Jarvis moment" — the global hotkey summons the
+  // window AND (opt-in via listen_on_summon, checked in the store) starts a
+  // hands-free recording. No-op in a plain browser (no Electron bridge).
+  useEffect(() => {
+    if (typeof window.jarvis?.onSummoned !== 'function') return;
+    window.jarvis.onSummoned(() => {
+      void useVoiceStore.getState().beginSummonListen();
+    });
+    return () => window.jarvis.removeAllListeners('summoned-by-hotkey');
+  }, []);
+
   // Phase 4: the push channel — the server can now speak first — and the
   // native-notification bridge that makes it felt while the app is in the tray.
   useEffect(() => {
     connectPush();
     const stopNotifications = initNotifications();
+    // Phase 7 Part 5: the voice sibling of the toast bridge — push events are
+    // SPOKEN when speak_proactive is on (gating lives inside the module).
+    const stopAnnounce = initVoiceAnnounce();
     // Part 4: a reminder firing while this window is open should also show
     // up live in chat, not just as a toast — if it's this session's.
     const stopReminders = onPush('reminder', (event) => {
@@ -128,6 +165,7 @@ export default function App() {
       stopSteps();
       stopTasks();
       stopReminders();
+      stopAnnounce();
       stopNotifications();
       disconnectPush();
     };

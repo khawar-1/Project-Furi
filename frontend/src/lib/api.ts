@@ -23,7 +23,11 @@ import type {
   ReminderStatus,
   Routine,
   SemanticMemory,
+  SttStatus,
   StreamChunk,
+  TranscribeResult,
+  TtsStatus,
+  VoiceSettings,
 } from '@/types';
 
 // Resolve backend URL (also used by lib/push.ts to derive the ws:// URL)
@@ -329,6 +333,150 @@ export const indexApi = {
   /** Phase 6 Part 6: the learned save/move destinations (read-only). */
   frequentFolders: (limit = 5): Promise<{ folders: FrequentFolder[] }> =>
     apiFetch<{ folders: FrequentFolder[] }>(`/api/index/frequent-folders?limit=${limit}`),
+};
+
+// ============================================================
+// Voice (Phase 7 — push-to-talk)
+// ============================================================
+
+/** The full PUT /api/settings/voice body — the backend persists every field,
+ *  so a partial body would silently reset the omitted ones to defaults. */
+export interface VoiceUpdateBody {
+  enabled: boolean;
+  stt_model: string;
+  review_before_send: boolean;
+  output_enabled: boolean;
+  voice: string;
+  speak_proactive: boolean;
+  speak_all_responses: boolean;
+  listen_on_summon: boolean;
+  tts_speed: number;
+  stt_device: string;
+  tts_device: string;
+  stt_compute_type: string;
+}
+
+/** Build the complete PUT body from the current settings plus a patch — the
+ *  ONE place the field list lives, so every caller (ChatPanel's speaker
+ *  toggle, the Settings VoiceCard) inherits a new field automatically
+ *  instead of each hand-copying the shape (the drift-risk lesson). */
+export function voiceUpdatePayload(
+  settings: VoiceSettings,
+  patch: Partial<VoiceUpdateBody> = {}
+): VoiceUpdateBody {
+  return {
+    enabled: settings.enabled,
+    stt_model: settings.stt_model,
+    review_before_send: settings.review_before_send,
+    output_enabled: settings.output_enabled,
+    voice: settings.voice,
+    speak_proactive: settings.speak_proactive,
+    speak_all_responses: settings.speak_all_responses,
+    listen_on_summon: settings.listen_on_summon,
+    tts_speed: settings.tts_speed,
+    stt_device: settings.stt_device,
+    tts_device: settings.tts_device,
+    stt_compute_type: settings.stt_compute_type,
+    ...patch,
+  };
+}
+
+export const voiceApi = {
+  getSettings: (): Promise<VoiceSettings> =>
+    apiFetch<VoiceSettings>('/api/settings/voice'),
+
+  /** PUT enabling voice (or switching models/voices) kicks the model
+   *  downloads immediately server-side; poll status() through them.
+   *  Build the body with voiceUpdatePayload() — never by hand. */
+  updateSettings: (update: VoiceUpdateBody): Promise<VoiceSettings> =>
+    apiFetch<VoiceSettings>('/api/settings/voice', {
+      method: 'PUT',
+      body: JSON.stringify(update),
+    }),
+
+  /** Purely local on the backend (no I/O) — safe to poll while a model loads. */
+  status: (): Promise<{
+    enabled: boolean;
+    stt: SttStatus & { configured_model: string };
+    tts: TtsStatus & { configured_voice: string; output_enabled: boolean };
+  }> => apiFetch('/api/voice/status'),
+
+  /** Synthesize one sentence to a WAV blob (Part 4's playback queue).
+   *  Bypasses apiFetch (binary response; the transcribe precedent). Resolves
+   *  null on 204 — the text sanitized to nothing (pure markdown scaffolding);
+   *  the caller just skips it. Throws the backend's human-readable `detail`
+   *  otherwise (voice/output disabled, engine still loading, …). */
+  speak: async (text: string, signal?: AbortSignal): Promise<Blob | null> => {
+    const response = await fetch(`${getBaseUrl()}/api/voice/speak`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+      signal,
+    });
+    if (response.status === 204) return null;
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        const body = (await response.json()) as { detail?: string };
+        if (body.detail) detail = body.detail;
+      } catch { /* non-JSON error body */ }
+      throw new Error(detail);
+    }
+    return response.blob();
+  },
+
+  /** Synthesize one sentence as a LIVE PCM stream — audio chunks arrive while
+   *  the sentence is still being synthesized (~1s to first sound instead of
+   *  the whole synthesis). Raw s16le mono at `sampleRate`; the playback queue
+   *  schedules chunks with Web Audio. Resolves null on 204 (sanitized to
+   *  nothing); throws the backend's `detail` otherwise — callers fall back
+   *  to the blob speak() on failure. */
+  speakStream: async (
+    text: string,
+    signal?: AbortSignal
+  ): Promise<{ sampleRate: number; body: ReadableStream<Uint8Array> } | null> => {
+    const response = await fetch(`${getBaseUrl()}/api/voice/speak/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+      signal,
+    });
+    if (response.status === 204) return null;
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        const body = (await response.json()) as { detail?: string };
+        if (body.detail) detail = body.detail;
+      } catch { /* non-JSON error body */ }
+      throw new Error(detail);
+    }
+    if (!response.body) throw new Error('Streaming not supported by this environment.');
+    const sampleRate = parseInt(response.headers.get('X-Sample-Rate') || '24000', 10);
+    return { sampleRate: Number.isFinite(sampleRate) ? sampleRate : 24000, body: response.body };
+  },
+
+  /** Transcribe one recorded utterance. Multipart, so this bypasses apiFetch
+   *  (the browser must set the multipart boundary itself — a forced JSON
+   *  Content-Type would break the upload). Errors surface the backend's
+   *  human-readable `detail` ("model not ready yet", "voice disabled", ...). */
+  transcribe: async (audio: Blob, signal?: AbortSignal): Promise<TranscribeResult> => {
+    const form = new FormData();
+    form.append('file', audio, 'utterance.webm');
+    const response = await fetch(`${getBaseUrl()}/api/voice/transcribe`, {
+      method: 'POST',
+      body: form,
+      signal,
+    });
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        const body = (await response.json()) as { detail?: string };
+        if (body.detail) detail = body.detail;
+      } catch { /* non-JSON error body */ }
+      throw new Error(detail);
+    }
+    return response.json() as Promise<TranscribeResult>;
+  },
 };
 
 // ============================================================

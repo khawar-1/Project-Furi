@@ -14,20 +14,36 @@ import {
   Link2,
   Link2Off,
   Loader2,
+  Mic,
   Plus,
   RotateCw,
   Send,
   Settings as SettingsIcon,
   ShieldCheck,
+  Square,
   Sunrise,
+  Volume2,
   X,
 } from 'lucide-react';
-import { indexApi, integrationsApi, settingsApi } from '@/lib/api';
+import { useShallow } from 'zustand/react/shallow';
+import {
+  indexApi,
+  integrationsApi,
+  settingsApi,
+  voiceApi,
+  voiceUpdatePayload,
+  type VoiceUpdateBody,
+} from '@/lib/api';
+import { useVoiceStore } from '@/stores/voiceStore';
+import { speakText } from '@/lib/voiceOutput';
+import { startRecording, voiceCaptureSupported, type RecordingHandle } from '@/lib/voiceInput';
 import type {
   BriefingSettings,
   FileIndexSettings,
   FrequentFolder,
   GoogleIntegrationStatus,
+  SttStatus,
+  TtsStatus,
 } from '@/types';
 
 const IDLE_POLL_MS = 15_000;
@@ -646,6 +662,464 @@ function FileIndexCard() {
   );
 }
 
+/** The shared switch control (the DailyBriefingCard/FileIndexCard toggle). */
+function ToggleSwitch({
+  checked,
+  disabled,
+  onToggle,
+  label,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onToggle: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onToggle}
+      className={clsx(
+        'relative w-10 h-5 rounded-full transition-colors flex-shrink-0 disabled:opacity-40',
+        checked ? 'bg-cyan-500/70' : 'bg-surface-2 border border-surface-border'
+      )}
+    >
+      <span
+        className={clsx(
+          'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform',
+          checked ? 'translate-x-5' : 'translate-x-0.5'
+        )}
+      />
+    </button>
+  );
+}
+
+/** One model status line: name + state chip + a progress bar while
+ *  downloading. The bar is HONEST: a real percentage only when the backend
+ *  reports one (`progress`), otherwise an indeterminate bar — the model
+ *  downloads here are opaque, so we never fabricate a percentage. */
+/** Device id → human label for the pickers and status badges. */
+const DEVICE_LABELS: Record<string, string> = {
+  auto: 'Auto',
+  cpu: 'CPU',
+  cuda: 'GPU',
+};
+
+function ModelStatusRow({
+  title,
+  status,
+}: {
+  title: string;
+  status: (SttStatus | TtsStatus) & { progress?: TtsStatus['progress']; device?: string | null };
+}) {
+  const progress = status.progress ?? null;
+  const percent =
+    progress && progress.total ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100)) : null;
+  // When ready, show which device it actually loaded on (GPU vs CPU) — makes
+  // "Auto" honest about what it picked.
+  const deviceLabel =
+    status.status === 'ready' && status.device
+      ? DEVICE_LABELS[status.device] ?? status.device
+      : null;
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-2">
+        <span className="flex-1 min-w-0 text-xs text-slate-400 truncate">{title}</span>
+        {deviceLabel && (
+          <span
+            className={clsx(
+              'text-[10px] px-1.5 py-0.5 rounded-full border font-mono flex-shrink-0',
+              status.device === 'cuda'
+                ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20'
+                : 'bg-surface-2 text-slate-500 border-surface-border'
+            )}
+          >
+            {deviceLabel}
+          </span>
+        )}
+        <span
+          className={clsx(
+            'text-[10px] px-2 py-0.5 rounded-full border font-mono flex items-center gap-1.5 flex-shrink-0',
+            status.status === 'ready'
+              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+              : status.status === 'loading'
+                ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                : status.status === 'error'
+                  ? 'bg-red-500/10 text-red-400 border-red-500/20'
+                  : 'bg-surface-2 text-slate-500 border-surface-border'
+          )}
+        >
+          {status.status === 'loading' && <Loader2 size={10} className="animate-spin" />}
+          {status.status === 'loading'
+            ? percent !== null
+              ? `downloading ${percent}%`
+              : 'downloading…'
+            : status.status === 'not_loaded'
+              ? 'not loaded'
+              : status.status}
+        </span>
+      </div>
+      {status.status === 'loading' && (
+        <div className="h-1 rounded-full bg-surface-2 overflow-hidden">
+          {percent !== null ? (
+            <div
+              className="h-full bg-cyan-500/70 transition-[width] duration-500"
+              style={{ width: `${percent}%` }}
+            />
+          ) : (
+            <div className="h-full w-1/3 bg-cyan-500/40 animate-pulse" />
+          )}
+        </div>
+      )}
+      {status.status === 'error' && status.error && (
+        <p className="text-[11px] text-red-400/80 break-words">{status.error}</p>
+      )}
+    </div>
+  );
+}
+
+function VoiceCard() {
+  const { settings, phase, applySettings, fetchSettings } = useVoiceStore(
+    useShallow((state) => ({
+      settings: state.settings,
+      phase: state.phase,
+      applySettings: state.applySettings,
+      fetchSettings: state.fetchSettings,
+    }))
+  );
+  const [isBusy, setIsBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Test mic — deliberately card-local, never the voiceStore phase machine:
+  // a test recording must never route into chat.
+  const [testState, setTestState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
+  const [testText, setTestText] = useState<string | null>(null);
+  const testHandleRef = useRef<RecordingHandle | null>(null);
+
+  useEffect(() => {
+    void fetchSettings(); // refresh on open — App.tsx fetched at startup
+    return () => {
+      testHandleRef.current?.cancel();
+    };
+  }, [fetchSettings]);
+
+  /** Every control PUTs IMMEDIATELY (the FileIndexCard enable-flow lesson):
+   *  optimistic through the shared store (ChatPanel reacts live), settled by
+   *  the server response, reverted on failure. */
+  const patch = async (update: Partial<VoiceUpdateBody>) => {
+    if (!settings || isBusy) return;
+    setIsBusy(true);
+    setError(null);
+    applySettings({ ...settings, ...update });
+    try {
+      applySettings(await voiceApi.updateSettings(voiceUpdatePayload(settings, update)));
+    } catch (e) {
+      applySettings(settings); // revert — the backend never saw it
+      setError(e instanceof Error ? e.message : 'Could not save');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const toggleTestMic = async () => {
+    if (testState === 'recording') {
+      const handle = testHandleRef.current;
+      testHandleRef.current = null;
+      setTestState('transcribing');
+      try {
+        const blob = await handle?.stop();
+        if (!blob) {
+          setTestState('idle');
+          return;
+        }
+        const result = await voiceApi.transcribe(blob);
+        setTestText(result.text.trim() || '(nothing heard)');
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Transcription failed');
+      } finally {
+        setTestState('idle');
+      }
+      return;
+    }
+    setError(null);
+    setTestText(null);
+    try {
+      testHandleRef.current = await startRecording({
+        onAutoStop: () => void toggleTestMic(),
+      });
+      setTestState('recording');
+    } catch (e) {
+      setError(
+        e instanceof Error && e.name === 'NotAllowedError'
+          ? 'Microphone access was denied.'
+          : e instanceof Error
+            ? e.message
+            : 'Could not start the microphone.'
+      );
+    }
+  };
+
+  const enabled = settings?.enabled ?? false;
+  const sttReady = settings?.stt_status.status === 'ready';
+  const ttsReady = settings?.tts_status.status === 'ready';
+  const toggles: Array<{
+    key: keyof VoiceUpdateBody;
+    label: string;
+    hint: string;
+    value: boolean;
+  }> = settings
+    ? [
+        {
+          key: 'output_enabled',
+          label: 'Spoken replies',
+          hint: 'Jarvis reads its answers aloud (also the header speaker toggle)',
+          value: settings.output_enabled,
+        },
+        {
+          key: 'review_before_send',
+          label: 'Review before send',
+          hint: 'Transcripts land in the input box instead of auto-sending',
+          value: settings.review_before_send,
+        },
+        {
+          key: 'speak_all_responses',
+          label: 'Speak typed responses too',
+          hint: 'Replies to typed messages are spoken, not just voice turns',
+          value: settings.speak_all_responses,
+        },
+        {
+          key: 'speak_proactive',
+          label: 'Speak notifications aloud',
+          hint: 'Reminders, briefings, and task outcomes are announced by voice',
+          value: settings.speak_proactive,
+        },
+        {
+          key: 'listen_on_summon',
+          label: 'Listen when summoned',
+          hint: 'Ctrl+Shift+J starts listening hands-free; pausing sends',
+          value: settings.listen_on_summon,
+        },
+      ]
+    : [];
+
+  return (
+    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
+      {/* Card header */}
+      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
+        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
+          <Mic size={15} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-sm font-semibold text-slate-200">Voice</h2>
+          <p className="text-xs text-muted truncate">
+            {enabled
+              ? 'Push-to-talk and spoken replies — everything runs locally'
+              : 'Talk to Jarvis and hear it answer — off'}
+          </p>
+        </div>
+        <ToggleSwitch
+          checked={enabled}
+          disabled={isBusy || !settings}
+          onToggle={() => void patch({ enabled: !enabled })}
+          label="Voice on/off"
+        />
+      </div>
+
+      {/* Card body */}
+      <div className="px-4 py-3.5 space-y-4">
+        <p className="text-xs text-slate-400">
+          Speech recognition (Whisper) and speech synthesis (Kokoro) both run on this
+          machine — audio never leaves it. Enabling downloads the models once. With
+          “Auto” device, they run on the GPU when one is available (much faster),
+          otherwise the CPU.
+        </p>
+
+        {/* Behavior toggles */}
+        <div className="space-y-2.5">
+          {toggles.map((t) => (
+            <div key={t.key} className="flex items-center gap-3">
+              <div className="flex-1 min-w-0">
+                <p className="text-xs text-slate-300">{t.label}</p>
+                <p className="text-[11px] text-slate-600 truncate" title={t.hint}>
+                  {t.hint}
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={t.value}
+                disabled={isBusy || !settings || !enabled}
+                onToggle={() => void patch({ [t.key]: !t.value })}
+                label={t.label}
+              />
+            </div>
+          ))}
+        </div>
+
+        {/* Recognition model + speaking voice + speed */}
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="text-xs text-slate-400" htmlFor="voice-stt-model">
+            Recognition model
+          </label>
+          <select
+            id="voice-stt-model"
+            value={settings?.stt_model ?? 'small'}
+            disabled={isBusy || !settings}
+            onChange={(e) => void patch({ stt_model: e.target.value })}
+            className="px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+          >
+            {(settings?.stt_models ?? []).map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+          <label className="text-xs text-slate-400" htmlFor="voice-tts-voice">
+            Voice
+          </label>
+          <select
+            id="voice-tts-voice"
+            value={settings?.voice ?? 'af_heart'}
+            disabled={isBusy || !settings}
+            onChange={(e) => void patch({ voice: e.target.value })}
+            className="px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+          >
+            {(settings?.voices ?? []).map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.label}
+              </option>
+            ))}
+          </select>
+          <label className="text-xs text-slate-400" htmlFor="voice-tts-speed">
+            Speed
+          </label>
+          <select
+            id="voice-tts-speed"
+            value={String(settings?.tts_speed ?? 1.0)}
+            disabled={isBusy || !settings}
+            onChange={(e) => void patch({ tts_speed: parseFloat(e.target.value) })}
+            className="px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+          >
+            <option value="0.75">0.75× (slower)</option>
+            <option value="1">1× (normal)</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.5× (faster)</option>
+          </select>
+        </div>
+
+        {/* Device selection — GPU makes both engines near-instant; Auto picks
+            the GPU when present, else CPU. A change reloads that engine. */}
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="text-xs text-slate-400" htmlFor="voice-stt-device">
+            Recognition runs on
+          </label>
+          <select
+            id="voice-stt-device"
+            value={settings?.stt_device ?? 'auto'}
+            disabled={isBusy || !settings}
+            onChange={(e) => void patch({ stt_device: e.target.value })}
+            className="px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+          >
+            {(settings?.devices ?? ['auto', 'cpu', 'cuda']).map((d) => (
+              <option key={d} value={d}>
+                {DEVICE_LABELS[d] ?? d}
+              </option>
+            ))}
+          </select>
+          <label className="text-xs text-slate-400" htmlFor="voice-tts-device">
+            Speech runs on
+          </label>
+          <select
+            id="voice-tts-device"
+            value={settings?.tts_device ?? 'auto'}
+            disabled={isBusy || !settings}
+            onChange={(e) => void patch({ tts_device: e.target.value })}
+            className="px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+          >
+            {(settings?.devices ?? ['auto', 'cpu', 'cuda']).map((d) => (
+              <option key={d} value={d}>
+                {DEVICE_LABELS[d] ?? d}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Model status (live via the store's status poller) */}
+        {settings && (
+          <div className="space-y-2">
+            <ModelStatusRow
+              title={`Speech recognition — ${settings.stt_model}`}
+              status={settings.stt_status}
+            />
+            <ModelStatusRow title="Speaking engine (Kokoro)" status={settings.tts_status} />
+          </div>
+        )}
+
+        {error && (
+          <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs">
+            {error}
+          </div>
+        )}
+
+        {/* Try it out */}
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => void toggleTestMic()}
+              disabled={
+                !enabled ||
+                !sttReady ||
+                !voiceCaptureSupported() ||
+                testState === 'transcribing' ||
+                (phase !== 'idle' && testState === 'idle')
+              }
+              className={clsx(
+                'flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors disabled:opacity-40',
+                testState === 'recording'
+                  ? 'text-red-400 bg-red-500/10 border-red-500/20 hover:bg-red-500/20'
+                  : 'text-cyan-400 bg-cyan-500/10 border-cyan-500/20 hover:bg-cyan-500/20'
+              )}
+              title={!sttReady ? 'The recognition model is not ready yet' : undefined}
+            >
+              {testState === 'recording' ? (
+                <Square size={12} fill="currentColor" />
+              ) : testState === 'transcribing' ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <Mic size={12} />
+              )}
+              {testState === 'recording'
+                ? 'Stop test'
+                : testState === 'transcribing'
+                  ? 'Transcribing…'
+                  : 'Test mic'}
+            </button>
+            <button
+              onClick={() => speakText("Hi — I'm Jarvis. This is how I sound.")}
+              disabled={!enabled || !settings?.output_enabled || !ttsReady}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-300 bg-surface-2 border border-surface-border hover:border-cyan-500/30 transition-colors disabled:opacity-40"
+              title={
+                !ttsReady
+                  ? 'The speaking voice is not ready yet'
+                  : !settings?.output_enabled
+                    ? 'Spoken replies are off'
+                    : undefined
+              }
+            >
+              <Volume2 size={12} />
+              Speak sample
+            </button>
+          </div>
+          {testText !== null && (
+            <p className="text-xs text-slate-300 px-2.5 py-1.5 rounded-lg bg-surface-2 border border-surface-border font-mono">
+              “{testText}”
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SettingsPanel() {
   return (
     <div className="flex flex-col h-full bg-surface overflow-hidden">
@@ -670,6 +1144,8 @@ export function SettingsPanel() {
         <FileIndexCard />
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Proactive</p>
         <DailyBriefingCard />
+        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Voice</p>
+        <VoiceCard />
       </div>
     </div>
   );

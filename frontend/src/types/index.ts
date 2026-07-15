@@ -399,6 +399,78 @@ export interface FrequentFolder {
 }
 
 // ============================================================
+// Voice (Phase 7 — push-to-talk)
+// ============================================================
+/** The STT model lifecycle (the first load doubles as a large download). */
+export interface SttStatus {
+  status: 'not_loaded' | 'loading' | 'ready' | 'error';
+  model: string | null;
+  error: string | null;
+  /** The device the model actually loaded on ("cpu"/"cuda"/null before load). */
+  device?: string | null;
+}
+
+/** The TTS engine lifecycle (Kokoro). The model loads once and is
+ *  voice-independent (preset voices are selected per-synth); `voice` is unused
+ *  here (the configured preset is reported by /status as configured_voice). The
+ *  download is opaque, so `progress` is always null → the card shows an
+ *  indeterminate bar. */
+export interface TtsStatus {
+  status: 'not_loaded' | 'loading' | 'ready' | 'error';
+  voice: string | null;
+  error: string | null;
+  progress: { downloaded: number; total: number | null; file: string } | null;
+  /** The inference device (always "cpu" for the Kokoro/onnxruntime engine). */
+  device?: string;
+}
+
+/** A selectable Kokoro preset voice (id + human label). */
+export interface VoiceOption {
+  id: string;
+  label: string;
+}
+
+/** GET/PUT /api/settings/voice — config + live model state in one fetch. */
+export interface VoiceSettings {
+  enabled: boolean;
+  stt_model: string;
+  review_before_send: boolean;
+  /** Part 3: speech output master switch (still gated on `enabled`). */
+  output_enabled: boolean;
+  /** The Kokoro preset voice id (one of `voices`). */
+  voice: string;
+  /** Part 5: speak server-initiated pushes (reminders, briefings). */
+  speak_proactive: boolean;
+  /** Part 4: speak TYPED turns too (voice-initiated turns always speak). */
+  speak_all_responses: boolean;
+  /** Part 5: start a hands-free recording when the global hotkey summons
+   *  the window (opt-in). */
+  listen_on_summon: boolean;
+  /** Speaking speed (1.0 = natural; 0.5..2.0). */
+  tts_speed: number;
+  /** Where each engine runs ("auto"/"cpu"/"cuda"). */
+  stt_device: string;
+  tts_device: string;
+  /** faster-whisper precision ("auto" derives from the device). */
+  stt_compute_type: string;
+  stt_models: string[];
+  /** The selectable preset voices. */
+  voices: VoiceOption[];
+  /** The selectable device options and whisper compute types. */
+  devices: string[];
+  stt_compute_types: string[];
+  stt_status: SttStatus;
+  tts_status: TtsStatus;
+}
+
+/** POST /api/voice/transcribe response. */
+export interface TranscribeResult {
+  text: string;
+  language: string | null;
+  duration: number;
+}
+
+// ============================================================
 // Electron Bridge (exposed by preload.ts)
 // ============================================================
 export interface JarvisElectronAPI {
@@ -414,6 +486,9 @@ export interface JarvisElectronAPI {
   notify: (title: string, body: string) => void;
   onBackendReady: (callback: () => void) => void;
   onBackendError: (callback: (error: string) => void) => void;
+  /** The global hotkey summoned the window (Phase 7, Part 5) — the renderer
+   *  may start an opt-in hands-free recording in response. */
+  onSummoned: (callback: () => void) => void;
   removeAllListeners: (channel: string) => void;
 }
 

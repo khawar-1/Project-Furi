@@ -217,6 +217,281 @@ What's complete:
   /api/index/frequent-folders + a read-only "Folders you use most" list in the
   Settings FileIndexCard. NO migration, NO scheduler job. PHASE 6 COMPLETE.
   Details in the "File Intelligence" Architecture section below.
+- Phase 7 Part 1 (voice STT foundation): local faster-whisper behind the
+  injectable STT_MODEL_FACTORY seam (app/core/voice_stt.py — tests never load
+  a real model; conftest autouse _hermetic_voice_stt is the backstop). Model
+  lifecycle is a retryable state machine (not_loaded/loading/ready/error) since
+  the first load doubles as a ~500MB download: ensure_model_loaded() kicks a
+  referenced background task, never blocks; weights under ~/.jarvis/whisper
+  (CPU int8). VoiceConfig in app_settings (key voice.config, enabled default
+  OFF = opt-in, stt_model whitelist VOICE_STT_MODELS, review_before_send;
+  coercer tolerates the Part 3 TTS fields from day one). API: POST
+  /api/voice/transcribe (409 not-ready self-heals by kicking the load; decode
+  failures 400 never 500) + GET /api/voice/status; config GET/PUT
+  /api/settings/voice — PUT enabling kicks the download IMMEDIATELY (the
+  FileIndexCard enable-flow lesson) and main.py warm-loads at startup when
+  enabled. NO migration. Voice is a TRANSPORT, never an authority: a
+  transcribed message enters the exact same chat_stream pipeline and every
+  gate re-applies; audio bytes never leave the machine.
+- Phase 7 Part 2 (push-to-talk UI): the speak→answer loop, frontend + Electron
+  only — zero backend changes. Electron main.ts grants the `media` permission
+  to OUR renderer only (setPermissionRequestHandler + the sync CheckHandler
+  twin; dev = the Vite origin, prod = file://) — no new preload bridge method,
+  getUserMedia just works in the sandboxed renderer. lib/voiceInput.ts owns
+  capture semantics IN CODE (MediaRecorder webm/opus with mime fallbacks,
+  AnalyserNode RMS levels for the waveform, <300ms hold = accidental tap
+  discarded, 60s hard cap auto-stops like a release, cancel() discards);
+  stores/voiceStore.ts is the idle/recording/transcribing state machine —
+  release → POST /api/voice/transcribe → sendMessage(text), or
+  setDraftMessage(text) when review_before_send is on OR a turn is already
+  streaming (never auto-send into a busy chat, never lose a transcript); any
+  voice failure is a dismissible inline error near the input, never a broken
+  chat turn, and a 409 refreshes the model status it names. ChatInput.tsx: the
+  Phase-6 placeholder mic is live — hold to record (pointer capture so a
+  drifting cursor still releases), the textarea swaps to a red listening
+  indicator + live waveform while held, hold Ctrl+Space is the in-app keyboard
+  equivalent (window-level, releasing either key ends the hold), Esc cancels,
+  tooltip states for off/downloading/error. voiceApi in lib/api.ts (transcribe
+  posts multipart FormData and must NOT ride apiFetch — the forced JSON
+  Content-Type would break the boundary); App.tsx fetches voice settings once
+  at startup and the store polls /api/voice/status (3s) only while a download
+  is in flight. The Settings VoiceCard is deliberately Part 5 — until then
+  voice is enabled via PUT /api/settings/voice.
+- Phase 7 Part 3 (TTS foundation): local Piper behind the injectable
+  TTS_ENGINE_FACTORY seam (app/core/voice_tts.py — the voice_stt state machine
+  verbatim: not_loaded/loading/ready/error, retryable, referenced background
+  load task, ensure_engine_loaded() never blocks; conftest autouse
+  _hermetic_voice_tts is the backstop). Dep is piper-tts==1.4.2 — 1.2.0 is
+  UNINSTALLABLE here (its piper-phonemize pin has no cp311/win_amd64 wheel;
+  recorded 2026-07-14); the 1.4.x API is PiperVoice.load + synthesize_wav into
+  an in-memory wave.Wave_write. Voices live under ~/.jarvis/voices, downloaded
+  on demand (httpx streaming, temp+os.replace atomic) from URLs derived
+  DETERMINISTICALLY from the whitelisted name (VOICE_TTS_VOICES in
+  app_settings — a hand-edited row can never point the downloader at an
+  arbitrary URL); default en_US-lessac-medium. sanitize_for_speech() is the
+  deterministic, tested markdown→speech cleaner (fences → "(code omitted)",
+  inline code kept, links → label, bare URLs → hostname, headers/bullets/
+  emphasis/tables stripped, paths → basename, emoji dropped, snake_case
+  survives) — Piper never reads raw markdown aloud. API: POST /api/voice/speak
+  {text, raw=False} → audio/wav (400 voice/output disabled, 409 not-ready
+  self-heals by kicking the load — the transcribe convention, 204 when
+  sanitize empties the text, MAX_SPEAK_CHARS=2000); GET /status gains the tts
+  half. VoiceConfig gains output_enabled (default ON, gated on master
+  `enabled`), voice, speak_proactive (Part 5), speak_all_responses (Part 4);
+  a Part-2-shaped PUT stays valid (defaulted fields). PUT enabling
+  voice+output kicks the engine load immediately; main.py warm-loads it at
+  startup. NO migration. Live-verified: real 60MB voice download → real WAV
+  (RIFF, 22050Hz mono) + sanitize + 204/400 paths on an isolated :8001.
+- Phase 7 Part 4 (streaming spoken responses): sentence-by-sentence speech
+  WHILE the SSE response still streams — frontend only, the chat route is
+  untouched. lib/voiceOutput.ts owns it all: an incremental sentence
+  segmenter (boundaries . ! ? + paragraph breaks, followed-by-whitespace only
+  so "3.5" never splits, min-length + abbreviation/initial guards for "e.g.",
+  never splits inside an open ``` fence so a whole code block reaches the
+  server as one "(code omitted)"), a sequential playback queue (each sentence
+  → POST /api/voice/speak → WAV played in order; synthesis of N+1 overlaps
+  playback of N — max 2 in flight; a failed/aborted/204 sentence is SKIPPED,
+  never a stalled queue), and stopSpeaking() barge-in (generation counter
+  invalidates every async continuation; abort in-flight fetches, clear queue,
+  halt audio instantly). The chatStore tap is deliberately thin: ONE
+  voiceOutput.onDelta call in the delta-append branch (the plan-chunk branch
+  returns first, so plan JSON is never spoken) + beginTurn/endTurn/cancelTurn
+  + stopSpeaking at sendMessage top and clearConversation. Speak policy: a
+  voice-initiated turn always speaks (voiceStore.endHold marks it just before
+  auto-send; review-mode drafts count as typed), speak_all_responses covers
+  typed turns. Plan-card pauses speak their deterministic approval/question
+  text ONCE for free — task_router streams it as a normal delta after the
+  plan chunk. Barge-in triggers: mic beginHold, a new sendMessage, speaker
+  toggle off, the header stop button. ChatPanel header: speaker toggle that
+  writes THROUGH to the persisted output_enabled (one source of truth with
+  the Part 5 VoiceCard; optimistic + revert), "● Speaking" indicator + stop
+  button while audio plays (voiceOutput mirrors `speaking` into voiceStore).
+  Zero backend changes.
+- Phase 7 Part 5 (proactive speech + VoiceCard + the Jarvis moment — the
+  capstone): three pieces. (1) Proactive speech: NEW lib/voiceAnnounce.ts
+  (the voice sibling of notifications.ts, started in App.tsx) — onPush('*')
+  speaks notificationContent(event) title+body via a NEW voiceOutput
+  speakText() export that calls the SAME Part 4 queue's private enqueue, so
+  an announcement serializes behind a response being spoken and dies on every
+  existing barge-in. Gated on enabled+output_enabled+speak_proactive; respects
+  SILENT_TYPES via the shared notificationContent; deliberate toast
+  asymmetries: speech fires even when the window is FOCUSED (being told aloud
+  is the point) but is DROPPED (not deferred) while voiceStore.phase !==
+  'idle' (never talk into an open mic); the fallback 'Jarvis' title is not
+  spoken. (2) Settings VoiceCard (SettingsPanel.tsx, new "Voice" section):
+  every control PUTs IMMEDIATELY through the shared voiceStore
+  (optimistic+revert, the FileIndexCard lesson) — master enabled toggle,
+  output/review/speak-all/speak-proactive/listen-on-summon sub-toggles,
+  stt_model + voice pickers, live ModelStatusRow per model with an HONEST
+  download bar: real percent for the Piper voice (voice_tts._download_file
+  gained a throttled progress_cb feeding a module-level _download_progress
+  surfaced in tts_status()["progress"], cleared when the load settles),
+  INDETERMINATE for whisper (faster-whisper's HF download is opaque — never
+  fabricate a number). "Test mic" records via card-LOCAL state (never the
+  voiceStore phase machine — a test can never route into chat) and shows the
+  transcript; "Speak sample" uses speakText. The full-PUT drift risk died
+  with it: api.ts voiceUpdatePayload(settings, patch) is the ONE place the
+  PUT body is built (ChatPanel's speaker toggle refactored onto it).
+  (3) The Jarvis moment: NEW VoiceConfig field listen_on_summon (default OFF
+  — strictly opt-in; a Part-3/4-shaped PUT stays valid). main.ts sends
+  'summoned-by-hotkey' ONLY from the hotkey path (tray/toast/second-instance
+  summons never listen; a cold-recreated window sends after did-finish-load
+  +500ms, best-effort), preload gains onSummoned — the ONE new bridge method.
+  App.tsx routes it to voiceStore.beginSummonListen(): a TOGGLE-mode
+  recording (mode 'summon') that auto-stops on silence — detection lives in
+  voiceInput's existing AnalyserNode meter loop, no new dep (speech ≥0.08
+  arms it, then 2s below stops; 8s of never-speech stops; constants tuned
+  live) — then flows through the SAME endHold pipeline, so
+  review_before_send and the speak-the-reply rule apply unchanged. Mic TAP /
+  silence / repeat-hotkey = stop-and-send; Esc = cancel (consistent with hold
+  mode). Rejected alternatives (recorded): GLOBAL hold-to-talk — Electron
+  globalShortcut has no keyup event, so "held" semantics from another app
+  would need OS-level keyboard hooks (a native dep + an input-monitoring
+  posture); WAKE WORD — an always-on microphone + another local model dep +
+  false positives; the explicit hotkey is the deliberate, auditable trigger.
+- Phase 7 Part 6 (live partial transcript): interim words while the mic is
+  open — frontend only, no new setting. voiceInput now records with a 500ms
+  MediaRecorder timeslice (chunks from one recorder concatenate into a
+  decodable stream; the final blob is unchanged) and, when an onPartial
+  callback is wired, offers Blob(chunks) every 1.5s. voiceStore transcribes
+  partials with a SINGLE-IN-FLIGHT rule (a busy tick is skipped — slow CPUs
+  self-pace; only wired when stt_status is 'ready', otherwise every tick
+  would 409) into a NEW interimText field — display-only, NEVER draftMessage,
+  so cancel leaves no residue; the in-flight partial is ABORTED before the
+  final transcribe (voiceApi.transcribe gained an AbortSignal), and a
+  stale result landing after the recording ended is dropped (phase check).
+  ChatInput renders interimText in place of the static "Listening…" hint the
+  moment there is one. PHASE 7 COMPLETE.
+- TTS speed round (2026-07-15, after the Piper→Chatterbox voice-cloning swap):
+  Chatterbox synthesis was RTF ~2-2.5 (a sentence took twice its own duration
+  to make). MEASURED root cause (scripts/bench_tts.py + a step profile): the
+  T3 autoregressive decode is ~90% of the cost at ~71ms/token and is kernel-
+  LAUNCH-bound — fp32 vs fp16 and batch 1 vs 2 all time the same, so fp16 is
+  deliberately NOT used (eager autocast measured SLOWER). What shipped:
+  NEW app/core/chatterbox_fast.py — our tuned copy of the generation loop
+  operating on the loaded model (site-packages never patched): SDPA restored
+  (stock passes output_attentions=True every step, forcing eager attention;
+  the attentions are never consumed), TF32, no per-token tqdm, length-scaled
+  max_new_tokens, and the decode step compiled with torch.compile
+  (reduce-overhead) over a transformers StaticCache — 71→~22ms/step. Windows
+  gotchas encoded in _configure_inductor(): needs the community
+  `triton-windows` wheel (<3.2 for torch 2.5), shape_padding=False (torch 2.5
+  pad_mm benchmark-cache rename race → FileExistsError), fx_graph_cache=True
+  (first compile ~70s, later startups ~20s — paid inside the load-task warmup
+  synth, so status "ready" means fast; the warmup also eats CUDA kernel-init).
+  Fallback chain, best-effort rule: compiled step → eager step (sticky
+  compile_broken flag) → stock model.generate() (wrapper catches everything);
+  VoiceConfig.tts_fast=False (new field, PUT-defaulted like every voice field)
+  is the user kill switch straight to stock. voice_tts.py also gained
+  _SYNTH_LOCK serializing ALL engine use (the frontend keeps 2 /speak requests
+  in flight and the model.conds swap in _apply is not thread-safe; serial is
+  also faster on one GPU). Frontend: SentenceSegmenter first-chunk fast path —
+  before a turn's first utterance, a clause boundary (, ; :) past 30 chars or
+  a last-resort whitespace soft-cut near 80 chars also cuts, so speech starts
+  on the first clause instead of the first full sentence (sentence-only rules
+  resume after the first emit). Measured end-to-end: medium sentence
+  14.15s→5.32s (2.7x, RTF 0.83 — synthesis now outruns playback); short
+  5.60s→2.67s. Bench: `python scripts/bench_tts.py` from backend/ (real model,
+  never collected by pytest).
+- TTS latency round 2 (2026-07-15, same day — "still slow" live report): the
+  speed round's gains NEVER REACHED THE APP. Root cause found by measuring the
+  live /speak (8s clause / 20s medium vs bench 2.7/5.3): reduce-overhead
+  compilation records CUDA GRAPHS, and a graph captured on one thread does not
+  replay from another — the warmup compiled on its asyncio.to_thread pool
+  thread, the first real /speak landed on a DIFFERENT pool thread, the
+  compiled step failed (empty exception message), and the sticky eager
+  fallback silently ran every sentence ~4x slow. Fixes, all in code:
+  (1) ALL engine work (load+warmup, synth, clone) runs on ONE dedicated
+  thread (voice_tts._TTS_EXECUTOR, max_workers=1) — never to_thread's shared
+  pool; thread-affinity regression test asserts factory+synth share a thread.
+  (2) The warmup compiles for the CONFIGURED cfg_weight's CFG batch size
+  (set_preferred_cfg_weight, called by settings PUT + main.py warm-load
+  before ensure_engine_loaded): cfg 0 = batch 1, cfg>0 = batch 2 are separate
+  compiles, and a mismatch recompiled ~60-90s on the first real sentence
+  after every restart. (Also measured: cfg_weight=0 is NO longer a speed knob
+  — the compiled step is launch-bound, batch 1 and 2 cost the same.)
+  (3) INTRA-SENTENCE STREAMING — POST /api/voice/speak/stream (raw PCM16 +
+  X-Sample-Rate header, CORS-exposed): chatterbox_fast.fast_generate_stream
+  pauses the token iterator, renders the whole prefix with S3Gen
+  finalize=False (0.1.2 ships the CosyVoice2 streaming hooks; the CFM's
+  FIXED rand_noise buffer makes re-renders reproduce earlier frames), and
+  emits only the not-yet-played tail, crossfaded by _StreamStitcher (HiFTGAN
+  adds tiny unseeded noise per render). THE SCHEDULE IS TWO RENDERS, NOT A
+  LADDER: every render costs ~1.6s FIXED (the flow re-processes the ~10s
+  reference-voice prompt), so a 24/48/96/192 ladder measured 2s mid-sentence
+  playback gaps; instead one adaptive HEAD render sized so its banked audio
+  covers the tail's production time (_head_tokens: C ≥ (N*t3+fixed)/(audio+t3),
+  measured rates as constants), then the FINAL render — measured ZERO gaps,
+  first audio 2.9s (clause) / 3.8s (medium) vs 3.7/6.8 one-shot. The endpoint
+  PRIMES the generator before StreamingResponse so not-ready is still an
+  honest 409; a consumer abort flips a stop event checked every token.
+  voice_tts.synthesize_speech_stream bridges the TTS thread to the loop via
+  an asyncio.Queue under the SAME _SYNTH_LOCK. Frontend: voiceOutput's
+  playback queue streams each sentence (StreamedUtterance prefetch buffer →
+  Web Audio gapless scheduling, activeSources stopped on barge-in, the
+  currently-PLAYING item's controller now aborted too — it had left the
+  queue), with per-sentence fallback to the blob /speak; api.ts speakStream.
+  Failure discipline: a stream failure before any emission falls back to
+  one-shot; after emission it ends truncated — never double-speak.
+- Backend startup crash fix (2026-07-15, same day — live report "no voice heard,
+  engine downloading 6-9 minutes"): the real backend process DIED with
+  0xc0000005 in torch_cpu.dll during the Chatterbox load (2 of 3 starts; the
+  uvicorn --reload parent kept port 8000, so the app showed a stale
+  "downloading…" forever). ROOT CAUSE, proven by A/B: ctranslate2
+  (faster-whisper) and torch ship DIFFERENT libiomp5md.dll versions (2025.09
+  vs 2024.03); whisper's loads first at startup, and torch_cpu initializing
+  against the foreign newer OpenMP AVs intermittently — a torch-only
+  standalone process NEVER crashes. Yesterday's "safetensors access-violation
+  = transient memory pressure" note was this same bug misdiagnosed (it started
+  the day Chatterbox brought torch into the backend). FIX (structural):
+  voice_stt._default_model_factory imports torch BEFORE faster_whisper, so
+  torch's OpenMP is always the resident copy regardless of which voice
+  engine's background load runs first; the Windows loader then resolves
+  ctranslate2's dependency to torch's copy (verified: STT still transcribes
+  correctly). Verified by 4 consecutive clean backend restarts to tts=ready
+  + live transcribe + /speak/stream.
+- GPU voice acceleration (2026-07-15 — "instant Jarvis" round): STT and TTS
+  were both CPU-bound (~5-10s/turn; measured whisper-small CPU transcribe of a
+  6.4s clip = 169s, RTF 26 on this weak laptop CPU — the real cause of the lag).
+  Both now run on the RTX 3060 GPU behind a device toggle with automatic CPU
+  fallback. MEASURED end-to-end: STT 631ms (was 169s — ~268x), TTS synth 1037ms
+  (was 13.7s — ~13x), and over the real HTTP API /speak 657ms + /transcribe
+  506ms (word-perfect round trip), both engines reporting device=cuda. Pieces,
+  all in code: NEW app/core/gpu_bootstrap.py (register_cuda_dll_dirs adds the
+  cuDNN wheel bin + a system CUDA-toolkit bin to BOTH os.add_dll_directory AND
+  os.environ["PATH"] — add_dll_directory alone does NOT cover onnxruntime's
+  runtime-loaded provider DLL's transitive deps on Windows; cuda_available()
+  probes via ctranslate2, no torch — called first thing in the main.py lifespan
+  before any onnxruntime/voice import). STT (voice_stt.py): the default factory
+  reads module `_device_pref`/`_compute_pref` (the seam stays a bare
+  `(model_name)` callable so test fakes are unchanged), resolves auto→cuda when
+  present, compute int8_float16 on cuda / int8 on cpu, try-CUDA-except-CPU
+  fallback, a warmup transcribe (first-call CUDA init paid inside the background
+  load), beam_size 5→1 (STT_BEAM_SIZE — a big lever on its own), and reports the
+  ACTUAL loaded device in stt_status(); state keyed on (model, device, compute)
+  so a device change reloads. TTS (voice_tts.py): _build_kokoro builds an
+  explicit onnxruntime InferenceSession with providers
+  [(CUDAExecutionProvider,{device_id:0}), CPUExecutionProvider] and hands it to
+  Kokoro.from_session (0.5.0 API — onnxruntime silently falls back to CPU when
+  CUDA can't init, so session.get_providers()[0] is the source of truth for the
+  actual device); a CUDA build/warmup failure rebuilds on CPU; CPU path sets
+  intra_op_num_threads=cores (a large CPU-path win by itself). VoiceConfig gained
+  stt_device/tts_device (auto/cpu/cuda) + stt_compute_type (all coerce-defaulted,
+  a pre-round row deserializes cleanly), VOICE_STT_MODELS gained English variants
+  (base.en/small.en/distil-small.en/distil-large-v3 — user picks speed/accuracy
+  live in the VoiceCard). Settings VoiceCard shows device pickers + the
+  actually-loaded device badge (honest about what "Auto" chose). DEPS: onnxruntime
+  → onnxruntime-gpu==1.22.0 (a CUDA-12 build — 1.27.x needs CUDA 13 and silently
+  falls back to CPU on a CUDA-12 box) + nvidia-cudnn-cu12 9.x + nvidia-cublas-cu12
+  12.x, installed --no-deps (cudnn declares cublas as a dep; onnxruntime-gpu and
+  onnxruntime can't coexist and faster-whisper/fastembed pull CPU onnxruntime
+  transitively). fastembed stays on CPU (bge-small is tiny; GPU reserved for
+  Whisper+Kokoro). GPU is an OPTIONAL opt-in upgrade documented in requirements.txt
+  — a plain `pip install -r requirements.txt` still installs CPU-only and the code
+  falls back gracefully. Removing torch (Kokoro migration) is what makes this safe:
+  no libiomp5md OpenMP clash — verified both engines load in one process + a clean
+  isolated backend boot, no 0xc0000005. Bench: `python scripts/bench_voice.py` from
+  backend/ (real models, real GPU, never collected by pytest). 1212 tests green.
 Current architecture rules:
 - Facts have subject: "user" | "shared" | "contact"
 - Shared facts (e.g. "Jamil and I played Tekken") save to both user and contact;

@@ -14,6 +14,7 @@ import type {
   TaskEventPayload,
 } from '@/types';
 import { agentApi, chatApi, tasksApi } from '@/lib/api';
+import * as voiceOutput from '@/lib/voiceOutput';
 
 interface ChatState {
   // State
@@ -83,6 +84,9 @@ export const useChatStore = create<ChatState>((set, get) => {
   sendMessage: async (content: string) => {
     const { messages, sessionId, activeProvider } = get();
 
+    // Part 4 barge-in: a new message silences the previous reply instantly.
+    voiceOutput.stopSpeaking();
+
     // Add user message immediately
     const userMessage: ChatMessage = {
       id: uuidv4(),
@@ -107,6 +111,11 @@ export const useChatStore = create<ChatState>((set, get) => {
       streamingMessageId: assistantMessageId,
       error: null,
     });
+
+    // Part 4: decide once whether this turn speaks (voice-initiated turns
+    // always do; speak_all_responses covers typed ones). The tap below feeds
+    // the sentence segmenter — chatStore itself stays thin.
+    voiceOutput.beginTurn();
 
     // Build the message history for the request
     const history = [...messages, userMessage].map((m) => ({
@@ -140,6 +149,9 @@ export const useChatStore = create<ChatState>((set, get) => {
           }));
           return;
         }
+        // The ONE voice-output tap (Part 4): every appended delta also feeds
+        // the sentence segmenter. Plan chunks returned above never reach it.
+        voiceOutput.onDelta(chunk.delta);
         set((state) => ({
           messages: state.messages.map((m) =>
             m.id === assistantMessageId
@@ -150,6 +162,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       },
       // onDone
       (returnedSessionId) => {
+        voiceOutput.endTurn(); // speak the trailing partial sentence
         set((state) => ({
           messages: state.messages.map((m) =>
             m.id === assistantMessageId
@@ -163,6 +176,9 @@ export const useChatStore = create<ChatState>((set, get) => {
       },
       // onError
       (error) => {
+        // Stop queueing further speech; sentences already queued were real,
+        // delivered text and finish playing.
+        voiceOutput.cancelTurn();
         set((state) => ({
           messages: state.messages.map((m) =>
             m.id === assistantMessageId
@@ -423,6 +439,7 @@ export const useChatStore = create<ChatState>((set, get) => {
   },
 
   clearConversation: () => {
+    voiceOutput.stopSpeaking();
     set({
       messages: [],
       sessionId: uuidv4(),

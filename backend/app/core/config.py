@@ -88,7 +88,6 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------------ Voice
     WHISPER_MODEL: str = "base"
-    PIPER_VOICE_PATH: str = "./voices/en_US-amy-medium.onnx"
 
     # ------------------------------------------------------------------ Supabase (optional)
     SUPABASE_URL: str = ""

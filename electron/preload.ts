@@ -32,6 +32,11 @@ export interface JarvisAPI {
   onBackendReady: (callback: () => void) => void;
   onBackendError: (callback: (error: string) => void) => void;
 
+  // IPC: the global hotkey summoned the window (Phase 7, Part 5) — the ONE
+  // new bridge method of this part. The renderer may start an opt-in
+  // hands-free recording in response; no data crosses the bridge.
+  onSummoned: (callback: () => void) => void;
+
   // Cleanup
   removeAllListeners: (channel: string) => void;
 }
@@ -67,6 +72,10 @@ const jarvisAPI: JarvisAPI = {
 
   onBackendError: (callback: (error: string) => void) => {
     ipcRenderer.on('backend-error', (_, error: string) => callback(error));
+  },
+
+  onSummoned: (callback: () => void) => {
+    ipcRenderer.on('summoned-by-hotkey', () => callback());
   },
 
   removeAllListeners: (channel: string) => {

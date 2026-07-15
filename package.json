@@ -5,7 +5,7 @@
   "private": true,
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "concurrently \"npm run backend\" \"npm run frontend:dev\" \"wait-on http://localhost:5173 && npm run electron:dev\"",
+    "dev": "concurrently \"npm run backend\" \"npm run frontend:dev\" \"wait-on http://localhost:5173 http-get://localhost:8000/health && npm run electron:dev\"",
     "frontend:dev": "cd frontend && npm run dev",
     "electron:dev": "tsc -p electron/tsconfig.json && cross-env NODE_ENV=development electron .",
     "electron:build": "electron-builder",

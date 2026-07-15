@@ -17,14 +17,24 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.core.app_settings import (
+    VOICE_DEVICES,
+    VOICE_STT_COMPUTE_TYPES,
+    VOICE_STT_MODELS,
+    VOICE_TTS_VOICE_IDS,
+    VOICE_TTS_VOICES,
     BriefingConfig,
+    VoiceConfig,
     get_briefing_config,
     get_briefing_job_id,
+    get_voice_config,
     set_briefing_config,
+    set_voice_config,
 )
 from app.core.daily_briefing import run_briefing_now, sync_briefing_job
 from app.core.dependencies import get_db
 from app.core.scheduler import scheduler
+from app.core.voice_stt import ensure_model_loaded, stt_status
+from app.core.voice_tts import ensure_engine_loaded, tts_status
 
 router = APIRouter()
 
@@ -78,3 +88,105 @@ async def put_briefing(update: BriefingUpdate, db=Depends(get_db)) -> dict:
 async def post_briefing_run_now(db=Depends(get_db)) -> dict:
     body = await run_briefing_now(db)
     return {"delivered": True, "message": body}
+
+
+# ------------------------------------------------------ voice (Phase 7, Part 1)
+
+
+class VoiceUpdate(BaseModel):
+    enabled: bool
+    stt_model: str = "small"
+    review_before_send: bool = False
+    # Part 3 output fields — defaulted so a Part-2-shaped PUT stays valid.
+    output_enabled: bool = True
+    # Kokoro preset voice id (validated against VOICE_TTS_VOICE_IDS).
+    voice: str = "af_heart"
+    speak_proactive: bool = False
+    speak_all_responses: bool = False
+    # Part 5 — defaulted so a Part-3/4-shaped PUT stays valid.
+    listen_on_summon: bool = False
+    # Speaking speed (1.0 = natural) — defaulted so an older-shaped PUT stays valid.
+    tts_speed: float = 1.0
+    # GPU voice round — device selection (auto/cpu/cuda) + whisper precision;
+    # defaulted so an older-shaped PUT stays valid.
+    stt_device: str = "auto"
+    tts_device: str = "auto"
+    stt_compute_type: str = "auto"
+
+
+async def _voice_payload(db) -> dict:
+    """Config + the live model state + the preset-voice list, so the settings
+    card renders one fetch. stt_status()/tts_status() are purely local (no I/O)
+    — safe on every GET."""
+    config = await get_voice_config(db)
+    return {
+        "enabled": config.enabled,
+        "stt_model": config.stt_model,
+        "review_before_send": config.review_before_send,
+        "output_enabled": config.output_enabled,
+        "voice": config.voice,
+        "speak_proactive": config.speak_proactive,
+        "speak_all_responses": config.speak_all_responses,
+        "listen_on_summon": config.listen_on_summon,
+        "tts_speed": config.tts_speed,
+        "stt_device": config.stt_device,
+        "tts_device": config.tts_device,
+        "stt_compute_type": config.stt_compute_type,
+        "stt_models": list(VOICE_STT_MODELS),
+        "voices": [{"id": vid, "label": label} for vid, label in VOICE_TTS_VOICES],
+        "devices": list(VOICE_DEVICES),
+        "stt_compute_types": list(VOICE_STT_COMPUTE_TYPES),
+        "stt_status": stt_status(),
+        "tts_status": tts_status(),
+    }
+
+
+@router.get("/voice", summary="Voice settings")
+async def get_voice(db=Depends(get_db)) -> dict:
+    return await _voice_payload(db)
+
+
+@router.put("/voice", summary="Update voice settings")
+async def put_voice(update: VoiceUpdate, db=Depends(get_db)) -> dict:
+    if update.stt_model not in VOICE_STT_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"stt_model must be one of: {', '.join(VOICE_STT_MODELS)}",
+        )
+    # `voice` is a Kokoro preset id. An unknown id falls back to the default
+    # rather than 400 (forward/backward compatibility — the picker and the
+    # whitelist should never disagree, but be lenient if they do).
+    voice = update.voice if update.voice in VOICE_TTS_VOICE_IDS else "af_heart"
+    # Device/compute are lenient too — an out-of-whitelist value falls back to
+    # "auto" rather than 400 (set_voice_config re-validates via _coerce_voice).
+    stt_device = update.stt_device if update.stt_device in VOICE_DEVICES else "auto"
+    tts_device = update.tts_device if update.tts_device in VOICE_DEVICES else "auto"
+    stt_compute = (
+        update.stt_compute_type
+        if update.stt_compute_type in VOICE_STT_COMPUTE_TYPES
+        else "auto"
+    )
+    await set_voice_config(db, VoiceConfig(
+        enabled=update.enabled,
+        stt_model=update.stt_model,
+        review_before_send=update.review_before_send,
+        output_enabled=update.output_enabled,
+        voice=voice,
+        speak_proactive=update.speak_proactive,
+        speak_all_responses=update.speak_all_responses,
+        listen_on_summon=update.listen_on_summon,
+        tts_speed=update.tts_speed,
+        stt_device=stt_device,
+        tts_device=tts_device,
+        stt_compute_type=stt_compute,
+    ))
+    # Enabling (or switching device) kicks the model load NOW — the FileIndexCard
+    # enable-flow lesson: a toggle that silently does nothing until some later
+    # trigger is a recorded live-bug class. A device change reloads the engine
+    # (ensure_* is keyed on device); switching preset voices needs no reload.
+    # ensure returns immediately; the card polls /api/voice/status through it.
+    if update.enabled:
+        await ensure_model_loaded(update.stt_model, stt_device, stt_compute)
+        if update.output_enabled:
+            await ensure_engine_loaded(tts_device)
+    return await _voice_payload(db)

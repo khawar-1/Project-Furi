@@ -1,12 +1,20 @@
 /**
  * Jarvis OS — Chat Panel
  * Main conversation interface with message list, streaming, and input bar.
+ *
+ * Phase 7, Part 4 — spoken responses: the header hosts the speaker toggle
+ * (writes through to the persisted output_enabled — one source of truth with
+ * the Part 5 VoiceCard), a "Speaking" indicator, and a stop button while
+ * audio plays. Toggling off (and stopping) silences playback instantly.
  */
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { clsx } from 'clsx';
-import { Trash2, Zap, ChevronDown } from 'lucide-react';
+import { Trash2, Zap, ChevronDown, Volume2, VolumeX, Square } from 'lucide-react';
 import { useChatStore } from '@/stores/chatStore';
+import { useVoiceStore } from '@/stores/voiceStore';
 import { useShallow } from 'zustand/react/shallow';
+import { voiceApi, voiceUpdatePayload } from '@/lib/api';
+import { stopSpeaking } from '@/lib/voiceOutput';
 import { MessageBubble } from './MessageBubble';
 import { ChatInput } from './ChatInput';
 import { StreamingIndicator } from './StreamingIndicator';
@@ -79,8 +87,38 @@ export function ChatPanel() {
         error: state.error,
       }))
     );
+  const { voiceSettings, speaking, applySettings } = useVoiceStore(
+    useShallow((state) => ({
+      voiceSettings: state.settings,
+      speaking: state.speaking,
+      applySettings: state.applySettings,
+    }))
+  );
+  // A speaker-toggle PUT is in flight — ignore further clicks until settled.
+  const [togglingSpeaker, setTogglingSpeaker] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasMessages = messages.length > 0;
+
+  // Speaker toggle: writes through to the persisted output_enabled (one
+  // source of truth with Settings). Optimistic + revert on error — the
+  // FileIndexCard enable-flow pattern. Turning OFF silences instantly.
+  const toggleSpeaker = useCallback(async () => {
+    if (!voiceSettings || togglingSpeaker) return;
+    const next = !voiceSettings.output_enabled;
+    if (!next) stopSpeaking();
+    setTogglingSpeaker(true);
+    applySettings({ ...voiceSettings, output_enabled: next });
+    try {
+      const updated = await voiceApi.updateSettings(
+        voiceUpdatePayload(voiceSettings, { output_enabled: next })
+      );
+      applySettings(updated);
+    } catch {
+      applySettings(voiceSettings); // revert — the backend never saw it
+    } finally {
+      setTogglingSpeaker(false);
+    }
+  }, [voiceSettings, togglingSpeaker, applySettings]);
 
   // Auto-scroll to bottom on new messages
   const scrollToBottom = useCallback(() => {
@@ -112,9 +150,43 @@ export function ChatPanel() {
               ● Generating
             </span>
           )}
+          {speaking && (
+            <span className="flex items-center gap-1.5 text-[10px] font-mono text-emerald-400/80 animate-pulse">
+              ● Speaking
+              <button
+                id="voice-stop-btn"
+                onClick={() => stopSpeaking()}
+                title="Stop speaking"
+                className="w-5 h-5 rounded flex items-center justify-center text-emerald-400 hover:text-danger hover:bg-danger/10 transition-fast"
+              >
+                <Square size={10} fill="currentColor" />
+              </button>
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-3">
+          {/* Speaker toggle (Phase 7, Part 4) — persisted output_enabled */}
+          {voiceSettings?.enabled && (
+            <button
+              id="voice-output-toggle"
+              onClick={() => void toggleSpeaker()}
+              disabled={togglingSpeaker}
+              title={
+                voiceSettings.output_enabled
+                  ? 'Spoken replies are on — click to mute Jarvis'
+                  : 'Spoken replies are off — click to unmute Jarvis'
+              }
+              className={clsx(
+                'w-7 h-7 rounded-lg flex items-center justify-center transition-fast',
+                voiceSettings.output_enabled
+                  ? 'text-cyan-400 hover:bg-surface-3'
+                  : 'text-muted hover:text-cyan-400 hover:bg-surface-3'
+              )}
+            >
+              {voiceSettings.output_enabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
+            </button>
+          )}
           {/* Provider selector */}
           <div className="relative">
             <select

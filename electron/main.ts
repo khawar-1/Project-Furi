@@ -10,7 +10,7 @@
  * - Native notifications are shown by the main process on behalf of the
  *   renderer (see ipc/handlers.ts); clicking one summons the window.
  */
-import { app, BrowserWindow, Menu, Tray, globalShortcut, shell, ipcMain } from 'electron';
+import { app, BrowserWindow, Menu, Tray, globalShortcut, session, shell, ipcMain } from 'electron';
 import { join } from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import { registerIpcHandlers } from './ipc/handlers';
@@ -69,6 +69,29 @@ function stopBackend(): void {
     backendProcess = null;
     console.log('[Electron] Backend process stopped');
   }
+}
+
+/** Wait for the spawned backend to start serving before we open the window, so
+ *  the renderer's first /health, /api/settings/voice and /ws requests don't
+ *  hit a not-yet-bound port (the ERR_CONNECTION_REFUSED startup race). Polls
+ *  /health with the global fetch (no new dependency) and resolves the moment
+ *  it gets a 200. On timeout it resolves anyway — the window still opens, and
+ *  the frontend's health re-poll + WS auto-reconnect cover a slow/failed
+ *  backend. Only used in production; in dev the `wait-on` gate in the `dev`
+ *  npm script already ensured the backend was up before Electron launched. */
+async function waitForBackend(timeoutMs = 30_000, intervalMs = 200): Promise<void> {
+  const url = `http://127.0.0.1:${BACKEND_PORT}/health`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return;
+    } catch {
+      // Not up yet — keep polling until the deadline.
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  console.warn('[Electron] Backend did not become healthy before timeout; opening window anyway');
 }
 
 // ============================================================
@@ -172,8 +195,61 @@ function createTray(): void {
   tray.on('click', () => void summonWindow());
 }
 
+// ============================================================
+// Microphone Permission (Phase 7, Part 2 — push-to-talk)
+// ============================================================
+/** Only our own renderer may use the microphone: the Vite dev server in dev,
+ *  the bundled file:// page in production. Everything else — and every other
+ *  permission type — is denied. No preload bridge is involved: getUserMedia
+ *  works directly in the sandboxed renderer once the permission is granted,
+ *  and the audio bytes only ever travel to the loopback backend. */
+function isOwnRenderer(requestingUrl: string): boolean {
+  return isDev
+    ? requestingUrl.startsWith(FRONTEND_DEV_URL)
+    : requestingUrl.startsWith('file://');
+}
+
+function registerMediaPermissionHandlers(): void {
+  session.defaultSession.setPermissionRequestHandler(
+    (_webContents, permission, callback, details) => {
+      callback(permission === 'media' && isOwnRenderer(details.requestingUrl));
+    }
+  );
+  // The synchronous twin: navigator.permissions.query and some getUserMedia
+  // paths consult this instead of raising a request.
+  session.defaultSession.setPermissionCheckHandler(
+    (_webContents, permission, requestingOrigin) => {
+      return permission === 'media' && isOwnRenderer(requestingOrigin);
+    }
+  );
+}
+
+/** Phase 7, Part 5 — the "Jarvis moment": ONLY the hotkey path announces
+ *  itself to the renderer ('summoned-by-hotkey'), so opt-in hands-free
+ *  listening starts exactly when the user pressed Ctrl+Shift+J — never on a
+ *  tray click, a toast click, or a second app launch. */
+function notifySummonedByHotkey(): void {
+  const contents = mainWindow?.webContents;
+  if (!contents || contents.isDestroyed()) return;
+  if (contents.isLoading()) {
+    // The window was just recreated from the tray-destroyed state — give the
+    // renderer a beat after load so its listener exists. Best-effort: a
+    // summon racing a cold window may drop the listen-start; the window is
+    // open either way and the mic is one tap away.
+    contents.once('did-finish-load', () => {
+      setTimeout(() => {
+        if (!contents.isDestroyed()) contents.send('summoned-by-hotkey');
+      }, 500);
+    });
+    return;
+  }
+  contents.send('summoned-by-hotkey');
+}
+
 function registerGlobalHotkey(): void {
-  const registered = globalShortcut.register(SUMMON_HOTKEY, () => void summonWindow());
+  const registered = globalShortcut.register(SUMMON_HOTKEY, () => {
+    void summonWindow().then(() => notifySummonedByHotkey());
+  });
   if (!registered) {
     // Another app owns the combination — not fatal, the tray still works.
     console.warn(`[Electron] Global hotkey ${SUMMON_HOTKEY} could not be registered`);
@@ -200,8 +276,13 @@ if (!app.requestSingleInstanceLock()) {
 
     startBackend();
     registerIpcHandlers(ipcMain, summonWindow);
+    registerMediaPermissionHandlers();
     createTray();
     registerGlobalHotkey();
+    // Production: don't open the window until the spawned backend is serving,
+    // or its first requests hit a dead port (the startup connection-refused
+    // race). In dev the `wait-on` gate already handled this before launch.
+    if (!isDev) await waitForBackend();
     await createWindow();
 
     app.on('activate', async () => {

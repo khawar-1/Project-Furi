@@ -31,6 +31,53 @@ fastembed==0.8.0
 pypdf==4.3.1
 python-docx==1.1.2
 
+# Local speech-to-text (Phase 7 Part 1 — push-to-talk; CPU int8, weights under
+# ~/.jarvis/whisper; onnxruntime for its VAD filter already comes via fastembed)
+faster-whisper==1.1.1
+
+# Local text-to-speech (Phase 7 — Kokoro, an 82M-param TTS, Apache-2.0). Runs on
+# onnxruntime with NO PyTorch (kokoro-onnx pulls onnxruntime + phonemizer-fork +
+# espeakng-loader — espeak-ng is BUNDLED, so no system install on Windows).
+# Fixed preset voices (no cloning — that was Chatterbox-specific and removed).
+# Model + voice files download on first load to ~/.jarvis/kokoro. Behind the
+# same TTS_ENGINE_FACTORY seam (tests never import it). Torch/torchaudio are no
+# longer required — removing them also eliminated the libiomp5md.dll OpenMP
+# clash with ctranslate2 (faster-whisper) that used to crash startup.
+# NOTE: kokoro-onnx 0.5.0 requires numpy>=2.0.2 — verified compatible with the
+# pinned fastembed/qdrant-client/onnxruntime here (test suite + a qdrant smoke
+# is the gate after any dependency change).
+kokoro-onnx==0.5.0
+
+# ------------------------------------------------------------------------------
+# OPTIONAL — GPU voice acceleration (Phase 7 speed round, 2026-07-15)
+# ------------------------------------------------------------------------------
+# By default STT (ctranslate2) and TTS (Kokoro/onnxruntime) run on CPU — a plain
+# `pip install -r requirements.txt` needs NO CUDA. On a machine with an NVIDIA
+# GPU you can make both engines near-instant (seconds → sub-second). The code
+# auto-detects CUDA and falls back to CPU on any failure (app/core/gpu_bootstrap.py
+# + the stt_device/tts_device settings), so this is purely additive.
+#
+# faster-whisper's ctranslate2 already ships CUDA support; only onnxruntime and
+# the CUDA math libraries must be added. onnxruntime-gpu and onnxruntime CANNOT
+# coexist (same package dir), and faster-whisper/fastembed pull CPU `onnxruntime`
+# transitively — so install the GPU stack imperatively with --no-deps AFTER the
+# base requirements (do NOT add these lines above; they'd conflict):
+#
+#   pip uninstall -y onnxruntime
+#   pip install --no-deps onnxruntime-gpu==1.22.0 \
+#       nvidia-cudnn-cu12==9.24.0.43 nvidia-cublas-cu12==12.9.2.10
+#
+# Version pins that matter (verified on Windows 11, Python 3.11, RTX 3060):
+#   - onnxruntime-gpu==1.22.0  → CUDA 12.x build. DO NOT use 1.27.x: it requires
+#                                CUDA 13 (looks for cublasLt64_13.dll) and its
+#                                CUDA EP silently falls back to CPU on a CUDA-12
+#                                box.
+#   - nvidia-cudnn-cu12 9.x    → cuDNN 9, serves BOTH ctranslate2 and onnxruntime.
+#   - nvidia-cublas-cu12 12.x  → cuBLAS 12; a system CUDA 12.x toolkit's cuBLAS
+#                                also works (gpu_bootstrap registers either).
+# fastembed keeps running on CPU (bge-small is tiny) — the GPU is reserved for
+# Whisper + Kokoro where latency matters.
+
 # Google integration (Phase 5 Part 1 — OAuth loopback flow + Gmail/Calendar clients)
 google-auth==2.35.0
 google-auth-oauthlib==1.2.1
