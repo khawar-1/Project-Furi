@@ -12,9 +12,17 @@
  */
 import { app, BrowserWindow, Menu, Tray, globalShortcut, session, shell, ipcMain } from 'electron';
 import { join } from 'path';
+import { homedir } from 'os';
+import { readFile } from 'fs/promises';
 import { spawn, ChildProcess } from 'child_process';
 import { registerIpcHandlers } from './ipc/handlers';
 import { appIcon } from './icon';
+import {
+  startSensing,
+  stopSensing,
+  armScreenSensing,
+  disarmScreenSensing,
+} from './sensing';
 
 const isDev = process.env.NODE_ENV === 'development';
 const FRONTEND_DEV_URL = 'http://localhost:5173';
@@ -92,6 +100,33 @@ async function waitForBackend(timeoutMs = 30_000, intervalMs = 200): Promise<voi
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
   console.warn('[Electron] Backend did not become healthy before timeout; opening window anyway');
+}
+
+/** The backend generates/persists a static API auth token at
+ *  ~/.jarvis/auth_token during startup (app/core/auth.py); every renderer
+ *  request must carry it. Read it here — after waitForBackend() in prod, so
+ *  it exists — and stash it in process.env BEFORE createWindow(): the
+ *  renderer child process inherits the env, and preload exposes it as
+ *  window.__JARVIS_TOKEN__ (the proven BACKEND_PORT mechanism). Retries
+ *  briefly for the dev race where Electron launches while the separately-run
+ *  backend is still booting for the very first time. Failure is non-fatal:
+ *  requests will 401 visibly rather than the app failing to open. */
+async function loadAuthToken(retries = 10, intervalMs = 500): Promise<void> {
+  const tokenPath = join(homedir(), '.jarvis', 'auth_token');
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const token = (await readFile(tokenPath, 'utf-8')).trim();
+      if (token) {
+        process.env.JARVIS_AUTH_TOKEN = token;
+        console.log('[Electron] API auth token loaded');
+        return;
+      }
+    } catch {
+      // Not written yet — keep retrying until the deadline.
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  console.warn(`[Electron] No auth token at ${tokenPath} — API requests will be rejected (401)`);
 }
 
 // ============================================================
@@ -275,7 +310,10 @@ if (!app.requestSingleInstanceLock()) {
     }
 
     startBackend();
-    registerIpcHandlers(ipcMain, summonWindow);
+    registerIpcHandlers(ipcMain, summonWindow, {
+      armScreenSensing,
+      disarmScreenSensing,
+    });
     registerMediaPermissionHandlers();
     createTray();
     registerGlobalHotkey();
@@ -283,7 +321,16 @@ if (!app.requestSingleInstanceLock()) {
     // or its first requests hit a dead port (the startup connection-refused
     // race). In dev the `wait-on` gate already handled this before launch.
     if (!isDev) await waitForBackend();
+    // The token file exists once the backend is healthy; must land in
+    // process.env before the window (and its preload) is created.
+    await loadAuthToken();
     await createWindow();
+
+    // Phase 8: start the Context Layer's native sensing loop. It polls the
+    // backend for the master switch and senses only while enabled; screen OCR
+    // stays disarmed until the renderer opts in (per-session). Needs the auth
+    // token (loaded above) to post.
+    startSensing();
 
     app.on('activate', async () => {
       if (BrowserWindow.getAllWindows().length === 0) {
@@ -302,6 +349,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  stopSensing();
   stopBackend();
 });
 

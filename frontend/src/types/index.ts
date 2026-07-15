@@ -471,6 +471,51 @@ export interface TranscribeResult {
 }
 
 // ============================================================
+// Context Layer (Phase 8)
+// ============================================================
+/** GET/PUT /api/context/settings — the privacy-first sensing config. */
+export interface ContextSettings {
+  enabled: boolean;              // master kill switch
+  device_sensing: boolean;
+  screen_ocr: boolean;           // OCR capability (capture also armed per-session)
+  ocr_interval_seconds: number;
+  idle_threshold_seconds: number;
+}
+
+/** GET /api/context/status — cheap sensing status for the indicator. */
+export interface ContextStatus {
+  enabled: boolean;
+  device_sensing: boolean;
+  screen_ocr: boolean;
+  device_fresh: boolean;
+  ocr_fresh: boolean;
+}
+
+/** GET /api/context/world — the aggregated world model (UI audit surface). */
+export interface WorldModel {
+  presence: 'active' | 'idle' | 'away' | 'unknown';
+  active_app: string | null;
+  window_title: string | null;
+  idle_seconds: number | null;
+  next_calendar_event: {
+    summary?: string;
+    when?: string;
+    location?: string;
+  } | null;
+  unread: { count: number; has_urgent: boolean } | null;
+  recent_file_focus: { filename: string; path: string; modified: string } | null;
+  on_screen_context: string | null;
+  sensing: {
+    enabled: boolean;
+    device_sensing: boolean;
+    screen_ocr: boolean;
+    device_fresh: boolean;
+    ocr_fresh: boolean;
+  };
+  captured_at: string;
+}
+
+// ============================================================
 // Electron Bridge (exposed by preload.ts)
 // ============================================================
 export interface JarvisElectronAPI {
@@ -489,6 +534,10 @@ export interface JarvisElectronAPI {
   /** The global hotkey summoned the window (Phase 7, Part 5) — the renderer
    *  may start an opt-in hands-free recording in response. */
   onSummoned: (callback: () => void) => void;
+  /** Arm/disarm per-session screen OCR sensing (Phase 8). The capture loop
+   *  runs in the main process; no image ever crosses the bridge. */
+  startScreenSensing: () => void;
+  stopScreenSensing: () => void;
   removeAllListeners: (channel: string) => void;
 }
 
@@ -497,5 +546,9 @@ declare global {
   interface Window {
     jarvis: JarvisElectronAPI;
     __BACKEND_URL__: string;
+    /** Static API auth token, injected by preload from the main process
+     *  (which read ~/.jarvis/auth_token). Absent in plain-browser dev —
+     *  getAuthToken() falls back to VITE_JARVIS_TOKEN there. */
+    __JARVIS_TOKEN__?: string;
   }
 }

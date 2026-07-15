@@ -11,9 +11,18 @@ import { appIcon } from '../icon';
 const NOTIFY_TITLE_MAX = 128;
 const NOTIFY_BODY_MAX = 512;
 
+/** Phase 8: the renderer arms/disarms per-session screen OCR. The actual
+ *  capture loop lives in the main process (sensing.ts); the renderer only
+ *  flips the intent — no image ever crosses to the renderer. */
+export interface ScreenSensingControls {
+  armScreenSensing: () => void;
+  disarmScreenSensing: () => void;
+}
+
 export function registerIpcHandlers(
   ipcMain: IpcMain,
-  summonWindow: () => Promise<void>
+  summonWindow: () => Promise<void>,
+  screen: ScreenSensingControls
 ): void {
   // ---- App version
   ipcMain.handle('get-app-version', () => {
@@ -66,4 +75,8 @@ export function registerIpcHandlers(
     notification.on('click', () => void summonWindow());
     notification.show();
   });
+
+  // ---- Screen sensing arm/disarm (Phase 8) — per-session opt-in for OCR.
+  ipcMain.on('context:start-screen', () => screen.armScreenSensing());
+  ipcMain.on('context:stop-screen', () => screen.disarmScreenSensing());
 }

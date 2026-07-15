@@ -14,7 +14,7 @@
  *   notification bridge).
  */
 import type { PushEvent } from '@/types';
-import { getBaseUrl } from '@/lib/api';
+import { getBaseUrl, getAuthToken } from '@/lib/api';
 import { usePushStore } from '@/stores/pushStore';
 
 type PushHandler = (event: PushEvent) => void;
@@ -30,7 +30,12 @@ let reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
 let shouldRun = false;
 
 function wsUrl(): string {
-  return getBaseUrl().replace(/^http/, 'ws') + '/ws';
+  // Browsers can't set headers on a WebSocket handshake, so the auth token
+  // rides as a query param — validated by the backend's AuthMiddleware.
+  // Re-derived on every (re)connect; the token is stable for the app's life.
+  const token = getAuthToken();
+  const query = token ? `?token=${encodeURIComponent(token)}` : '';
+  return getBaseUrl().replace(/^http/, 'ws') + '/ws' + query;
 }
 
 /** Register a handler for one event type ('*' = every event).

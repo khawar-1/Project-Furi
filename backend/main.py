@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
+from app.core.auth import AuthMiddleware, get_or_create_token
 from app.core.config import settings
 from app.db.database import init_db
 from app.db.qdrant_client import init_qdrant
@@ -20,6 +21,7 @@ from app.api import integrations, settings as settings_api
 from app.api import index as index_api
 from app.api import routines as routines_api
 from app.api import voice as voice_api
+from app.api import context as context_api
 import app.core.reminders  # noqa: F401 — registers the "reminder" job handler at import time
 import app.core.birthdays  # noqa: F401 — registers the "birthday" job handler at import time
 import app.core.daily_briefing  # noqa: F401 — registers the "daily_briefing" job handler at import time
@@ -40,6 +42,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         register_cuda_dll_dirs()
     except Exception as e:
         logger.warning(f"⚠️  CUDA DLL registration failed (voice uses CPU): {e}")
+
+    # Ensure the API auth token exists BEFORE /health goes green — Electron
+    # reads ~/.jarvis/auth_token right after its health poll succeeds. A
+    # failure here never blocks startup: the middleware fails closed and the
+    # 401s make the problem visible.
+    try:
+        get_or_create_token()
+    except Exception as e:
+        logger.error(f"⚠️  Auth token setup failed (requests will be denied): {e}")
 
     # Apply schema migrations FIRST (2026-07-13): nobody runs alembic by hand
     # on a desktop app. create_all below only adds missing TABLES — a new
@@ -200,6 +211,12 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
 
+    # Static-token auth gate (2026-07-15) — added BEFORE CORS in code so CORS
+    # is the OUTERMOST middleware (add_middleware prepends): a browser-dev 401
+    # still carries CORS headers and is readable by the renderer. /health and
+    # OPTIONS preflight are exempt inside the middleware itself.
+    app.add_middleware(AuthMiddleware)
+
     # CORS — allow Electron renderer and Vite dev server
     app.add_middleware(
         CORSMiddleware,
@@ -246,6 +263,9 @@ def create_app() -> FastAPI:
 
     # Phase 7 Part 1 — local voice (push-to-talk transcription)
     app.include_router(voice_api.router, prefix="/api/voice", tags=["Voice"])
+
+    # Phase 8 — the Context Layer (device/screen sensing + world model)
+    app.include_router(context_api.router, prefix="/api/context", tags=["Context"])
 
     return app
 

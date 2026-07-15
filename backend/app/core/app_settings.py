@@ -29,6 +29,7 @@ BRIEFING_JOB_ID_KEY = "daily_briefing.job_id"
 FILE_INDEX_CONFIG_KEY = "file_index.config"
 FILE_INDEX_JOB_ID_KEY = "file_index.job_id"
 VOICE_CONFIG_KEY = "voice.config"
+CONTEXT_CONFIG_KEY = "context.config"
 
 
 # --------------------------------------------------------- generic accessor
@@ -394,4 +395,93 @@ async def set_voice_config(db: AsyncSession, config: VoiceConfig) -> None:
         "stt_device": config.stt_device,
         "tts_device": config.tts_device,
         "stt_compute_type": config.stt_compute_type,
+    })
+
+
+# ---------------------------------------------------- context config (Phase 8)
+
+# Bounds for the sensing cadences — validated here so a hand-edited row can
+# never arm an absurdly tight capture loop or a nonsensical idle threshold.
+CONTEXT_MIN_OCR_INTERVAL = 5            # seconds — a floor on screen-capture cadence
+CONTEXT_MAX_OCR_INTERVAL = 3600
+CONTEXT_MIN_IDLE_THRESHOLD = 30         # seconds — below this "idle" is meaningless
+CONTEXT_MAX_IDLE_THRESHOLD = 3600
+
+
+@dataclass(frozen=True)
+class ContextConfig:
+    """Phase 8 — the Context Layer's privacy-first settings.
+
+    `enabled` is the MASTER kill switch and defaults OFF: no sensing of any
+    kind happens until the user opts in, and flipping it off stops every
+    backend write path AND (via the Electron settings poll) the native sensing
+    loops. `device_sensing` (active app/window title + idle time) defaults ON
+    but is only effective under the master switch. `screen_ocr` is the OCR
+    CAPABILITY and defaults OFF — even with it on, the actual screen capture is
+    additionally armed per-session in Electron (never silently persisted on).
+
+    Retention is structurally NONE: nothing sensed is stored to SQLite (only
+    this config is); the world model and the rolling OCR summary live in memory
+    and are staleness-gated. There is deliberately no retention field to set."""
+    enabled: bool
+    device_sensing: bool
+    screen_ocr: bool
+    ocr_interval_seconds: int
+    idle_threshold_seconds: int
+
+
+def default_context_config() -> ContextConfig:
+    return ContextConfig(
+        enabled=False,          # master OFF — sensing is strictly opt-in
+        device_sensing=True,    # the lightest signal; only effective under `enabled`
+        screen_ocr=False,       # OCR is the most sensitive — opt-in on top of `enabled`
+        ocr_interval_seconds=30,
+        idle_threshold_seconds=300,
+    )
+
+
+def _clamp_int(value: Any, lo: int, hi: int, fallback: int) -> int:
+    try:
+        return max(lo, min(int(value), hi))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _coerce_context(raw: Any) -> ContextConfig:
+    """A stored dict → ContextConfig, defaulting any missing/invalid part
+    (never a crash from a hand-edited row) — the FileIndexConfig discipline."""
+    default = default_context_config()
+    if not isinstance(raw, dict):
+        return default
+    return ContextConfig(
+        enabled=bool(raw.get("enabled", default.enabled)),
+        device_sensing=bool(raw.get("device_sensing", default.device_sensing)),
+        screen_ocr=bool(raw.get("screen_ocr", default.screen_ocr)),
+        ocr_interval_seconds=_clamp_int(
+            raw.get("ocr_interval_seconds"),
+            CONTEXT_MIN_OCR_INTERVAL, CONTEXT_MAX_OCR_INTERVAL,
+            default.ocr_interval_seconds,
+        ),
+        idle_threshold_seconds=_clamp_int(
+            raw.get("idle_threshold_seconds"),
+            CONTEXT_MIN_IDLE_THRESHOLD, CONTEXT_MAX_IDLE_THRESHOLD,
+            default.idle_threshold_seconds,
+        ),
+    )
+
+
+async def get_context_config(db: AsyncSession) -> ContextConfig:
+    raw = await get_setting(db, CONTEXT_CONFIG_KEY, default=None)
+    if raw is None:
+        return default_context_config()
+    return _coerce_context(raw)
+
+
+async def set_context_config(db: AsyncSession, config: ContextConfig) -> None:
+    await set_setting(db, CONTEXT_CONFIG_KEY, {
+        "enabled": config.enabled,
+        "device_sensing": config.device_sensing,
+        "screen_ocr": config.screen_ocr,
+        "ocr_interval_seconds": config.ocr_interval_seconds,
+        "idle_threshold_seconds": config.idle_threshold_seconds,
     })

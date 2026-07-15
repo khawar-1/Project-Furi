@@ -89,6 +89,12 @@ npm run dev
 - Qdrant dashboard: `http://localhost:6333/dashboard`
 - Electron window opens with the Jarvis OS chat interface
 
+> **API auth:** every endpoint except `/health` requires a static token
+> (`X-Jarvis-Token` header; `?token=` on the WebSocket). The backend generates
+> it at first startup in `~/.jarvis/auth_token` and Electron injects it
+> automatically. For plain-browser dev (no Electron), copy that file's value
+> into `frontend/.env.local` as `VITE_JARVIS_TOKEN=...`.
+
 ## Switching LLM Providers
 
 Edit `.env`:

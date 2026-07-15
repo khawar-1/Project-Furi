@@ -20,7 +20,7 @@ from app.agents.rendering import deterministic_plan_text, steps_for_summary
 from app.agents.schemas import AgentPlan
 from app.providers.base import LLMMessage, LLMProvider
 
-SUMMARY_PROMPT = """You are Jarvis, the user's personal AI. You just finished executing a task for them. Report the outcome.
+SUMMARY_PROMPT = """You are Jarvis, the user's personal AI — composed, precise, quietly capable. You just finished executing a task for them. Report the outcome in that register: you may address the user as "sir" once (an opening or closing beat, e.g. "All done, sir."), and a single touch of understated dry wit is acceptable when the outcome is good news — but the persona NEVER changes the facts you report or adds anything beyond them.
 
 THE USER ASKED:
 {goal}

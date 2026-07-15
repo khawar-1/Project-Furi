@@ -492,6 +492,46 @@ What's complete:
   no libiomp5md OpenMP clash — verified both engines load in one process + a clean
   isolated backend boot, no 0xc0000005. Bench: `python scripts/bench_voice.py` from
   backend/ (real models, real GPU, never collected by pytest). 1212 tests green.
+- Phase 8 (The Context Layer — foundation for everything proactive): a local,
+  private, WRITE-ONLY "world model" of what the user is doing right now.
+  Behavior is UNCHANGED this phase — nothing consumes the model yet (Phase 9);
+  the risk is contained to collection + privacy posture. Privacy is structural:
+  everything is opt-in, OFF by default, local-only, retention=NONE (in-memory,
+  nothing sensed hits SQLite), behind a MASTER kill switch with a visible
+  "sensing on" indicator. Pieces: (8.1) app/core/context_store.py — the ONE
+  read seam get_world_model(db) (TTL-cached ~5s; presence active/idle/away,
+  active app+window title, next calendar event, unread-urgency, recent-file
+  focus, on-screen context), each section INDEPENDENTLY best-effort (the
+  daily-briefing gather rule; Google sections cached 60s) and the whole model
+  DARK when the master switch is off. Sensed state (device signal, rolling OCR
+  summary) lives in module globals, staleness-gated, wiped on restart —
+  reset_context_store() is the test/shutdown hook. (8.2) Device sensing runs in
+  Electron MAIN (electron/sensing.ts — works while in tray): a single
+  long-lived PowerShell/Win32 helper (GetForegroundWindow, zero npm native dep)
+  for the active app/window title + powerMonitor.getSystemIdleTime() for idle,
+  POSTed to /api/context/device on change + a 30s heartbeat. Main POLLS
+  /api/context/settings (~15s) and senses only while `enabled` — so the kill
+  switch takes effect within one poll. Signals come IN over authed HTTP, NEVER
+  the /ws socket (strictly server→client stays invariant). (8.3) Screen OCR:
+  Electron captures a DOWNSCALED desktopCapturer thumbnail (no full-res images)
+  and POSTs it to /api/context/screen ONLY while PER-SESSION armed (screenArmed
+  defaults false every launch, arm/disarm via the new preload
+  startScreenSensing/stopScreenSensing IPC → main); the backend OCRs with
+  RapidOCR (onnxruntime — reuses the GPU stack, behind the injectable
+  OCR_ENGINE_FACTORY seam like STT_MODEL_FACTORY) and condenses to a short
+  summary DETERMINISTICALLY (condense_ocr_text — no LLM). The endpoint is
+  HARD-GATED: 403 unless master AND screen_ocr are both on, checked before any
+  decode; the raw frame is OCR'd in memory and dropped (never to disk).
+  (8.4) Privacy: ContextConfig in app_settings (key context.config — enabled
+  default False = master, device_sensing default True, screen_ocr default
+  False, ocr_interval/idle_threshold clamped), the Settings "Context & sensing"
+  card (immediate-PUT toggles + an auditable "What Jarvis currently sees" panel
+  reading GET /api/context/world), and a StatusBar "Sensing: On" indicator (amber
+  when screen OCR). rapidocr-onnxruntime is an OPTIONAL opt-in dep documented in
+  requirements.txt (lazy import — base install stays CPU-clean; enabling OCR
+  without it fails clean). NO migration (config in the existing k/v table; sensed
+  data in-memory). Every route sits behind AuthMiddleware. Details in the
+  "The Context Layer" Architecture section below. 1260 tests green.
 Current architecture rules:
 - Facts have subject: "user" | "shared" | "contact"
 - Shared facts (e.g. "Jamil and I played Tekken") save to both user and contact;
@@ -1211,4 +1251,20 @@ derived on demand — no new table, no scheduler job, nothing that can act.
 The DB stores naive UTC (`utc_now()` in models.py). API serializers MUST use `utc_iso()` (models.py), never bare `.isoformat()`: a naive ISO string has no timezone marker, so the frontend's `new Date(iso)` reads it as LOCAL time and every displayed timestamp shifts by the machine's UTC offset (the "reminder set for 6 PM shows 1 PM" bug, fixed 2026-07-09). Applied to reminders, activity, tasks, chat messages, and schedule serializers. Extraction-derived date-semantics fields (`event_date`, `interaction_date`, `occurred_at` in contacts/episodes/memory) deliberately keep bare `.isoformat()` — they are calendar dates, not UTC moments, and marking them UTC would shift the displayed day.
 
 ### Config
-`app/core/config.py` is the single Pydantic `Settings` source of truth, loaded from `../.env` relative to `backend/` (i.e. the repo-root `.env`). Access settings via the `settings` singleton, never re-read env vars elsewhere. `BACKEND_HOST` must stay `127.0.0.1`: the API is unauthenticated and can run tools on the machine — never bind it to `0.0.0.0`.
+`app/core/config.py` is the single Pydantic `Settings` source of truth, loaded from `../.env` relative to `backend/` (i.e. the repo-root `.env`). Access settings via the `settings` singleton, never re-read env vars elsewhere. `BACKEND_HOST` must stay `127.0.0.1`: the API can run tools on the machine — never bind it to `0.0.0.0`.
+
+### API auth token (2026-07-15)
+Loopback is not authorization — any local process (or a webpage firing simple-request POSTs at localhost; CORS hides the response, not the request) could otherwise drive an API that sends email and runs shell commands. `app/core/auth.py`: the backend generates a static token at first startup, persisted at `~/.jarvis/auth_token` (atomic write, best-effort 0600 — the google_auth hygiene), stable across restarts. `AuthMiddleware` (pure ASGI — it must see the `websocket` scope and must never buffer the SSE/PCM streams; added BEFORE CORS in code so CORS stays outermost and browser-dev 401s stay readable) validates every HTTP request via `X-Jarvis-Token` (or `Authorization: Bearer`) with `secrets.compare_digest`, and every `/ws` handshake via `?token=` (browsers can't set WS headers; rejected handshakes close 4401). Exempt: `/health` (Electron polls it before it can know the token) and `OPTIONS` (CORS preflight). Token resolution failure fails CLOSED. Electron `main.ts` `loadAuthToken()` reads the file after `waitForBackend()` and stashes it in `process.env` before `createWindow()`; preload exposes it as `window.__JARVIS_TOKEN__` (the `__BACKEND_URL__` pattern). Frontend: `getAuthToken()`/`authHeaders()` in `lib/api.ts` cover `apiFetch` + the 4 bare-fetch sites (streamChat SSE, speak, speakStream, transcribe — header only there, never a Content-Type on multipart); `push.ts` `wsUrl()` appends the query param. **Plain-browser dev** (no Electron): put the token in `frontend/.env.local` as `VITE_JARVIS_TOKEN` (typed in `src/vite-env.d.ts`). Tests: conftest autouse `_hermetic_auth` disables enforcement suite-wide (`auth.ENABLED = False` + scratch `TOKEN_PATH`); `test_auth.py` re-enables it explicitly and covers 401/Bearer/preflight/WS-4401/token lifecycle. `settings.API_AUTH_TOKEN` overrides the file (scripted use only).
+
+### Personality (2026-07-15)
+The film-Jarvis register — composed, economical, understated dry wit, addresses the user as "Sir" (once per response at most, opening/closing beat) — lives ONLY in LLM-authored user-facing text: the chat `IDENTITY:`/`RESPONSE STYLE:` blocks in `_build_system_prompt` (chat.py), the `SUMMARY_PROMPT` opening in `agents/summary.py`, and the `_COMPOSER_SYSTEM` opening in `core/daily_briefing.py` (its UNTRUSTED/never-follow-instructions guardrail is load-bearing and kept verbatim — a test asserts it). Deliberately UNTOUCHED: every deterministic text (approval requests, outcome/failure reports, reminder confirmations — charm must never obscure consent), `task_router._CLASSIFY_PROMPT`, both planner prompts, and `extractor.ENTITY_EXTRACTION_PROMPT` (wit in JSON-producing prompts risks misclassification). The chat prompt's honesty rules explicitly outrank the persona ("a charming fabrication is still a fabrication").
+
+### The Context Layer (Phase 8)
+Jarvis's local, private picture of what the user is doing right now — the write-only foundation everything proactive (Phase 9) will read. **This phase changes no behavior**: it senses and aggregates; nothing consumes the model yet. Privacy is the load-bearing constraint — opt-in, OFF by default, local-only, **retention = NONE** (nothing sensed touches SQLite), behind a **master kill switch** with a visible "sensing on" indicator.
+
+- **The world model** (`app/core/context_store.py`) is the ONE read seam: `get_world_model(db)`. Sensed state — the latest device signal and the rolling OCR summary — lives in **module globals** (retention=none; `reset_context_store()` is the test/shutdown hook), timestamped with `time.monotonic()` for **staleness gating**. `record_device_signal(...)` / `record_ocr_summary(...)` are the write entry points (called by the API only after the gate passes). `get_world_model` is memoized ~5s and assembles, each section INDEPENDENTLY best-effort (the `daily_briefing.gather_*` rule — a failure drops the section, never raises): **presence** (active/idle/away/unknown, from idle-seconds vs `idle_threshold` + signal freshness), **active_app**/**window_title** (nulled when stale), **next_calendar_event** + **unread** urgency (Google, reusing `calendar_tools._event_row`/`format_event_when` + `email_tools.build_gmail_query`; own 60s cache; not-connected → absent), **recent_file_focus** (most-recent active `FileIndex` row), and **on_screen_context** (the OCR summary, nulled when stale). When the master switch is off, the model goes DARK (empty, `sensing.enabled=False`) — reads and writes both stop. `context_status(db)` is the cheap, no-I/O status the StatusBar polls.
+- **Device sensing** runs in the Electron MAIN process (`electron/sensing.ts`) so it works while the window lives in the tray. A single long-lived **PowerShell/Win32 helper** (`GetForegroundWindow` + process name — **zero npm native dependency**, no electron-builder rebuild) emits the active app/window title on change; `powerMonitor.getSystemIdleTime()` gives idle time. Signals POST to `/api/context/device` on change + a 30s heartbeat — over ordinary **authed HTTP, never the `/ws` socket** (server→client stays invariant). Main **polls `/api/context/settings` (~15s)** and senses only while `enabled`, so the kill switch takes effect within one poll. Windows-only for now (the helper is Win32).
+- **Screen OCR** (chosen depth): Electron captures a **downscaled `desktopCapturer` thumbnail** (no full-res images) and POSTs it to `/api/context/screen` ONLY while **per-session armed** (`screenArmed` defaults false every launch — arm/disarm via the new preload `startScreenSensing`/`stopScreenSensing` IPC → main; the ONLY new bridge methods, no image ever crosses to the renderer). The endpoint is **HARD-GATED**: 403 unless master AND `screen_ocr` are both on, checked **before any decode**; the raw frame is OCR'd in memory and dropped (never to disk). OCR runs in the backend via **RapidOCR (onnxruntime)** behind the injectable **`OCR_ENGINE_FACTORY`** seam (the `STT_MODEL_FACTORY` pattern — tests swap a fake, never load a model; conftest autouse `_hermetic_screen_ocr` is the backstop) and reuses the GPU stack. The summary is produced **deterministically** (`condense_ocr_text` — strip noise, dedupe, keep the most informative lines in on-screen order, cap length; no LLM, so periodic capture is free and can't exfiltrate the screen to a provider).
+- **Config + privacy posture** (`ContextConfig` in `app_settings`, key `context.config`, the `FileIndexConfig` coercer discipline): `enabled` (master, default False), `device_sensing` (default True, only under master), `screen_ocr` (default False — the OCR *capability*; capture is additionally per-session armed), `ocr_interval_seconds`/`idle_threshold_seconds` (clamped). The Settings **"Context & sensing"** card (`SettingsPanel.tsx`, `contextStore.ts`) is immediate-PUT (optimistic + revert, the FileIndexCard lesson) with plain-language consent copy, the start/stop screen-sensing button, and a read-only **"What Jarvis currently sees"** audit (GET `/api/context/world`) — the trust surface. `StatusBar.tsx` shows the visible **"Sensing: On"** indicator (amber for screen OCR).
+- **API** (`app/api/context.py`, `/api/context`, all behind `AuthMiddleware`): `GET`/`PUT /settings`, `POST /device` (accept-and-ignore when gated → `{stored:false}`; strings truncated), `POST /screen` (multipart, hard-gated 403), `GET /world`, `GET /status`.
+- **No migration** (config in the existing `app_settings` k/v table; sensed data in-memory). `rapidocr-onnxruntime` is an OPTIONAL opt-in dep documented in `requirements.txt` — lazy import, so the base install stays CPU-clean and enabling OCR without it fails clean. Tests: `test_context_store.py` (presence/staleness/master-gating/best-effort Google/recent-file/status), `test_screen_ocr.py` (condense + engine seam), `test_context_api.py` (settings + validation, device gate, screen 403 + OCR path, world/status). NO consumer reads the model yet — Phase 9.

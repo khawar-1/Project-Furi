@@ -37,6 +37,12 @@ export interface JarvisAPI {
   // hands-free recording in response; no data crosses the bridge.
   onSummoned: (callback: () => void) => void;
 
+  // IPC: arm/disarm per-session screen OCR sensing (Phase 8). The renderer
+  // only flips the intent; the capture loop runs in the main process and no
+  // image ever crosses the bridge.
+  startScreenSensing: () => void;
+  stopScreenSensing: () => void;
+
   // Cleanup
   removeAllListeners: (channel: string) => void;
 }
@@ -78,6 +84,9 @@ const jarvisAPI: JarvisAPI = {
     ipcRenderer.on('summoned-by-hotkey', () => callback());
   },
 
+  startScreenSensing: () => ipcRenderer.send('context:start-screen'),
+  stopScreenSensing: () => ipcRenderer.send('context:stop-screen'),
+
   removeAllListeners: (channel: string) => {
     ipcRenderer.removeAllListeners(channel);
   },
@@ -87,3 +96,8 @@ contextBridge.exposeInMainWorld('jarvis', jarvisAPI);
 
 // Expose the backend URL as a global constant for the API client
 contextBridge.exposeInMainWorld('__BACKEND_URL__', `http://localhost:${process.env.BACKEND_PORT || '8000'}`);
+
+// The API auth token, read from ~/.jarvis/auth_token by the main process
+// (loadAuthToken) before this window was created and inherited via env.
+// Every backend call must carry it (X-Jarvis-Token / ?token= on the WS).
+contextBridge.exposeInMainWorld('__JARVIS_TOKEN__', process.env.JARVIS_AUTH_TOKEN || '');

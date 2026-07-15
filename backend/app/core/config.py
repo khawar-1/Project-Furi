@@ -80,11 +80,17 @@ class Settings(BaseSettings):
     GOOGLE_TOKEN_PATH: str = ""
 
     # ------------------------------------------------------------------ Backend
-    # Loopback only — the API is unauthenticated; 0.0.0.0 would expose the
-    # tool system (file deletion, shell commands) to the whole network.
+    # Loopback only — 0.0.0.0 would expose the tool system (file deletion,
+    # shell commands) to the whole network. Requests are additionally gated by
+    # a static auth token (app/core/auth.py): loopback is not authorization —
+    # any local process or a webpage firing POSTs at localhost could otherwise
+    # drive the API.
     BACKEND_HOST: str = "127.0.0.1"
     BACKEND_PORT: int = 8000
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
+    # Empty = the backend generates/persists one at ~/.jarvis/auth_token.
+    # Set explicitly only for scripted/dev use; never commit a real value.
+    API_AUTH_TOKEN: str = ""
 
     # ------------------------------------------------------------------ Voice
     WHISPER_MODEL: str = "base"

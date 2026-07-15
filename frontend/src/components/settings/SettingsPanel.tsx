@@ -8,13 +8,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { clsx } from 'clsx';
 import {
+  Activity,
   CheckCircle2,
   Database,
+  Eye,
   FolderSearch,
   Link2,
   Link2Off,
   Loader2,
   Mic,
+  Monitor,
   Plus,
   RotateCw,
   Send,
@@ -35,6 +38,7 @@ import {
   type VoiceUpdateBody,
 } from '@/lib/api';
 import { useVoiceStore } from '@/stores/voiceStore';
+import { useContextStore } from '@/stores/contextStore';
 import { speakText } from '@/lib/voiceOutput';
 import { startRecording, voiceCaptureSupported, type RecordingHandle } from '@/lib/voiceInput';
 import type {
@@ -44,6 +48,7 @@ import type {
   GoogleIntegrationStatus,
   SttStatus,
   TtsStatus,
+  WorldModel,
 } from '@/types';
 
 const IDLE_POLL_MS = 15_000;
@@ -1120,6 +1125,206 @@ function VoiceCard() {
   );
 }
 
+const PRESENCE_LABELS: Record<WorldModel['presence'], string> = {
+  active: 'At the keyboard',
+  idle: 'Idle',
+  away: 'Away',
+  unknown: 'Unknown',
+};
+
+/** Phase 8 — the Context Layer's privacy-first sensing controls + the
+ *  "what Jarvis currently sees" audit surface. Every toggle PUTs immediately
+ *  (optimistic + revert, via the context store). */
+function ContextSensingCard() {
+  const {
+    settings,
+    world,
+    screenArmed,
+    error,
+    fetchSettings,
+    updateSettings,
+    fetchWorld,
+    armScreen,
+    disarmScreen,
+  } = useContextStore(
+    useShallow((s) => ({
+      settings: s.settings,
+      world: s.world,
+      screenArmed: s.screenArmed,
+      error: s.error,
+      fetchSettings: s.fetchSettings,
+      updateSettings: s.updateSettings,
+      fetchWorld: s.fetchWorld,
+      armScreen: s.armScreen,
+      disarmScreen: s.disarmScreen,
+    }))
+  );
+
+  useEffect(() => {
+    void fetchSettings();
+  }, [fetchSettings]);
+
+  // While sensing is on, refresh the audit view so the user can see exactly
+  // what is stored (the trust surface). Off → don't poll.
+  const enabled = settings?.enabled ?? false;
+  useEffect(() => {
+    if (!enabled) return;
+    void fetchWorld();
+    const t = setInterval(() => void fetchWorld(), 5_000);
+    return () => clearInterval(t);
+  }, [enabled, fetchWorld]);
+
+  const deviceSensing = settings?.device_sensing ?? true;
+  const screenOcr = settings?.screen_ocr ?? false;
+  const ocrInterval = settings?.ocr_interval_seconds ?? 30;
+  const idleThreshold = settings?.idle_threshold_seconds ?? 300;
+  const hasBridge = typeof window.jarvis?.startScreenSensing === 'function';
+
+  return (
+    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
+      {/* Header + master kill switch */}
+      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
+        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-emerald-400/80">
+          <Eye size={15} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-sm font-semibold text-slate-200">Context & sensing</h2>
+          <p className="text-xs text-muted truncate">
+            {enabled ? 'Sensing on — local only, nothing stored' : 'Off — Jarvis senses nothing'}
+          </p>
+        </div>
+        <ToggleSwitch
+          checked={enabled}
+          disabled={!settings}
+          onToggle={() => void updateSettings({ enabled: !enabled })}
+          label="Master sensing switch"
+        />
+      </div>
+
+      {/* Body */}
+      <div className="px-4 py-3.5 space-y-3">
+        <p className="text-xs text-slate-400">
+          Lets Jarvis know what you're doing right now — presence, the active app, and
+          (optionally) what's on screen — so it can be genuinely helpful later. Everything
+          stays on this machine, nothing is saved to disk, and this master switch turns it
+          all off instantly.
+        </p>
+
+        {enabled && (
+          <>
+            {/* Device sensing */}
+            <div className="flex items-center gap-3">
+              <Activity size={14} className="text-cyan-400/70 flex-shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-xs text-slate-300">Presence & active app</p>
+                <p className="text-[11px] text-muted">Active window title + idle time (no screenshots)</p>
+              </div>
+              <ToggleSwitch
+                checked={deviceSensing}
+                onToggle={() => void updateSettings({ device_sensing: !deviceSensing })}
+                label="Device sensing"
+              />
+            </div>
+
+            {/* Screen OCR capability */}
+            <div className="flex items-center gap-3">
+              <Monitor size={14} className="text-amber-400/70 flex-shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-xs text-slate-300">Read the screen (OCR)</p>
+                <p className="text-[11px] text-muted">
+                  Periodic on-screen text, read locally. Off by default — start it per session below.
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={screenOcr}
+                onToggle={() => void updateSettings({ screen_ocr: !screenOcr })}
+                label="Screen OCR capability"
+              />
+            </div>
+
+            {screenOcr && hasBridge && (
+              <button
+                onClick={() => (screenArmed ? disarmScreen() : armScreen())}
+                className={clsx(
+                  'flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                  screenArmed
+                    ? 'text-red-400 bg-red-500/10 border-red-500/20 hover:bg-red-500/20'
+                    : 'text-amber-400 bg-amber-500/10 border-amber-500/20 hover:bg-amber-500/20'
+                )}
+              >
+                {screenArmed ? <Square size={12} /> : <Eye size={12} />}
+                {screenArmed ? 'Stop screen sensing (this session)' : 'Start screen sensing (this session)'}
+              </button>
+            )}
+
+            {/* Cadences */}
+            <div className="flex flex-wrap items-center gap-4 pt-1">
+              <div className="flex items-center gap-2">
+                <label className="text-[11px] text-slate-400" htmlFor="ocr-interval">Screen every (s)</label>
+                <input
+                  id="ocr-interval"
+                  type="number"
+                  min={5}
+                  value={ocrInterval}
+                  onChange={(e) => void updateSettings({ ocr_interval_seconds: Number(e.target.value) })}
+                  className="w-16 px-2 py-1 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 focus:outline-none focus:border-cyan-500/40"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="text-[11px] text-slate-400" htmlFor="idle-threshold">Idle after (s)</label>
+                <input
+                  id="idle-threshold"
+                  type="number"
+                  min={30}
+                  value={idleThreshold}
+                  onChange={(e) => void updateSettings({ idle_threshold_seconds: Number(e.target.value) })}
+                  className="w-16 px-2 py-1 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 focus:outline-none focus:border-cyan-500/40"
+                />
+              </div>
+            </div>
+
+            {/* Audit: what Jarvis currently sees */}
+            <div className="mt-1 p-3 rounded-lg bg-surface-2/50 border border-surface-border space-y-1.5">
+              <div className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-slate-500">
+                <ShieldCheck size={11} /> What Jarvis currently sees
+              </div>
+              <AuditRow label="Presence" value={world ? PRESENCE_LABELS[world.presence] : '—'} />
+              <AuditRow label="Active app" value={world?.active_app || '—'} />
+              <AuditRow label="Window" value={world?.window_title || '—'} />
+              <AuditRow
+                label="Next event"
+                value={world?.next_calendar_event?.summary
+                  ? `${world.next_calendar_event.summary}${world.next_calendar_event.when ? ` — ${world.next_calendar_event.when}` : ''}`
+                  : '—'}
+              />
+              <AuditRow
+                label="Unread"
+                value={world?.unread ? `${world.unread.count}${world.unread.has_urgent ? ' (urgent)' : ''}` : '—'}
+              />
+              <AuditRow label="On screen" value={world?.on_screen_context || '—'} />
+            </div>
+          </>
+        )}
+
+        {error && (
+          <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs">
+            {error}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AuditRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-start gap-2 text-[11px]">
+      <span className="text-slate-500 w-20 flex-shrink-0">{label}</span>
+      <span className="text-slate-300 min-w-0 break-words">{value}</span>
+    </div>
+  );
+}
+
 export function SettingsPanel() {
   return (
     <div className="flex flex-col h-full bg-surface overflow-hidden">
@@ -1146,6 +1351,8 @@ export function SettingsPanel() {
         <DailyBriefingCard />
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Voice</p>
         <VoiceCard />
+        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Awareness</p>
+        <ContextSensingCard />
       </div>
     </div>
   );

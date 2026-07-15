@@ -9,6 +9,8 @@ import type {
   ChatMessage,
   ChatRequest,
   Contact,
+  ContextSettings,
+  ContextStatus,
   Episode,
   FileIndexSettings,
   FileIndexStatus,
@@ -28,6 +30,7 @@ import type {
   TranscribeResult,
   TtsStatus,
   VoiceSettings,
+  WorldModel,
 } from '@/types';
 
 // Resolve backend URL (also used by lib/push.ts to derive the ws:// URL)
@@ -38,14 +41,32 @@ export function getBaseUrl(): string {
   return 'http://localhost:8000';
 }
 
+// The static API auth token every backend call must carry (the backend's
+// AuthMiddleware 401s without it). In Electron, preload injects it as
+// window.__JARVIS_TOKEN__; in plain-browser dev put the value of
+// ~/.jarvis/auth_token in frontend/.env.local as VITE_JARVIS_TOKEN.
+// Also used by lib/push.ts (WebSockets can't set headers → ?token= param).
+export function getAuthToken(): string {
+  if (typeof window !== 'undefined' && window.__JARVIS_TOKEN__) {
+    return window.__JARVIS_TOKEN__;
+  }
+  return import.meta.env.VITE_JARVIS_TOKEN ?? '';
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getAuthToken();
+  return token ? { 'X-Jarvis-Token': token } : {};
+}
+
 // ============================================================
 // Base fetch with error handling
 // ============================================================
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   const url = `${getBaseUrl()}${path}`;
   const response = await fetch(url, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options,
+    // Auth header spread LAST so no caller can accidentally drop it.
+    headers: { 'Content-Type': 'application/json', ...options.headers, ...authHeaders() },
   });
 
   if (!response.ok) {
@@ -77,7 +98,7 @@ export const chatApi = {
     try {
       const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify(request),
       });
 
@@ -308,6 +329,27 @@ export const settingsApi = {
 };
 
 // ============================================================
+// Context Layer (Phase 8) — settings, status, world model
+// ============================================================
+export const contextApi = {
+  getSettings: (): Promise<ContextSettings> =>
+    apiFetch<ContextSettings>('/api/context/settings'),
+
+  updateSettings: (update: ContextSettings): Promise<ContextSettings> =>
+    apiFetch<ContextSettings>('/api/context/settings', {
+      method: 'PUT',
+      body: JSON.stringify(update),
+    }),
+
+  /** Cheap sensing status — drives the StatusBar indicator. */
+  getStatus: (): Promise<ContextStatus> =>
+    apiFetch<ContextStatus>('/api/context/status'),
+
+  /** The aggregated world model — the "what Jarvis currently sees" audit. */
+  getWorld: (): Promise<WorldModel> => apiFetch<WorldModel>('/api/context/world'),
+};
+
+// ============================================================
 // Semantic file index (Phase 6, Part 2)
 // ============================================================
 export const indexApi = {
@@ -409,7 +451,7 @@ export const voiceApi = {
   speak: async (text: string, signal?: AbortSignal): Promise<Blob | null> => {
     const response = await fetch(`${getBaseUrl()}/api/voice/speak`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ text }),
       signal,
     });
@@ -437,7 +479,7 @@ export const voiceApi = {
   ): Promise<{ sampleRate: number; body: ReadableStream<Uint8Array> } | null> => {
     const response = await fetch(`${getBaseUrl()}/api/voice/speak/stream`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ text }),
       signal,
     });
@@ -464,6 +506,9 @@ export const voiceApi = {
     form.append('file', audio, 'utterance.webm');
     const response = await fetch(`${getBaseUrl()}/api/voice/transcribe`, {
       method: 'POST',
+      // Auth header ONLY — never a Content-Type here: the browser must set
+      // the multipart boundary itself or the upload breaks.
+      headers: authHeaders(),
       body: form,
       signal,
     });

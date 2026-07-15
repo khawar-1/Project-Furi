@@ -37,6 +37,24 @@ def session_id():
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_auth(tmp_path_factory):
+    """The API auth gate (app/core/auth.py) guards every route on the real
+    app that API tests import from main. Tests must never present tokens or
+    touch the real ~/.jarvis/auth_token: auth is disabled and the token path
+    repointed at an empty scratch dir. test_auth.py re-enables it explicitly
+    to cover enforcement."""
+    from app.core import auth
+
+    enabled, token_path = auth.ENABLED, auth.TOKEN_PATH
+    auth.ENABLED = False
+    auth.TOKEN_PATH = tmp_path_factory.mktemp("auth") / "auth_token"
+    auth.reset_auth()
+    yield
+    auth.ENABLED, auth.TOKEN_PATH = enabled, token_path
+    auth.reset_auth()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_question_gate(tmp_path_factory):
     """The planner's question self-resolution gate verifies questions with a
     REAL filesystem search that defaults to the user's home directory. Tests
@@ -98,6 +116,35 @@ def _hermetic_voice_tts():
     voice_tts.TTS_ENGINE_FACTORY = _refuse
     yield
     voice_tts.reset_tts()
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_screen_ocr():
+    """screen_ocr's default factory imports rapidocr_onnxruntime + loads OCR
+    models. Tests must never trigger that: every test starts with a cleared
+    engine and a factory that refuses outright. OCR tests swap in their own
+    fake (returning canned text) on top."""
+    from app.core import screen_ocr
+
+    def _refuse():
+        raise RuntimeError("test tried to load a real OCR engine")
+
+    screen_ocr.reset_screen_ocr()
+    screen_ocr.OCR_ENGINE_FACTORY = _refuse
+    yield
+    screen_ocr.reset_screen_ocr()
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_context_store():
+    """The Phase 8 world model holds sensed device/OCR state in module globals
+    (retention=none). Reset it around every test so one test's signal never
+    leaks into another's world model."""
+    from app.core import context_store
+
+    context_store.reset_context_store()
+    yield
+    context_store.reset_context_store()
 
 
 @pytest.fixture(autouse=True)

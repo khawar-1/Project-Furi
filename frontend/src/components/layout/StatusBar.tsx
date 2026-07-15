@@ -2,14 +2,27 @@
  * Jarvis OS — Status Bar
  * Bottom bar showing backend connection, active model, and app version.
  */
+import { useEffect } from 'react';
 import { clsx } from 'clsx';
-import { Circle, Cpu, Wifi, WifiOff, RefreshCw } from 'lucide-react';
+import { Circle, Cpu, Eye, Wifi, WifiOff, RefreshCw } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 import { usePushStore } from '@/stores/pushStore';
+import { useContextStore } from '@/stores/contextStore';
+
+const SENSING_POLL_MS = 10_000;
 
 export function StatusBar() {
   const { backendStatus, healthData, isCheckingHealth, checkBackendHealth } = useUIStore();
   const pushConnected = usePushStore((s) => s.connected);
+  const sensing = useContextStore((s) => s.status);
+  const fetchSensingStatus = useContextStore((s) => s.fetchStatus);
+
+  // The required visible "sensing on" indicator — poll the cheap status.
+  useEffect(() => {
+    void fetchSensingStatus();
+    const t = setInterval(() => void fetchSensingStatus(), SENSING_POLL_MS);
+    return () => clearInterval(t);
+  }, [fetchSensingStatus]);
 
   const isConnected = backendStatus === 'ok';
   const isDegraded = backendStatus === 'degraded';
@@ -81,6 +94,26 @@ export function StatusBar() {
             Push: {pushConnected ? 'Live' : 'Off'}
           </span>
         </div>
+
+        {/* Sensing indicator (Phase 8) — visible whenever the Context Layer is on */}
+        {sensing?.enabled && (
+          <div
+            className="flex items-center gap-1"
+            title={
+              sensing.screen_ocr
+                ? 'Context sensing on (device + screen) — local only'
+                : 'Context sensing on (device) — local only'
+            }
+          >
+            <Eye
+              size={10}
+              className={clsx(sensing.screen_ocr ? 'text-amber-400' : 'text-emerald-500')}
+            />
+            <span className={clsx(sensing.screen_ocr ? 'text-amber-400' : 'text-emerald-500')}>
+              Sensing: On{sensing.screen_ocr ? ' (screen)' : ''}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Center: Model info */}
