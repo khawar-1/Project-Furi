@@ -17,6 +17,7 @@ import {
   Link2,
   Link2Off,
   Loader2,
+  MessageSquare,
   Mic,
   Monitor,
   Plus,
@@ -1387,24 +1388,24 @@ function ContextSensingCard() {
   const {
     settings,
     world,
-    screenArmed,
+    screenPaused,
     error,
     fetchSettings,
     updateSettings,
     fetchWorld,
-    armScreen,
-    disarmScreen,
+    pauseScreen,
+    resumeScreen,
   } = useContextStore(
     useShallow((s) => ({
       settings: s.settings,
       world: s.world,
-      screenArmed: s.screenArmed,
+      screenPaused: s.screenPaused,
       error: s.error,
       fetchSettings: s.fetchSettings,
       updateSettings: s.updateSettings,
       fetchWorld: s.fetchWorld,
-      armScreen: s.armScreen,
-      disarmScreen: s.disarmScreen,
+      pauseScreen: s.pauseScreen,
+      resumeScreen: s.resumeScreen,
     }))
   );
 
@@ -1424,6 +1425,7 @@ function ContextSensingCard() {
 
   const deviceSensing = settings?.device_sensing ?? true;
   const screenOcr = settings?.screen_ocr ?? false;
+  const screenInChat = settings?.screen_in_chat ?? false;
   const affectiveSensing = settings?.affective_sensing ?? false;
   const ocrInterval = settings?.ocr_interval_seconds ?? 30;
   const idleThreshold = settings?.idle_threshold_seconds ?? 300;
@@ -1481,7 +1483,7 @@ function ContextSensingCard() {
               <div className="flex-1 min-w-0">
                 <p className="text-xs text-slate-300">Read the screen (OCR)</p>
                 <p className="text-[11px] text-muted">
-                  Periodic on-screen text, read locally. Off by default — start it per session below.
+                  On-screen text, captured automatically and read locally while this is on.
                 </p>
               </div>
               <ToggleSwitch
@@ -1491,18 +1493,37 @@ function ContextSensingCard() {
               />
             </div>
 
+            {/* Screen-aware chat — opt-in on top of the OCR capability */}
+            {screenOcr && (
+              <div className="flex items-center gap-3 pl-6">
+                <MessageSquare size={14} className="text-amber-400/70 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs text-slate-300">Screen-aware chat</p>
+                  <p className="text-[11px] text-muted">
+                    Let Jarvis use on-screen text to answer your questions (sends screen
+                    text to the language model when you chat).
+                  </p>
+                </div>
+                <ToggleSwitch
+                  checked={screenInChat}
+                  onToggle={() => void updateSettings({ screen_in_chat: !screenInChat })}
+                  label="Screen-aware chat"
+                />
+              </div>
+            )}
+
             {screenOcr && hasBridge && (
               <button
-                onClick={() => (screenArmed ? disarmScreen() : armScreen())}
+                onClick={() => (screenPaused ? resumeScreen() : pauseScreen())}
                 className={clsx(
                   'flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
-                  screenArmed
-                    ? 'text-red-400 bg-red-500/10 border-red-500/20 hover:bg-red-500/20'
-                    : 'text-amber-400 bg-amber-500/10 border-amber-500/20 hover:bg-amber-500/20'
+                  screenPaused
+                    ? 'text-amber-400 bg-amber-500/10 border-amber-500/20 hover:bg-amber-500/20'
+                    : 'text-red-400 bg-red-500/10 border-red-500/20 hover:bg-red-500/20'
                 )}
               >
-                {screenArmed ? <Square size={12} /> : <Eye size={12} />}
-                {screenArmed ? 'Stop screen sensing (this session)' : 'Start screen sensing (this session)'}
+                {screenPaused ? <Eye size={12} /> : <Square size={12} />}
+                {screenPaused ? 'Resume screen capture' : 'Pause screen capture (this session)'}
               </button>
             )}
 

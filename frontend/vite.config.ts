@@ -9,6 +9,17 @@ export default defineConfig({
       '@': resolve(__dirname, './src'),
     },
   },
+  optimizeDeps: {
+    // onnxruntime-web (wake word) resolves its .wasm binary via
+    // `new URL(..., import.meta.url)`. Vite's dep pre-bundling relocates the
+    // JS into node_modules/.vite/deps/, where no .wasm exists — the dev
+    // server's SPA fallback then serves index.html and WebAssembly aborts
+    // with "expected magic word 00 61 73 6d, found 3c 21 64 6f" (<!do —
+    // live failure 2026-07-16). Excluded, the package's own ESM is served
+    // from node_modules via /@fs/ and the URL resolves to the real file.
+    // Build output is unaffected (optimizeDeps is dev-only).
+    exclude: ['onnxruntime-web'],
+  },
   server: {
     port: 5173,
     strictPort: true,

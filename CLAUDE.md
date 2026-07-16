@@ -740,6 +740,12 @@ docker-compose up -d
 # Dev: backend + frontend + electron all together
 npm run dev
 
+# After stopping dev with Ctrl+C, sweep any stranded processes (the uvicorn
+# --reload parent holding port 8000, a stray Vite/Electron, an orphaned
+# sensing helper) — scripts/stop-dev.ps1 reports exactly what it killed.
+npm run stop
+# Manual check: netstat -ano | findstr ":8000"   and   Get-Process python,node,electron -ErrorAction SilentlyContinue
+
 # Backend only (equivalent to what `npm run dev` runs)
 cd backend && venv\Scripts\python -m uvicorn main:app --reload --port 8000
 

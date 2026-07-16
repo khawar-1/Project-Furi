@@ -14,6 +14,8 @@ from app.core.context_store import (
     record_affective_signal,
     record_device_signal,
     record_ocr_summary,
+    reset_context_store,
+    screen_context_for_chat,
 )
 from app.db.models import FileIndex
 
@@ -69,6 +71,7 @@ async def _enable(db, **overrides):
         ocr_interval_seconds=overrides.get("ocr_interval_seconds", 30),
         idle_threshold_seconds=overrides.get("idle_threshold_seconds", 300),
         affective_sensing=overrides.get("affective_sensing", False),
+        screen_in_chat=overrides.get("screen_in_chat", False),
     )
     await set_context_config(db, cfg)
 
@@ -284,3 +287,157 @@ def test_high_load_predicate_gates_on_confidence():
     assert high_load({"load": "busy", "confidence": 0.2}) is False
     assert high_load({"load": "busy", "confidence": 0.5}) is True
     assert high_load({"load": "stressed", "confidence": 0.34}) is True
+
+
+# ------------------------------------------- screen-aware chat (ring buffer)
+
+def test_screen_ring_appends_and_caps():
+    for i in range(context_store.SCREEN_RING_MAX + 2):
+        record_ocr_summary(f"summary {i}", full_text=f"full text {i}")
+    ring = context_store._screen_ring
+    assert len(ring) == context_store.SCREEN_RING_MAX
+    # Oldest entries dropped; newest last.
+    assert ring[-1].full_text == "full text 4"
+    assert ring[0].full_text == "full text 2"
+
+
+def test_screen_ring_dedupes_unchanged_capture(monkeypatch):
+    record_ocr_summary("same", full_text="identical screen text")
+    first = context_store._screen_ring[-1]
+    # Advance the clock so the refresh is observable, then repeat the capture.
+    monkeypatch.setattr(context_store.time, "monotonic", lambda: first.captured + 42.0)
+    record_ocr_summary("same", full_text="identical screen text")
+    ring = context_store._screen_ring
+    assert len(ring) == 1                            # no duplicate entry
+    assert ring[-1].captured == first.captured + 42.0  # freshness moved forward
+
+
+def test_screen_ring_caps_full_text():
+    record_ocr_summary("s", full_text="x" * 5000)
+    assert len(context_store._screen_ring[-1].full_text) == context_store.SCREEN_FULL_TEXT_MAX
+
+
+def test_screen_ring_falls_back_to_summary():
+    record_ocr_summary("condensed only")
+    assert context_store._screen_ring[-1].full_text == "condensed only"
+
+
+def test_screen_ring_skips_empty_capture():
+    record_ocr_summary("", full_text="   ")
+    assert context_store._screen_ring == []
+
+
+def test_screen_ring_attributes_from_device_signal():
+    record_device_signal("Code.exe", "planner.py — jarvis", idle_seconds=1)
+    record_ocr_summary("s", full_text="editor text")
+    entry = context_store._screen_ring[-1]
+    assert entry.app == "Code.exe"
+    assert entry.window_title == "planner.py — jarvis"
+
+
+def test_screen_ring_explicit_attribution_wins():
+    record_device_signal("Code.exe", "planner.py", idle_seconds=1)
+    record_ocr_summary("s", full_text="t", app="chrome", window_title="Docs")
+    entry = context_store._screen_ring[-1]
+    assert entry.app == "chrome"
+    assert entry.window_title == "Docs"
+
+
+def test_reset_clears_screen_ring():
+    record_ocr_summary("s", full_text="t")
+    reset_context_store()
+    assert context_store._screen_ring == []
+
+
+# --------------------------------------- screen-aware chat (the read helper)
+
+async def _arm_screen_chat(db, **overrides):
+    overrides.setdefault("screen_ocr", True)
+    overrides.setdefault("screen_in_chat", True)
+    await _enable(db, **overrides)
+
+
+async def test_screen_chat_block_renders_current_screen(db_session):
+    await _arm_screen_chat(db_session)
+    record_device_signal("Code.exe", "planner.py — jarvis", idle_seconds=1)
+    record_ocr_summary("condensed", full_text="def resume(self): ...")
+    block = await screen_context_for_chat(db_session)
+    assert block.startswith("CURRENT SCREEN (~")
+    assert "s ago" in block
+    assert 'in Code.exe — "planner.py — jarvis"' in block
+    assert "def resume(self): ..." in block
+
+
+async def test_screen_chat_block_includes_up_to_two_priors(db_session):
+    await _arm_screen_chat(db_session)
+    record_ocr_summary("a", full_text="oldest screen")
+    record_ocr_summary("b", full_text="middle screen", app="chrome", window_title="Docs")
+    record_ocr_summary("c", full_text="newest screen", app="Code.exe", window_title="x.py")
+    block = await screen_context_for_chat(db_session)
+    assert "CURRENT SCREEN" in block and "newest screen" in block
+    assert block.count("EARLIER") == 2
+    assert "middle screen" in block and "oldest screen" in block
+    # Newest prior listed first.
+    assert block.index("middle screen") < block.index("oldest screen")
+
+
+async def test_screen_chat_gate_matrix(db_session):
+    record_ocr_summary("s", full_text="secret screen text")
+    for off in ("enabled", "screen_ocr", "screen_in_chat"):
+        await _arm_screen_chat(db_session, **{off: False})
+        assert await screen_context_for_chat(db_session) == "", f"{off}=False must gate"
+    # All three on → the block appears.
+    await _arm_screen_chat(db_session)
+    assert "secret screen text" in await screen_context_for_chat(db_session)
+
+
+async def test_screen_chat_honest_note_without_captures(db_session):
+    """Opted-in but no capture yet → the HONEST no-capture note, never ""
+    (an empty note left the LLM inventing 'say take a screenshot' — live
+    fabrication 2026-07-16). The note must forbid magic phrases."""
+    await _arm_screen_chat(db_session)
+    note = await screen_context_for_chat(db_session)
+    assert note == context_store.SCREEN_NO_CAPTURE_NOTE
+    assert "NO FRESH SCREEN CAPTURE" in note
+    assert "take a screenshot" in note  # named and forbidden explicitly
+    assert "NEVER" in note
+
+
+async def test_screen_chat_honest_note_when_current_too_old(db_session, monkeypatch):
+    await _arm_screen_chat(db_session)
+    record_ocr_summary("s", full_text="old text")
+    monkeypatch.setattr(context_store, "SCREEN_CHAT_MAX_AGE_SECONDS", -1.0)
+    # Stale must not masquerade as "right now" — but the user is opted in, so
+    # the honest note replaces the screen text (never silence).
+    assert await screen_context_for_chat(db_session) == context_store.SCREEN_NO_CAPTURE_NOTE
+    # The ring itself keeps last-known (never hard-nulled on staleness).
+    assert context_store._screen_ring[-1].full_text == "old text"
+
+
+async def test_screen_chat_empty_when_config_read_fails(db_session, monkeypatch):
+    record_ocr_summary("s", full_text="t")
+
+    async def _boom(_db):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(context_store, "get_context_config", _boom)
+    assert await screen_context_for_chat(db_session) == ""
+
+
+async def test_ring_outlives_world_model_staleness(db_session, monkeypatch):
+    """The condensed on_screen_context still nulls when stale (unchanged Phase 8
+    behavior) while the chat ring keeps last-known with age exposed."""
+    await _arm_screen_chat(db_session)
+    record_ocr_summary("condensed text", full_text="fuller text")
+    monkeypatch.setattr(context_store, "OCR_FRESH_MIN_SECONDS", -1.0)
+    monkeypatch.setattr(context_store, "OCR_FRESH_INTERVAL_MULTIPLIER", -1)
+    model = await get_world_model(db_session, use_cache=False)
+    assert model.on_screen_context is None
+    assert "fuller text" in await screen_context_for_chat(db_session)
+
+
+def test_age_label_humanizes():
+    assert context_store._age_label(5) == "~5s ago"
+    assert context_store._age_label(119) == "~119s ago"
+    assert context_store._age_label(180) == "~3m ago"
+    assert context_store._age_label(-2) == "~0s ago"

@@ -34,6 +34,11 @@ import wakewordUrl from '@/assets/wakeword/hey_jarvis_v0.1.onnx?url';
 // rewrites to a hashed asset URL that resolves in both dev (http://) and
 // packaged Electron (file://). So we do NOT override ort.env.wasm.wasmPaths —
 // the package's `exports` map blocks importing the .wasm as a module anyway.
+// DEV GOTCHA (live failure 2026-07-16): that URL rewrite does NOT happen
+// inside a Vite-PRE-BUNDLED dep — the .wasm request resolved into
+// .vite/deps/, got index.html back, and WASM compile aborted on the "<!do"
+// magic word, silently killing the wake word. vite.config.ts therefore
+// carries `optimizeDeps.exclude: ['onnxruntime-web']`; keep it there.
 
 // ---- openWakeWord streaming constants
 const SAMPLE_RATE = 16_000;
@@ -48,6 +53,36 @@ const MEL_BINS = 32;
 // ---- detection tuning
 const THRESHOLD = 0.5;
 const COOLDOWN_MS = 3_000;
+
+// ---- real-time backpressure
+// If the three-model chain can't keep up with the mic, unconsumed samples pile
+// up in `pending`. Unbounded, that backlog (plus the per-chunk slice churn
+// over an ever-growing array) grew until the renderer was OOM-killed — blank
+// window, DevTools disconnected (live failure 2026-07-16, the first day this
+// path actually ran; the WASM load failure had masked it). Wake detection
+// only needs the last ~1.3s of audio, so a backlog covering seconds means the
+// CPU is simply too slow: drop the buffered audio, and after repeated
+// overflows stop entirely — honest degradation beats a pegged CPU and a dead
+// renderer.
+const MAX_BACKLOG_SAMPLES = SAMPLE_RATE * 3; // 3s of unprocessed audio
+const MAX_OVERFLOWS = 5;
+
+// ---- crash-loop breaker
+// The renderer died repeatedly right after wake-word start (live failure
+// 2026-07-16: blank→reload→blank cycles until the main-process reload cap),
+// and nothing inside a renderer can catch its own process death. So the
+// module keeps a strike counter in localStorage: a strike is written when
+// detection starts, and cleared only on a GRACEFUL outcome — stopWakeWord()
+// or 30s of stable running. A crash can never clear it. Two fresh strikes =
+// wake word is what's killing this renderer → skip starting it (console-
+// warned) so the reload lands on a usable app. Strikes go stale after 10
+// minutes, so the feature retries on a later launch (self-healing; the cost
+// of a wrong strike — e.g. two rapid quit-after-launch cycles — is 10 wake-
+// word-less minutes, never a broken app).
+const CRASH_GUARD_KEY = 'jarvis.wakeword.crash-strikes';
+const CRASH_GUARD_LIMIT = 2;
+const CRASH_GUARD_STABLE_MS = 30_000;
+const CRASH_GUARD_FRESH_MS = 10 * 60_000;
 
 // ------------------------------------------------------------- module state
 let running = false;
@@ -70,6 +105,55 @@ let prevTail = new Float32Array(MEL_LOOKBACK); // lookback context for the mel w
 let melBuffer: Float32Array[] = []; // rolling mel frames (each MEL_BINS long)
 let featureBuffer: Float32Array[] = []; // rolling embeddings (each EMBEDDING_DIM long)
 let lastTriggerAt = 0;
+let overflowCount = 0; // per-session; see MAX_OVERFLOWS
+let crashGuardTimer: number | null = null;
+let inferredOnce = false; // first full inference chain completed (see noteStage)
+
+
+function readStrikes(): { strikes: number; at: number; stage?: string } {
+  try {
+    const raw = localStorage.getItem(CRASH_GUARD_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as {
+        strikes?: number;
+        at?: number;
+        stage?: string;
+      };
+      return { strikes: parsed.strikes ?? 0, at: parsed.at ?? 0, stage: parsed.stage };
+    }
+  } catch {
+    // Unreadable storage = no strikes; the guard is best-effort.
+  }
+  return { strikes: 0, at: 0 };
+}
+
+/** Record how far startup got on the CURRENT strike — a crash freezes the
+ *  last stage written, so the breaker (and the ~/.jarvis crash log's
+ *  timestamps) can say WHERE the renderer died: loading models, opening the
+ *  mic, or only once real inference began. Forensics only; best-effort. */
+function noteStage(stage: string): void {
+  try {
+    const raw = localStorage.getItem(CRASH_GUARD_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    parsed.stage = stage;
+    localStorage.setItem(CRASH_GUARD_KEY, JSON.stringify(parsed));
+  } catch {
+    // Best-effort.
+  }
+}
+
+function clearStrikes(): void {
+  if (crashGuardTimer !== null) {
+    window.clearTimeout(crashGuardTimer);
+    crashGuardTimer = null;
+  }
+  try {
+    localStorage.removeItem(CRASH_GUARD_KEY);
+  } catch {
+    // Best-effort.
+  }
+}
 
 // ------------------------------------------------------------- lifecycle
 
@@ -77,11 +161,38 @@ let lastTriggerAt = 0;
  *  running. Best-effort — any failure logs and leaves wake word inactive. */
 export async function startWakeWord(): Promise<void> {
   if (running) return;
-  running = true;
+  const guard = readStrikes();
+  if (
+    guard.strikes >= CRASH_GUARD_LIMIT &&
+    Date.now() - guard.at < CRASH_GUARD_FRESH_MS
+  ) {
+    console.warn(
+      '[WakeWord] not starting: the previous renderer sessions crashed right ' +
+        `after wake-word start (crash-loop breaker; last stage reached: ` +
+        `${guard.stage ?? 'unknown'}). Will retry on a later launch.`
+    );
+    return;
+  }
   try {
+    localStorage.setItem(
+      CRASH_GUARD_KEY,
+      JSON.stringify({ strikes: guard.strikes + 1, at: Date.now(), stage: 'starting' })
+    );
+  } catch {
+    // Best-effort.
+  }
+  running = true;
+  overflowCount = 0;
+  inferredOnce = false;
+  try {
+    noteStage('loading-models');
     await ensureModels();
+    noteStage('opening-mic');
     await openMic();
     subscribeSuspend();
+    noteStage('running');
+    // Survived startup: after a stable window the strike is forgiven.
+    crashGuardTimer = window.setTimeout(clearStrikes, CRASH_GUARD_STABLE_MS);
   } catch (e) {
     console.warn('[WakeWord] failed to start; wake word inactive:', e);
     stopWakeWord();
@@ -90,6 +201,11 @@ export async function startWakeWord(): Promise<void> {
 
 /** Stop detection and release the mic. Safe to call any time. */
 export function stopWakeWord(): void {
+  // A graceful stop of a LIVE session is not a crash. Guarded on `running`
+  // because App.tsx calls this on mount before settings load — an
+  // unconditional clear would wipe the strikes before startWakeWord ever
+  // reads them and the breaker could never trip.
+  if (running) clearStrikes();
   running = false;
   suspended = false;
   if (unsubStore) {
@@ -110,11 +226,13 @@ async function ensureModels(): Promise<void> {
     executionProviders: ['wasm'],
     graphOptimizationLevel: 'all',
   };
-  [melSession, embedSession, wakeSession] = await Promise.all([
-    ort.InferenceSession.create(melspecUrl, opts),
-    ort.InferenceSession.create(embeddingUrl, opts),
-    ort.InferenceSession.create(wakewordUrl, opts),
-  ]);
+  // Sequential, not Promise.all: three concurrent session builds spike the
+  // wasm-heap allocation at the exact moment the renderer has been dying
+  // (2026-07-16 crash rounds). Serial costs ~nothing at startup and keeps
+  // the peak flat.
+  melSession = await ort.InferenceSession.create(melspecUrl, opts);
+  embedSession = await ort.InferenceSession.create(embeddingUrl, opts);
+  wakeSession = await ort.InferenceSession.create(wakewordUrl, opts);
 }
 
 // ------------------------------------------------------------- mic capture
@@ -136,6 +254,10 @@ async function openMic(): Promise<void> {
     if (!running || suspended) return;
     const input = e.inputBuffer.getChannelData(0);
     for (let i = 0; i < input.length; i++) pending.push(input[i]);
+    if (pending.length > MAX_BACKLOG_SAMPLES) {
+      handleOverflow();
+      return;
+    }
     void drainQueue();
   };
   source.connect(processor);
@@ -189,6 +311,25 @@ function resetBuffers(): void {
   featureBuffer = [];
 }
 
+/** Inference fell seconds behind the mic (see MAX_BACKLOG_SAMPLES). Drop the
+ *  backlog; after repeated overflows this machine demonstrably can't run wake
+ *  word in real time — stop it for the session rather than melt the CPU. */
+function handleOverflow(): void {
+  overflowCount += 1;
+  resetBuffers();
+  if (overflowCount >= MAX_OVERFLOWS) {
+    console.warn(
+      '[WakeWord] inference cannot keep up with real-time audio on this machine; ' +
+        'disabling wake word for this session.'
+    );
+    stopWakeWord();
+  } else {
+    console.warn(
+      `[WakeWord] audio backlog overflowed (${overflowCount}/${MAX_OVERFLOWS}) — dropping buffered audio.`
+    );
+  }
+}
+
 // ------------------------------------------------------------- inference loop
 
 /** Drain pending audio in CHUNK-sized steps, single-in-flight so slow inference
@@ -201,6 +342,10 @@ async function drainQueue(): Promise<void> {
       const chunk = Float32Array.from(pending.slice(0, CHUNK));
       pending = pending.slice(CHUNK);
       await processChunk(chunk);
+      if (!inferredOnce) {
+        inferredOnce = true;
+        noteStage('inference-ok');
+      }
     }
   } catch (e) {
     console.warn('[WakeWord] inference error (ignored):', e);

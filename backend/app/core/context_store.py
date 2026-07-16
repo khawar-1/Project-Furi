@@ -40,6 +40,18 @@ DEVICE_FRESH_SECONDS = 90.0
 #: a long interval still leaves the summary visible between captures.
 OCR_FRESH_MIN_SECONDS = 120.0
 OCR_FRESH_INTERVAL_MULTIPLIER = 3
+# ------------------------------------------------------- screen-aware chat
+#: How many recent OCR captures are kept for chat context (in-memory ring,
+#: retention=none — wiped on restart like everything else sensed).
+SCREEN_RING_MAX = 3
+#: Per-capture cap on the fuller OCR text kept for chat (the condensed world
+#: -model summary stays separately capped in screen_ocr.condense_ocr_text).
+SCREEN_FULL_TEXT_MAX = 1500
+#: The chat injection only fires when the LATEST capture is at most this old —
+#: beyond it the screen context is history, not "what's on screen right now".
+#: Unlike the world model's on_screen_context, the ring itself is never nulled
+#: on staleness: it keeps last-known and exposes age instead.
+SCREEN_CHAT_MAX_AGE_SECONDS = 300.0
 #: The assembled model is memoized this long so Phase-9 consumers polling it do
 #: not re-hit Google on every read; the expensive Google sections have their own
 #: longer cache below. Tests pass use_cache=False for determinism.
@@ -84,6 +96,18 @@ class _OcrState:
 
 
 @dataclass(frozen=True)
+class _ScreenCapture:
+    """One entry of the screen-context ring (screen-aware chat): the fuller OCR
+    text plus which app/window it was read from. In-memory only, wiped on
+    restart — the Phase 8 retention=none posture."""
+    full_text: str                    # capped at SCREEN_FULL_TEXT_MAX
+    app: Optional[str]
+    window_title: Optional[str]
+    captured: float                   # time.monotonic() at capture (age)
+    captured_at: str                  # utc iso (display)
+
+
+@dataclass(frozen=True)
 class _AffectiveState:
     """The latest client-posted affective summary (Phase 13). Each field is
     optional — a source that isn't sensing right now is simply absent."""
@@ -97,6 +121,9 @@ class _AffectiveState:
 _device: Optional[_DeviceState] = None
 _ocr: Optional[_OcrState] = None
 _affective: Optional[_AffectiveState] = None
+#: Ring of the last SCREEN_RING_MAX OCR captures (screen-aware chat) — newest
+#: last. Kept even past staleness (last-known + age); retention=none.
+_screen_ring: list[_ScreenCapture] = []
 #: Rolling (monotonic_ts, app_key) of recent device signals — the app-switch
 #: rate signal for activity intensity. Retention=none; wiped on restart.
 _activity_ring: list[tuple[float, str]] = []
@@ -113,6 +140,7 @@ def reset_context_store() -> None:
     _ocr = None
     _affective = None
     _activity_ring.clear()
+    _screen_ring.clear()
     _world_cache = None
     _google_cache.clear()
 
@@ -166,17 +194,63 @@ def record_affective_signal(
     _world_cache = None
 
 
-def record_ocr_summary(summary: str) -> None:
+def record_ocr_summary(
+    summary: str,
+    *,
+    full_text: Optional[str] = None,
+    app: Optional[str] = None,
+    window_title: Optional[str] = None,
+) -> None:
     """Store the rolling on-screen-context summary. Called by the /screen
     endpoint only after the master + screen_ocr gate passes. An empty summary
-    clears the state (the screen had no readable text)."""
+    clears the condensed state (the screen had no readable text).
+
+    Screen-aware chat additions: `full_text` is the richer OCR text kept in the
+    capture ring (capped SCREEN_FULL_TEXT_MAX; falls back to the summary), and
+    `app`/`window_title` attribute the capture — defaulted from the current
+    fresh device signal when not passed (the /screen endpoint has no device
+    info of its own). An UNCHANGED capture refreshes the latest ring entry's
+    timestamps in place instead of appending a duplicate, so age labels and
+    freshness stay honest while the user sits on one window."""
     global _ocr, _world_cache
+    mono = time.monotonic()
+    now_wall = datetime.now(timezone.utc).isoformat()
+
     text = (summary or "").strip()
     _ocr = _OcrState(
         summary=text,
-        captured=time.monotonic(),
-        captured_at=datetime.now(timezone.utc).isoformat(),
+        captured=mono,
+        captured_at=now_wall,
     ) if text else None
+
+    # ----- the chat ring (kept last-known; never nulled on staleness) -----
+    ring_text = (full_text or "").strip() or text
+    if ring_text:
+        ring_text = ring_text[:SCREEN_FULL_TEXT_MAX]
+        if (app is None and window_title is None) and _device is not None and _device_fresh(mono):
+            app = _device.active_app
+            window_title = _device.window_title
+        latest = _screen_ring[-1] if _screen_ring else None
+        if latest is not None and latest.full_text == ring_text:
+            # Dedupe: same screen text — refresh timestamps (and attribution)
+            # in place rather than storing an identical capture.
+            _screen_ring[-1] = _ScreenCapture(
+                full_text=ring_text,
+                app=app if app is not None else latest.app,
+                window_title=window_title if window_title is not None else latest.window_title,
+                captured=mono,
+                captured_at=now_wall,
+            )
+        else:
+            _screen_ring.append(_ScreenCapture(
+                full_text=ring_text,
+                app=app,
+                window_title=window_title,
+                captured=mono,
+                captured_at=now_wall,
+            ))
+            del _screen_ring[:-SCREEN_RING_MAX]
+
     _world_cache = None
 
 
@@ -501,6 +575,88 @@ async def get_world_model(db: AsyncSession, *, use_cache: bool = True) -> WorldM
     )
     _world_cache = (now, model)
     return model
+
+
+# -------------------------------------------------------- screen-aware chat
+
+def _age_label(seconds: float) -> str:
+    """A short human age for a capture — '~Ns ago' under two minutes, '~Nm ago'
+    beyond. Deterministic (no locale, no fuzz) so tests can assert on it."""
+    s = max(0, int(seconds))
+    if s < 120:
+        return f"~{s}s ago"
+    return f"~{s // 60}m ago"
+
+
+def _capture_location(entry: _ScreenCapture) -> str:
+    """'in <app> — "<window title>"' with either part degrading gracefully."""
+    app = (entry.app or "").strip()
+    title = (entry.window_title or "").strip()
+    if app and title:
+        return f'in {app} — "{title}"'
+    if app:
+        return f"in {app}"
+    if title:
+        return f'in "{title}"'
+    return "app unknown"
+
+
+#: Injected instead of screen text when the user OPTED IN to screen-aware chat
+#: but no fresh capture exists (fresh launch with Jarvis focused, sensing
+#: paused, backend just restarted — the ring is in-memory by design). Without
+#: this the LLM sees nothing and INVENTS rituals ("just say 'take a
+#: screenshot'" — live fabrication 2026-07-16); an honest system-authored
+#: explanation is the structural fix, not a hopeful prompt rule.
+SCREEN_NO_CAPTURE_NOTE = (
+    "NO FRESH SCREEN CAPTURE: screen-aware chat is enabled, but there is no "
+    "recent capture right now. Captures happen AUTOMATICALLY while screen "
+    "sensing runs; Jarvis never captures its own window, so right after "
+    "startup nothing exists until the user views another window for a moment. "
+    "If the user asks about their screen: say you don't have a fresh view yet "
+    "and ask them to bring the screen they mean to the front for a couple of "
+    "seconds, then ask again. There is NO command, request, or trigger phrase "
+    "for this — NEVER tell the user to say 'take a screenshot' or any other "
+    "magic words."
+)
+
+
+async def screen_context_for_chat(db: AsyncSession) -> str:
+    """The screen-context block for chat injection (screen-aware chat), or "".
+
+    Gated on master + screen_ocr + screen_in_chat ALL being on — the chat LLM
+    only ever sees on-screen text the user separately consented to sharing with
+    it; the gate off returns "". When the gate is ON but the ring is empty or
+    the latest capture is older than SCREEN_CHAT_MAX_AGE_SECONDS (last-known is
+    kept in memory, but stale screen text must not masquerade as "right now"),
+    the HONEST SCREEN_NO_CAPTURE_NOTE is returned instead of "" — an opted-in
+    user asking "what's on my screen" must get a truthful "no capture yet",
+    never an LLM improvising trigger phrases. Config read is best-effort — any
+    failure reads as gate-off, never raises."""
+    try:
+        config = await get_context_config(db)
+    except Exception as e:
+        logger.debug(f"Screen chat context: config read failed (non-critical): {e}")
+        return ""
+    if not (config.enabled and config.screen_ocr and config.screen_in_chat):
+        return ""
+    if not _screen_ring:
+        return SCREEN_NO_CAPTURE_NOTE
+
+    now = time.monotonic()
+    current = _screen_ring[-1]
+    if (now - current.captured) > SCREEN_CHAT_MAX_AGE_SECONDS:
+        return SCREEN_NO_CAPTURE_NOTE
+
+    parts = [
+        f"CURRENT SCREEN ({_age_label(now - current.captured)}, "
+        f"{_capture_location(current)}):\n{current.full_text}"
+    ]
+    for prior in reversed(_screen_ring[:-1][-2:]):  # up to 2, newest first
+        parts.append(
+            f"EARLIER ({_age_label(now - prior.captured)}, "
+            f"{_capture_location(prior)}):\n{prior.full_text}"
+        )
+    return "\n\n".join(parts)
 
 
 async def context_status(db: AsyncSession) -> dict:

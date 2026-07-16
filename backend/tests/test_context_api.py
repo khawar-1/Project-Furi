@@ -51,6 +51,7 @@ async def _enable(client, **fields):
         "ocr_interval_seconds": 30,
         "idle_threshold_seconds": 300,
         "affective_sensing": False,
+        "screen_in_chat": False,
     }
     body.update(fields)
     return await client.put("/api/context/settings", json=body)
@@ -86,6 +87,19 @@ async def test_settings_roundtrips_affective(client):
 async def test_settings_defaults_affective_off(client):
     body = (await client.get("/api/context/settings")).json()
     assert body["affective_sensing"] is False
+
+
+async def test_settings_roundtrips_screen_in_chat(client):
+    r = await _enable(client, screen_in_chat=True)
+    assert r.status_code == 200
+    assert r.json()["screen_in_chat"] is True
+    again = await client.get("/api/context/settings")
+    assert again.json()["screen_in_chat"] is True
+
+
+async def test_settings_defaults_screen_in_chat_off(client):
+    body = (await client.get("/api/context/settings")).json()
+    assert body["screen_in_chat"] is False
 
 
 async def test_settings_put_rejects_bad_interval(client):
@@ -211,6 +225,43 @@ async def test_screen_ocr_path(client):
     assert "Inbox" in body["summary"]
     world = (await client.get("/api/context/world")).json()
     assert world["on_screen_context"] == body["summary"]
+
+
+async def test_screen_feeds_chat_ring_with_full_text(client):
+    """POST /screen stores the fuller (pre-condense) OCR text in the chat ring,
+    attributed to the current device app/window — the screen-aware-chat path."""
+    from app.core import context_store
+
+    await _enable(client, screen_in_chat=True)
+    await client.post("/api/context/device", json={
+        "active_app": "chrome", "window_title": "An article", "idle_seconds": 1,
+    })
+    screen_ocr.OCR_ENGINE_FACTORY = lambda: (
+        lambda data: "Headline\nA long paragraph of readable article text here"
+    )
+    r = await client.post(
+        "/api/context/screen",
+        files={"file": ("frame.png", b"\x89PNGfake", "image/png")},
+    )
+    assert r.status_code == 200
+    entry = context_store._screen_ring[-1]
+    assert "A long paragraph of readable article text here" in entry.full_text
+    assert entry.app == "chrome"
+    assert entry.window_title == "An article"
+
+
+async def test_screen_unchanged_capture_does_not_grow_ring(client):
+    from app.core import context_store
+
+    await _enable(client, screen_in_chat=True)
+    screen_ocr.OCR_ENGINE_FACTORY = lambda: (lambda data: "Same screen text")
+    for _ in range(3):
+        r = await client.post(
+            "/api/context/screen",
+            files={"file": ("frame.png", b"\x89PNGfake", "image/png")},
+        )
+        assert r.status_code == 200
+    assert len(context_store._screen_ring) == 1
 
 
 async def test_screen_rejects_empty_frame(client):

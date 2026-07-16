@@ -5,9 +5,12 @@
  * IMMEDIATELY (the FileIndexCard/DailyBriefingCard lesson — optimistic, revert
  * on error) so a toggle is never a no-op that waits for a separate save.
  *
- * Screen OCR has a per-session runtime "armed" state that is NOT persisted:
- * arming/disarming goes to the Electron main process (which owns the capture
- * loop) via the preload bridge. `screenArmed` mirrors that intent for the UI.
+ * Screen capture runs whenever the PERSISTED opt-in allows it (master +
+ * screen_ocr) — the settings toggle is the consent and survives restarts.
+ * `screenPaused` mirrors the per-session INSTANT pause owned by the Electron
+ * main process (preload bridge): a local kill switch with no settings-poll
+ * latency, reset to capturing on every launch. (The old per-session "arm"
+ * silently disarmed capture on every restart — live failure 2026-07-16.)
  */
 import { create } from 'zustand';
 import { contextApi } from '@/lib/api';
@@ -17,23 +20,23 @@ interface ContextState {
   settings: ContextSettings | null;
   status: ContextStatus | null;
   world: WorldModel | null;
-  /** Per-session screen-OCR capture intent (renderer→main; not persisted). */
-  screenArmed: boolean;
+  /** Per-session screen-capture pause (renderer→main; not persisted). */
+  screenPaused: boolean;
   error: string | null;
 
   fetchSettings: () => Promise<void>;
   updateSettings: (patch: Partial<ContextSettings>) => Promise<void>;
   fetchStatus: () => Promise<void>;
   fetchWorld: () => Promise<void>;
-  armScreen: () => void;
-  disarmScreen: () => void;
+  pauseScreen: () => void;
+  resumeScreen: () => void;
 }
 
 export const useContextStore = create<ContextState>((set, get) => ({
   settings: null,
   status: null,
   world: null,
-  screenArmed: false,
+  screenPaused: false,
   error: null,
 
   fetchSettings: async () => {
@@ -53,11 +56,6 @@ export const useContextStore = create<ContextState>((set, get) => ({
     try {
       const saved = await contextApi.updateSettings(next);
       set({ settings: saved });
-      // Turning the master switch (or the OCR capability) off must also stop a
-      // live screen-capture session.
-      if ((!saved.enabled || !saved.screen_ocr) && get().screenArmed) {
-        get().disarmScreen();
-      }
     } catch (e) {
       set({ settings: current, error: (e as Error).message }); // revert
     }
@@ -79,13 +77,13 @@ export const useContextStore = create<ContextState>((set, get) => ({
     }
   },
 
-  armScreen: () => {
-    window.jarvis?.startScreenSensing?.();
-    set({ screenArmed: true });
+  pauseScreen: () => {
+    window.jarvis?.stopScreenSensing?.();
+    set({ screenPaused: true });
   },
 
-  disarmScreen: () => {
-    window.jarvis?.stopScreenSensing?.();
-    set({ screenArmed: false });
+  resumeScreen: () => {
+    window.jarvis?.startScreenSensing?.();
+    set({ screenPaused: false });
   },
 }));

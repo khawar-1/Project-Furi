@@ -525,6 +525,7 @@ export interface ContextSettings {
   ocr_interval_seconds: number;
   idle_threshold_seconds: number;
   affective_sensing: boolean;    // Phase 13 — coarse load read (separate opt-in)
+  screen_in_chat: boolean;       // screen-aware chat — opt-in on top of screen_ocr
 }
 
 /** GET /api/context/status — cheap sensing status for the indicator. */

@@ -448,15 +448,23 @@ class ContextConfig:
     this config is); the world model and the rolling OCR summary live in memory
     and are staleness-gated. There is deliberately no retention field to set.
 
-    `affective_sensing` carries a trailing default so a pre-Phase-13 stored row
-    (and any external ContextConfig constructor) deserializes cleanly; the coercer
-    and default still set it explicitly, the VoiceConfig discipline."""
+    `screen_in_chat` (screen-aware chat) is a further opt-in ON TOP of
+    `screen_ocr`: only when master + screen_ocr + screen_in_chat are ALL on does
+    on-screen text get injected into the chat LLM's prompt. It defaults OFF —
+    OCR context reaching a language model is a bigger disclosure than the local
+    world model, so it is separately consented.
+
+    `affective_sensing` / `screen_in_chat` carry trailing defaults so a stored
+    row from before their phase (and any external ContextConfig constructor)
+    deserializes cleanly; the coercer and default still set them explicitly,
+    the VoiceConfig discipline."""
     enabled: bool
     device_sensing: bool
     screen_ocr: bool
     ocr_interval_seconds: int
     idle_threshold_seconds: int
     affective_sensing: bool = False
+    screen_in_chat: bool = False
 
 
 def default_context_config() -> ContextConfig:
@@ -467,6 +475,7 @@ def default_context_config() -> ContextConfig:
         ocr_interval_seconds=30,
         idle_threshold_seconds=300,
         affective_sensing=False,  # Phase 13 — separate opt-in, highest uncertainty
+        screen_in_chat=False,     # screen-aware chat — opt-in on top of screen_ocr
     )
 
 
@@ -498,6 +507,7 @@ def _coerce_context(raw: Any) -> ContextConfig:
             default.idle_threshold_seconds,
         ),
         affective_sensing=bool(raw.get("affective_sensing", default.affective_sensing)),
+        screen_in_chat=bool(raw.get("screen_in_chat", default.screen_in_chat)),
     )
 
 
@@ -516,6 +526,7 @@ async def set_context_config(db: AsyncSession, config: ContextConfig) -> None:
         "ocr_interval_seconds": config.ocr_interval_seconds,
         "idle_threshold_seconds": config.idle_threshold_seconds,
         "affective_sensing": config.affective_sensing,
+        "screen_in_chat": config.screen_in_chat,
     })
 
 

@@ -116,7 +116,16 @@ _STRONG_DOMAIN_RE = re.compile(
     # multi-class classifier makes the WEB/CHAT call ("I saw a website" is a
     # false fire costing one temp-0 call). A bare URL is a strong signal.
     r"\bweb\b|\bwebsites?\b|\bweb\s?pages?\b|\bonline\b|\binternet\b|"
-    r"\bgoogle\b|\burls?\b|https?://)"
+    r"\bgoogle\b|\burls?\b|https?://|"
+    # "search" / "look it up" as verbs fire alone (live bug 2026-07-16,
+    # round 2: "yes search and tell me when is the new seasopn of blackclover
+    # comming out" — a go-ahead to the chat LLM's own "I can search the web,
+    # just say the word" offer — named no web noun, exceeded the 8-word
+    # follow-up cap, and fell to plain chat, which fabricated "I've started a
+    # search…"). A user telling their assistant to SEARCH almost always means
+    # a lookup; "I've been searching for a new job" is a false fire costing
+    # one temp-0 call answering CHAT — the recall-first trade-off.
+    r"\bsearch(?:es|ed|ing)?\b|\blook(?:ed|ing)?\s+(?:it|that|this|them)\s+up\b)"
 )
 
 # Weak signals — common in ordinary conversation (media nouns, URLs, "e.g.",
@@ -167,6 +176,37 @@ _OWN_ACTION_RE = re.compile(
 _OWN_ACTION_AUX_RE = re.compile(r"\b(?:did|have|had)\s+(?:you|u)\b")
 
 
+# Current-info questions ("when is the new season of Black Clover coming
+# out?") name no domain noun at all — the object is a fact out in the world,
+# not a file or a website. Live bug 2026-07-16: exactly that question missed
+# the gate, fell to plain chat, and the chat LLM fabricated "Searching the
+# web for the latest… One moment, sir." — a search it structurally cannot
+# run, so no answer ever came. With web_search available these are WEB-class,
+# so a QUESTION carrying a time-sensitive marker reaches the classifier,
+# which makes the real WEB/CHAT call (the recall-first trade-off: a false
+# fire costs one temp-0 call). Statements never fire this tier — "I love the
+# new season" is small talk.
+# TYPO TOLERANCE (live bug 2026-07-16, round 2: "when is new seasom of black
+# clover comming" missed every exact-word marker and fell to chat again):
+# people type fast — season-shaped words match on the "seaso" stem and
+# "coming" accepts the doubled-m misspelling. A "new seasoning" false fire
+# costs one temp-0 call answering CHAT; the miss cost a fabricated answer.
+_WEB_QUESTION_MARKER_RE = re.compile(
+    r"\b(latest|newest|news|release date|released?|releasing|"
+    r"comm?ing (?:out|up)|come out|came out|"
+    r"(?:new|next) seaso\w+|season \d+|"
+    r"price of|stock price|who won|score|weather|upcoming|announced?|update on)\b"
+)
+# A question reads as one: ends with "?" or opens with a question word — an
+# optional greeting/affirmation + one vocative word ("hey jarvis, when …",
+# "yes, when is …") may precede it.
+_QUESTION_SHAPE_RE = re.compile(
+    r"^\W*(?:hey|hi|yo|ok|okay|so|yes|yeah|yep|sure|please)?[\s,!.]*(?:\w+[\s,!.]+)?"
+    r"(?:when|what|whats|who|whos|where|which|how|is|are|was|were|"
+    r"did|does|do|has|have|will|any)\b"
+)
+
+
 def looks_like_task(text: str) -> bool:
     """Deterministic pre-filter, tuned for RECALL: a strong computer-domain
     noun fires alone (any verb, any phrasing); weak signals need an action
@@ -177,6 +217,10 @@ def looks_like_task(text: str) -> bool:
     if _OWN_ACTION_RE.search(t):
         return True
     if _OWN_ACTION_AUX_RE.search(t) and _ACTION_VERB_RE.search(t):
+        return True
+    if _WEB_QUESTION_MARKER_RE.search(t) and (
+        t.rstrip().endswith("?") or _QUESTION_SHAPE_RE.match(t)
+    ):
         return True
     return bool(_ACTION_VERB_RE.search(t)) and bool(_WEAK_DOMAIN_RE.search(t))
 
@@ -219,7 +263,7 @@ Reply with EXACTLY one word:
 TASK — asks Jarvis to perform a FILES/SYSTEM action now, OR asks what Jarvis ITSELF did on the machine (the folder/file it created, what it deleted, what it has done today).
 EMAIL — asks Jarvis to search, read, draft, send, or reply to email now.
 CALENDAR — asks Jarvis to look at or change calendar events now.
-WEB — asks Jarvis to search the web or open/read a web page now.
+WEB — asks Jarvis to search the web or open/read a web page now, OR asks a question that needs CURRENT information from the internet (news, release dates, upcoming seasons or products, prices, scores, weather — anything time-sensitive that built-in knowledge cannot reliably answer). Jarvis looks it up rather than guessing or promising.
 CHAT — anything else: conversation, questions Jarvis can answer from its own knowledge, sharing information about their life, talking ABOUT the user's own past or hypothetical actions, an answer to an earlier question, or a request none of these tools can do (reminders — handled elsewhere).
 
 Judge the INTENT, not the vocabulary:
@@ -228,6 +272,7 @@ Judge the INTENT, not the vocabulary:
 - An instruction to SEND is EMAIL even when the text to send reads like a statement or is written on someone's behalf: "email i221538@nu.edu.pk that the report is done", "send Ali a mail saying I'll be late", and "email him that this is Furi writing on behalf of my master" are all EMAIL, not CHAT.
 - "my calendar is packed this week" is CHAT, while "put a meeting with jamil on my calendar tomorrow at 3" is CALENDAR.
 - "what do you think of vector databases?" is CHAT (answerable from knowledge), while "search the web for the latest LangGraph release" or "look up who won the match today" or "open https://example.com and summarize it" is WEB.
+- A question about something CURRENT is WEB even when it never says "search": "when is the new season of Black Clover coming out?" or "what's the latest iPhone price?" needs up-to-date information — never answer it from stale knowledge or promise to look it up later.
 - A question about JARVIS'S OWN actions is TASK, not CHAT — Jarvis answers it from its action record, never from memory: "what was the name of the folder you created?", "did you delete anything today?", "who created the jarvis_test folder?" (Jarvis may have) are all TASK; "I deleted a bunch of files yesterday" is CHAT (the user talking about their own actions).
 Any wording that asks for one of those actions now — or asks about actions Jarvis itself performed — gets its action label; anything else is CHAT.
 

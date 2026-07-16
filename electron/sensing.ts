@@ -12,13 +12,18 @@
  * - Device sensing (active app/window title + idle time) is lightweight — no
  *   images — via a single long-lived PowerShell/Win32 helper + Electron's
  *   built-in powerMonitor.getSystemIdleTime().
- * - Screen OCR capture is PER-SESSION opt-in: `screenArmed` defaults false on
- *   every launch and is only turned on by an explicit renderer action (the IPC
- *   in ipc/handlers.ts). It is additionally gated by the config's `screen_ocr`
- *   capability + the master switch. The captured frame is a DOWNSCALED
- *   thumbnail; it is POSTed and never stored on disk.
+ * - Screen OCR capture runs whenever the PERSISTED opt-in allows it (master
+ *   switch + `screen_ocr`, both default OFF and visible in the StatusBar
+ *   indicator) — the settings toggle IS the consent, and it survives restarts.
+ *   (The original per-session "arm every launch" ritual silently disarmed
+ *   capture on every restart — live failure 2026-07-16: the user's opted-in
+ *   screen questions went dark and the chat LLM invented a "take a
+ *   screenshot" trigger phrase.) `screenPaused` is the per-session INSTANT
+ *   pause (renderer IPC in ipc/handlers.ts) — a local kill that doesn't wait
+ *   out the settings poll; it resets to capturing on the next launch. The
+ *   captured frame is a DOWNSCALED thumbnail; POSTed, never stored on disk.
  */
-import { powerMonitor, desktopCapturer } from 'electron';
+import { powerMonitor, desktopCapturer, BrowserWindow } from 'electron';
 import { spawn, ChildProcess } from 'child_process';
 
 interface ContextSettings {
@@ -31,6 +36,12 @@ interface ContextSettings {
 
 const SETTINGS_POLL_MS = 15_000;   // how often main re-reads the backend flags
 const DEVICE_HEARTBEAT_MS = 30_000; // keep presence fresh even without a change
+// Screen-aware chat: a foreground-window change also triggers a capture (the
+// interval loop stays as the floor). Settle lets the new window paint first;
+// the min gap keeps an alt-tab burst from spamming the OCR engine (matches the
+// backend's CONTEXT_MIN_OCR_INTERVAL). The backend dedupes unchanged text.
+const OCR_CHANGE_SETTLE_MS = 800;
+const OCR_CHANGE_MIN_GAP_MS = 5_000;
 const DEFAULT_SETTINGS: ContextSettings = {
   enabled: false,
   device_sensing: true,
@@ -46,8 +57,14 @@ let ocrTimer: NodeJS.Timeout | null = null;
 let winHelper: ChildProcess | null = null;
 let lastTitle = '';
 let lastApp = '';
-/** Per-session opt-in for screen OCR — false on every launch, never persisted. */
-let screenArmed = false;
+/** Change-triggered capture state: a pending settle timer (coalesces bursts)
+ *  and when the last change-triggered capture actually fired (min-gap). */
+let changeCaptureTimer: NodeJS.Timeout | null = null;
+let lastChangeCaptureAt = 0;
+/** Per-session PAUSE for screen OCR — false (capturing) on every launch; the
+ *  persisted screen_ocr setting is the consent, this is the instant local
+ *  override. Never persisted. */
+let screenPaused = false;
 
 function backendUrl(path: string): string {
   const port = process.env.BACKEND_PORT || '8000';
@@ -65,8 +82,16 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
 /** A single long-lived PowerShell process that prints one JSON line whenever
  *  the foreground window changes: {"app": "<process>.exe", "title": "<title>"}.
  *  Uses user32/kernel32 P/Invoke — lightweight, no screenshots, no npm native
- *  module. Windows-only; a spawn failure degrades to idle-only sensing. */
+ *  module. Windows-only; a spawn failure degrades to idle-only sensing.
+ *
+ *  PARENT WATCHDOG: stopWinHelper()/before-quit is the graceful shutdown, but
+ *  a hard-killed Electron (Task Manager, a Ctrl+C that never reaches
+ *  before-quit) used to orphan this infinite loop forever (live zombie,
+ *  2026-07-16). The helper therefore checks Electron's own PID every
+ *  iteration and exits on its own the moment the parent is gone — it can
+ *  never outlive the app, whatever the kill path. */
 const WIN_HELPER_SCRIPT = `
+$parentPid = ${process.pid}
 $sig = @'
 using System;
 using System.Runtime.InteropServices;
@@ -80,6 +105,7 @@ public class W {
 Add-Type $sig
 $last = ""
 while ($true) {
+  if (-not (Get-Process -Id $parentPid -ErrorAction SilentlyContinue)) { exit }
   try {
     $h = [W]::GetForegroundWindow()
     $sb = New-Object System.Text.StringBuilder 1024
@@ -121,6 +147,7 @@ function startWinHelper(): void {
           lastApp = parsed.app || '';
           lastTitle = parsed.title || '';
           void postDevice(); // a foreground change is worth posting immediately
+          scheduleChangeCapture(); // …and worth a fresh screen capture too
         } catch {
           // Ignore a malformed line; the next change re-posts.
         }
@@ -171,10 +198,17 @@ async function postDevice(): Promise<void> {
 }
 
 // ============================================================
-// Screen OCR capture (per-session armed)
+// Screen OCR capture (persisted opt-in; per-session pausable)
 // ============================================================
-async function captureAndPostScreen(): Promise<void> {
-  if (!settings.enabled || !settings.screen_ocr || !screenArmed) return;
+async function captureAndPostScreen(): Promise<boolean> {
+  if (!settings.enabled || !settings.screen_ocr || screenPaused) return false;
+  // Self-observation guard (screen-aware chat): never capture while Jarvis
+  // itself is the foreground window. Asking "what's on my screen" from inside
+  // Jarvis means the thing the user was looking at BEFORE focusing us — and
+  // OCR-ing our own chat panel would feed Jarvis's answers back into its own
+  // context (a feedback loop). The last pre-focus capture stays "current";
+  // a hidden/tray window is not focused, so wake-word asks capture normally.
+  if (BrowserWindow.getFocusedWindow()) return false;
   try {
     const sources = await desktopCapturer.getSources({
       types: ['screen'],
@@ -183,9 +217,9 @@ async function captureAndPostScreen(): Promise<void> {
       thumbnailSize: { width: 1280, height: 800 },
     });
     const primary = sources[0];
-    if (!primary) return;
+    if (!primary) return false;
     const png = primary.thumbnail.toPNG();
-    if (!png || png.length === 0) return;
+    if (!png || png.length === 0) return false;
 
     const form = new FormData();
     form.append('file', new Blob([png], { type: 'image/png' }), 'frame.png');
@@ -194,9 +228,33 @@ async function captureAndPostScreen(): Promise<void> {
       headers: authHeaders(), // do NOT set Content-Type — the Blob sets the boundary
       body: form,
     });
+    return true;
   } catch {
     // A capture/post hiccup — the next interval retries; never throw.
+    return false;
   }
+}
+
+/** A foreground-window change schedules one capture after a short settle
+ *  delay (screen-aware chat: the on-screen context follows the user's focus
+ *  instead of waiting out the interval). Bursts coalesce into the pending
+ *  timer; a min gap throttles rapid alt-tabbing. captureAndPostScreen itself
+ *  stays the gate (enabled + screen_ocr + not paused), so this is inert when
+ *  screen sensing is off. */
+function scheduleChangeCapture(): void {
+  if (!settings.enabled || !settings.screen_ocr || screenPaused) return;
+  if (changeCaptureTimer) return; // a capture is already pending — coalesce
+  if (Date.now() - lastChangeCaptureAt < OCR_CHANGE_MIN_GAP_MS) return;
+  changeCaptureTimer = setTimeout(() => {
+    changeCaptureTimer = null;
+    // Burn the min-gap ONLY when a capture actually happened: a fire skipped by
+    // the self-observation guard (Jarvis was focused) must not throttle the
+    // very next switch away — "focus Jarvis, then switch to Chrome 2s later"
+    // has to capture Chrome promptly, not wait out a gap the skip started.
+    void captureAndPostScreen().then((captured) => {
+      if (captured) lastChangeCaptureAt = Date.now();
+    });
+  }, OCR_CHANGE_SETTLE_MS);
 }
 
 // ============================================================
@@ -220,7 +278,7 @@ function applyDeviceLoop(): void {
 }
 
 function applyScreenLoop(): void {
-  const wantScreen = settings.enabled && settings.screen_ocr && screenArmed;
+  const wantScreen = settings.enabled && settings.screen_ocr && !screenPaused;
   if (wantScreen) {
     if (!ocrTimer) {
       const ms = Math.max(5, settings.ocr_interval_seconds) * 1000;
@@ -253,15 +311,18 @@ async function pollSettings(): Promise<void> {
   }
 }
 
-/** Renderer opted INTO screen sensing for this session. */
+/** Renderer RESUMED screen capture after a session pause. (Exported name kept
+ *  for the IPC wiring; semantics are resume — the persisted setting is the
+ *  consent, capture runs by default while it allows.) */
 export function armScreenSensing(): void {
-  screenArmed = true;
+  screenPaused = false;
   applyScreenLoop();
 }
 
-/** Renderer opted OUT (or the master switch flipped) — the kill switch. */
+/** Renderer PAUSED screen capture for this session — the instant local kill
+ *  switch (no settings-poll latency). Resets on the next launch. */
 export function disarmScreenSensing(): void {
-  screenArmed = false;
+  screenPaused = true;
   applyScreenLoop();
 }
 
@@ -284,6 +345,7 @@ export function stopSensing(): void {
   if (settingsTimer) { clearInterval(settingsTimer); settingsTimer = null; }
   if (deviceTimer) { clearInterval(deviceTimer); deviceTimer = null; }
   if (ocrTimer) { clearInterval(ocrTimer); ocrTimer = null; }
+  if (changeCaptureTimer) { clearTimeout(changeCaptureTimer); changeCaptureTimer = null; }
   stopWinHelper();
-  screenArmed = false;
+  screenPaused = false;
 }

@@ -279,6 +279,48 @@ def test_gate_bare_did_you_still_needs_an_action_verb():
     assert looks_like_task("have you heard the new album?") is False
 
 
+def test_gate_fires_on_current_info_questions():
+    # A current-info QUESTION names no domain noun — the object is a fact out
+    # in the world (live bug 2026-07-16: the Black Clover question missed the
+    # gate and plain chat fabricated "Searching the web… One moment, sir.").
+    # A time-sensitive marker + question shape reaches the classifier, which
+    # makes the WEB/CHAT call.
+    assert looks_like_task(
+        "Hey Jarvis, when is the new season of Black Clover coming out?"
+    ) is True
+    assert looks_like_task("when is the next season of severance coming out") is True
+    assert looks_like_task("what's the latest news on the election?") is True
+    assert looks_like_task("who won the match today?") is True
+
+
+def test_gate_current_info_tier_tolerates_typos():
+    # Round 2 (live 2026-07-16): the same question typed fast — "seasom",
+    # "comming" — missed every exact-word marker and fell to chat again.
+    # Season-shaped words match on the stem; "coming" accepts a doubled m.
+    assert looks_like_task("when is new seasom of black clover comming") is True
+    assert looks_like_task("when is the new seasopn of blackclover comming out") is True
+
+
+def test_gate_fires_on_bare_search_verb():
+    # "search" / "look it up" as verbs are strong signals (live 2026-07-16
+    # round 2: "yes search and tell me when…" — a go-ahead to the chat LLM's
+    # own search offer — named no web noun, was over the follow-up word cap,
+    # and fell to plain chat, which fabricated "I've started a search…").
+    assert looks_like_task(
+        "yes search and tell me when is the new seasopn of blackclover comming out"
+    ) is True
+    assert looks_like_task("search for cheap flights to karachi") is True
+    assert looks_like_task("just look it up") is True
+
+
+def test_gate_current_info_tier_needs_question_and_marker():
+    # A statement with a marker is small talk; a question without a marker is
+    # ordinary conversation — neither may cost a classifier call.
+    assert looks_like_task("i love this season of the show") is False
+    assert looks_like_task("the new season finally came out yesterday") is False
+    assert looks_like_task("what do you think of vector databases?") is False
+
+
 def test_classify_prompt_routes_own_action_questions_to_task():
     # The classifier is TOLD that questions about Jarvis's own actions are
     # TASK — before this, its CHAT line ("talking ABOUT past actions") made
@@ -455,6 +497,18 @@ async def test_chat_label_yields_no_plan_chunk(client):
     "I've added the meeting to your calendar for 3pm.",
     "I added it to your calendar.",
     "The invite was sent to the team.",
+    # Web-search action promises (live bug 2026-07-16 — chat cannot search,
+    # so a progressive/future search claim is always a fabrication).
+    "Searching the web for the latest on Black Clover's next season.\n\nOne moment, sir.",
+    "Let me check online for the release date.",
+    "I'll search the web and get back to you shortly, sir.",
+    "Looking that up online now.",
+    # Round 2 (live 2026-07-16): the fabrication learned to avoid the word
+    # "web" — a started-a-search claim or a promise to report back findings
+    # is always a fabrication from the chat path.
+    "I've started a search for the latest news on the *Black Clover* anime "
+    "release date. I'll let you know what I find.",
+    "I have begun a search for the latest updates on that.",
 ])
 def test_impersonation_guard_catches_email_calendar_fabrications(text):
     assert _SYSTEM_VOICE_RE.search(text) is not None
@@ -467,6 +521,9 @@ def test_impersonation_guard_catches_email_calendar_fabrications(text):
     "Would you like me to create a calendar event for that meeting?",
     "I can add that meeting to your calendar if you tell me the time.",
     "Do you want me to email Jamil about it?",
+    "I can search the web for you — just say 'search the web for the release date'.",
+    "You can ask me to search the web for anything current, sir.",
+    "I can start a search for the latest news if you'd like — just say the word.",
 ])
 def test_impersonation_guard_allows_capability_statements(text):
     assert _SYSTEM_VOICE_RE.search(text) is None

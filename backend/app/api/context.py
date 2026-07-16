@@ -60,6 +60,7 @@ class ContextSettingsUpdate(BaseModel):
     ocr_interval_seconds: int = 30
     idle_threshold_seconds: int = 300
     affective_sensing: bool = False
+    screen_in_chat: bool = False
 
 
 def _config_payload(config: ContextConfig) -> dict:
@@ -70,6 +71,7 @@ def _config_payload(config: ContextConfig) -> dict:
         "ocr_interval_seconds": config.ocr_interval_seconds,
         "idle_threshold_seconds": config.idle_threshold_seconds,
         "affective_sensing": config.affective_sensing,
+        "screen_in_chat": config.screen_in_chat,
     }
 
 
@@ -103,6 +105,7 @@ async def put_settings(update: ContextSettingsUpdate, db=Depends(get_db)) -> dic
         ocr_interval_seconds=update.ocr_interval_seconds,
         idle_threshold_seconds=update.idle_threshold_seconds,
         affective_sensing=update.affective_sensing,
+        screen_in_chat=update.screen_in_chat,
     ))
     return _config_payload(await get_context_config(db))
 
@@ -205,7 +208,9 @@ async def post_screen(file: UploadFile = File(...), db=Depends(get_db)) -> dict:
     finally:
         del data  # drop the raw frame promptly; nothing persists it
     summary = condense_ocr_text(text)
-    record_ocr_summary(summary)
+    # The fuller (pre-condense) text feeds the screen-aware-chat ring; the
+    # store caps it and attributes it to the current device app/window.
+    record_ocr_summary(summary, full_text=text)
     return {"stored": True, "summary": summary}
 
 

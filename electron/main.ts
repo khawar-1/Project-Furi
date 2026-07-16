@@ -10,10 +10,10 @@
  * - Native notifications are shown by the main process on behalf of the
  *   renderer (see ipc/handlers.ts); clicking one summons the window.
  */
-import { app, BrowserWindow, Menu, Tray, globalShortcut, session, shell, ipcMain } from 'electron';
+import { app, BrowserWindow, Menu, Tray, crashReporter, globalShortcut, session, shell, ipcMain } from 'electron';
 import { join } from 'path';
 import { homedir } from 'os';
-import { readFile } from 'fs/promises';
+import { appendFile, mkdir, readFile } from 'fs/promises';
 import { spawn, ChildProcess } from 'child_process';
 import { registerIpcHandlers } from './ipc/handlers';
 import { appIcon } from './icon';
@@ -35,6 +35,30 @@ let backendProcess: ChildProcess | null = null;
 // Set on every real quit path (tray Quit, app.quit, OS shutdown) so the
 // window's close-to-tray handler knows to let the close through.
 let isQuitting = false;
+// Renderer crash-loop guard (see the render-process-gone handler).
+let rendererCrashCount = 0;
+let lastRendererCrashAt = 0;
+
+// ============================================================
+// Crash Forensics
+// ============================================================
+// Terminal lines scroll away and the user shouldn't have to fish for them —
+// on a desktop app the crash record must be DURABLE (live failure 2026-07-16:
+// the renderer died repeatedly right after wake-word start and the reason was
+// only ever printed to the dev terminal). Every process-gone event is also
+// appended to ~/.jarvis/logs/renderer-crashes.log (the backend's ~/.jarvis
+// home), best-effort — a logging failure never affects the app.
+const CRASH_LOG_DIR = join(homedir(), '.jarvis', 'logs');
+const CRASH_LOG_PATH = join(CRASH_LOG_DIR, 'renderer-crashes.log');
+function logCrashToFile(line: string): void {
+  void mkdir(CRASH_LOG_DIR, { recursive: true })
+    .then(() => appendFile(CRASH_LOG_PATH, `${new Date().toISOString()} ${line}\n`))
+    .catch(() => undefined);
+}
+// Local-only Crashpad: minidumps land in app.getPath('crashDumps') and are
+// NEVER uploaded anywhere — they exist so a native crash ('crashed' rather
+// than 'oom') leaves a stack we can inspect on this machine.
+crashReporter.start({ uploadToServer: false });
 
 // ============================================================
 // Backend Process Management
@@ -188,6 +212,30 @@ async function createWindow(): Promise<void> {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+  });
+
+  // A dead renderer must never leave a permanently blank window (live failure
+  // 2026-07-16: the renderer died shortly after wake-word start — DevTools
+  // disconnected, the window stayed black, and NOTHING was logged, so the
+  // crash reason was unknowable). Log the real reason (Chromium reports 'oom'
+  // distinctly from 'crashed') and reload the page, capped so a crash loop
+  // can't spin forever.
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error(
+      `[Electron] Renderer process gone: reason=${details.reason} exitCode=${details.exitCode}`
+    );
+    logCrashToFile(`renderer-gone reason=${details.reason} exitCode=${details.exitCode}`);
+    if (details.reason === 'clean-exit') return;
+    const now = Date.now();
+    if (now - lastRendererCrashAt > 60_000) rendererCrashCount = 0;
+    lastRendererCrashAt = now;
+    rendererCrashCount += 1;
+    if (rendererCrashCount > 3) {
+      console.error('[Electron] Renderer crashed repeatedly — leaving it down; check the reason above.');
+      return;
+    }
+    console.error(`[Electron] Reloading the window (attempt ${rendererCrashCount}/3).`);
+    mainWindow?.webContents.reload();
   });
 }
 
@@ -345,6 +393,19 @@ if (!app.requestSingleInstanceLock()) {
 app.on('window-all-closed', () => {
   // Intentionally empty: the tray keeps the app alive; summonWindow()
   // recreates the window on demand.
+});
+
+// GPU/utility process deaths blank the window without touching the renderer —
+// log them too so a black screen is always attributable from the terminal.
+app.on('child-process-gone', (_event, details) => {
+  if (details.reason !== 'clean-exit' && details.reason !== 'killed') {
+    console.error(
+      `[Electron] Child process gone: type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`
+    );
+    logCrashToFile(
+      `child-gone type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`
+    );
+  }
 });
 
 app.on('before-quit', () => {
