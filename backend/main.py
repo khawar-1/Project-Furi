@@ -22,10 +22,12 @@ from app.api import index as index_api
 from app.api import routines as routines_api
 from app.api import voice as voice_api
 from app.api import context as context_api
+from app.api import initiative as initiative_api
 import app.core.reminders  # noqa: F401 — registers the "reminder" job handler at import time
 import app.core.birthdays  # noqa: F401 — registers the "birthday" job handler at import time
 import app.core.daily_briefing  # noqa: F401 — registers the "daily_briefing" job handler at import time
 import app.core.reindex  # noqa: F401 — registers the "reindex" job handler at import time
+import app.core.initiative  # noqa: F401 — registers the "initiative" job handler at import time
 
 
 @asynccontextmanager
@@ -192,6 +194,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as e:
         logger.warning(f"⚠️  Reindex-job reconciliation failed (non-critical): {e}")
 
+    # Phase 9: reconcile the initiative heartbeat — arm it when the engine is
+    # enabled, heal a fire/re-arm crash, sweep strays, expire stale suggestions.
+    # After scheduler.start() so its timer is live; non-critical.
+    try:
+        from app.core.initiative import ensure_initiative_job
+        await ensure_initiative_job()
+    except Exception as e:
+        logger.warning(f"⚠️  Initiative-job reconciliation failed (non-critical): {e}")
+
     logger.info(f"🤖 LLM Provider: {settings.LLM_PROVIDER}")
     logger.info(f"🌐 Backend ready at http://{settings.BACKEND_HOST}:{settings.BACKEND_PORT}")
 
@@ -266,6 +277,9 @@ def create_app() -> FastAPI:
 
     # Phase 8 — the Context Layer (device/screen sensing + world model)
     app.include_router(context_api.router, prefix="/api/context", tags=["Context"])
+
+    # Phase 9 — the Initiative Engine (proactive suggestion feed + settings)
+    app.include_router(initiative_api.router, prefix="/api/initiative", tags=["Initiative"])
 
     return app
 

@@ -23,6 +23,7 @@ import {
   Send,
   Settings as SettingsIcon,
   ShieldCheck,
+  Sparkles,
   Square,
   Sunrise,
   Volume2,
@@ -31,6 +32,7 @@ import {
 import { useShallow } from 'zustand/react/shallow';
 import {
   indexApi,
+  initiativeApi,
   integrationsApi,
   settingsApi,
   voiceApi,
@@ -46,6 +48,7 @@ import type {
   FileIndexSettings,
   FrequentFolder,
   GoogleIntegrationStatus,
+  InitiativeSettings,
   SttStatus,
   TtsStatus,
   WorldModel,
@@ -319,6 +322,238 @@ function DailyBriefingCard() {
           {justSent ? 'Briefing sent' : 'Send now'}
         </button>
       </div>
+    </div>
+  );
+}
+
+const AUTONOMY_HELP: Record<string, string> = {
+  suggest: 'Only shows suggestions — never starts anything on its own.',
+  ask: 'May offer to do something; it only runs after you accept.',
+  act: 'May start safe actions itself. Anything that sends, deletes, or leaves the machine still asks for approval first.',
+};
+
+function InitiativeCard() {
+  const [settings, setSettings] = useState<InitiativeSettings | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
+  const [justRan, setJustRan] = useState(false);
+
+  useEffect(() => {
+    initiativeApi
+      .getSettings()
+      .then(setSettings)
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load settings'));
+  }, []);
+
+  // Every control PUTs the FULL body immediately (optimistic + settle from the
+  // response), the DailyBriefingCard discipline — a partial body would reset the
+  // omitted fields. `patch` merges over the last-known settings.
+  const patch = async (update: Partial<InitiativeSettings>) => {
+    if (!settings) return;
+    const merged = { ...settings, ...update };
+    setSettings(merged); // optimistic
+    setIsBusy(true);
+    setError(null);
+    try {
+      setSettings(await initiativeApi.updateSettings({
+        enabled: merged.enabled,
+        autonomy: merged.autonomy,
+        interval_minutes: merged.interval_minutes,
+        daily_budget: merged.daily_budget,
+        quiet_start_hour: merged.quiet_start_hour,
+        quiet_end_hour: merged.quiet_end_hour,
+        min_gap_minutes: merged.min_gap_minutes,
+      }));
+    } catch (e) {
+      setSettings(settings); // revert
+      setError(e instanceof Error ? e.message : 'Could not save');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleRunNow = async () => {
+    setIsBusy(true);
+    setError(null);
+    try {
+      await initiativeApi.runNow();
+      setJustRan(true);
+      setTimeout(() => setJustRan(false), 2500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not run');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const enabled = settings?.enabled ?? false;
+  const autonomy = settings?.autonomy ?? 'ask';
+  const nextRun = settings?.next_run_at ? new Date(settings.next_run_at) : null;
+
+  return (
+    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
+      {/* Card header */}
+      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
+        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
+          <Sparkles size={15} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-sm font-semibold text-slate-200">Initiative engine</h2>
+          <p className="text-xs text-muted truncate">
+            {enabled
+              ? nextRun
+                ? `Next check: ${nextRun.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}`
+                : `Checking every ${settings?.interval_minutes ?? 45} min`
+              : 'Jarvis volunteers helpful suggestions — off'}
+          </p>
+        </div>
+        <button
+          role="switch"
+          aria-checked={enabled}
+          disabled={isBusy || !settings}
+          onClick={() => void patch({ enabled: !enabled })}
+          className={clsx(
+            'relative w-10 h-5 rounded-full transition-colors flex-shrink-0 disabled:opacity-40',
+            enabled ? 'bg-cyan-500/70' : 'bg-surface-2 border border-surface-border'
+          )}
+        >
+          <span
+            className={clsx(
+              'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform',
+              enabled ? 'translate-x-5' : 'translate-x-0.5'
+            )}
+          />
+        </button>
+      </div>
+
+      {/* Card body — only meaningful when enabled */}
+      {enabled && settings && (
+        <div className="px-4 py-3.5 space-y-3.5">
+          <p className="text-xs text-slate-400">
+            On a throttled schedule, Jarvis reviews your day (calendar, inbox, notes, and
+            activity) and surfaces a few timely suggestions in the Suggestions panel.
+          </p>
+
+          {/* Autonomy */}
+          <div className="space-y-1.5">
+            <label className="text-xs text-slate-400" htmlFor="initiative-autonomy">
+              How far it may go
+            </label>
+            <select
+              id="initiative-autonomy"
+              value={autonomy}
+              disabled={isBusy}
+              onChange={(e) => void patch({ autonomy: e.target.value as InitiativeSettings['autonomy'] })}
+              className="w-full px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+            >
+              <option value="suggest">Suggest only</option>
+              <option value="ask">Ask before acting</option>
+              <option value="act">Act on safe things</option>
+            </select>
+            <p className="text-[11px] text-muted leading-relaxed">
+              {AUTONOMY_HELP[autonomy] ?? AUTONOMY_HELP.ask}
+            </p>
+          </div>
+
+          {/* Numeric governors */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <label className="text-xs text-slate-400" htmlFor="initiative-budget">
+                Max per day
+              </label>
+              <input
+                id="initiative-budget"
+                type="number"
+                min={0}
+                max={50}
+                value={settings.daily_budget}
+                disabled={isBusy}
+                onChange={(e) => void patch({ daily_budget: Number(e.target.value) })}
+                className="w-full px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-slate-400" htmlFor="initiative-interval">
+                Check every (min)
+              </label>
+              <input
+                id="initiative-interval"
+                type="number"
+                min={15}
+                max={1440}
+                value={settings.interval_minutes}
+                disabled={isBusy}
+                onChange={(e) => void patch({ interval_minutes: Number(e.target.value) })}
+                className="w-full px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-slate-400" htmlFor="initiative-quiet-start">
+                Quiet from (hour)
+              </label>
+              <input
+                id="initiative-quiet-start"
+                type="number"
+                min={0}
+                max={23}
+                value={settings.quiet_start_hour}
+                disabled={isBusy}
+                onChange={(e) => void patch({ quiet_start_hour: Number(e.target.value) })}
+                className="w-full px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-slate-400" htmlFor="initiative-quiet-end">
+                Quiet until (hour)
+              </label>
+              <input
+                id="initiative-quiet-end"
+                type="number"
+                min={0}
+                max={23}
+                value={settings.quiet_end_hour}
+                disabled={isBusy}
+                onChange={(e) => void patch({ quiet_end_hour: Number(e.target.value) })}
+                className="w-full px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+              />
+            </div>
+          </div>
+          <p className="text-[11px] text-muted">
+            During quiet hours Jarvis stays silent. Suggestions are also spaced at least{' '}
+            {settings.min_gap_minutes} min apart.
+          </p>
+
+          {error && (
+            <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs">
+              {error}
+            </div>
+          )}
+
+          <button
+            onClick={() => void handleRunNow()}
+            disabled={isBusy}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 hover:bg-cyan-500/20 transition-colors disabled:opacity-40"
+          >
+            {justRan ? <CheckCircle2 size={12} /> : <Sparkles size={12} />}
+            {justRan ? 'Pass run' : 'Run a pass now'}
+          </button>
+        </div>
+      )}
+
+      {!enabled && (
+        <div className="px-4 py-3.5">
+          <p className="text-xs text-slate-400">
+            When on, Jarvis periodically looks for genuinely useful things to raise — a
+            meeting to prep for, an email worth a reply — and offers them quietly. Off by
+            default; it never acts without your say-so unless you allow it.
+          </p>
+          {error && (
+            <div className="mt-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs">
+              {error}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1349,6 +1584,7 @@ export function SettingsPanel() {
         <FileIndexCard />
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Proactive</p>
         <DailyBriefingCard />
+        <InitiativeCard />
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Voice</p>
         <VoiceCard />
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Awareness</p>

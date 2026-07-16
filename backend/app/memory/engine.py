@@ -1718,11 +1718,25 @@ class MemoryEngine:
             logger.warning(f"Episode search failed: {e}")
             return []
 
-    async def get_preferences(self) -> list[Preference]:
+    #: Preference keys with this prefix are INTERNAL machine signals (Phase 9 —
+    #: the initiative engine's per-category accept/dismiss affinity), NOT
+    #: user-authored preferences. They must never render into the chat MEMORY
+    #: CONTEXT (format_context shows the top-5 preferences verbatim), so
+    #: get_preferences filters them by default. The initiative gatherer reads
+    #: them with include_internal=True.
+    INTERNAL_PREFERENCE_PREFIX = "initiative_affinity:"
+
+    async def get_preferences(self, include_internal: bool = False) -> list[Preference]:
         result = await self.db.execute(
             select(Preference).order_by(desc(Preference.confidence))
         )
-        return list(result.scalars().all())
+        prefs = list(result.scalars().all())
+        if include_internal:
+            return prefs
+        return [
+            p for p in prefs
+            if not (p.key or "").startswith(self.INTERNAL_PREFERENCE_PREFIX)
+        ]
 
     # ==============================================================
     # CONTEXT BUILDER — the most important method

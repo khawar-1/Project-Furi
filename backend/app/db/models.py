@@ -398,6 +398,49 @@ class Routine(Base):
 
 
 # ============================================================
+# Initiative suggestions — proactive nudges (Phase 9)
+# ============================================================
+class Suggestion(Base):
+    """
+    A proactive suggestion Jarvis volunteered from the initiative heartbeat —
+    the user-facing record of the ambient suggestion feed. This is Jarvis's
+    OWN generated content (a nudge, a question, or an action it chose to
+    surface), so it persists to SQLite (unlike Phase 8 sensed data, which is
+    retention=none): the feed must survive a restart and stay accept/dismiss-
+    able. The ONE accessor is app/core/suggestions.py — the router/handler
+    never touch this table directly (the reminders-router rule).
+
+    `autonomy` records what the code-owned policy classified this candidate as:
+    - "suggest" — informational only (no goal, nothing to run).
+    - "ask"     — carries a `goal`; accepting starts an approval-gated Task.
+    - "acted"   — the heartbeat already started the Task (only under autonomy
+                  level "act"); every write inside still paused at the gate.
+    `goal` is a GOAL STRING re-fed to the planner on accept/act, never a frozen
+    plan — so the approval gate + path/recipient/event-id locks re-apply (the
+    Routine.goal_template principle). `dedupe_key` is a normalized signature
+    that blocks re-surfacing the same nudge within a cooldown window.
+    """
+    __tablename__ = "suggestions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    session_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    category: Mapped[str] = mapped_column(String(64), default="general", index=True)
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, default="")  # the "why it matters"
+    autonomy: Mapped[str] = mapped_column(String(16), default="suggest")  # suggest | ask | act
+    priority: Mapped[str] = mapped_column(String(16), default="normal")  # low | normal | high
+    goal: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # goal string for ask/act
+    # pending | accepted | dismissed | acted | expired
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    task_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)  # set when a Task starts
+    dedupe_key: Mapped[str] = mapped_column(String(128), default="", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+
+
+# ============================================================
 # Scheduled Jobs — Persisted timed work (Phase 4, Part 2)
 # ============================================================
 class ScheduledJob(Base):

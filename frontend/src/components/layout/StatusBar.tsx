@@ -2,20 +2,23 @@
  * Jarvis OS — Status Bar
  * Bottom bar showing backend connection, active model, and app version.
  */
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { clsx } from 'clsx';
-import { Circle, Cpu, Eye, Wifi, WifiOff, RefreshCw } from 'lucide-react';
+import { Circle, Cpu, Eye, Sparkles, Wifi, WifiOff, RefreshCw } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 import { usePushStore } from '@/stores/pushStore';
 import { useContextStore } from '@/stores/contextStore';
+import { initiativeApi } from '@/lib/api';
 
 const SENSING_POLL_MS = 10_000;
+const INITIATIVE_POLL_MS = 30_000;
 
 export function StatusBar() {
   const { backendStatus, healthData, isCheckingHealth, checkBackendHealth } = useUIStore();
   const pushConnected = usePushStore((s) => s.connected);
   const sensing = useContextStore((s) => s.status);
   const fetchSensingStatus = useContextStore((s) => s.fetchStatus);
+  const [initiativeOn, setInitiativeOn] = useState(false);
 
   // The required visible "sensing on" indicator — poll the cheap status.
   useEffect(() => {
@@ -23,6 +26,23 @@ export function StatusBar() {
     const t = setInterval(() => void fetchSensingStatus(), SENSING_POLL_MS);
     return () => clearInterval(t);
   }, [fetchSensingStatus]);
+
+  // Phase 9: a quiet "Jarvis may speak first" indicator. Proactivity state
+  // changes rarely, so a slow poll is plenty; failures keep the last value.
+  useEffect(() => {
+    let alive = true;
+    const check = () =>
+      initiativeApi
+        .getSettings()
+        .then((s) => alive && setInitiativeOn(s.enabled))
+        .catch(() => {});
+    void check();
+    const t = setInterval(() => void check(), INITIATIVE_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
 
   const isConnected = backendStatus === 'ok';
   const isDegraded = backendStatus === 'degraded';
@@ -112,6 +132,14 @@ export function StatusBar() {
             <span className={clsx(sensing.screen_ocr ? 'text-amber-400' : 'text-emerald-500')}>
               Sensing: On{sensing.screen_ocr ? ' (screen)' : ''}
             </span>
+          </div>
+        )}
+
+        {/* Initiative indicator (Phase 9) — Jarvis may volunteer suggestions */}
+        {initiativeOn && (
+          <div className="flex items-center gap-1" title="Initiative engine on — Jarvis may suggest things proactively">
+            <Sparkles size={10} className="text-cyan-400" />
+            <span className="text-cyan-400">Initiative: On</span>
           </div>
         )}
       </div>

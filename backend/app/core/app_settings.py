@@ -30,6 +30,8 @@ FILE_INDEX_CONFIG_KEY = "file_index.config"
 FILE_INDEX_JOB_ID_KEY = "file_index.job_id"
 VOICE_CONFIG_KEY = "voice.config"
 CONTEXT_CONFIG_KEY = "context.config"
+INITIATIVE_CONFIG_KEY = "initiative.config"
+INITIATIVE_JOB_ID_KEY = "initiative.job_id"
 
 
 # --------------------------------------------------------- generic accessor
@@ -485,3 +487,126 @@ async def set_context_config(db: AsyncSession, config: ContextConfig) -> None:
         "ocr_interval_seconds": config.ocr_interval_seconds,
         "idle_threshold_seconds": config.idle_threshold_seconds,
     })
+
+
+# ------------------------------------------------- initiative config (Phase 9)
+
+#: The autonomy CEILING the policy caps every candidate at. Ordered least → most
+#: capable so a candidate's proposed autonomy can be clamped by index:
+#: - "off"     — the engine surfaces nothing (belt; the job also won't run when
+#:               the master `enabled` is false).
+#: - "suggest" — only informational nudges; nothing ever starts a plan.
+#: - "ask"     — nudges may carry a goal; ACCEPTING starts an approval-gated Task.
+#: - "act"     — Jarvis may auto-start the Task without waiting for Accept. Even
+#:               then every write inside still pauses at the approval gate — a
+#:               hand-edited row can never grant silent write authority.
+INITIATIVE_AUTONOMY_LEVELS = ("off", "suggest", "ask", "act")
+
+# Bounds validated here so a hand-edited row can never arm an absurd cadence or
+# an unbounded suggestion firehose.
+INITIATIVE_MIN_INTERVAL = 15          # minutes — a floor on the heartbeat cadence
+INITIATIVE_MAX_INTERVAL = 24 * 60
+INITIATIVE_MIN_BUDGET = 0             # 0 = generate but never surface (a soft mute)
+INITIATIVE_MAX_BUDGET = 50
+INITIATIVE_MIN_GAP = 5                # minutes — rate limiter floor between surfaced items
+INITIATIVE_MAX_GAP = 12 * 60
+
+
+@dataclass(frozen=True)
+class InitiativeConfig:
+    """Phase 9 — the Initiative Engine's settings, privacy-and-quota-first.
+
+    `enabled` is the master switch and defaults OFF: Jarvis never volunteers a
+    thing until the user opts in (the sensing/index/voice convention). `autonomy`
+    is the CEILING the code-owned policy caps every candidate at — default
+    "ask", so accepting a suggestion is always required before any plan starts;
+    "act" (auto-start) is opt-in only and STILL routes every write through the
+    approval gate. The governor fields make the throttled DeepSeek pass safe:
+    `daily_budget` caps how many suggestions surface per local day,
+    `quiet_start_hour`/`quiet_end_hour` blackout a window (the pass skips
+    entirely — no generation, no push), and `min_gap_minutes` rate-limits how
+    close two surfaced items can be. `interval_minutes` is the heartbeat cadence
+    (a pure interval, like the reindex job). hours are LOCAL wall clock."""
+    enabled: bool
+    autonomy: str
+    interval_minutes: int
+    daily_budget: int
+    quiet_start_hour: int
+    quiet_end_hour: int
+    min_gap_minutes: int
+
+
+def default_initiative_config() -> InitiativeConfig:
+    return InitiativeConfig(
+        enabled=False,          # master OFF — proactivity is strictly opt-in
+        autonomy="ask",         # accept-to-start by default; "act" is opt-in
+        interval_minutes=45,
+        daily_budget=5,
+        quiet_start_hour=22,    # 22:00 → 08:00 quiet by default
+        quiet_end_hour=8,
+        min_gap_minutes=30,
+    )
+
+
+def _coerce_initiative(raw: Any) -> InitiativeConfig:
+    """A stored dict → InitiativeConfig, defaulting any missing/invalid part
+    (never a crash from a hand-edited row) — the ContextConfig discipline."""
+    default = default_initiative_config()
+    if not isinstance(raw, dict):
+        return default
+    autonomy = raw.get("autonomy", default.autonomy)
+    if autonomy not in INITIATIVE_AUTONOMY_LEVELS:
+        autonomy = default.autonomy
+    return InitiativeConfig(
+        enabled=bool(raw.get("enabled", default.enabled)),
+        autonomy=autonomy,
+        interval_minutes=_clamp_int(
+            raw.get("interval_minutes"),
+            INITIATIVE_MIN_INTERVAL, INITIATIVE_MAX_INTERVAL,
+            default.interval_minutes,
+        ),
+        daily_budget=_clamp_int(
+            raw.get("daily_budget"),
+            INITIATIVE_MIN_BUDGET, INITIATIVE_MAX_BUDGET,
+            default.daily_budget,
+        ),
+        quiet_start_hour=_clamp_int(
+            raw.get("quiet_start_hour"), 0, 23, default.quiet_start_hour
+        ),
+        quiet_end_hour=_clamp_int(
+            raw.get("quiet_end_hour"), 0, 23, default.quiet_end_hour
+        ),
+        min_gap_minutes=_clamp_int(
+            raw.get("min_gap_minutes"),
+            INITIATIVE_MIN_GAP, INITIATIVE_MAX_GAP,
+            default.min_gap_minutes,
+        ),
+    )
+
+
+async def get_initiative_config(db: AsyncSession) -> InitiativeConfig:
+    raw = await get_setting(db, INITIATIVE_CONFIG_KEY, default=None)
+    if raw is None:
+        return default_initiative_config()
+    return _coerce_initiative(raw)
+
+
+async def set_initiative_config(db: AsyncSession, config: InitiativeConfig) -> None:
+    await set_setting(db, INITIATIVE_CONFIG_KEY, {
+        "enabled": config.enabled,
+        "autonomy": config.autonomy,
+        "interval_minutes": config.interval_minutes,
+        "daily_budget": config.daily_budget,
+        "quiet_start_hour": config.quiet_start_hour,
+        "quiet_end_hour": config.quiet_end_hour,
+        "min_gap_minutes": config.min_gap_minutes,
+    })
+
+
+async def get_initiative_job_id(db: AsyncSession) -> Optional[str]:
+    value = await get_setting(db, INITIATIVE_JOB_ID_KEY, default=None)
+    return value if isinstance(value, str) and value else None
+
+
+async def set_initiative_job_id(db: AsyncSession, job_id: Optional[str]) -> None:
+    await set_setting(db, INITIATIVE_JOB_ID_KEY, job_id)

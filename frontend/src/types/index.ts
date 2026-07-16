@@ -346,6 +346,7 @@ export type ActivePanel =
   | 'timeline'
   | 'reminders'
   | 'routines'
+  | 'initiative'
   | 'tools'
   | 'voice'
   | 'settings';
@@ -513,6 +514,55 @@ export interface WorldModel {
     ocr_fresh: boolean;
   };
   captured_at: string;
+}
+
+// ============================================================
+// Initiative Engine (Phase 9 — proactive suggestions)
+// ============================================================
+/** The autonomy ceiling the user sets — how far Jarvis may go on its own. */
+export type AutonomyLevel = 'off' | 'suggest' | 'ask' | 'act';
+
+/** What the policy classified a surfaced suggestion as. */
+export type SuggestionAutonomy = 'suggest' | 'ask' | 'act';
+
+export type SuggestionPriority = 'low' | 'normal' | 'high';
+
+export type SuggestionStatus =
+  | 'pending'
+  | 'accepted'
+  | 'dismissed'
+  | 'acted'
+  | 'expired';
+
+/** One proactive suggestion from the initiative heartbeat (the feed row). */
+export interface Suggestion {
+  id: string;
+  session_id: string | null;
+  category: string;
+  title: string;
+  body: string;
+  rationale: string; // the "why it matters"
+  autonomy: SuggestionAutonomy;
+  priority: SuggestionPriority;
+  goal: string | null;
+  status: SuggestionStatus;
+  task_id: string | null;
+  created_at: string;
+  updated_at: string;
+  expires_at: string | null;
+}
+
+/** GET/PUT /api/initiative/settings — the engine's governor config. */
+export interface InitiativeSettings {
+  enabled: boolean;
+  autonomy: AutonomyLevel;
+  interval_minutes: number;
+  daily_budget: number;
+  quiet_start_hour: number;
+  quiet_end_hour: number;
+  min_gap_minutes: number;
+  autonomy_levels: AutonomyLevel[];
+  next_run_at: string | null;
 }
 
 // ============================================================

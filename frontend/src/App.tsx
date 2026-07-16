@@ -11,6 +11,7 @@ import { ContactsPanel } from '@/components/contacts/ContactsPanel';
 import { TimelinePanel } from '@/components/timeline/TimelinePanel';
 import { ReminderPanel } from '@/components/reminders/ReminderPanel';
 import { RoutinesPanel } from '@/components/routines/RoutinesPanel';
+import { SuggestionPanel } from '@/components/initiative/SuggestionPanel';
 import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { useUIStore } from '@/stores/uiStore';
 import { connectPush, disconnectPush, onPush } from '@/lib/push';
@@ -18,6 +19,7 @@ import { initNotifications } from '@/lib/notifications';
 import { initVoiceAnnounce } from '@/lib/voiceAnnounce';
 import { useChatStore } from '@/stores/chatStore';
 import { useVoiceStore } from '@/stores/voiceStore';
+import { useSuggestionsStore } from '@/stores/suggestionsStore';
 import type { ActivePanel } from '@/types';
 
 function PanelContent({ panel }: { panel: ActivePanel }) {
@@ -34,6 +36,8 @@ function PanelContent({ panel }: { panel: ActivePanel }) {
       return <ReminderPanel />;
     case 'routines':
       return <RoutinesPanel />;
+    case 'initiative':
+      return <SuggestionPanel />;
     case 'settings':
       return <SettingsPanel />;
     default:
@@ -49,6 +53,7 @@ function ComingSoonPanel({ panel }: { panel: ActivePanel }) {
     timeline: 'Activity Timeline',
     reminders: 'Reminders',
     routines: 'Routines',
+    initiative: 'Suggestions',
     tools: 'Tool Execution Log',
     voice: 'Voice Controls',
     settings: 'Settings',
@@ -61,6 +66,7 @@ function ComingSoonPanel({ panel }: { panel: ActivePanel }) {
     timeline: '3',
     reminders: '4',
     routines: '6',
+    initiative: '9',
     tools: '5',
     voice: '6',
     settings: '5',
@@ -159,7 +165,13 @@ export default function App() {
     const stopRoutineOffer = onPush('routine_offer', (event) => {
       useChatStore.getState().receiveReminderFired(event.payload);
     });
+    // Phase 9: a proactive suggestion — prepend it to the feed live (and it
+    // toasts via notifications, with the reasoned "why it matters" framing).
+    const stopSuggestion = onPush('suggestion', (event) => {
+      useSuggestionsStore.getState().receiveSuggestion(event.payload);
+    });
     return () => {
+      stopSuggestion();
       stopRoutineOffer();
       stopBriefing();
       stopSteps();

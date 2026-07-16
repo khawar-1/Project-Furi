@@ -18,12 +18,15 @@ import type {
   GoogleConnectResult,
   GoogleIntegrationStatus,
   HealthResponse,
+  InitiativeSettings,
   MemorySearchResult,
   MemoryStats,
   Preference,
   Reminder,
   ReminderStatus,
   Routine,
+  Suggestion,
+  SuggestionStatus,
   SemanticMemory,
   SttStatus,
   StreamChunk,
@@ -290,6 +293,45 @@ export const routinesApi = {
       method: 'POST',
       body: JSON.stringify({ session_id: sessionId ?? null }),
     }),
+};
+
+// ============================================================
+// Initiative Engine (Phase 9 — proactive suggestions)
+// ============================================================
+export const initiativeApi = {
+  listSuggestions: (status?: SuggestionStatus): Promise<Suggestion[]> => {
+    const query = status ? `?status=${status}` : '';
+    return apiFetch<Suggestion[]>(`/api/initiative/suggestions${query}`);
+  },
+
+  /** Accept a suggestion. If it carries a goal, an approval-gated background
+   *  Task starts (the outcome arrives as a push/toast + PlanCard in chat). */
+  accept: (id: string): Promise<Suggestion> =>
+    apiFetch<Suggestion>(`/api/initiative/suggestions/${id}/accept`, { method: 'POST' }),
+
+  dismiss: (id: string): Promise<Suggestion> =>
+    apiFetch<Suggestion>(`/api/initiative/suggestions/${id}/dismiss`, { method: 'POST' }),
+
+  getSettings: (): Promise<InitiativeSettings> =>
+    apiFetch<InitiativeSettings>('/api/initiative/settings'),
+
+  updateSettings: (update: {
+    enabled: boolean;
+    autonomy: string;
+    interval_minutes: number;
+    daily_budget: number;
+    quiet_start_hour: number;
+    quiet_end_hour: number;
+    min_gap_minutes: number;
+  }): Promise<InitiativeSettings> =>
+    apiFetch<InitiativeSettings>('/api/initiative/settings', {
+      method: 'PUT',
+      body: JSON.stringify(update),
+    }),
+
+  /** Run one initiative pass now (respects the daily budget). */
+  runNow: (): Promise<{ surfaced: number }> =>
+    apiFetch('/api/initiative/run-now', { method: 'POST' }),
 };
 
 // ============================================================
