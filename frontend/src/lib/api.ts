@@ -17,6 +17,8 @@ import type {
   FrequentFolder,
   GoogleConnectResult,
   GoogleIntegrationStatus,
+  GoalThread,
+  GoalThreadStatus,
   HealthResponse,
   InitiativeSettings,
   MemorySearchResult,
@@ -25,6 +27,7 @@ import type {
   Reminder,
   ReminderStatus,
   Routine,
+  RoutineSchedule,
   Suggestion,
   SuggestionStatus,
   SemanticMemory,
@@ -293,6 +296,14 @@ export const routinesApi = {
       method: 'POST',
       body: JSON.stringify({ session_id: sessionId ?? null }),
     }),
+
+  /** Set or clear a routine's time trigger (schedule_type=null clears it). A
+   *  scheduled run re-plans through the approval gate, so a write still pauses. */
+  setSchedule: (id: string, schedule: Partial<RoutineSchedule>): Promise<Routine> =>
+    apiFetch<Routine>(`/api/routines/${id}/schedule`, {
+      method: 'PUT',
+      body: JSON.stringify(schedule),
+    }),
 };
 
 // ============================================================
@@ -332,6 +343,27 @@ export const initiativeApi = {
   /** Run one initiative pass now (respects the daily budget). */
   runNow: (): Promise<{ surfaced: number }> =>
     apiFetch('/api/initiative/run-now', { method: 'POST' }),
+};
+
+// ============================================================
+// Goal threads (Phase 11.3 — ongoing-concern tracking)
+// ============================================================
+export const threadsApi = {
+  list: (status?: GoalThreadStatus): Promise<GoalThread[]> => {
+    const query = status ? `?status=${status}` : '';
+    return apiFetch<GoalThread[]>(`/api/threads${query}`);
+  },
+
+  create: (payload: { title: string; description?: string; event_date?: string }): Promise<GoalThread> =>
+    apiFetch<GoalThread>('/api/threads', { method: 'POST', body: JSON.stringify(payload) }),
+
+  /** Mark a thread resolved ("it landed") — stops the follow-up nudges. */
+  resolve: (id: string): Promise<GoalThread> =>
+    apiFetch<GoalThread>(`/api/threads/${id}/resolve`, { method: 'POST' }),
+
+  /** Dismiss a thread (stop nudging, distinct from resolved). */
+  dismiss: (id: string): Promise<GoalThread> =>
+    apiFetch<GoalThread>(`/api/threads/${id}/dismiss`, { method: 'POST' }),
 };
 
 // ============================================================
@@ -389,6 +421,16 @@ export const contextApi = {
 
   /** The aggregated world model — the "what Jarvis currently sees" audit. */
   getWorld: (): Promise<WorldModel> => apiFetch<WorldModel>('/api/context/world'),
+
+  /** Phase 13: post a coarse affective summary (timing/energy only — never
+   *  keystroke content or audio). Gated server-side; ignored when off. */
+  postState: (
+    signal: { typing_cpm?: number; backspace_rate?: number; voice_energy?: number }
+  ): Promise<{ stored: boolean }> =>
+    apiFetch<{ stored: boolean }>('/api/context/state', {
+      method: 'POST',
+      body: JSON.stringify(signal),
+    }),
 };
 
 // ============================================================
@@ -438,6 +480,8 @@ export interface VoiceUpdateBody {
   stt_device: string;
   tts_device: string;
   stt_compute_type: string;
+  continuous_conversation: boolean;
+  wake_word: boolean;
 }
 
 /** Build the complete PUT body from the current settings plus a patch — the
@@ -461,6 +505,8 @@ export function voiceUpdatePayload(
     stt_device: settings.stt_device,
     tts_device: settings.tts_device,
     stt_compute_type: settings.stt_compute_type,
+    continuous_conversation: settings.continuous_conversation,
+    wake_word: settings.wake_word,
     ...patch,
   };
 }

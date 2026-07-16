@@ -115,6 +115,30 @@ async def test_put_round_trips_listen_on_summon(client):
     assert r.json()["listen_on_summon"] is False
 
 
+async def test_put_round_trips_phase12_ambient_fields(client):
+    # Phase 12.1/12.2: continuous_conversation + wake_word persist, and a PUT
+    # that omits them (an older-shaped frontend) still succeeds and defaults
+    # both OFF (the coerce discipline).
+    r = await client.put("/api/settings/voice", json={
+        "enabled": False, "stt_model": "small",
+        "continuous_conversation": True, "wake_word": True,
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["continuous_conversation"] is True
+    assert body["wake_word"] is True
+    r = await client.get("/api/settings/voice")
+    body = r.json()
+    assert body["continuous_conversation"] is True and body["wake_word"] is True
+    # An omitting PUT defaults them back OFF.
+    r = await client.put("/api/settings/voice", json={
+        "enabled": False, "stt_model": "small",
+    })
+    assert r.status_code == 200
+    assert r.json()["continuous_conversation"] is False
+    assert r.json()["wake_word"] is False
+
+
 async def test_put_rejects_unknown_model(client):
     r = await client.put("/api/settings/voice", json={
         "enabled": True, "stt_model": "gigantic-v9",

@@ -559,6 +559,61 @@ What's complete:
   the sensing/index/voice convention). Suggestion feed panel + accept/dismiss +
   Settings InitiativeCard + StatusBar indicator. Details in the "The Initiative
   Engine" Architecture section below. 1318 tests green; runtime-verified.
+- Phase 10 (Pattern & Predictive Automation — recurring work runs itself, with
+  tiered consent). Three parts, almost all riding the EXISTING Initiative
+  Engine (gatherer + render-section + composer-clause additions) except 10.2,
+  the one new autonomous surface. (10.1) Pattern mining
+  (app/core/pattern_mining.py — the file_intelligence compute-on-demand
+  precedent, NO new table): DETERMINISTIC cadence detection (detect_cadence,
+  pure/timezone-agnostic) over completed Task.goal timestamps → weekly@(day,
+  hour) / daily@hour / None (conservative ≥60% majority, 2h band; a uniform
+  UTC→local offset preserves the clustering so it's hermetically testable).
+  Enriches core/routines.maybe_offer_routine to spell out a SCHEDULED teach
+  phrase ("...usually every Friday around 4pm — save this as a routine that runs
+  every friday at 4pm"), and feeds a RECURRING PATTERNS initiative signal.
+  (10.2) Scheduled routines: a time trigger on Routine (new schedule_* columns +
+  a per-row schedule_job_id pointer, the Contact.birthday_job_id template;
+  migration e2c4a6b8d013, idempotent add-column guards). app/core/
+  scheduled_routines.py is the birthdays.py 6-part recurring-job pattern
+  (ROUTINE_JOB_KIND="routine", next_routine_run_at weekly/daily wall-clock +
+  interval, sync_routine_schedule_job choke point, guarded _routine_job_handler,
+  ensure_routine_schedule_jobs startup reconcile, register() at import, wired in
+  main.py). THE SAFETY PROPERTY: the handler runs the goal_template STRING
+  through start_task → the plan is RE-DERIVED → the approval gate re-applies, so
+  a scheduled WRITE pauses for approval and a read-only routine completes
+  autonomously ("scheduled" = auto-PLAN, never auto-WRITE — the Routine
+  principle, live-verified: a fired routine PAUSED at awaiting_choice). NO LLM in
+  the handler. Deterministic recurrence parser (app/core/recurrence_parser.py —
+  "every friday at 4pm" / "every day at 8am" / "every 30 minutes", never-guess,
+  documented bare-hour band) lets chat TEACH set a schedule; PUT /api/routines/
+  {id}/schedule (validate-and-clamp, re-arm in-request) + a RoutinesPanel
+  schedule editor. (10.3) Predictive pre-work: a _gather_prep_opportunities
+  signal (meetings starting soon; a morning inbox-triage window) + composer
+  guidance to propose READ-ONLY prep goals (meeting packets / inbox summaries)
+  at the "act" tier — safe by construction (a read-only plan never hits the
+  approval gate; a write still pauses). Details in the "Pattern & Predictive
+  Automation" Architecture section. Migrations e2c4a6b8d013.
+- Phase 11 (Relationship & Conversational Continuity — feels like an ongoing
+  relationship). All three ride the Initiative Engine; only 11.3 adds a store.
+  (11.1) People-cadence tracker (app/core/relationship_cadence.py::people_cadence
+  — "haven't caught up with X in ~N weeks" from Contact.last_interaction, HONEST
+  about the data: last_interaction is when the person last CAME UP, not a
+  verified outbound message, so the nudge is phrased "haven't caught up with",
+  never "haven't messaged"; the composer makes reconnects "ask", never "act").
+  (11.2) Proactive memory callbacks (relationship_cadence.memory_callbacks — the
+  heuristic FALLBACK: user/shared facts from ~1-3 weeks ago that read as open
+  concerns by keyword; used only when there are no structured goal-threads).
+  (11.3) Goal/thread tracking — the one new store: GoalThread table (migration
+  f4b7d9a1c025, idempotent) + app/core/goal_threads.py accessor (upsert-dedupe
+  by normalized title, resolve/drop lifecycle, due_threads/mark_nudged nudge
+  cadence — mark_nudged pushes next_check_at out so a concern is never nagged
+  every heartbeat). Threads are CAPTURED from conversation by extending the
+  extractor with a bounded, defaulted open_threads field (extraction_schema.py
+  OpenThread + prompt rule 14, conservative "high bar"). Nudged via a
+  _gather_goal_threads initiative signal. API /api/threads (list/create/resolve/
+  dismiss) + Threads panel + Sidebar nav. Details in the "Relationship &
+  Conversational Continuity" Architecture section. 1398 tests green;
+  runtime-verified.
 Current architecture rules:
 - Facts have subject: "user" | "shared" | "contact"
 - Shared facts (e.g. "Jamil and I played Tekken") save to both user and contact;
@@ -1309,3 +1364,113 @@ Anticipation — Jarvis volunteers the right thing at the right time, safely. Th
 - **Config** (`InitiativeConfig` in `app_settings`, key `initiative.config`, NO migration): `enabled` (master, default **False** — opt-in, the sensing/index/voice convention), `autonomy` (default **"ask"**), `interval_minutes`/`daily_budget`/`quiet_start_hour`/`quiet_end_hour`/`min_gap_minutes` (all clamped in `_coerce_initiative`). The singleton job pointer is `initiative.job_id`.
 - **API** (`app/api/initiative.py`, `/api/initiative`, behind AuthMiddleware): `GET`/`PUT /settings` (PUT re-syncs the job in the same request — the settings.py rule), `GET /suggestions?status=`, `POST /suggestions/{id}/accept` (deps get_db + get_llm_provider), `POST /suggestions/{id}/dismiss`, `POST /run-now`. **Frontend**: `Suggestion`/`InitiativeSettings` types, `initiativeApi`, `suggestionsStore` (feed + live `receiveSuggestion`), `SuggestionPanel` ("why it matters" cards, Accept/Dismiss), Sidebar "Suggestions" nav, `App.tsx` `onPush('suggestion')`, `SettingsPanel` `InitiativeCard` (immediate-PUT autonomy select + budget/interval/quiet-hours + Run-now), `StatusBar` "Initiative: On" indicator.
 - **Decisions (user-confirmed)**: OFF + "ask" default; "act" built but opt-in only; intelligent-notification framing on initiative pushes ONLY. Tests: `test_initiative.py` (interval math, sync, quiet/budget/rate governor skips-but-rearms, dedupe, autonomy-policy matrix, compose validate-retry-empty, dispatch suggest/ask/act, guards, ensure arm/sweep/expire, run-now), `test_suggestions.py` (CRUD, accept-starts-approval-gated-task invariant, dismiss, expiry, affinity clamp/net, the chat-leak filter), `test_initiative_api.py` (settings GET/PUT/400/clamp/re-sync, accept/dismiss/404, list, run-now). 1318 tests green; runtime-verified live on an isolated backend (boot on fresh DB, real DeepSeek heartbeat surfacing a timely suggestion, accept → task paused for approval).
+
+### Pattern & Predictive Automation (Phase 10)
+Recurring work runs itself, with tiered consent. 10.1 and 10.3 are new
+signal-gatherers + composer clauses on the existing Initiative Engine; 10.2 is
+the one new autonomous surface (a real scheduler job), safe because it
+re-derives plans from goal strings through the approval gate.
+
+- **Pattern mining** (`app/core/pattern_mining.py`, Part 1 — the
+  `file_intelligence.frequent_folders` compute-on-demand precedent: reads
+  existing rows, NO new table, best-effort → []). `mine_task_patterns` groups
+  completed `Task.goal` by `routines.normalize_goal` (the ONE normalizer) and
+  runs **DETERMINISTIC cadence detection** over each group's `finished_at`
+  values: `detect_cadence(local_dts)` is PURE and timezone-agnostic (uses only
+  `.weekday()/.hour/.minute`, so a uniform UTC→local offset preserves the
+  clustering — hermetically testable) → `weekly@(weekday,hour)` when a dominant
+  weekday + a tight ≤2h hour band both clear a ≥60% majority, `daily@hour` when a
+  tight hour band spreads across ≥3 distinct weekdays, else `None` (frequency
+  only; a false "every Friday" is worse than silence — the reminder-parser
+  never-guess rule). `cadence_for_goal` powers the **offer-to-save enrichment**
+  (`core/routines.maybe_offer_routine`: when a cadence is found the offer names
+  it and spells out a SCHEDULED teach phrase via `teach_phrase_cadence`, and the
+  `routine_offer` push carries `suggested_schedule`); `format_task_patterns`
+  renders the `RECURRING PATTERNS` initiative signal. `cadence_to_schedule` maps
+  a cadence to Routine schedule fields.
+- **Scheduled routines** (`app/core/scheduled_routines.py`, Part 2 — the
+  birthdays.py 6-part recurring-job pattern with a PER-ROW pointer). New
+  `Routine.schedule_type`(None|interval|daily|weekly)/`schedule_minute`/
+  `schedule_hour`/`schedule_weekday`/`schedule_interval_minutes`/
+  `schedule_job_id` (migration `e2c4a6b8d013`, idempotent add-column guards;
+  `schedule_job_id` never serialized). `ROUTINE_JOB_KIND="routine"`,
+  `next_routine_run_at` (weekly/daily via local wall-clock → `to_naive_utc`, the
+  `next_briefing_run_at` convention; interval via `now + timedelta`, the reindex
+  convention), `sync_routine_schedule_job` (single choke point, cancel→arm→store
+  id, best-effort), `_routine_job_handler` (guards: gone/inactive/unscheduled →
+  return; stale pointer → return; schedule-kind changed → return; then re-derive
+  + re-arm), `ensure_routine_schedule_jobs` (startup reconcile, wired in main.py
+  after `ensure_initiative_job`), `register()` at import.
+  **SAFETY — the load-bearing property**: the handler runs `goal_template` (a
+  STRING) through `start_task` → the planner RE-DERIVES the plan → the structural
+  approval gate + path/recipient/event-id locks re-apply. A scheduled WRITE
+  pauses and pushes a PlanCard for approval; a read-only routine completes
+  autonomously. "Scheduled" = auto-PLAN, never auto-WRITE (the Routine
+  principle). NO LLM call in the handler. `normalize_schedule_spec` validates
+  the type + CLAMPS numerics (the `_clamp_int` philosophy — never crash on an
+  out-of-range value). `set_routine_schedule` applies + re-arms in one call.
+  **Chat teaching** (`app/core/recurrence_parser.py`, deterministic + conservative
+  — "every friday at 4pm" / "every day at 8am" / "every 30 minutes"; documented
+  bare-hour band; unparseable → unscheduled, never guess): the `routine_router`
+  TEACH pulls a recurrence phrase out of the name span (`strip_recurrence`,
+  BEFORE the inline split) and sets the schedule. **API**: `PUT /api/routines/
+  {id}/schedule` (validate/clamp, 400 on bad type, re-arm in-request — the
+  settings.py rule) + schedule fields + computed `next_run_at` in the serializer;
+  `RoutinesPanel` schedule editor.
+- **Predictive pre-work** (Part 3, delivered via the Initiative act tier — no new
+  engine): `_gather_meeting_prep` (timed events starting within
+  `_PREP_LOOKAHEAD_HOURS`, own narrow calendar query reusing
+  `calendar_tools._event_row`/`format_event_when`) + `_morning_triage_due`
+  (a morning window with unread email) feed a `PREP OPPORTUNITIES` signal;
+  composer guidance proposes READ-ONLY prep goals (meeting packets, inbox
+  summaries) at `suggested_autonomy="act"`. **Safe by construction**: an "act"
+  dispatch of a read-only goal → `start_task` → a plan of only READ-permission
+  steps → never hits the approval gate → completes and pushes a prep summary;
+  a mis-proposed write still pauses at the gate; `act` only fires at the opt-in
+  `act` ceiling.
+- Tests: `test_pattern_mining.py`, `test_recurrence_parser.py`,
+  `test_scheduled_routines.py`, `test_routines_api.py` (+schedule),
+  `test_initiative.py` (+patterns/prep signals). Runtime-verified live: clean
+  boot + migration + reconcile, `PUT /schedule` arms a real `scheduled_jobs` row
+  with a correct next-run, a routine run re-derived the plan and PAUSED at
+  `awaiting_choice` (the gate re-applied).
+
+### Relationship & Conversational Continuity (Phase 11)
+Feels like an ongoing relationship, not stateless turns. All three parts ride
+the Initiative Engine as new gatherers/candidates; only 11.3 adds a store.
+
+- **People-cadence tracker** (`app/core/relationship_cadence.py::people_cadence`,
+  Part 1 — read-only, on-demand, best-effort → []): active `Contact` rows with
+  real history (`interaction_count >= min`) not interacted with for `>=` a
+  threshold (~3 weeks), longest silence first. **HONEST about the data**:
+  `Contact.last_interaction` reflects when the person last CAME UP (memory-
+  extraction activity), not a verified outbound message — the nudge is phrased
+  "haven't caught up with X in a while", never a false "you haven't messaged X",
+  and the composer makes a reconnect "ask" (it sends a message), never "act".
+- **Proactive memory callbacks** (`relationship_cadence.memory_callbacks`, Part 2
+  — the heuristic FALLBACK): user/shared `SemanticMemory` from the ~5–21-day
+  window that reads as an open concern by a conservative keyword filter. Used
+  ONLY when there are no structured goal-threads (avoids double-nudging the same
+  concern from two sources).
+- **Goal/thread tracking** (Part 3 — the one new store). `GoalThread` table
+  (migration `f4b7d9a1c025`, idempotent): id/title/`normalized_title`(dedupe
+  key)/description/status(open|resolved|dropped)/contact_id/event_date/
+  `next_check_at`/`last_nudged_at`/source/is_active. `app/core/goal_threads.py`
+  is the ONE accessor (the reminders rule): `upsert_thread` (dedupe by
+  normalized title on an OPEN thread — re-mention updates, never duplicates;
+  `next_check_at` defaults to the day AFTER a known `event_date` — "did it
+  land?" — else +7 days), `list_threads`, `resolve_thread`/`drop_thread`,
+  `due_threads` (open+active past `next_check_at`), `mark_nudged` (records the
+  nudge and pushes `next_check_at` out `RENUDGE_DAYS` so a concern is never
+  nagged every heartbeat). **Capture**: the extractor emits a bounded, defaulted
+  `open_threads` field (`extraction_schema.py` `OpenThread` + prompt rule 14 — a
+  deliberately HIGH bar: only genuine ongoing concerns, never completed facts or
+  passing remarks), persisted best-effort via `upsert_thread` in
+  `run_extraction_pipeline`. **Nudging**: `_gather_goal_threads` surfaces due
+  threads to the composer as `memory_reminder` follow-ups AND marks them nudged.
+  **API** `/api/threads` (list/create/resolve/dismiss) + `ThreadsPanel` +
+  Sidebar "Threads" nav.
+- Tests: `test_goal_threads.py`, `test_relationship_cadence.py`,
+  `test_threads_api.py`, `test_initiative.py` (+people/threads/callbacks signals
+  + mark-nudged). 1398 tests green; runtime-verified live: boot + migration,
+  `/api/threads` create/dedupe/resolve/400, `next_check = event_date + 1 day`.

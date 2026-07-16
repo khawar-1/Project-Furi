@@ -31,6 +31,7 @@ from app.core.app_settings import (
 from app.core.context_store import (
     context_status,
     get_world_model,
+    record_affective_signal,
     record_device_signal,
     record_ocr_summary,
 )
@@ -58,6 +59,7 @@ class ContextSettingsUpdate(BaseModel):
     screen_ocr: bool = False
     ocr_interval_seconds: int = 30
     idle_threshold_seconds: int = 300
+    affective_sensing: bool = False
 
 
 def _config_payload(config: ContextConfig) -> dict:
@@ -67,6 +69,7 @@ def _config_payload(config: ContextConfig) -> dict:
         "screen_ocr": config.screen_ocr,
         "ocr_interval_seconds": config.ocr_interval_seconds,
         "idle_threshold_seconds": config.idle_threshold_seconds,
+        "affective_sensing": config.affective_sensing,
     }
 
 
@@ -99,6 +102,7 @@ async def put_settings(update: ContextSettingsUpdate, db=Depends(get_db)) -> dic
         screen_ocr=update.screen_ocr,
         ocr_interval_seconds=update.ocr_interval_seconds,
         idle_threshold_seconds=update.idle_threshold_seconds,
+        affective_sensing=update.affective_sensing,
     ))
     return _config_payload(await get_context_config(db))
 
@@ -129,6 +133,44 @@ async def post_device(signal: DeviceSignal, db=Depends(get_db)) -> dict:
         except (TypeError, ValueError):
             idle = None
     record_device_signal(active_app, window_title, idle)
+    return {"stored": True}
+
+
+# ----------------------------------------------------- affective (Phase 13)
+
+class AffectiveSignal(BaseModel):
+    """A client-computed affective summary — TIMING and ENERGY only, never
+    keystroke content or audio. Every field optional (a source not sensing now
+    is simply absent). Values are clamped defensively before use."""
+    typing_cpm: float | None = None
+    backspace_rate: float | None = None
+    voice_energy: float | None = None
+
+
+def _clamp(value: float | None, lo: float, hi: float) -> float | None:
+    if value is None:
+        return None
+    try:
+        return max(lo, min(hi, float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+@router.post("/state", summary="Record an affective summary (Electron/renderer only)")
+async def post_state(signal: AffectiveSignal, db=Depends(get_db)) -> dict:
+    """Store the latest typing-cadence / voice-energy summary. HARD-GATED: the
+    master switch AND affective_sensing must both be on, else the signal is
+    accepted-and-ignored ({stored: false}) so the poster never races a just-
+    flipped setting (the /device convention). Only coarse numbers are accepted —
+    there is no content channel here to leak."""
+    config = await get_context_config(db)
+    if not config.enabled or not config.affective_sensing:
+        return {"stored": False}
+    record_affective_signal(
+        _clamp(signal.typing_cpm, 0.0, 2000.0),
+        _clamp(signal.backspace_rate, 0.0, 1.0),
+        _clamp(signal.voice_energy, 0.0, 1.0),
+    )
     return {"stored": True}
 
 

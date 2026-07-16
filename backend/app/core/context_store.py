@@ -49,6 +49,21 @@ GOOGLE_CACHE_TTL_SECONDS = 60.0
 #: How many unread messages to probe when counting (a digest, not the inbox).
 UNREAD_PROBE = 25
 
+# ------------------------------------------------------------- affective (Phase 13)
+#: A posted affective summary (typing cadence / voice energy) is "current" this
+#: long; after that it drops out of the derivation (staleness-gated like device).
+AFFECTIVE_FRESH_SECONDS = 90.0
+#: App-switch rate is computed over this trailing window of device signals.
+ACTIVITY_WINDOW_SECONDS = 300.0
+#: Cap the device-signal ring buffer (retention=none, in-memory, wiped on restart).
+ACTIVITY_RING_MAX = 64
+#: Coarse thresholds mapping raw signals → a 0..1 intensity/strain. All are
+#: deliberately generous — this is an arousal/effort PROXY, never an emotion read.
+TYPING_BUSY_CPM = 240.0            # sustained chars/min at/above this reads "busy"
+BACKSPACE_STRAIN_RATE = 0.25       # this fraction of keys being deletes reads "effortful"
+SWITCH_BUSY_PER_MIN = 4.0          # app switches/min at/above this reads "thrashing"
+VOICE_AROUSAL = 0.5                # scaled RMS (0..1) at/above this reads "energized"
+
 
 # --------------------------------------------------------------- in-mem state
 
@@ -68,8 +83,23 @@ class _OcrState:
     captured_at: str         # utc iso (display)
 
 
+@dataclass(frozen=True)
+class _AffectiveState:
+    """The latest client-posted affective summary (Phase 13). Each field is
+    optional — a source that isn't sensing right now is simply absent."""
+    typing_cpm: Optional[float]      # chars/min over the client's rolling window
+    backspace_rate: Optional[float]  # fraction of keystrokes that were deletes (0..1)
+    voice_energy: Optional[float]    # scaled mic RMS (0..1), an arousal proxy
+    received: float                  # time.monotonic() at receipt (staleness)
+    received_at: str                 # utc iso (display)
+
+
 _device: Optional[_DeviceState] = None
 _ocr: Optional[_OcrState] = None
+_affective: Optional[_AffectiveState] = None
+#: Rolling (monotonic_ts, app_key) of recent device signals — the app-switch
+#: rate signal for activity intensity. Retention=none; wiped on restart.
+_activity_ring: list[tuple[float, str]] = []
 #: key ("calendar"/"unread") → (monotonic_ts, value-or-None)
 _google_cache: dict[str, tuple[float, Any]] = {}
 #: (monotonic_ts, WorldModel)
@@ -78,9 +108,11 @@ _world_cache: Optional[tuple[float, "WorldModel"]] = None
 
 def reset_context_store() -> None:
     """Test/shutdown hook — drop all sensed state and caches (retention=none)."""
-    global _device, _ocr, _world_cache
+    global _device, _ocr, _affective, _world_cache
     _device = None
     _ocr = None
+    _affective = None
+    _activity_ring.clear()
     _world_cache = None
     _google_cache.clear()
 
@@ -95,15 +127,43 @@ def record_device_signal(
     """Store the latest device signal (active app/window + idle time). Called by
     the /device endpoint only after the master + device_sensing gate passes."""
     global _device, _world_cache
+    mono = time.monotonic()
     now_wall = datetime.now(timezone.utc).isoformat()
     _device = _DeviceState(
         active_app=active_app or None,
         window_title=window_title or None,
         idle_seconds=idle_seconds,
-        received=time.monotonic(),
+        received=mono,
         received_at=now_wall,
     )
+    # Feed the app-switch-rate signal (Phase 13 activity intensity). Key on the
+    # app, falling back to the window title; drop old entries beyond the window.
+    key = (active_app or window_title or "").strip()
+    if key:
+        _activity_ring.append((mono, key))
+        cutoff = mono - ACTIVITY_WINDOW_SECONDS
+        while _activity_ring and (_activity_ring[0][0] < cutoff or len(_activity_ring) > ACTIVITY_RING_MAX):
+            _activity_ring.pop(0)
     _world_cache = None  # a new signal invalidates the memoized model
+
+
+def record_affective_signal(
+    typing_cpm: Optional[float],
+    backspace_rate: Optional[float],
+    voice_energy: Optional[float],
+) -> None:
+    """Store the latest client-computed affective summary (Phase 13). Called by
+    the /state endpoint only after the master + affective_sensing gate passes.
+    Only TIMING/ENERGY summaries are posted — never keystroke content or audio."""
+    global _affective, _world_cache
+    _affective = _AffectiveState(
+        typing_cpm=typing_cpm,
+        backspace_rate=backspace_rate,
+        voice_energy=voice_energy,
+        received=time.monotonic(),
+        received_at=datetime.now(timezone.utc).isoformat(),
+    )
+    _world_cache = None
 
 
 def record_ocr_summary(summary: str) -> None:
@@ -146,6 +206,111 @@ def _derive_presence(config: ContextConfig, now: float) -> str:
     return "idle" if idle >= config.idle_threshold_seconds else "active"
 
 
+# ------------------------------------------------------- affective (Phase 13)
+
+def _affective_fresh(now: float) -> bool:
+    return _affective is not None and (now - _affective.received) <= AFFECTIVE_FRESH_SECONDS
+
+
+def _switches_per_min(now: float) -> Optional[float]:
+    """App switches per minute over the trailing activity window, or None when
+    there isn't enough history. A short span is floored to 60s so a burst can
+    never explode the rate — this is a coarse read, not a precise metric."""
+    cutoff = now - ACTIVITY_WINDOW_SECONDS
+    window = [(t, k) for (t, k) in _activity_ring if t >= cutoff]
+    if len(window) < 2:
+        return None
+    switches = sum(1 for i in range(1, len(window)) if window[i][1] != window[i - 1][1])
+    span = max(window[-1][0] - window[0][0], 60.0)
+    return switches / (span / 60.0)
+
+
+def _derive_user_state(config: ContextConfig, now: float) -> Optional[dict]:
+    """A COARSE load bucket from independently-best-effort signals: activity
+    intensity (app-switch rate + idle), typing cadence + backspace strain, and
+    voice energy. Returns None when no fresh signal contributes — never a guess.
+
+    Deliberately conservative and transparent: `signals` echoes the raw inputs
+    so the audit UI shows exactly what fed the read, and `confidence` scales with
+    how many independent source families contributed (adaptive behavior requires
+    both a busy/stressed bucket AND enough confidence — see high_load())."""
+    intensity_parts: list[float] = []
+    strain_parts: list[float] = []
+    signals: dict[str, Any] = {}
+    sources = 0
+
+    # Source 1 — activity intensity (device). Present iff a fresh device signal.
+    if _device is not None and _device_fresh(now):
+        sources += 1
+        idle = _device.idle_seconds or 0.0
+        if idle >= config.idle_threshold_seconds:
+            intensity_parts.append(0.0)   # idle overrides prior thrash → calm
+            signals["idle_seconds"] = round(idle, 1)
+        else:
+            rate = _switches_per_min(now)
+            if rate is not None:
+                signals["app_switches_per_min"] = round(rate, 2)
+                intensity_parts.append(min(1.0, rate / SWITCH_BUSY_PER_MIN))
+            else:
+                intensity_parts.append(0.0)
+
+    # Source 2 — typing cadence + backspace strain (client-posted).
+    if _affective_fresh(now) and _affective is not None:
+        a = _affective
+        if a.typing_cpm is not None:
+            sources += 1
+            signals["typing_cpm"] = round(a.typing_cpm, 1)
+            intensity_parts.append(min(1.0, a.typing_cpm / TYPING_BUSY_CPM))
+            if a.backspace_rate is not None:
+                signals["backspace_rate"] = round(a.backspace_rate, 2)
+                # rate == BACKSPACE_STRAIN_RATE maps to 0.5 strain; 2× → 1.0.
+                strain_parts.append(min(1.0, a.backspace_rate / (BACKSPACE_STRAIN_RATE * 2)))
+        # Source 3 — voice energy (arousal proxy), only while it's being sensed.
+        if a.voice_energy is not None:
+            sources += 1
+            signals["voice_energy"] = round(a.voice_energy, 2)
+            intensity_parts.append(min(1.0, a.voice_energy / VOICE_AROUSAL))
+
+    if sources == 0:
+        return None
+
+    intensity = sum(intensity_parts) / len(intensity_parts) if intensity_parts else 0.0
+    strain = max(strain_parts) if strain_parts else 0.0
+
+    if strain >= 0.5 and intensity >= 0.4:
+        load = "stressed"
+    elif intensity >= 0.6:
+        load = "busy"
+    elif intensity >= 0.3:
+        load = "steady"
+    else:
+        load = "calm"
+
+    return {
+        "load": load,
+        "confidence": round(min(1.0, sources / 3.0), 2),
+        "signals": signals,
+    }
+
+
+#: A load read only steers behavior (initiative bar, chat brevity, output router)
+#: when it is high AND confident enough — a single weak signal never re-tunes
+#: Jarvis. Kept as one predicate so every consumer agrees on the threshold.
+HIGH_LOAD_MIN_CONFIDENCE = 0.33
+
+
+def high_load(user_state: Optional[dict]) -> bool:
+    """True iff the user reads as busy/stressed with enough confidence to act on.
+    The ONE gate every adaptive consumer (backend + mirrored on the frontend)
+    shares, so a low-confidence blip never changes behavior."""
+    if not user_state:
+        return False
+    return (
+        user_state.get("load") in ("busy", "stressed")
+        and float(user_state.get("confidence") or 0.0) >= HIGH_LOAD_MIN_CONFIDENCE
+    )
+
+
 # --------------------------------------------------------------- world model
 
 @dataclass(frozen=True)
@@ -160,6 +325,7 @@ class WorldModel:
     unread: Optional[dict] = None                   # {count, has_urgent}
     recent_file_focus: Optional[dict] = None        # {filename, path, modified}
     on_screen_context: Optional[str] = None
+    user_state: Optional[dict] = None               # {load, confidence, signals} (Phase 13)
     sensing: dict = field(default_factory=dict)     # {enabled, device_sensing, ...}
     captured_at: str = ""
 
@@ -279,6 +445,7 @@ async def get_world_model(db: AsyncSession, *, use_cache: bool = True) -> WorldM
                 "enabled": bool(config.enabled) if config else False,
                 "device_sensing": bool(config.device_sensing) if config else False,
                 "screen_ocr": bool(config.screen_ocr) if config else False,
+                "affective_sensing": bool(config.affective_sensing) if config else False,
                 "device_fresh": False,
                 "ocr_fresh": False,
             },
@@ -309,6 +476,9 @@ async def get_world_model(db: AsyncSession, *, use_cache: bool = True) -> WorldM
 
     on_screen = _ocr.summary if (ocr_fresh and _ocr) else None
 
+    # Affective load — only when its own opt-in is on; best-effort, dark otherwise.
+    user_state = _derive_user_state(config, now) if config.affective_sensing else None
+
     model = WorldModel(
         presence=presence,
         active_app=active_app,
@@ -318,10 +488,12 @@ async def get_world_model(db: AsyncSession, *, use_cache: bool = True) -> WorldM
         unread=unread,
         recent_file_focus=recent_file,
         on_screen_context=on_screen,
+        user_state=user_state,
         sensing={
             "enabled": True,
             "device_sensing": config.device_sensing,
             "screen_ocr": config.screen_ocr,
+            "affective_sensing": config.affective_sensing,
             "device_fresh": device_fresh,
             "ocr_fresh": ocr_fresh,
         },
@@ -342,12 +514,13 @@ async def context_status(db: AsyncSession) -> dict:
     if config is None:
         return {
             "enabled": False, "device_sensing": False, "screen_ocr": False,
-            "device_fresh": False, "ocr_fresh": False,
+            "affective_sensing": False, "device_fresh": False, "ocr_fresh": False,
         }
     return {
         "enabled": config.enabled,
         "device_sensing": config.device_sensing,
         "screen_ocr": config.screen_ocr,
+        "affective_sensing": config.affective_sensing,
         "device_fresh": config.enabled and _device_fresh(now),
         "ocr_fresh": config.enabled and _ocr_fresh(now, config),
     }

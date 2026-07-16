@@ -13,6 +13,7 @@ import {
   Database,
   Eye,
   FolderSearch,
+  Gauge,
   Link2,
   Link2Off,
   Loader2,
@@ -1140,6 +1141,18 @@ function VoiceCard() {
           hint: 'Ctrl+Shift+J starts listening hands-free; pausing sends',
           value: settings.listen_on_summon,
         },
+        {
+          key: 'continuous_conversation',
+          label: 'Continuous conversation',
+          hint: 'After a spoken reply, keep listening briefly so you can talk back without re-triggering',
+          value: settings.continuous_conversation,
+        },
+        {
+          key: 'wake_word',
+          label: 'Wake word (“Hey Jarvis”)',
+          hint: 'Always-on microphone; detection runs on-device and audio never leaves this machine',
+          value: settings.wake_word,
+        },
       ]
     : [];
 
@@ -1411,6 +1424,7 @@ function ContextSensingCard() {
 
   const deviceSensing = settings?.device_sensing ?? true;
   const screenOcr = settings?.screen_ocr ?? false;
+  const affectiveSensing = settings?.affective_sensing ?? false;
   const ocrInterval = settings?.ocr_interval_seconds ?? 30;
   const idleThreshold = settings?.idle_threshold_seconds ?? 300;
   const hasBridge = typeof window.jarvis?.startScreenSensing === 'function';
@@ -1492,6 +1506,23 @@ function ContextSensingCard() {
               </button>
             )}
 
+            {/* Affective sensing (Phase 13) — its own opt-in, highest uncertainty */}
+            <div className="flex items-center gap-3">
+              <Gauge size={14} className="text-fuchsia-400/70 flex-shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-xs text-slate-300">Read my load (experimental)</p>
+                <p className="text-[11px] text-muted">
+                  A coarse calm/busy/stressed read from typing pace + voice energy — used only
+                  to be briefer and hold non-urgent nudges. Timing only, never keystrokes or audio.
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={affectiveSensing}
+                onToggle={() => void updateSettings({ affective_sensing: !affectiveSensing })}
+                label="Affective sensing"
+              />
+            </div>
+
             {/* Cadences */}
             <div className="flex flex-wrap items-center gap-4 pt-1">
               <div className="flex items-center gap-2">
@@ -1537,6 +1568,14 @@ function ContextSensingCard() {
                 value={world?.unread ? `${world.unread.count}${world.unread.has_urgent ? ' (urgent)' : ''}` : '—'}
               />
               <AuditRow label="On screen" value={world?.on_screen_context || '—'} />
+              {affectiveSensing && (
+                <AuditRow
+                  label="Load"
+                  value={world?.user_state
+                    ? `${world.user_state.load} (confidence ${Math.round(world.user_state.confidence * 100)}%)`
+                    : '—'}
+                />
+              )}
             </div>
           </>
         )}

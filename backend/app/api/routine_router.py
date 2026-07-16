@@ -34,7 +34,9 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.recurrence_parser import ScheduleSpec, strip_recurrence
 from app.core.routines import create_routine, get_routine_by_name
+from app.core.scheduled_routines import describe_schedule, set_routine_schedule
 from app.db.persist import persist_message_best_effort
 from app.db.schemas import ChatRequest, StreamChunk
 from app.providers.base import LLMProvider
@@ -99,19 +101,24 @@ def _clean_name(raw: str) -> str:
     return name
 
 
-def _match_teach(message: str) -> Optional[tuple[str, Optional[str]]]:
-    """(name, inline_goal_or_None) when the message is a TEACH request, else
-    None. inline_goal is a procedure written into the teach message itself."""
+def _match_teach(
+    message: str,
+) -> Optional[tuple[str, Optional[str], Optional[ScheduleSpec]]]:
+    """(name, inline_goal_or_None, schedule_spec_or_None) when the message is a
+    TEACH request, else None. inline_goal is a procedure written into the teach
+    message; schedule_spec is a recurring trigger ("...that runs every Friday at
+    4pm") pulled out of the name span BEFORE the inline split, so the recurrence
+    phrase never leaks into the routine name or an inline procedure."""
     for pattern in _TEACH_PATTERNS:
         m = pattern.search(message)
         if not m:
             continue
-        raw = m.group("name")
+        raw, spec = strip_recurrence(m.group("name"))
         parts = _INLINE_SPLIT_RE.split(raw, maxsplit=1)
         name = _clean_name(parts[0])
         inline = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
         if name:
-            return name, inline
+            return name, inline, spec
     return None
 
 
@@ -154,8 +161,8 @@ async def maybe_handle_routine(
     # TEACH — deterministic, no planner.
     teach = _match_teach(goal)
     if teach is not None:
-        name, inline = teach
-        return await _handle_teach(request, name, inline, goal, session_id, db)
+        name, inline, spec = teach
+        return await _handle_teach(request, name, inline, spec, goal, session_id, db)
 
     # RUN — explicit ("run my X routine") or an exact saved-name match.
     run_name = _match_run_name(goal)
@@ -190,10 +197,10 @@ def _capture_prior_goal(request: ChatRequest) -> Optional[str]:
     return None
 
 
-def _saved_text(name: str) -> str:
+def _saved_text(name: str, schedule_note: str = "") -> str:
     return (
-        f'Saved routine "{name}". Say "run my {name} routine" any time and '
-        f"I'll re-plan it fresh — asking before anything destructive."
+        f'Saved routine "{name}".{schedule_note} Say "run my {name} routine" '
+        f"any time and I'll re-plan it fresh — asking before anything destructive."
     )
 
 
@@ -201,6 +208,7 @@ async def _handle_teach(
     request: ChatRequest,
     name: str,
     inline: Optional[str],
+    spec: Optional[ScheduleSpec],
     goal: str,
     session_id: str,
     db: AsyncSession,
@@ -209,8 +217,23 @@ async def _handle_teach(
     if not goal_template:
         return _stream_text(_NO_GOAL_TEXT, session_id, db, persist_user=goal)
     routine = await create_routine(db, name, goal_template)
+
+    # Optional recurring schedule ("...that runs every Friday at 4pm"). A scheduled
+    # run re-derives the plan through the approval gate, so a scheduled write still
+    # pauses for approval — auto-plan, never auto-write. Best-effort.
+    schedule_note = ""
+    if spec is not None:
+        try:
+            updated = await set_routine_schedule(db, routine.id, spec.as_dict())
+            if updated is not None and updated.schedule_type:
+                schedule_note = f" I'll run it {describe_schedule(updated)}."
+        except Exception as e:
+            logger.warning(f"Routine schedule set failed (non-critical): {e}")
+
     logger.info(f"Routine '{routine.name}' taught from chat (session {session_id})")
-    return _stream_text(_saved_text(routine.name), session_id, db, persist_user=goal)
+    return _stream_text(
+        _saved_text(routine.name, schedule_note), session_id, db, persist_user=goal
+    )
 
 
 # ---------------------------------------------------------------- run

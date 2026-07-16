@@ -297,7 +297,13 @@ class VoiceConfig:
     GPU-when-present, else CPU); `stt_compute_type` tunes whisper's precision
     ("auto" derives it from the device). All coerce to their default when a
     stored row carries an out-of-whitelist value, so a pre-GPU-round config
-    deserializes cleanly."""
+    deserializes cleanly.
+
+    Phase 12 ambient fields, both default OFF and gated under the master
+    `enabled`: `continuous_conversation` (Part 12.1) re-opens a short hands-free
+    window after a spoken reply so the user can talk back without re-triggering;
+    `wake_word` (Part 12.2) enables always-on on-device "Hey Jarvis" detection
+    in the renderer (raw audio never leaves the machine)."""
     enabled: bool
     stt_model: str
     review_before_send: bool
@@ -310,6 +316,8 @@ class VoiceConfig:
     stt_device: str
     tts_device: str
     stt_compute_type: str
+    continuous_conversation: bool
+    wake_word: bool
 
 
 def default_voice_config() -> VoiceConfig:
@@ -326,6 +334,8 @@ def default_voice_config() -> VoiceConfig:
         stt_device="auto",
         tts_device="auto",
         stt_compute_type="auto",
+        continuous_conversation=False,
+        wake_word=False,
     )
 
 
@@ -373,6 +383,10 @@ def _coerce_voice(raw: Any) -> VoiceConfig:
         stt_device=stt_device,
         tts_device=tts_device,
         stt_compute_type=stt_compute_type,
+        continuous_conversation=bool(
+            raw.get("continuous_conversation", default.continuous_conversation)
+        ),
+        wake_word=bool(raw.get("wake_word", default.wake_word)),
     )
 
 
@@ -397,6 +411,8 @@ async def set_voice_config(db: AsyncSession, config: VoiceConfig) -> None:
         "stt_device": config.stt_device,
         "tts_device": config.tts_device,
         "stt_compute_type": config.stt_compute_type,
+        "continuous_conversation": config.continuous_conversation,
+        "wake_word": config.wake_word,
     })
 
 
@@ -422,14 +438,25 @@ class ContextConfig:
     CAPABILITY and defaults OFF — even with it on, the actual screen capture is
     additionally armed per-session in Electron (never silently persisted on).
 
+    `affective_sensing` (Phase 13) is its OWN opt-in master, effective only under
+    the context master and defaulting OFF: it derives a COARSE load bucket
+    (calm/steady/busy/stressed) from typing cadence, voice energy, and activity
+    intensity — an arousal/effort proxy, never an emotion read. It is the highest-
+    uncertainty signal, so it is separately gated and separately indicated.
+
     Retention is structurally NONE: nothing sensed is stored to SQLite (only
     this config is); the world model and the rolling OCR summary live in memory
-    and are staleness-gated. There is deliberately no retention field to set."""
+    and are staleness-gated. There is deliberately no retention field to set.
+
+    `affective_sensing` carries a trailing default so a pre-Phase-13 stored row
+    (and any external ContextConfig constructor) deserializes cleanly; the coercer
+    and default still set it explicitly, the VoiceConfig discipline."""
     enabled: bool
     device_sensing: bool
     screen_ocr: bool
     ocr_interval_seconds: int
     idle_threshold_seconds: int
+    affective_sensing: bool = False
 
 
 def default_context_config() -> ContextConfig:
@@ -439,6 +466,7 @@ def default_context_config() -> ContextConfig:
         screen_ocr=False,       # OCR is the most sensitive — opt-in on top of `enabled`
         ocr_interval_seconds=30,
         idle_threshold_seconds=300,
+        affective_sensing=False,  # Phase 13 — separate opt-in, highest uncertainty
     )
 
 
@@ -469,6 +497,7 @@ def _coerce_context(raw: Any) -> ContextConfig:
             CONTEXT_MIN_IDLE_THRESHOLD, CONTEXT_MAX_IDLE_THRESHOLD,
             default.idle_threshold_seconds,
         ),
+        affective_sensing=bool(raw.get("affective_sensing", default.affective_sensing)),
     )
 
 
@@ -486,6 +515,7 @@ async def set_context_config(db: AsyncSession, config: ContextConfig) -> None:
         "screen_ocr": config.screen_ocr,
         "ocr_interval_seconds": config.ocr_interval_seconds,
         "idle_threshold_seconds": config.idle_threshold_seconds,
+        "affective_sensing": config.affective_sensing,
     })
 
 

@@ -50,6 +50,7 @@ async def _enable(client, **fields):
         "screen_ocr": True,
         "ocr_interval_seconds": 30,
         "idle_threshold_seconds": 300,
+        "affective_sensing": False,
     }
     body.update(fields)
     return await client.put("/api/context/settings", json=body)
@@ -72,6 +73,19 @@ async def test_settings_put_roundtrip(client):
     assert r.json()["idle_threshold_seconds"] == 120
     again = await client.get("/api/context/settings")
     assert again.json()["idle_threshold_seconds"] == 120
+
+
+async def test_settings_roundtrips_affective(client):
+    r = await _enable(client, affective_sensing=True)
+    assert r.status_code == 200
+    assert r.json()["affective_sensing"] is True
+    again = await client.get("/api/context/settings")
+    assert again.json()["affective_sensing"] is True
+
+
+async def test_settings_defaults_affective_off(client):
+    body = (await client.get("/api/context/settings")).json()
+    assert body["affective_sensing"] is False
 
 
 async def test_settings_put_rejects_bad_interval(client):
@@ -120,6 +134,46 @@ async def test_device_truncates_long_strings(client):
     world = (await client.get("/api/context/world")).json()
     assert len(world["active_app"]) <= 256
     assert len(world["window_title"]) <= 512
+
+
+# ---------------------------------------------------- affective /state gate
+
+async def test_state_stored_and_surfaced_when_enabled(client):
+    await _enable(client, affective_sensing=True)
+    r = await client.post("/api/context/state", json={
+        "typing_cpm": 400, "backspace_rate": 0.05,
+    })
+    assert r.status_code == 200
+    assert r.json()["stored"] is True
+    world = (await client.get("/api/context/world")).json()
+    assert world["user_state"] is not None
+    assert world["user_state"]["load"] == "busy"
+
+
+async def test_state_ignored_when_affective_off(client):
+    await _enable(client, affective_sensing=False)   # master on, affective off
+    r = await client.post("/api/context/state", json={"typing_cpm": 400})
+    assert r.status_code == 200
+    assert r.json()["stored"] is False
+    world = (await client.get("/api/context/world")).json()
+    assert world["user_state"] is None
+
+
+async def test_state_ignored_when_master_off(client):
+    await _enable(client, enabled=False, affective_sensing=True)
+    r = await client.post("/api/context/state", json={"typing_cpm": 400})
+    assert r.json()["stored"] is False
+
+
+async def test_state_clamps_out_of_range(client):
+    await _enable(client, affective_sensing=True)
+    # A wild backspace_rate is clamped, not rejected — coarse, never a crash.
+    r = await client.post("/api/context/state", json={
+        "typing_cpm": 300, "backspace_rate": 9.0,
+    })
+    assert r.status_code == 200
+    world = (await client.get("/api/context/world")).json()
+    assert world["user_state"]["signals"]["backspace_rate"] == 1.0
 
 
 # ------------------------------------------------------- screen OCR gate

@@ -6,18 +6,126 @@
  * want. Running re-plans the stored goal fresh — a destructive step still
  * pauses for approval in chat.
  */
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { clsx } from 'clsx';
-import { Play, Trash2, Repeat, Workflow } from 'lucide-react';
+import { Play, Trash2, Repeat, Workflow, CalendarClock } from 'lucide-react';
 import { useRoutinesStore } from '@/stores/routinesStore';
-import type { Routine } from '@/types';
+import type { Routine, RoutineScheduleType } from '@/types';
 
 const REFRESH_INTERVAL_MS = 15_000;
 
+const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+function fmtTime(hour: number, minute: number): string {
+  const suffix = hour < 12 ? 'AM' : 'PM';
+  const h12 = hour % 12 || 12;
+  return `${h12}:${String(minute).padStart(2, '0')} ${suffix}`;
+}
+
+/** A short human phrase for a routine's schedule, or null when unscheduled. */
+function describeSchedule(r: Routine): string | null {
+  if (r.schedule_type === 'interval') {
+    const n = r.schedule_interval_minutes ?? 0;
+    if (n && n % 60 === 0) {
+      const h = n / 60;
+      return `every ${h} hour${h !== 1 ? 's' : ''}`;
+    }
+    return `every ${n} minutes`;
+  }
+  if (r.schedule_type === 'daily') return `every day at ${fmtTime(r.schedule_hour, r.schedule_minute)}`;
+  if (r.schedule_type === 'weekly' && r.schedule_weekday != null) {
+    return `every ${WEEKDAYS[r.schedule_weekday]} at ${fmtTime(r.schedule_hour, r.schedule_minute)}`;
+  }
+  return null;
+}
+
+function ScheduleEditor({ routine, onDone }: { routine: Routine; onDone: () => void }) {
+  const { setSchedule, savingScheduleId } = useRoutinesStore();
+  const [type, setType] = useState<RoutineScheduleType>(routine.schedule_type ?? null);
+  const [time, setTime] = useState(
+    `${String(routine.schedule_hour).padStart(2, '0')}:${String(routine.schedule_minute).padStart(2, '0')}`,
+  );
+  const [weekday, setWeekday] = useState(routine.schedule_weekday ?? 0);
+  const [intervalMinutes, setIntervalMinutes] = useState(routine.schedule_interval_minutes ?? 60);
+  const saving = savingScheduleId === routine.id;
+
+  const save = async () => {
+    const [h, m] = time.split(':').map((v) => parseInt(v, 10) || 0);
+    await setSchedule(routine.id, {
+      schedule_type: type,
+      schedule_hour: h,
+      schedule_minute: m,
+      schedule_weekday: type === 'weekly' ? weekday : null,
+      schedule_interval_minutes: type === 'interval' ? intervalMinutes : null,
+    });
+    onDone();
+  };
+
+  const inputCls =
+    'bg-surface-2 border border-surface-border rounded-lg px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-cyan-500/40';
+
+  return (
+    <div className="px-3.5 pb-3.5 pt-1 border-t border-surface-border/60 space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={type ?? 'off'}
+          onChange={(e) => setType(e.target.value === 'off' ? null : (e.target.value as RoutineScheduleType))}
+          className={inputCls}
+        >
+          <option value="off">No schedule</option>
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="interval">Every…</option>
+        </select>
+
+        {type === 'weekly' && (
+          <select value={weekday} onChange={(e) => setWeekday(parseInt(e.target.value, 10))} className={inputCls}>
+            {WEEKDAYS.map((d, i) => (
+              <option key={i} value={i}>{d}</option>
+            ))}
+          </select>
+        )}
+
+        {(type === 'daily' || type === 'weekly') && (
+          <input type="time" value={time} onChange={(e) => setTime(e.target.value)} className={inputCls} />
+        )}
+
+        {type === 'interval' && (
+          <div className="flex items-center gap-1">
+            <input
+              type="number"
+              min={5}
+              value={intervalMinutes}
+              onChange={(e) => setIntervalMinutes(parseInt(e.target.value, 10) || 5)}
+              className={clsx(inputCls, 'w-16')}
+            />
+            <span className="text-xs text-muted">minutes</span>
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => void save()}
+          disabled={saving}
+          className="px-2.5 py-1 rounded-lg text-xs font-medium bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25 transition-colors disabled:opacity-40"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        <button onClick={onDone} className="px-2.5 py-1 rounded-lg text-xs text-slate-500 hover:text-slate-300">
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function RoutineCard({ routine }: { routine: Routine }) {
   const { runningId, deletingId, runRoutine, deleteRoutine } = useRoutinesStore();
+  const [editing, setEditing] = useState(false);
   const isRunning = runningId === routine.id;
   const isDeleting = deletingId === routine.id;
+  const scheduleText = describeSchedule(routine);
 
   return (
     <div className="group relative bg-surface-1 border border-surface-border rounded-xl transition-all duration-200 hover:border-cyan-500/20">
@@ -31,9 +139,29 @@ function RoutineCard({ routine }: { routine: Routine }) {
             {routine.name}
           </p>
           <p className="text-xs text-muted mt-1 break-words line-clamp-3">{routine.goal_template}</p>
+          {scheduleText && (
+            <div className="flex items-center gap-1.5 mt-1.5 text-[11px] text-cyan-400/80">
+              <CalendarClock size={12} />
+              <span>Runs {scheduleText}</span>
+              {routine.next_run_at && (
+                <span className="text-slate-600">· next {new Date(routine.next_run_at).toLocaleString()}</span>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex-shrink-0 flex items-center gap-1">
+          <button
+            onClick={() => setEditing((v) => !v)}
+            className={clsx(
+              'p-1.5 rounded-lg transition-colors',
+              scheduleText ? 'text-cyan-400/70 hover:text-cyan-400' : 'text-slate-600 hover:text-cyan-400',
+              'hover:bg-cyan-500/10',
+            )}
+            title="Schedule this routine"
+          >
+            <CalendarClock size={14} />
+          </button>
           <button
             onClick={() => void runRoutine(routine.id)}
             disabled={isRunning}
@@ -52,6 +180,8 @@ function RoutineCard({ routine }: { routine: Routine }) {
           </button>
         </div>
       </div>
+
+      {editing && <ScheduleEditor routine={routine} onDone={() => setEditing(false)} />}
     </div>
   );
 }

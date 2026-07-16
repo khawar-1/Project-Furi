@@ -69,6 +69,12 @@ COMPOSER_TEMPERATURE = 0.4
 # How much of each source to feed the composer (a signal, not the firehose).
 _CADENCE_TASKS = 6
 _RECENT_SUGGESTIONS = 8
+_PATTERNS_LIMIT = 5
+
+# Predictive pre-work (Phase 10.3) windows.
+_PREP_LOOKAHEAD_HOURS = 3          # a meeting starting within this window can be prepped
+_MORNING_TRIAGE_START_HOUR = 7     # inbox-triage opportunity window (local)
+_MORNING_TRIAGE_END_HOUR = 11
 
 _AUTONOMY_ORDER = ("suggest", "ask", "act")
 
@@ -174,6 +180,97 @@ async def _gather_cadence(db: AsyncSession) -> dict:
     return out
 
 
+async def _gather_patterns(db: AsyncSession) -> list:
+    """Recurring completed goals + their cadence (Phase 10.1). Best-effort → []."""
+    try:
+        from app.core.pattern_mining import mine_task_patterns
+        return await mine_task_patterns(db, limit=_PATTERNS_LIMIT)
+    except Exception as e:
+        logger.debug(f"Initiative: patterns dropped ({type(e).__name__}: {e})")
+        return []
+
+
+async def _gather_meeting_prep() -> list[dict]:
+    """Upcoming TIMED events starting within the next few hours — candidates for
+    a read-only prep packet (Phase 10.3). Best-effort → []. Own calendar query
+    (a narrow now→now+window range), reusing the tools' row/format helpers."""
+    try:
+        from app.core import daily_briefing as brief
+        from app.integrations.google_auth import GoogleNotConnectedError
+        from app.integrations.google_services import get_calendar_service
+        from app.tools.calendar_tools import _event_row, format_event_when
+
+        service = await get_calendar_service()
+        now = datetime.now()
+        end = now + timedelta(hours=_PREP_LOOKAHEAD_HOURS)
+        listing = await brief._run(service.events().list(
+            calendarId="primary",
+            timeMin=now.astimezone().isoformat(),
+            timeMax=end.astimezone().isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=5,
+        ))
+        out: list[dict] = []
+        for e in listing.get("items") or []:
+            r = _event_row(e)
+            if r.get("all_day"):
+                continue  # a prep packet is for a timed meeting, not an all-day marker
+            out.append({"summary": r["summary"], "when": format_event_when(r)})
+        return out
+    except Exception as e:  # includes GoogleNotConnectedError → no prep, no noise
+        logger.debug(f"Initiative: meeting-prep dropped ({type(e).__name__}: {e})")
+        return []
+
+
+def _morning_triage_due(unread_count: int) -> bool:
+    """True during the local morning window when unread email is waiting — an
+    inbox-triage prep opportunity."""
+    hour = datetime.now().hour
+    return unread_count > 0 and _MORNING_TRIAGE_START_HOUR <= hour < _MORNING_TRIAGE_END_HOUR
+
+
+async def _gather_people_cadence(db: AsyncSession) -> list[dict]:
+    """People not caught up with in a while (Phase 11.1). Best-effort → []."""
+    try:
+        from app.core.relationship_cadence import people_cadence
+        return await people_cadence(db)
+    except Exception as e:
+        logger.debug(f"Initiative: people-cadence dropped ({type(e).__name__}: {e})")
+        return []
+
+
+async def _gather_goal_threads(db: AsyncSession) -> list[dict]:
+    """Due ongoing-concern threads to follow up on (Phase 11.3). Marks each
+    nudged so it isn't re-surfaced on every heartbeat. Best-effort → []."""
+    try:
+        from app.core.goal_threads import due_threads, mark_nudged
+        threads = await due_threads(db)
+        out: list[dict] = []
+        for t in threads:
+            out.append({
+                "title": t.title,
+                "description": t.description,
+                "event_date": t.event_date.isoformat() if t.event_date else None,
+            })
+            await mark_nudged(db, t)
+        return out
+    except Exception as e:
+        logger.debug(f"Initiative: goal-threads dropped ({type(e).__name__}: {e})")
+        return []
+
+
+async def _gather_memory_callbacks(db: AsyncSession) -> list[dict]:
+    """Heuristic open-concern facts to follow up on — the fallback when there
+    are no structured goal-threads (Phase 11.2). Best-effort → []."""
+    try:
+        from app.core.relationship_cadence import memory_callbacks
+        return await memory_callbacks(db)
+    except Exception as e:
+        logger.debug(f"Initiative: memory-callbacks dropped ({type(e).__name__}: {e})")
+        return []
+
+
 async def gather_initiative_signals(db: AsyncSession) -> dict:
     """Every input the composer reasons over, each INDEPENDENTLY best-effort (the
     gather_briefing_sections rule — a dead source drops its section, never the
@@ -190,13 +287,29 @@ async def gather_initiative_signals(db: AsyncSession) -> dict:
         logger.debug(f"Initiative: world model dropped ({type(e).__name__}: {e})")
         world = {}
 
+    unread_emails = await brief._gather_unread()
+
+    # Prefer structured goal-threads for follow-ups; the memory-callback
+    # heuristic is only a fallback when there are no due threads (avoids
+    # double-nudging the same concern from two sources).
+    goal_threads = await _gather_goal_threads(db)
+    memory_callbacks = [] if goal_threads else await _gather_memory_callbacks(db)
+
     return {
         "world": world,
         "events": await brief._gather_events(),
-        "unread_emails": await brief._gather_unread(),
+        "unread_emails": unread_emails,
         "birthdays": await brief._gather_birthdays(db),
         "memories": await brief._gather_memories(db),
         "cadence": await _gather_cadence(db),
+        "patterns": await _gather_patterns(db),
+        "prep": {
+            "meetings": await _gather_meeting_prep(),
+            "inbox_triage": _morning_triage_due(len(unread_emails)),
+        },
+        "people_cadence": await _gather_people_cadence(db),
+        "goal_threads": goal_threads,
+        "memory_callbacks": memory_callbacks,
         "affinities": await _safe_affinities(db),
         "recent_suggestions": await _recent_suggestion_titles(db),
     }
@@ -228,6 +341,8 @@ def _is_empty(signals: dict) -> bool:
         "next_calendar_event", "unread", "recent_file_focus", "on_screen_context",
     ))
     cadence = signals.get("cadence") or {}
+    prep = signals.get("prep") or {}
+    prep_has = bool(prep.get("meetings") or prep.get("inbox_triage"))
     return not any([
         signals.get("events"),
         signals.get("unread_emails"),
@@ -235,6 +350,11 @@ def _is_empty(signals: dict) -> bool:
         signals.get("memories"),
         cadence.get("recent_goals"),
         cadence.get("routines"),
+        signals.get("patterns"),
+        prep_has,
+        signals.get("people_cadence"),
+        signals.get("goal_threads"),
+        signals.get("memory_callbacks"),
         world_has,
     ])
 
@@ -267,6 +387,28 @@ _COMPOSER_SYSTEM = (
     "in doubt use \"ask\". Anything that sends a message, deletes, or leaves the "
     "machine must be \"ask\", never \"act\".\n"
     "- priority: \"low\", \"normal\", or \"high\"\n\n"
+    "RECURRING PATTERNS: if the user keeps doing the same task (a listed "
+    "pattern), you may suggest automating it — as an informational nudge "
+    "(\"suggest\", no action) spelling out that they can say \"save this as a "
+    "routine that runs <when>\", or as an \"ask\" offering to do that same task "
+    "now. Category \"task_followup\".\n"
+    "PREDICTIVE PREP: for an upcoming meeting or a waiting inbox you may propose "
+    "READ-ONLY preparation — gathering, summarizing, or recalling context only, "
+    "NEVER sending, creating, or changing anything. Write the proposed_action so "
+    "it clearly only reads (e.g. \"Prepare a prep packet for my 3pm meeting "
+    "'Design review': read the calendar entry, find related recent emails, and "
+    "recall any notes about it\" or \"Summarize my unread emails into a short "
+    "triage list\"). Because such prep only reads, it may be \"act\"; category "
+    "\"calendar_prep\" (meetings) or \"email_followup\" (inbox).\n"
+    "RECONNECTING: for someone the user hasn't caught up with in a while, you "
+    "may gently suggest reaching out — phrase it as \"you haven't caught up with "
+    "X in a while\" (NOT a false \"you haven't messaged X\"; we only know when "
+    "they last came up). Because reaching out sends a message, this is \"ask\", "
+    "never \"act\"; category \"task_followup\".\n"
+    "FOLLOW-UPS: for an OPEN THREAD or a recent note that reads like an open "
+    "concern, you may check in (\"last week you were worried about the deadline "
+    "— how did that land?\"). This is usually informational (\"suggest\", no "
+    "action); category \"memory_reminder\".\n\n"
     "Respect the user's feedback: the AFFINITIES section says which categories "
     "they usually accept or dismiss — lean into accepted ones, be sparing with "
     "dismissed ones. Do not repeat anything in RECENTLY SUGGESTED.\n\n"
@@ -347,6 +489,53 @@ def _render_signal_block(signals: dict) -> str:
     if cadence.get("routines"):
         lines.append("")
         lines.append("SAVED ROUTINES: " + ", ".join(cadence["routines"]))
+
+    patterns = signals.get("patterns") or []
+    if patterns:
+        from app.core.pattern_mining import format_task_patterns
+        block = format_task_patterns(patterns)
+        if block:
+            lines.append("")
+            lines.append("RECURRING PATTERNS (a routine could automate these):")
+            lines.append(block)
+
+    prep = signals.get("prep") or {}
+    meetings = prep.get("meetings") or []
+    if meetings:
+        lines.append("")
+        lines.append("UPCOMING MEETINGS (a read-only prep packet could help):")
+        for m in meetings:
+            lines.append(f"- {m['when']}: {m['summary']}")
+    if prep.get("inbox_triage"):
+        lines.append("")
+        lines.append(
+            "INBOX: unread email is waiting this morning — a read-only triage/"
+            "summary could help start the day."
+        )
+
+    people = signals.get("people_cadence") or []
+    if people:
+        lines.append("")
+        lines.append("PEOPLE YOU HAVEN'T CAUGHT UP WITH IN A WHILE:")
+        for p in people:
+            rel = f", {p['relationship_type']}" if p.get("relationship_type") else ""
+            lines.append(f"- {p['name']}{rel} — ~{p['weeks_since']} weeks since they last came up")
+
+    threads = signals.get("goal_threads") or []
+    if threads:
+        lines.append("")
+        lines.append("OPEN THREADS (things the user had a stake in — worth a follow-up):")
+        for t in threads:
+            date_part = f" (dated {t['event_date']})" if t.get("event_date") else ""
+            desc = f" — {t['description']}" if t.get("description") else ""
+            lines.append(f"- {t['title']}{date_part}{desc}")
+
+    callbacks = signals.get("memory_callbacks") or []
+    if callbacks:
+        lines.append("")
+        lines.append("RECENT NOTES THAT MAY WANT A FOLLOW-UP:")
+        for c in callbacks:
+            lines.append(f"- ({c['days_ago']} days ago) {c['content']}")
 
     affinities = signals.get("affinities") or {}
     if affinities:
@@ -448,6 +637,18 @@ def _priority_rank(priority: str) -> int:
     return {"high": 0, "normal": 1, "low": 2}.get(priority, 1)
 
 
+def _under_load(signals: dict) -> bool:
+    """True iff the World Model's affective read says the user is busy/stressed
+    with enough confidence to act on (Phase 13.2). Best-effort — a missing/dark
+    section reads as 'not under load' (the graceful default)."""
+    try:
+        from app.core.context_store import high_load
+        world = signals.get("world") or {}
+        return high_load(world.get("user_state"))
+    except Exception:
+        return False
+
+
 async def _dispatch_candidate(
     db: AsyncSession,
     candidate: InitiativeCandidate,
@@ -547,6 +748,21 @@ async def _run_pass(db: AsyncSession, config, provider=None) -> int:
 
     # Highest priority first, so a tight budget spends on what matters most.
     candidates.sort(key=lambda c: _priority_rank(c.priority))
+
+    # Phase 13.2 — when the user reads as busy/stressed (with enough confidence),
+    # raise the surfacing bar: only HIGH-priority candidates survive, so Jarvis
+    # doesn't pile trivia on someone already under load. Deterministic and
+    # strictly reductive — it can only drop candidates, never add or upgrade one.
+    if _under_load(signals):
+        high = [c for c in candidates if c.priority == "high"]
+        if len(high) != len(candidates):
+            logger.debug(
+                f"Initiative: user under load — {len(candidates)}→{len(high)} "
+                "candidate(s) after the high-priority-only filter"
+            )
+        candidates = high
+        if not candidates:
+            return 0
 
     session_id = await _latest_session_id(db)
     remaining = await _budget_remaining(db, config.daily_budget)

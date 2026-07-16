@@ -4,10 +4,11 @@
  */
 import { useEffect, useState } from 'react';
 import { clsx } from 'clsx';
-import { Circle, Cpu, Eye, Sparkles, Wifi, WifiOff, RefreshCw } from 'lucide-react';
+import { Circle, Cpu, Eye, Mic, Sparkles, Wifi, WifiOff, RefreshCw } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 import { usePushStore } from '@/stores/pushStore';
 import { useContextStore } from '@/stores/contextStore';
+import { useVoiceStore } from '@/stores/voiceStore';
 import { initiativeApi } from '@/lib/api';
 
 const SENSING_POLL_MS = 10_000;
@@ -18,6 +19,10 @@ export function StatusBar() {
   const pushConnected = usePushStore((s) => s.connected);
   const sensing = useContextStore((s) => s.status);
   const fetchSensingStatus = useContextStore((s) => s.fetchStatus);
+  // Phase 12.2: the required visible indicator while the wake-word mic is armed.
+  const wakeWordOn = useVoiceStore(
+    (s) => !!s.settings?.enabled && !!s.settings?.wake_word
+  );
   const [initiativeOn, setInitiativeOn] = useState(false);
 
   // The required visible "sensing on" indicator — poll the cheap status.
@@ -132,6 +137,17 @@ export function StatusBar() {
             <span className={clsx(sensing.screen_ocr ? 'text-amber-400' : 'text-emerald-500')}>
               Sensing: On{sensing.screen_ocr ? ' (screen)' : ''}
             </span>
+          </div>
+        )}
+
+        {/* Wake-word indicator (Phase 12.2) — the always-on mic must be visible */}
+        {wakeWordOn && (
+          <div
+            className="flex items-center gap-1"
+            title="Wake word on — listening for “Hey Jarvis” (on-device; audio never leaves this machine)"
+          >
+            <Mic size={10} className="text-amber-400" />
+            <span className="text-amber-400">Listening · Hey Jarvis</span>
           </div>
         )}
 

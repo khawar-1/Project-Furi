@@ -113,9 +113,19 @@ def test_match_teach_extracts_name(message, expected_name):
 def test_match_teach_splits_inline_goal():
     result = _match_teach('save this as a routine called cleanup that: delete the tmp files')
     assert result is not None
-    name, inline = result
+    name, inline, spec = result
     assert name == "cleanup"
     assert inline == "delete the tmp files"
+    assert spec is None  # no recurrence phrase
+
+
+def test_match_teach_extracts_recurrence():
+    result = _match_teach('save this as a routine called weekly report that runs every friday at 4pm')
+    assert result is not None
+    name, inline, spec = result
+    assert name == "weekly report"
+    assert inline is None
+    assert spec is not None and spec.schedule_type == "weekly" and spec.schedule_weekday == 4
 
 
 @pytest.mark.parametrize(

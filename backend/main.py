@@ -23,11 +23,13 @@ from app.api import routines as routines_api
 from app.api import voice as voice_api
 from app.api import context as context_api
 from app.api import initiative as initiative_api
+from app.api import threads as threads_api
 import app.core.reminders  # noqa: F401 — registers the "reminder" job handler at import time
 import app.core.birthdays  # noqa: F401 — registers the "birthday" job handler at import time
 import app.core.daily_briefing  # noqa: F401 — registers the "daily_briefing" job handler at import time
 import app.core.reindex  # noqa: F401 — registers the "reindex" job handler at import time
 import app.core.initiative  # noqa: F401 — registers the "initiative" job handler at import time
+import app.core.scheduled_routines  # noqa: F401 — registers the "routine" job handler at import time
 
 
 @asynccontextmanager
@@ -203,6 +205,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as e:
         logger.warning(f"⚠️  Initiative-job reconciliation failed (non-critical): {e}")
 
+    # Phase 10.2: reconcile scheduled-routine jobs — arm scheduled routines,
+    # heal a fire/re-arm crash, sweep orphans. After scheduler.start(); non-critical.
+    try:
+        from app.core.scheduled_routines import ensure_routine_schedule_jobs
+        await ensure_routine_schedule_jobs()
+    except Exception as e:
+        logger.warning(f"⚠️  Routine-schedule reconciliation failed (non-critical): {e}")
+
     logger.info(f"🤖 LLM Provider: {settings.LLM_PROVIDER}")
     logger.info(f"🌐 Backend ready at http://{settings.BACKEND_HOST}:{settings.BACKEND_PORT}")
 
@@ -280,6 +290,9 @@ def create_app() -> FastAPI:
 
     # Phase 9 — the Initiative Engine (proactive suggestion feed + settings)
     app.include_router(initiative_api.router, prefix="/api/initiative", tags=["Initiative"])
+
+    # Phase 11 — goal threads (ongoing-concern tracking)
+    app.include_router(threads_api.router, prefix="/api/threads", tags=["Threads"])
 
     return app
 

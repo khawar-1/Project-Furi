@@ -19,6 +19,7 @@
  * The audio never leaves the machine: the caller posts the returned Blob to
  * the loopback-only backend.
  */
+import { recordVoiceEnergy } from '@/lib/affectiveSensing';
 
 export const MIN_RECORDING_MS = 300;
 export const MAX_RECORDING_MS = 60_000;
@@ -56,6 +57,13 @@ export interface RecorderOptions {
   /** Part 5 (summon listening): auto-stop after SILENCE_STOP_MS of quiet once
    *  speech was heard (or MAX_INITIAL_SILENCE_MS if it never was). */
   silenceStop?: boolean;
+  /** Phase 12.1 (continuous conversation): override the never-heard-speech
+   *  grace. A follow-up window uses a shorter grace so a quiet user closes the
+   *  conversation quickly. Defaults to MAX_INITIAL_SILENCE_MS. */
+  initialSilenceMs?: number;
+  /** Override the post-speech quiet gap that ends an utterance. Defaults to
+   *  SILENCE_STOP_MS. */
+  silenceStopMs?: number;
 }
 
 export interface RecordingHandle {
@@ -134,6 +142,8 @@ export async function startRecording(
   let heardSpeech = false;
   let lastLoudAt = startedAt;
   let autoStopFired = false;
+  const silenceStopMs = options.silenceStopMs ?? SILENCE_STOP_MS;
+  const initialSilenceMs = options.initialSilenceMs ?? MAX_INITIAL_SILENCE_MS;
 
   let rafId = 0;
   const meter = () => {
@@ -146,6 +156,8 @@ export async function startRecording(
     // RMS of speech is small — scale up and clamp so the waveform is lively.
     const level = Math.min(1, Math.sqrt(sumSquares / samples.length) * 3.5);
     callbacks.onLevel?.(level);
+    // Phase 13: feed the arousal proxy (gated/consumed inside affectiveSensing).
+    recordVoiceEnergy(level);
     if (options.silenceStop && !autoStopFired && !finished && !cancelled) {
       const now = Date.now();
       if (level >= SILENCE_LEVEL_THRESHOLD) {
@@ -153,8 +165,8 @@ export async function startRecording(
         lastLoudAt = now;
       } else if (
         heardSpeech
-          ? now - lastLoudAt >= SILENCE_STOP_MS
-          : now - startedAt >= MAX_INITIAL_SILENCE_MS
+          ? now - lastLoudAt >= silenceStopMs
+          : now - startedAt >= initialSilenceMs
       ) {
         autoStopFired = true;
         stopRecorder();

@@ -10,6 +10,8 @@ from app.core.app_settings import ContextConfig, set_context_config
 from app.core.context_store import (
     context_status,
     get_world_model,
+    high_load,
+    record_affective_signal,
     record_device_signal,
     record_ocr_summary,
 )
@@ -66,6 +68,7 @@ async def _enable(db, **overrides):
         screen_ocr=overrides.get("screen_ocr", True),
         ocr_interval_seconds=overrides.get("ocr_interval_seconds", 30),
         idle_threshold_seconds=overrides.get("idle_threshold_seconds", 300),
+        affective_sensing=overrides.get("affective_sensing", False),
     )
     await set_context_config(db, cfg)
 
@@ -207,3 +210,77 @@ async def test_status_dark_when_master_off(db_session):
     status = await context_status(db_session)
     assert status["enabled"] is False
     assert status["device_fresh"] is False   # gated by the master switch
+
+
+# --------------------------------------------------- affective (Phase 13)
+
+async def test_user_state_absent_when_affective_off(db_session):
+    # Master on, affective opt-in OFF → no load read even with a fresh signal.
+    await _enable(db_session, affective_sensing=False)
+    record_affective_signal(typing_cpm=300, backspace_rate=0.0, voice_energy=None)
+    model = await get_world_model(db_session, use_cache=False)
+    assert model.user_state is None
+    assert model.sensing["affective_sensing"] is False
+
+
+async def test_user_state_none_without_any_signal(db_session):
+    # Affective on but nothing posted and no device signal → honest None.
+    await _enable(db_session, affective_sensing=True)
+    model = await get_world_model(db_session, use_cache=False)
+    assert model.user_state is None
+    assert model.sensing["affective_sensing"] is True
+
+
+async def test_user_state_calm_when_quiet(db_session):
+    await _enable(db_session, affective_sensing=True)
+    record_affective_signal(typing_cpm=10, backspace_rate=0.0, voice_energy=None)
+    model = await get_world_model(db_session, use_cache=False)
+    assert model.user_state is not None
+    assert model.user_state["load"] == "calm"
+    assert high_load(model.user_state) is False
+
+
+async def test_user_state_busy_when_typing_fast(db_session):
+    await _enable(db_session, affective_sensing=True)
+    record_affective_signal(typing_cpm=400, backspace_rate=0.05, voice_energy=None)
+    model = await get_world_model(db_session, use_cache=False)
+    assert model.user_state["load"] == "busy"
+    assert model.user_state["signals"]["typing_cpm"] == 400.0
+    assert high_load(model.user_state) is True
+
+
+async def test_user_state_stressed_from_high_backspace(db_session):
+    await _enable(db_session, affective_sensing=True)
+    # Fast typing AND a high delete rate → effortful → stressed.
+    record_affective_signal(typing_cpm=300, backspace_rate=0.6, voice_energy=None)
+    model = await get_world_model(db_session, use_cache=False)
+    assert model.user_state["load"] == "stressed"
+    assert high_load(model.user_state) is True
+
+
+async def test_user_state_confidence_scales_with_sources(db_session):
+    await _enable(db_session, affective_sensing=True)
+    # Two source families (typing + voice) present → confidence ~2/3.
+    record_affective_signal(typing_cpm=300, backspace_rate=0.1, voice_energy=0.7)
+    model = await get_world_model(db_session, use_cache=False)
+    assert model.user_state["confidence"] == pytest.approx(0.67, abs=0.01)
+
+
+async def test_user_state_dark_when_master_off(db_session):
+    await _enable(db_session, enabled=False, affective_sensing=True)
+    record_affective_signal(typing_cpm=400, backspace_rate=0.5, voice_energy=0.9)
+    model = await get_world_model(db_session, use_cache=False)
+    # Master off → no load read at all (dark), even though the sub-toggle is on
+    # (sensing echoes the configured flag, like device_sensing/screen_ocr do).
+    assert model.user_state is None
+    assert model.sensing["enabled"] is False
+    assert model.sensing["affective_sensing"] is True
+
+
+def test_high_load_predicate_gates_on_confidence():
+    assert high_load(None) is False
+    assert high_load({"load": "calm", "confidence": 1.0}) is False
+    # Busy but too low-confidence to act on.
+    assert high_load({"load": "busy", "confidence": 0.2}) is False
+    assert high_load({"load": "busy", "confidence": 0.5}) is True
+    assert high_load({"load": "stressed", "confidence": 0.34}) is True

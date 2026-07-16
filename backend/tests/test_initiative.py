@@ -477,3 +477,165 @@ async def test_run_now_noop_when_off(factory, sched):
     await _enable(factory, sched, autonomy="off")
     async with factory() as db:
         assert await run_initiative_now(db) == 0
+
+
+# ============================ Phase 10 signals: patterns + prep
+
+def test_render_includes_patterns_and_prep():
+    from app.core.pattern_mining import PatternCadence, PatternCandidate
+    signals = {
+        "world": {}, "events": [], "unread_emails": [], "birthdays": [],
+        "memories": [], "cadence": {}, "affinities": {}, "recent_suggestions": [],
+        "patterns": [PatternCandidate(
+            "compile the week", "Compile the week", 4,
+            PatternCadence(kind="weekly", weekday=4, hour=16, minute=0))],
+        "prep": {
+            "meetings": [{"summary": "Design review", "when": "2026-07-16 15:00"}],
+            "inbox_triage": True,
+        },
+    }
+    block = ini._render_signal_block(signals)
+    assert "RECURRING PATTERNS" in block and "Compile the week" in block
+    assert "UPCOMING MEETINGS" in block and "Design review" in block
+    assert "INBOX:" in block
+
+
+def test_is_empty_considers_patterns_and_prep():
+    base = {"world": {}, "events": [], "unread_emails": [], "birthdays": [],
+            "memories": [], "cadence": {}, "affinities": {}, "recent_suggestions": []}
+    assert ini._is_empty({**base, "patterns": [], "prep": {"meetings": [], "inbox_triage": False}})
+    assert not ini._is_empty({**base, "patterns": [object()], "prep": {}})
+    assert not ini._is_empty({**base, "patterns": [], "prep": {"inbox_triage": True}})
+
+
+def test_morning_triage_window(monkeypatch):
+    import app.core.initiative as m
+    from datetime import datetime as _dt
+
+    class _Clock(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 16, 9, 0)  # 09:00 local — inside the window
+
+    monkeypatch.setattr(m, "datetime", _Clock)
+    assert m._morning_triage_due(3) is True
+    assert m._morning_triage_due(0) is False  # no unread → no opportunity
+
+
+async def test_gather_patterns_from_tasks(factory):
+    from datetime import timedelta
+    base = datetime(2026, 7, 3, 16, 0)
+    async with factory() as db:
+        for i in range(3):
+            db.add(Task(goal="compile the week", status="completed",
+                        finished_at=base + timedelta(weeks=i)))
+        await db.commit()
+        patterns = await ini._gather_patterns(db)
+    assert any(p.normalized_goal == "compile the week" for p in patterns)
+
+
+# ==================== Phase 11 signals: people cadence + threads + callbacks
+
+def test_render_includes_relationship_signals():
+    signals = {
+        "world": {}, "events": [], "unread_emails": [], "birthdays": [],
+        "memories": [], "cadence": {}, "affinities": {}, "recent_suggestions": [],
+        "patterns": [], "prep": {},
+        "people_cadence": [{"name": "Jamil", "weeks_since": 6, "relationship_type": "friend"}],
+        "goal_threads": [{"title": "The deadline", "description": "worried", "event_date": None}],
+        "memory_callbacks": [],
+    }
+    block = ini._render_signal_block(signals)
+    assert "PEOPLE YOU HAVEN'T CAUGHT UP WITH" in block and "Jamil" in block
+    assert "OPEN THREADS" in block and "The deadline" in block
+
+
+def test_is_empty_considers_relationship_signals():
+    base = {"world": {}, "events": [], "unread_emails": [], "birthdays": [],
+            "memories": [], "cadence": {}, "affinities": {}, "recent_suggestions": [],
+            "patterns": [], "prep": {}}
+    assert ini._is_empty({**base, "people_cadence": [], "goal_threads": [], "memory_callbacks": []})
+    assert not ini._is_empty({**base, "people_cadence": [{"name": "X", "weeks_since": 5}]})
+    assert not ini._is_empty({**base, "goal_threads": [{"title": "t"}]})
+
+
+async def test_gather_goal_threads_marks_nudged(factory):
+    from datetime import timedelta
+    from app.core.goal_threads import get_thread, upsert_thread
+    async with factory() as db:
+        t = await upsert_thread(db, "worried about the deadline")
+        t.next_check_at = utc_now() - timedelta(days=1)  # make it due
+        await db.commit()
+        tid = t.id
+
+        out = await ini._gather_goal_threads(db)
+        assert any(x["title"] == "worried about the deadline" for x in out)
+
+        # It was marked nudged, so it is no longer due (no re-nudge next heartbeat).
+        refreshed = await get_thread(db, tid)
+        assert refreshed.last_nudged_at is not None
+        assert refreshed.next_check_at > utc_now()
+
+
+# ==================== Phase 13: affective governor (high-load surfacing bar)
+
+def _cfg_high_gap():
+    return InitiativeConfig(
+        enabled=True, autonomy="ask", interval_minutes=45, daily_budget=5,
+        quiet_start_hour=_non_quiet()[0], quiet_end_hour=_non_quiet()[1],
+        min_gap_minutes=30,
+    )
+
+
+def _priority_json(priority: str):
+    return json.dumps({"initiatives": [{
+        "title": "Reply to Bob", "category": "email_followup",
+        "rationale": "Bob is waiting.", "body": "Draft a reply?",
+        "proposed_action": "Draft a reply to Bob", "suggested_autonomy": "ask",
+        "priority": priority,
+    }]})
+
+
+async def test_under_load_drops_non_high_priority(factory, monkeypatch):
+    """Busy+confident world → a normal-priority candidate is filtered out."""
+    async def _signals(db):
+        return {"world": {"user_state": {"load": "busy", "confidence": 0.67}},
+                "events": [{"when": "now", "summary": "x"}]}
+    monkeypatch.setattr(ini, "gather_initiative_signals", _signals)
+    async with factory() as db:
+        surfaced = await ini._run_pass(db, _cfg_high_gap(),
+                                       provider=_FakeProvider(_priority_json("normal")))
+    assert surfaced == 0
+    async with factory() as db:
+        assert len((await db.execute(select(Suggestion))).scalars().all()) == 0
+
+
+async def test_under_load_keeps_high_priority(factory, monkeypatch):
+    """A HIGH-priority candidate still surfaces even under load."""
+    async def _signals(db):
+        return {"world": {"user_state": {"load": "stressed", "confidence": 0.67}},
+                "events": [{"when": "now", "summary": "x"}]}
+    monkeypatch.setattr(ini, "gather_initiative_signals", _signals)
+    async with factory() as db:
+        surfaced = await ini._run_pass(db, _cfg_high_gap(),
+                                       provider=_FakeProvider(_priority_json("high")))
+    assert surfaced == 1
+
+
+async def test_low_confidence_load_does_not_filter(factory, monkeypatch):
+    """A busy read below the confidence gate never changes surfacing."""
+    async def _signals(db):
+        return {"world": {"user_state": {"load": "busy", "confidence": 0.2}},
+                "events": [{"when": "now", "summary": "x"}]}
+    monkeypatch.setattr(ini, "gather_initiative_signals", _signals)
+    async with factory() as db:
+        surfaced = await ini._run_pass(db, _cfg_high_gap(),
+                                       provider=_FakeProvider(_priority_json("normal")))
+    assert surfaced == 1
+
+
+def test_under_load_helper_gates_on_confidence():
+    assert ini._under_load({"world": {"user_state": {"load": "busy", "confidence": 0.5}}}) is True
+    assert ini._under_load({"world": {"user_state": {"load": "busy", "confidence": 0.1}}}) is False
+    assert ini._under_load({"world": {}}) is False
+    assert ini._under_load({}) is False

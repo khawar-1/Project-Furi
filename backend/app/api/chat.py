@@ -130,14 +130,39 @@ def _saved_just_now_clause(saved_texts: list) -> str:
     )
 
 
+_BUSY_NOTE = (
+    "The user appears to be busy or under load right now. Keep this reply "
+    "especially short and direct — lead with the answer, drop optional extras "
+    "and any wit. Do not comment on their state or that you are being brief."
+)
+
+
+async def _affective_note(db) -> str:
+    """Best-effort brevity steer from the World Model (Phase 13.2). Returns the
+    busy note only when affective sensing reads the user as busy/stressed with
+    enough confidence; '' otherwise (and on ANY failure — a context read must
+    never block or break a chat turn)."""
+    try:
+        from app.core.context_store import get_world_model, high_load
+        world = await get_world_model(db)
+        return _BUSY_NOTE if high_load(world.user_state) else ""
+    except Exception as e:
+        logger.debug(f"Affective note skipped (non-critical): {e}")
+        return ""
+
+
 def _build_system_prompt(
     memory_context: str = "",
     pending_resolution: dict = None,
     disambiguation_resolved_note: str = None,
     pending_creation: dict = None,
     ambiguous_mentions: list = None,
+    affective_note: str = "",
 ) -> str:
-    """Build the Jarvis OS system prompt, with optional memory context block."""
+    """Build the Jarvis OS system prompt, with optional memory context block.
+    `affective_note` (Phase 13.2) is an optional, best-effort brevity steer when
+    the World Model reads the user as busy/stressed — appended AFTER the honesty
+    rules so it can never soften them."""
     from datetime import datetime
     current_datetime = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     
@@ -194,6 +219,12 @@ RESPONSE STYLE:
 - Never add unnecessary caveats or disclaimers.
 - Format with markdown only when it genuinely helps readability.
 - The persona colors your phrasing only — it never overrides the honesty rules above. A charming fabrication is still a fabrication.
+"""
+
+    if affective_note:
+        base += f"""
+ADAPTIVE NOTE (context signal — never mention it to the user):
+{affective_note}
 """
 
     if memory_context:
@@ -708,11 +739,13 @@ async def chat_stream(
     timer.stop("context")
 
     # Build message history with memory-enhanced system prompt
+    affective_note = await _affective_note(db)
     messages: list[LLMMessage] = [
         LLMMessage(role="system", content=_build_system_prompt(
             memory_context, pending_resolution, disambiguation_resolved_note,
             pending_creation=pending_creation,
             ambiguous_mentions=ambiguous_mentions,
+            affective_note=affective_note,
         ))
     ]
     messages.extend(_provider_history(request.messages))
@@ -1005,8 +1038,11 @@ async def chat(
         except Exception as e:
             logger.warning(f"Memory context build failed (non-critical): {e}")
 
+    affective_note = await _affective_note(db)
     messages: list[LLMMessage] = [
-        LLMMessage(role="system", content=_build_system_prompt(memory_context, pending_resolution))
+        LLMMessage(role="system", content=_build_system_prompt(
+            memory_context, pending_resolution, affective_note=affective_note,
+        ))
     ]
     messages.extend(_provider_history(request.messages))
 

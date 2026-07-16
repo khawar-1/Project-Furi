@@ -307,12 +307,48 @@ export interface Reminder {
 // ============================================================
 // Routines (Phase 6, Part 5 — teachable procedural memory)
 // ============================================================
+export type RoutineScheduleType = 'interval' | 'daily' | 'weekly' | null;
+
+export interface RoutineSchedule {
+  schedule_type: RoutineScheduleType;
+  schedule_hour: number;
+  schedule_minute: number;
+  schedule_weekday: number | null;
+  schedule_interval_minutes: number | null;
+}
+
 export interface Routine {
   id: string;
   name: string;
   normalized_name: string;
   goal_template: string;
   is_active: boolean;
+  // Schedule (Phase 10.2 — scheduled routines). next_run_at is server-computed.
+  schedule_type: RoutineScheduleType;
+  schedule_hour: number;
+  schedule_minute: number;
+  schedule_weekday: number | null;
+  schedule_interval_minutes: number | null;
+  next_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
+// Goal threads (Phase 11.3 — ongoing-concern tracking)
+// ============================================================
+export type GoalThreadStatus = 'open' | 'resolved' | 'dropped';
+
+export interface GoalThread {
+  id: string;
+  title: string;
+  description: string | null;
+  status: GoalThreadStatus;
+  contact_id: string | null;
+  event_date: string | null;
+  next_check_at: string | null;
+  last_nudged_at: string | null;
+  source: string;
   created_at: string;
   updated_at: string;
 }
@@ -347,6 +383,7 @@ export type ActivePanel =
   | 'reminders'
   | 'routines'
   | 'initiative'
+  | 'threads'
   | 'tools'
   | 'voice'
   | 'settings';
@@ -454,6 +491,12 @@ export interface VoiceSettings {
   tts_device: string;
   /** faster-whisper precision ("auto" derives from the device). */
   stt_compute_type: string;
+  /** Phase 12.1: after a spoken reply, re-open a short hands-free window so
+   *  the user can talk back without re-triggering (opt-in). */
+  continuous_conversation: boolean;
+  /** Phase 12.2: always-on on-device "Hey Jarvis" detection in the renderer
+   *  (opt-in; raw audio never leaves the machine). */
+  wake_word: boolean;
   stt_models: string[];
   /** The selectable preset voices. */
   voices: VoiceOption[];
@@ -481,6 +524,7 @@ export interface ContextSettings {
   screen_ocr: boolean;           // OCR capability (capture also armed per-session)
   ocr_interval_seconds: number;
   idle_threshold_seconds: number;
+  affective_sensing: boolean;    // Phase 13 — coarse load read (separate opt-in)
 }
 
 /** GET /api/context/status — cheap sensing status for the indicator. */
@@ -488,8 +532,17 @@ export interface ContextStatus {
   enabled: boolean;
   device_sensing: boolean;
   screen_ocr: boolean;
+  affective_sensing: boolean;
   device_fresh: boolean;
   ocr_fresh: boolean;
+}
+
+/** The coarse affective load read (Phase 13) — null unless affective sensing is
+ *  on and a fresh signal contributed. `signals` echoes the raw inputs. */
+export interface UserState {
+  load: 'calm' | 'steady' | 'busy' | 'stressed';
+  confidence: number;
+  signals: Record<string, number>;
 }
 
 /** GET /api/context/world — the aggregated world model (UI audit surface). */
@@ -506,10 +559,12 @@ export interface WorldModel {
   unread: { count: number; has_urgent: boolean } | null;
   recent_file_focus: { filename: string; path: string; modified: string } | null;
   on_screen_context: string | null;
+  user_state: UserState | null;
   sensing: {
     enabled: boolean;
     device_sensing: boolean;
     screen_ocr: boolean;
+    affective_sensing: boolean;
     device_fresh: boolean;
     ocr_fresh: boolean;
   };

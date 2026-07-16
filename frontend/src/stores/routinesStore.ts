@@ -5,7 +5,7 @@
  * starts a background Task whose outcome arrives as a push event.
  */
 import { create } from 'zustand';
-import type { Routine } from '@/types';
+import type { Routine, RoutineSchedule } from '@/types';
 import { routinesApi } from '@/lib/api';
 
 interface RoutinesState {
@@ -14,11 +14,13 @@ interface RoutinesState {
   error: string | null;
   deletingId: string | null;
   runningId: string | null;
+  savingScheduleId: string | null;
 
   /** silent = background refresh: no spinner, keep stale data on failure */
   loadRoutines: (opts?: { silent?: boolean }) => Promise<void>;
   deleteRoutine: (id: string) => Promise<void>;
   runRoutine: (id: string) => Promise<void>;
+  setSchedule: (id: string, schedule: Partial<RoutineSchedule>) => Promise<void>;
 }
 
 export const useRoutinesStore = create<RoutinesState>((set) => ({
@@ -27,6 +29,7 @@ export const useRoutinesStore = create<RoutinesState>((set) => ({
   error: null,
   deletingId: null,
   runningId: null,
+  savingScheduleId: null,
 
   loadRoutines: async (opts) => {
     const silent = opts?.silent ?? false;
@@ -61,6 +64,19 @@ export const useRoutinesStore = create<RoutinesState>((set) => ({
       set({ error: String(e) });
     } finally {
       set({ runningId: null });
+    }
+  },
+
+  setSchedule: async (id: string, schedule: Partial<RoutineSchedule>) => {
+    set({ savingScheduleId: id, error: null });
+    try {
+      const updated = await routinesApi.setSchedule(id, schedule);
+      set((state) => ({
+        routines: state.routines.map((r) => (r.id === id ? updated : r)),
+        savingScheduleId: null,
+      }));
+    } catch (e) {
+      set({ error: String(e), savingScheduleId: null });
     }
   },
 }));

@@ -6,7 +6,7 @@ Runs as a background task — never blocks the streaming response.
 import asyncio
 import json
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from loguru import logger
@@ -101,6 +101,9 @@ Return ONLY valid JSON with this exact structure (no explanation, no markdown):
   ],
   "preferences": [
     {{"key": "unique_key_snake_case", "value": "The preference description", "evidence": "what triggered this"}}
+  ],
+  "open_threads": [
+    {{"title": "Short label of an ONGOING concern/goal the user has a pending stake in (e.g. 'The project deadline', 'Interview at Acme')", "description": "One sentence of context", "event_date": "YYYY-MM-DD if a deadline/relevant date is known, else null"}}
   ]
 }}
 
@@ -121,6 +124,7 @@ CRITICAL RULES — READ CAREFULLY:
 11. PREFERENCES: Detect when the user explicitly states "I prefer...", "I like...", "I hate...", or corrects your style. Return in "preferences".
 12. Return empty arrays [] or null values for categories with nothing to extract.
 13. NO META-CONVERSATION FACTS: NEVER record the act of talking to the assistant as a fact. "Mentioned Ali Raza", "Inquired about Hamil", "Asked about X", "Wants to know Y" are NOT facts — they describe this chat, not the user's life. If the current message only names a person, answers a clarification question, or asks a question WITHOUT stating new real-world information, return empty arrays — extract NOTHING.
+14. OPEN THREADS — ONGOING CONCERNS ONLY: Capture in "open_threads" ONLY a genuine ONGOING matter the user has an OPEN, unresolved stake in and would appreciate a later follow-up on — e.g. worry about a deadline, waiting to hear back on an interview/application, an upcoming decision they're weighing, a health or relationship situation in progress. This is a HIGH bar: do NOT capture completed events, one-off facts, tasks for the AI, general preferences, or passing remarks. If the user says a thread is now resolved/done, do NOT re-open it. If nothing qualifies, return [].
 """
 
 
@@ -238,6 +242,16 @@ _META_FACT_RE = re.compile(
 def is_meta_conversation_fact(text: str) -> bool:
     """True for junk facts about the conversation itself ("Mentioned X")."""
     return bool(_META_FACT_RE.match(text or ""))
+
+
+def _parse_iso_date(value: Optional[str]) -> Optional[date]:
+    """A YYYY-MM-DD string → date, or None (best-effort — never raises)."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
 
 
 async def run_extraction_pipeline(
@@ -419,6 +433,24 @@ async def run_extraction_pipeline(
                     evidence=pref.evidence,
                     source="inferred",
                 )
+
+        # --- Store open threads (ongoing concerns — Phase 11.3). Each write is
+        # independently best-effort so one bad row never aborts the pass.
+        for thread in entities.open_threads:
+            if not thread.title:
+                continue
+            try:
+                from app.core.goal_threads import upsert_thread
+                event_date = _parse_iso_date(thread.event_date)
+                await upsert_thread(
+                    db,
+                    thread.title,
+                    description=thread.description,
+                    event_date=event_date,
+                    source="extractor",
+                )
+            except Exception as e:
+                logger.debug(f"Open-thread persist skipped (non-critical): {e}")
 
         logger.debug("Extraction pipeline completed successfully")
 

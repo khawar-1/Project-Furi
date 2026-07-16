@@ -23,9 +23,17 @@ import { markNextTurnVoice, stopSpeaking } from '@/lib/voiceOutput';
 import { useChatStore } from '@/stores/chatStore';
 
 export type VoicePhase = 'idle' | 'recording' | 'transcribing';
-/** How the current recording started: a held mic ('hold') or the global
- *  hotkey ('summon' — tap-to-send, silence auto-stop). */
-export type VoiceMode = 'hold' | 'summon';
+/** How the current recording started: a held mic ('hold'), the global hotkey
+ *  or wake word ('summon' — tap-to-send, silence auto-stop), or an automatic
+ *  follow-up window after a spoken reply ('followup' — Phase 12.1, silence
+ *  auto-stop with a short grace; an empty follow-up ends the conversation
+ *  silently rather than erroring). */
+export type VoiceMode = 'hold' | 'summon' | 'followup';
+
+/** Phase 12.1: the never-heard-speech grace for a follow-up window. Kept short
+ *  so a quiet user closes the conversation quickly instead of waiting the full
+ *  8s summon grace. */
+const FOLLOWUP_INITIAL_SILENCE_MS = 5_000;
 
 interface VoiceState {
   phase: VoicePhase;
@@ -39,6 +47,12 @@ interface VoiceState {
   /** Part 4: spoken audio is playing right now (mirrored by voiceOutput —
    *  drives the header "Speaking" indicator + stop button). */
   speaking: boolean;
+  /** Phase 12.1: a voice conversation is in progress — the last voice turn was
+   *  auto-sent and (while `continuous_conversation` is on) a follow-up window
+   *  re-opens after each spoken reply. Cleared by Esc, a silent follow-up
+   *  timeout, or disabling voice. The re-arm itself lives in
+   *  lib/voiceConversation.ts (the voiceAnnounce module precedent). */
+  conversationActive: boolean;
   /** Non-blocking inline error shown near the input; cleared on next hold. */
   error: string | null;
 
@@ -51,6 +65,13 @@ interface VoiceState {
    *  listening, stop-and-send) a hands-free recording. Opt-in via
    *  listen_on_summon; silence auto-stops it. */
   beginSummonListen: () => Promise<void>;
+  /** Phase 12.2: the wake word ("Hey Jarvis") fired — start a hands-free
+   *  recording. Opt-in via wake_word (NOT listen_on_summon); reuses the summon
+   *  capture path so review/speak rules and continuous conversation all apply. */
+  beginWakeListen: () => Promise<void>;
+  /** Phase 12.1: after a spoken reply, re-open a short hands-free window so the
+   *  user can talk back without re-triggering. Driven by voiceConversation.ts. */
+  beginFollowUpListen: () => Promise<void>;
   /** Release: stop, transcribe, then auto-send (or draft, per settings). */
   endHold: () => Promise<void>;
   /** Esc / pointer left: discard the recording, transcribe nothing. */
@@ -142,19 +163,22 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     partialBusy = false;
   };
 
-  /** Start a recording in either mode — beginHold/beginSummonListen share
-   *  everything but the trigger semantics. */
+  /** Start a recording in any mode — beginHold/beginSummonListen/
+   *  beginFollowUpListen share everything but the trigger + silence semantics.
+   *  'summon' and 'followup' both auto-stop on silence; 'followup' uses a
+   *  shorter never-heard-speech grace so a quiet user ends the conversation. */
   const startCapture = async (mode: VoiceMode) => {
     const { settings } = get();
     // Barge-in (Part 4): opening the mic silences Jarvis instantly —
     // you can't listen while you're being talked over.
     stopSpeaking();
     set({ error: null });
+    const handsFree = mode === 'summon' || mode === 'followup';
     try {
       activeRecording = await startRecording(
         {
           onLevel: (level) => set({ level }),
-          // A stop decided by voiceInput (60s cap, or silence in summon
+          // A stop decided by voiceInput (60s cap, or silence in a hands-free
           // mode) is treated exactly like a release.
           onAutoStop: () => void get().endHold(),
           // Interim transcription only makes sense once the model is ready —
@@ -163,7 +187,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
             ? { onPartial: handlePartial }
             : {}),
         },
-        { silenceStop: mode === 'summon' }
+        {
+          silenceStop: handsFree,
+          ...(mode === 'followup'
+            ? { initialSilenceMs: FOLLOWUP_INITIAL_SILENCE_MS }
+            : {}),
+        }
       );
       set({ phase: 'recording', mode, level: 0, interimText: '' });
     } catch (e) {
@@ -188,6 +217,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     interimText: '',
     settings: null,
     speaking: false,
+    conversationActive: false,
     error: null,
 
     fetchSettings: async () => {
@@ -225,10 +255,30 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       await startCapture('summon');
     },
 
+    beginWakeListen: async () => {
+      const { phase, settings } = get();
+      // Gated on the wake-word master (NOT listen_on_summon). wakeWord.ts
+      // already suppresses detection while the mic is busy or Jarvis speaks,
+      // but re-check phase here so a late trigger can never double-open.
+      if (!settings?.enabled || !settings.wake_word) return;
+      if (phase !== 'idle') return;
+      await startCapture('summon');
+    },
+
+    beginFollowUpListen: async () => {
+      const { phase, settings } = get();
+      if (!settings?.enabled || !settings.continuous_conversation) return;
+      if (phase !== 'idle') return;
+      await startCapture('followup');
+    },
+
     endHold: async () => {
       const recording = activeRecording;
       if (!recording || get().phase !== 'recording') return;
       activeRecording = null;
+      // The mode the recording STARTED in decides the empty-transcript and
+      // conversation semantics below (the transcribing set clears it to 'hold').
+      const entryMode = get().mode;
       // The final transcript is authoritative — abort any interim request
       // so it never races the real one, and clear the interim display.
       stopPartials();
@@ -236,14 +286,22 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       try {
         const blob = await recording.stop();
         if (!blob) {
-          // Accidental tap (<300ms) — silently discard.
+          // Accidental tap (<300ms) — silently discard. A follow-up that was
+          // too short to be speech ends the conversation quietly.
           set({ phase: 'idle' });
+          if (entryMode === 'followup') set({ conversationActive: false });
           return;
         }
         const result = await voiceApi.transcribe(blob);
         const text = result.text.trim();
         set({ phase: 'idle' });
         if (!text) {
+          // A silent follow-up window is the NATURAL end of a conversation —
+          // close it quietly, never with a "didn't catch that" error.
+          if (entryMode === 'followup') {
+            set({ conversationActive: false });
+            return;
+          }
           set({ error: 'I didn’t catch anything — try again.' });
           return;
         }
@@ -256,6 +314,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
           // A voice-initiated turn speaks its reply (Part 4). Review-mode
           // drafts are sent by Enter later — those count as typed turns.
           markNextTurnVoice();
+          // Phase 12.1: mark the conversation active so voiceConversation.ts
+          // re-opens a follow-up window after the reply is spoken.
+          if (get().settings?.continuous_conversation) {
+            set({ conversationActive: true });
+          }
           await chat.sendMessage(text);
         }
       } catch (e) {
@@ -265,6 +328,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
           phase: 'idle',
           error: e instanceof Error ? e.message : 'Transcription failed.',
         });
+        if (entryMode === 'followup') set({ conversationActive: false });
         void get().fetchSettings(); // refresh the model status the error names
       }
     },
@@ -273,8 +337,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       activeRecording?.cancel();
       activeRecording = null;
       stopPartials();
+      // Esc ends any in-progress voice conversation (Phase 12.1).
       if (get().phase !== 'idle') {
-        set({ phase: 'idle', mode: 'hold', level: 0, interimText: '' });
+        set({ phase: 'idle', mode: 'hold', level: 0, interimText: '', conversationActive: false });
+      } else if (get().conversationActive) {
+        set({ conversationActive: false });
       }
     },
 

@@ -20,6 +20,7 @@ import app.tools  # noqa: F401 — registers the real file/terminal tools
 from app.agents import plan_store, task_runner
 from app.agents.task_runner import wait_for_task
 from app.core.dependencies import get_db, get_llm_provider, get_qdrant
+from app.core.scheduler import JarvisScheduler
 from app.db.database import Base
 from app.providers.base import EmbeddingResponse, LLMMessage, LLMProvider, LLMResponse
 from main import app
@@ -70,6 +71,17 @@ async def client(monkeypatch):
     async def _no_memory(*args, **kwargs):
         return ""
     monkeypatch.setattr("app.api.routines.planner_memory_context", _no_memory)
+
+    # Isolate the app-wide scheduler (PUT /schedule arms a job) onto a throwaway
+    # scheduler sharing this test's in-memory DB (the contacts-API rule) — no
+    # real jarvis.db, no real timer.
+    import app.core.scheduled_routines as sr
+    import app.core.scheduler as scheduler_module
+    sched = JarvisScheduler(session_factory=factory)
+    monkeypatch.setattr(sr, "scheduler", sched)
+    monkeypatch.setattr(scheduler_module, "scheduler", sched)
+    sched.register_handler(sr.ROUTINE_JOB_KIND, sr._routine_job_handler)
+
     plan_store._PENDING_PLANS.clear()
 
     async def _get_db():
@@ -92,6 +104,7 @@ async def client(monkeypatch):
         yield c
     app.dependency_overrides.clear()
     plan_store._PENDING_PLANS.clear()
+    await sched.shutdown()
     await engine.dispose()
 
 
@@ -172,3 +185,58 @@ async def test_run_starts_background_task(client, tmp_path):
     task = (await client.get(f"/api/tasks/{task_id}")).json()
     assert task["status"] == "completed"
     assert task["goal"] == goal
+
+
+# ================================================================ schedule
+
+async def test_set_weekly_schedule(client):
+    created = (await client.post(
+        "/api/routines", json={"name": "weekly report", "goal_template": "compile the week"}
+    )).json()
+    r = await client.put(
+        f"/api/routines/{created['id']}/schedule",
+        json={"schedule_type": "weekly", "schedule_weekday": 4,
+              "schedule_hour": 16, "schedule_minute": 0},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["schedule_type"] == "weekly" and body["schedule_weekday"] == 4
+    assert body["next_run_at"] is not None and body["next_run_at"].endswith("+00:00")
+    # schedule_job_id is internal plumbing — never serialized.
+    assert "schedule_job_id" not in body
+
+    listed = (await client.get("/api/routines")).json()
+    assert listed[0]["schedule_type"] == "weekly"
+
+
+async def test_clear_schedule(client):
+    created = (await client.post(
+        "/api/routines", json={"name": "digest", "goal_template": "make digest"}
+    )).json()
+    await client.put(
+        f"/api/routines/{created['id']}/schedule",
+        json={"schedule_type": "daily", "schedule_hour": 8},
+    )
+    r = await client.put(
+        f"/api/routines/{created['id']}/schedule", json={"schedule_type": None}
+    )
+    assert r.status_code == 200
+    assert r.json()["schedule_type"] is None
+    assert r.json()["next_run_at"] is None
+
+
+async def test_schedule_missing_routine_404(client):
+    r = await client.put(
+        "/api/routines/nope/schedule", json={"schedule_type": "daily", "schedule_hour": 8}
+    )
+    assert r.status_code == 404
+
+
+async def test_schedule_invalid_type_400(client):
+    created = (await client.post(
+        "/api/routines", json={"name": "x", "goal_template": "g"}
+    )).json()
+    r = await client.put(
+        f"/api/routines/{created['id']}/schedule", json={"schedule_type": "hourly"}
+    )
+    assert r.status_code == 400

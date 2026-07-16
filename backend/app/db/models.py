@@ -393,6 +393,19 @@ class Routine(Base):
     normalized_name: Mapped[str] = mapped_column(String(256), nullable=False, unique=True, index=True)
     goal_template: Mapped[str] = mapped_column(Text, nullable=False)  # raw goal re-fed to the planner
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    # --- Optional time trigger (Phase 10, Part 2 — scheduled routines) ---
+    # schedule_type None = manual-only (invoke by name). "interval" | "daily" |
+    # "weekly" auto-run the goal_template through start_task at the next
+    # occurrence (the plan is re-derived, so the approval gate re-applies — a
+    # scheduled write pauses for approval, a read-only routine completes).
+    schedule_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    schedule_minute: Mapped[int] = mapped_column(Integer, default=0)      # 0-59
+    schedule_hour: Mapped[int] = mapped_column(Integer, default=9)        # 0-23 (daily/weekly)
+    schedule_weekday: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 0=Mon..6=Sun (weekly)
+    schedule_interval_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # interval
+    # The scheduled_jobs.id pointer for this routine's next run (per-row, the
+    # Contact.birthday_job_id template). Internal plumbing — never serialized.
+    schedule_job_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
@@ -438,6 +451,42 @@ class Suggestion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+
+
+# ============================================================
+# Goal threads — ongoing concerns Jarvis nudges toward (Phase 11, Part 3)
+# ============================================================
+class GoalThread(Base):
+    """A lightweight ongoing-concern / goal thread ("the deadline I was worried
+    about", "prepping for the interview") that Jarvis can proactively follow up
+    on — "last week you were worried about the deadline; did it land?".
+
+    Captured from conversation by the extractor (source="extractor") or created
+    manually. `status` tracks the lifecycle (open → resolved | dropped);
+    `next_check_at` is when a nudge becomes due, `last_nudged_at` throttles
+    repeat nudges. `normalized_title` is a dedupe key so re-mentioning the same
+    concern updates the open thread instead of piling up duplicates. The ONE
+    accessor is app/core/goal_threads.py — the initiative gatherer/router never
+    touch this table directly (the reminders rule).
+    """
+    __tablename__ = "goal_threads"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    normalized_title: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # open | resolved | dropped
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)
+    contact_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("contacts.id"), nullable=True, index=True
+    )
+    event_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)  # deadline/relevant date
+    next_check_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    last_nudged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    source: Mapped[str] = mapped_column(String(32), default="extractor")  # extractor | manual
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
 
 # ============================================================

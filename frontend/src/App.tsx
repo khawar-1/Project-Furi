@@ -11,14 +11,18 @@ import { ContactsPanel } from '@/components/contacts/ContactsPanel';
 import { TimelinePanel } from '@/components/timeline/TimelinePanel';
 import { ReminderPanel } from '@/components/reminders/ReminderPanel';
 import { RoutinesPanel } from '@/components/routines/RoutinesPanel';
+import { ThreadsPanel } from '@/components/threads/ThreadsPanel';
 import { SuggestionPanel } from '@/components/initiative/SuggestionPanel';
 import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { useUIStore } from '@/stores/uiStore';
 import { connectPush, disconnectPush, onPush } from '@/lib/push';
-import { initNotifications } from '@/lib/notifications';
-import { initVoiceAnnounce } from '@/lib/voiceAnnounce';
+import { initOutputRouter } from '@/lib/outputRouter';
+import { initVoiceConversation } from '@/lib/voiceConversation';
+import { initAffectiveSensing } from '@/lib/affectiveSensing';
+import { startWakeWord, stopWakeWord } from '@/lib/wakeWord';
 import { useChatStore } from '@/stores/chatStore';
 import { useVoiceStore } from '@/stores/voiceStore';
+import { useContextStore } from '@/stores/contextStore';
 import { useSuggestionsStore } from '@/stores/suggestionsStore';
 import type { ActivePanel } from '@/types';
 
@@ -38,6 +42,8 @@ function PanelContent({ panel }: { panel: ActivePanel }) {
       return <RoutinesPanel />;
     case 'initiative':
       return <SuggestionPanel />;
+    case 'threads':
+      return <ThreadsPanel />;
     case 'settings':
       return <SettingsPanel />;
     default:
@@ -54,6 +60,7 @@ function ComingSoonPanel({ panel }: { panel: ActivePanel }) {
     reminders: 'Reminders',
     routines: 'Routines',
     initiative: 'Suggestions',
+    threads: 'Threads',
     tools: 'Tool Execution Log',
     voice: 'Voice Controls',
     settings: 'Settings',
@@ -67,6 +74,7 @@ function ComingSoonPanel({ panel }: { panel: ActivePanel }) {
     reminders: '4',
     routines: '6',
     initiative: '9',
+    threads: '11',
     tools: '5',
     voice: '6',
     settings: '5',
@@ -131,13 +139,24 @@ export default function App() {
   }, []);
 
   // Phase 4: the push channel — the server can now speak first — and the
-  // native-notification bridge that makes it felt while the app is in the tray.
+  // multi-modal output router (Phase 12.3) that decides, per event, whether it
+  // reaches the user by native toast, spoken voice, or just the in-app card
+  // (urgency × World-Model presence × focus × mic state). The router is the
+  // single output-medium subscriber — it replaces the old separate toast +
+  // voice-announce gates.
   useEffect(() => {
     connectPush();
-    const stopNotifications = initNotifications();
-    // Phase 7 Part 5: the voice sibling of the toast bridge — push events are
-    // SPOKEN when speak_proactive is on (gating lives inside the module).
-    const stopAnnounce = initVoiceAnnounce();
+    // Phase 13 + 12.3 need the sensing config app-wide (the output router's
+    // presence gating and the affective collector both read it). One fetch at
+    // startup; the Settings card refreshes it while open.
+    void useContextStore.getState().fetchSettings();
+    const stopRouter = initOutputRouter();
+    // Phase 12.1: after a spoken reply, re-open a short hands-free window so the
+    // user can talk back without re-triggering (gating lives inside the module).
+    const stopConversation = initVoiceConversation();
+    // Phase 13.1: summarize typing cadence + voice energy locally and post the
+    // coarse read (gated on the affective opt-in inside the module).
+    const stopAffective = initAffectiveSensing();
     // Part 4: a reminder firing while this window is open should also show
     // up live in chat, not just as a toast — if it's this session's.
     const stopReminders = onPush('reminder', (event) => {
@@ -177,11 +196,26 @@ export default function App() {
       stopSteps();
       stopTasks();
       stopReminders();
-      stopAnnounce();
-      stopNotifications();
+      stopAffective();
+      stopConversation();
+      stopRouter();
       disconnectPush();
     };
   }, []);
+
+  // Phase 12.2: wake word ("Hey Jarvis") — always-on ON-DEVICE detection in the
+  // renderer, strictly opt-in. Start/stop it whenever the voice master + the
+  // wake-word toggle change. No-op in a plain browser (getUserMedia/ONNX still
+  // load, but the module fails soft). Detection audio never leaves the machine.
+  const wakeWordOn =
+    useVoiceStore((s) => !!s.settings?.enabled && !!s.settings?.wake_word);
+  useEffect(() => {
+    if (wakeWordOn) {
+      void startWakeWord();
+      return () => stopWakeWord();
+    }
+    stopWakeWord();
+  }, [wakeWordOn]);
 
   return (
     <div className="flex flex-col h-screen w-screen bg-surface overflow-hidden">

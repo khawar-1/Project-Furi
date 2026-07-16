@@ -151,10 +151,23 @@ def _suggest_name(goal: str) -> str:
     return short if len(short) <= 40 else short[:40].rstrip()
 
 
-def _offer_body(goal: str, suggested: str) -> str:
+def _offer_body(goal: str, suggested: str, cadence=None) -> str:
+    """The offer text. When a temporal cadence was mined, name it and spell out
+    a SCHEDULED teach phrase so saying it back both saves the routine and sets
+    its schedule (parse_routine_recurrence understands the phrase)."""
     goal_short = " ".join(goal.split())
     if len(goal_short) > 100:
         goal_short = goal_short[:99] + "…"
+    if cadence is not None:
+        from app.core.pattern_mining import describe_cadence, teach_phrase_cadence
+        when = describe_cadence(cadence)
+        phrase = teach_phrase_cadence(cadence)
+        return (
+            f'You\'ve had me do "{goal_short}" a few times now — usually {when}. '
+            f'Want me to save it as a routine that runs on that schedule? Just '
+            f'say: save this as a routine called "{suggested}" that runs {phrase} '
+            f'— or drop the schedule part to just save it by name.'
+        )
     return (
         f'You\'ve had me do "{goal_short}" a few times now. Want me to save it '
         f'as a reusable routine? Just say: save this as a routine called '
@@ -187,13 +200,29 @@ async def maybe_offer_routine(
         if key in offered:
             return False  # offer at most once per goal, ever
 
+        # Mine a temporal cadence so a recurring-at-a-time goal is offered as a
+        # SCHEDULED routine (best-effort — never blocks the offer).
+        cadence = None
+        try:
+            from app.core.pattern_mining import cadence_for_goal
+            cadence = await cadence_for_goal(db, goal)
+        except Exception as e:
+            logger.debug(f"Routine offer cadence mining skipped: {e}")
+
         suggested = _suggest_name(goal)
-        body = _offer_body(goal, suggested)
+        body = _offer_body(goal, suggested, cadence=cadence)
 
         # Durable copy first (the push channel has no queue — reminder rule).
         db.add(Message(session_id=session_id, role="assistant", content=body))
         await set_setting(db, OFFERED_KEY, offered + [key])  # commits
         await db.commit()
+
+        suggested_schedule = None
+        cadence_text = ""
+        if cadence is not None:
+            from app.core.pattern_mining import cadence_to_schedule, describe_cadence
+            suggested_schedule = cadence_to_schedule(cadence)
+            cadence_text = describe_cadence(cadence)
 
         await push("routine_offer", {
             "session_id": session_id,
@@ -202,6 +231,8 @@ async def maybe_offer_routine(
             "text": body,
             "goal": goal,
             "suggested_name": suggested,
+            "suggested_schedule": suggested_schedule,
+            "cadence_text": cadence_text,
         })
         logger.info(f"Offered to save recurring goal as a routine: '{goal[:60]}'")
         return True

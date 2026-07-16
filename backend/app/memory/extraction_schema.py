@@ -215,6 +215,31 @@ class PreferenceItem(BaseModel):
         return str(_none_to_default(v, "")).strip()
 
 
+class OpenThread(BaseModel):
+    """An ongoing concern / goal the user has an open stake in and would
+    appreciate a follow-up on (Phase 11.3). Deliberately narrow — only genuine
+    pending matters ("worried about the deadline", "waiting to hear back on the
+    interview"), never a completed fact or a passing remark."""
+    model_config = ConfigDict(extra="ignore")
+
+    title: str = ""
+    description: Optional[str] = None
+    event_date: Optional[str] = None  # YYYY-MM-DD when a relevant date is known
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title(cls, v):
+        return str(_none_to_default(v, "")).strip()
+
+    @field_validator("description", "event_date", mode="before")
+    @classmethod
+    def _opt(cls, v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+
 class ExtractionResult(BaseModel):
     """Validated top-level shape of the extractor LLM's JSON output."""
     model_config = ConfigDict(extra="ignore")
@@ -227,11 +252,12 @@ class ExtractionResult(BaseModel):
     facts_to_supersede: list[str] = Field(default_factory=list)
     important_events: list[ImportantEvent] = Field(default_factory=list)
     preferences: list[PreferenceItem] = Field(default_factory=list)
+    open_threads: list[OpenThread] = Field(default_factory=list)
 
     @field_validator(
         "people_mentioned", "contacts_to_delete", "relationships",
         "facts_about_user", "facts_to_supersede", "important_events",
-        "preferences",
+        "preferences", "open_threads",
         mode="before",
     )
     @classmethod

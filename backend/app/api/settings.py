@@ -112,6 +112,9 @@ class VoiceUpdate(BaseModel):
     stt_device: str = "auto"
     tts_device: str = "auto"
     stt_compute_type: str = "auto"
+    # Phase 12 ambient fields — defaulted so an older-shaped PUT stays valid.
+    continuous_conversation: bool = False
+    wake_word: bool = False
 
 
 async def _voice_payload(db) -> dict:
@@ -132,6 +135,8 @@ async def _voice_payload(db) -> dict:
         "stt_device": config.stt_device,
         "tts_device": config.tts_device,
         "stt_compute_type": config.stt_compute_type,
+        "continuous_conversation": config.continuous_conversation,
+        "wake_word": config.wake_word,
         "stt_models": list(VOICE_STT_MODELS),
         "voices": [{"id": vid, "label": label} for vid, label in VOICE_TTS_VOICES],
         "devices": list(VOICE_DEVICES),
@@ -179,6 +184,8 @@ async def put_voice(update: VoiceUpdate, db=Depends(get_db)) -> dict:
         stt_device=stt_device,
         tts_device=tts_device,
         stt_compute_type=stt_compute,
+        continuous_conversation=update.continuous_conversation,
+        wake_word=update.wake_word,
     ))
     # Enabling (or switching device) kicks the model load NOW — the FileIndexCard
     # enable-flow lesson: a toggle that silently does nothing until some later

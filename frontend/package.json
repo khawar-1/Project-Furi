@@ -11,15 +11,16 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "clsx": "^2.1.0",
+    "lucide-react": "^0.344.0",
+    "onnxruntime-web": "1.19.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "zustand": "^4.5.2",
     "react-markdown": "^9.0.1",
-    "remark-gfm": "^4.0.0",
     "react-syntax-highlighter": "^15.5.0",
-    "lucide-react": "^0.344.0",
-    "clsx": "^2.1.0",
-    "uuid": "^9.0.1"
+    "remark-gfm": "^4.0.0",
+    "uuid": "^9.0.1",
+    "zustand": "^4.5.2"
   },
   "devDependencies": {
     "@types/react": "^18.2.64",
