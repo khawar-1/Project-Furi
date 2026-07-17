@@ -182,6 +182,39 @@ def _hermetic_browser():
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_browser_session():
+    """browser_session's default factory LAUNCHES A REAL CHROMIUM against the
+    user's own ~/.jarvis/browser profile — a visible window, on their machine,
+    holding whatever they are logged into. That is categorically worse than the
+    stray fetch _hermetic_browser exists to stop, and the same reasoning applies
+    with more force: the planner already splices steps of its own accord, so it
+    is not enough that no test calls browse_page on purpose.
+
+    Refuse outright. Browser tests swap in their own fake page/context on top.
+    The host cache is cleared too — it memoizes DNS answers, so a cached verdict
+    could otherwise leak between tests."""
+    from app.core import browser_session
+
+    def _refuse():
+        raise RuntimeError("test tried to launch a real browser")
+
+    browser_session.BROWSER_FACTORY = _refuse
+    browser_session.reset_host_cache()
+    # The media registry holds a live session across tool calls (Phase 14.2). A
+    # fake session left in it would leak into the next test, so clear it too —
+    # inert here (tests only ever register fakes), the reset_host_cache hygiene.
+    browser_session._active_media = None
+    browser_session._active_media_meta = {}
+    browser_session._login_browser = None
+    yield
+    browser_session.BROWSER_FACTORY = None
+    browser_session.reset_host_cache()
+    browser_session._active_media = None
+    browser_session._active_media_meta = {}
+    browser_session._login_browser = None
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_screen_ocr():
     """screen_ocr's default factory imports rapidocr_onnxruntime + loads OCR
     models. Tests must never trigger that: every test starts with a cleared

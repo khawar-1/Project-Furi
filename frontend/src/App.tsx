@@ -24,6 +24,7 @@ import { useChatStore } from '@/stores/chatStore';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { useContextStore } from '@/stores/contextStore';
 import { useSuggestionsStore } from '@/stores/suggestionsStore';
+import { useBrowserStore } from '@/stores/browserStore';
 import type { ActivePanel } from '@/types';
 
 function PanelContent({ panel }: { panel: ActivePanel }) {
@@ -150,6 +151,10 @@ export default function App() {
     // presence gating and the affective collector both read it). One fetch at
     // startup; the Settings card refreshes it while open.
     void useContextStore.getState().fetchSettings();
+    // Phase 14: recover the "▶ Playing" indicator on reload — a browse window may
+    // already be playing from before this renderer connected (the push channel
+    // has no queue), so poll the current media state once.
+    void useBrowserStore.getState().refresh();
     const stopRouter = initOutputRouter();
     // Phase 12.1: after a spoken reply, re-open a short hands-free window so the
     // user can talk back without re-triggering (gating lives inside the module).
@@ -189,7 +194,13 @@ export default function App() {
     const stopSuggestion = onPush('suggestion', (event) => {
       useSuggestionsStore.getState().receiveSuggestion(event.payload);
     });
+    // Phase 14: a browse window started or stopped playing — update the
+    // StatusBar "▶ Playing" indicator live.
+    const stopBrowserMedia = onPush('browser_media', (event) => {
+      useBrowserStore.getState().receive(event.payload ?? {});
+    });
     return () => {
+      stopBrowserMedia();
       stopSuggestion();
       stopRoutineOffer();
       stopBriefing();

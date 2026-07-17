@@ -16,8 +16,22 @@ def create_provider() -> LLMProvider:
     """
     Factory function — returns a singleton provider instance.
     Cached so the same instance is reused across all requests.
-    
+
     To switch providers: change LLM_PROVIDER in .env and restart the backend.
+    """
+    return build_provider()
+
+
+def build_provider() -> LLMProvider:
+    """Construct a FRESH provider instance, bypassing the cache.
+
+    The cached create_provider() holds a persistent httpx client that binds to
+    the event loop it is first used on. Code that must run on a DIFFERENT loop
+    (the Phase 14 browser runtime drives its LLM decisions on a dedicated
+    Proactor loop — see app/core/browser_runtime.py) needs its own provider whose
+    client binds to that loop; sharing the cached one would use an httpx pool
+    across two loops. Such a caller builds one here and closes it (__aexit__)
+    when done.
     """
     provider_name = settings.LLM_PROVIDER.lower().strip()
     logger.info(f"Creating LLM provider: {provider_name}")

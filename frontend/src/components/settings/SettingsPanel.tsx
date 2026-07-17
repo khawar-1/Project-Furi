@@ -10,6 +10,7 @@ import { clsx } from 'clsx';
 import {
   Activity,
   CheckCircle2,
+  Chrome,
   Database,
   Eye,
   FolderSearch,
@@ -33,6 +34,7 @@ import {
 } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import {
+  browserApi,
   indexApi,
   initiativeApi,
   integrationsApi,
@@ -1620,6 +1622,122 @@ function AuditRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+function BrowserAccountCard() {
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [isBusy, setIsBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const { login_open } = await browserApi.accountStatus();
+      setLoginOpen(login_open);
+    } catch {
+      /* browser control is optional; a missing endpoint is not an error here */
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const handleSignIn = async () => {
+    setIsBusy(true);
+    setError(null);
+    try {
+      await browserApi.openLogin();
+      setLoginOpen(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not open the sign-in window');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleDone = async () => {
+    setIsBusy(true);
+    try {
+      await browserApi.closeLogin();
+      setLoginOpen(false);
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  return (
+    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
+      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
+        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
+          <Chrome size={15} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-sm font-semibold text-slate-200">Browser account</h2>
+          <p className="text-xs text-muted truncate">
+            Sign into YouTube/Google so Jarvis plays as you
+          </p>
+        </div>
+        <span
+          className={clsx(
+            'text-[10px] px-2 py-0.5 rounded-full border font-mono flex items-center gap-1.5',
+            loginOpen
+              ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+              : 'bg-surface-2 text-slate-500 border-surface-border'
+          )}
+        >
+          {loginOpen && <Loader2 size={10} className="animate-spin" />}
+          {loginOpen ? 'window open' : 'ready'}
+        </span>
+      </div>
+
+      <div className="px-4 py-3.5 space-y-3">
+        <p className="text-xs text-slate-400">
+          Jarvis drives its own <span className="text-slate-300">Chrome</span> window with a
+          private profile — separate from your everyday Chrome. Sign in once here and it stays
+          signed in for every future play. You type your password directly into Google;
+          Jarvis never sees or stores it.
+        </p>
+        <p className="text-[11px] text-slate-600">
+          A public song plays fine without signing in — this only makes playback use your account
+          (history, recommendations). Note: Google sometimes refuses sign-in in an automated
+          window; if it does, that's Google's bot check, not a Jarvis error.
+        </p>
+
+        {error && (
+          <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs">
+            {error}
+          </div>
+        )}
+
+        <div className="flex items-center gap-2">
+          {loginOpen ? (
+            <>
+              <button
+                onClick={() => void handleDone()}
+                disabled={isBusy}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-200 bg-cyan-500/15 border border-cyan-500/30 hover:bg-cyan-500/25 transition-colors disabled:opacity-40"
+              >
+                <CheckCircle2 size={12} />
+                I've finished signing in
+              </button>
+              <span className="text-[11px] text-slate-500">
+                Complete the sign-in in the open window, then click this.
+              </span>
+            </>
+          ) : (
+            <button
+              onClick={() => void handleSignIn()}
+              disabled={isBusy}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-200 bg-surface-2 border border-surface-border hover:border-cyan-500/30 transition-colors disabled:opacity-40"
+            >
+              {isBusy ? <Loader2 size={12} className="animate-spin" /> : <Chrome size={12} />}
+              Sign in to browser
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SettingsPanel() {
   return (
     <div className="flex flex-col h-full bg-surface overflow-hidden">
@@ -1640,6 +1758,7 @@ export function SettingsPanel() {
       <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3 max-w-2xl">
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1">Integrations</p>
         <GoogleAccountCard />
+        <BrowserAccountCard />
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Files</p>
         <FileIndexCard />
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Proactive</p>

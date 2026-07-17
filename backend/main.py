@@ -24,6 +24,7 @@ from app.api import voice as voice_api
 from app.api import context as context_api
 from app.api import initiative as initiative_api
 from app.api import threads as threads_api
+from app.api import browser as browser_api
 import app.core.reminders  # noqa: F401 — registers the "reminder" job handler at import time
 import app.core.birthdays  # noqa: F401 — registers the "birthday" job handler at import time
 import app.core.daily_briefing  # noqa: F401 — registers the "daily_briefing" job handler at import time
@@ -221,6 +222,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("🛑 Jarvis OS backend shutting down...")
     await scheduler.shutdown()
 
+    # Phase 14: stop the dedicated browser loop thread (best-effort; it is a
+    # daemon, so a missed stop never blocks exit).
+    try:
+        from app.core.browser_runtime import shutdown_browser_runtime
+        shutdown_browser_runtime()
+    except Exception as e:
+        logger.debug(f"browser runtime shutdown: {e}")
+
 
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -293,6 +302,9 @@ def create_app() -> FastAPI:
 
     # Phase 11 — goal threads (ongoing-concern tracking)
     app.include_router(threads_api.router, prefix="/api/threads", tags=["Threads"])
+
+    # Phase 14 — browser media control (stop a browse window left playing)
+    app.include_router(browser_api.router, prefix="/api/browser", tags=["Browser"])
 
     return app
 

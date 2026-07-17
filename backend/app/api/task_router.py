@@ -10,7 +10,7 @@ Detection is two-stage so normal chat pays ZERO extra cost:
    gate does not fire there is no LLM call at all: `maybe_handle_task`
    returns None and the message flows into the untouched Phase 2 chat path.
 2. LLM classification — one tiny temperature-0 call returning a routing label
-   (TASK / EMAIL / CALENDAR / WEB / CHAT; WEB added Phase 6 Part 1) that rejects
+   (TASK / EMAIL / CALENDAR / WEB / BROWSE / CHAT; BROWSE added Phase 14) that rejects
    gate false-positives ("my brother deleted my save file" fires the gate but is
    conversation). It judges the goal with any background-intent phrase already
    stripped — "…and remind me when you are done" would read as a reminder
@@ -117,6 +117,13 @@ _STRONG_DOMAIN_RE = re.compile(
     # false fire costing one temp-0 call). A bare URL is a strong signal.
     r"\bweb\b|\bwebsites?\b|\bweb\s?pages?\b|\bonline\b|\binternet\b|"
     r"\bgoogle\b|\burls?\b|https?://|"
+    # Browse / live-site domain (Phase 14). A named media/streaming site fires
+    # the gate ALONE (the object-noun rule); the classifier makes the
+    # BROWSE/CHAT call ("I saw it on youtube" is a false fire costing one temp-0
+    # call — the recall-first trade-off). These are the sites a user says "play
+    # X on ___" about — a small, stable vocabulary.
+    r"\byoutube\b|\byou\s?tube\b|\bspotify\b|\bnetflix\b|\bvimeo\b|"
+    r"\bsoundcloud\b|\btwitch\b|"
     # "search" / "look it up" as verbs fire alone (live bug 2026-07-16,
     # round 2: "yes search and tell me when is the new seasopn of blackclover
     # comming out" — a go-ahead to the chat LLM's own "I can search the web,
@@ -131,7 +138,8 @@ _STRONG_DOMAIN_RE = re.compile(
 # Weak signals — common in ordinary conversation (media nouns, URLs, "e.g.",
 # decimals all brush against these) — still need an action verb to fire.
 _WEAK_DOMAIN_RE = re.compile(
-    r"(\bpictures\b|\bvideos\b|\bmusic\b|\bdrive\b|\bdisk\b|"
+    r"(\bpictures\b|\bvideos?\b|\bmusic\b|\bsongs?\b|\btracks?\b|\bepisodes?\b|"
+    r"\bmovies?\b|\btrailers?\b|\bpodcasts?\b|\bdrive\b|\bdisk\b|"
     r"\bprocess(?:es)?\b|[/\\]|~[/\\]?|\.\w{1,4}\b)"
 )
 
@@ -146,7 +154,13 @@ _ACTION_VERB_RE = re.compile(
     r"renamed|renaming|copy|copies|copied|copying|organize|organizes|organized|"
     r"organizing|organise|organises|organised|organising|sort|sorts|sorted|sorting|"
     r"run|runs|running|execute|executes|executed|executing|launch|launches|launched|"
-    r"launching|install|installs|installed|installing|search|searches|searched|"
+    r"launching|install|installs|installed|installing|"
+    # Media / live-site verbs (Phase 14) — "play"/"watch"/"listen"/"stream"
+    # only fire with a weak media noun ("play the song", "watch the trailer");
+    # a named site ("play X on youtube") fires the strong gate above on its own.
+    r"play|plays|played|playing|watch|watches|watched|watching|"
+    r"listen|listens|listened|listening|stream|streams|streamed|streaming|"
+    r"search|searches|searched|"
     r"searching|find|finds|found|finding|locate|locates|located|locating|list|lists|"
     r"listing|read|reads|reading|open|opens|opened|opening|show|shows|showing|"
     r"check|checks|checking|look|"
@@ -361,12 +375,14 @@ _CLASSIFY_PROMPT = """You route messages for Jarvis OS, a personal AI that can a
 - EMAIL: search and read Gmail; draft, send, or reply to email.
 - CALENDAR: list/find Google Calendar events; create, update, or delete events.
 - WEB: search the web and open/read a web page to look up online information.
+- BROWSE: drive a real web browser to ACT on a live site — play or watch a video (YouTube and the like), or navigate an interactive web app the user names.
 
 Reply with EXACTLY one word:
 TASK — asks Jarvis to perform a FILES/SYSTEM action now, OR asks what Jarvis ITSELF did on the machine (the folder/file it created, what it deleted, what it has done today).
 EMAIL — asks Jarvis to search, read, draft, send, or reply to email now.
 CALENDAR — asks Jarvis to look at or change calendar events now.
 WEB — asks Jarvis to search the web or open/read a web page now, OR asks a factual question better answered from the live internet than from stale built-in knowledge. This covers two cases: (a) anything CURRENT or time-sensitive (news, release dates, upcoming seasons or products, prices, scores, weather), and (b) a factual question about a SPECIFIC real-world entity — a person, company, product, place, organization, or a creative work such as a show, anime, movie, game, or book ("what do you know about Black Clover", "who is the CEO of X", "tell me about the Framework laptop"). Jarvis looks these up rather than guessing, promising, or reciting possibly-outdated training data.
+BROWSE — asks Jarvis to DO something on a live website by driving a browser: play or watch a video ("play jane by the long faces on youtube", "watch the new trailer on youtube", "open youtube and play some lofi"), or operate an interactive web app. This is ACTING on a live site — distinct from WEB, which only LOOKS UP information.
 CHAT — anything else: casual conversation; OPINION, reasoning, or general/timeless concepts Jarvis can reason about ("what do you think of vector databases", "explain recursion", "how does TCP work"); help writing or debugging code; questions about the user's own life or about Jarvis itself; sharing information about their life; talking ABOUT the user's own past or hypothetical actions; an answer to an earlier question; or a request none of these tools can do (reminders — handled elsewhere).
 
 Judge the INTENT, not the vocabulary:
@@ -375,6 +391,7 @@ Judge the INTENT, not the vocabulary:
 - An instruction to SEND is EMAIL even when the text to send reads like a statement or is written on someone's behalf: "email i221538@nu.edu.pk that the report is done", "send Ali a mail saying I'll be late", and "email him that this is Furi writing on behalf of my master" are all EMAIL, not CHAT.
 - "my calendar is packed this week" is CHAT, while "put a meeting with jamil on my calendar tomorrow at 3" is CALENDAR.
 - "what do you think of vector databases?" is CHAT (answerable from knowledge), while "search the web for the latest LangGraph release" or "look up who won the match today" or "open https://example.com and summarize it" is WEB.
+- "play jane by the long faces on youtube", "watch the new severance trailer on youtube", or "open youtube and play some lofi" is BROWSE (act on a live site), while "what's the most-viewed youtube video" or "who owns youtube" is WEB (just look it up).
 - A question about something CURRENT is WEB even when it never says "search": "when is the new season of Black Clover coming out?" or "what's the latest iPhone price?" needs up-to-date information — never answer it from stale knowledge or promise to look it up later.
 - A factual question about a SPECIFIC real-world thing is WEB even when it isn't time-sensitive and never says "search": "what do you know about Black Clover", "who is Grigori Perelman", "tell me about the Framework laptop" — look them up for an accurate, current answer rather than reciting possibly-stale training data. But a question of OPINION, REASONING, or a general/timeless concept is CHAT: "what do you think of Black Clover", "how does anime production work", "what is recursion".
 - A question about JARVIS'S OWN actions is TASK, not CHAT — Jarvis answers it from its action record, never from memory: "what was the name of the folder you created?", "did you delete anything today?", "who created the jarvis_test folder?" (Jarvis may have) are all TASK; "I deleted a bunch of files yesterday" is CHAT (the user talking about their own actions).
@@ -388,7 +405,7 @@ One word (TASK, EMAIL, CALENDAR, WEB, or CHAT):"""
 # The recognized action labels. All three feed the SAME planner and the same
 # approval gates — there is one execution path. The label buys recall +
 # telemetry and is the clean seam for future per-domain handlers.
-_ACTION_LABELS = ("TASK", "EMAIL", "CALENDAR", "WEB")
+_ACTION_LABELS = ("TASK", "EMAIL", "CALENDAR", "WEB", "BROWSE")
 
 # Shown to the classifier when the conversation has earlier turns. A message
 # is part of a conversation, not an island: "its in my downloads folder" after
@@ -398,7 +415,7 @@ _ACTION_LABELS = ("TASK", "EMAIL", "CALENDAR", "WEB")
 _CLASSIFY_CONTEXT_TEMPLATE = """RECENT CONVERSATION (context only — the user message below is the NEXT message in it):
 {context}
 
-A short follow-up that continues an action being discussed in that conversation — supplying a detail it was missing ("its in my downloads folder"), correcting it, or telling Jarvis to go ahead with it ("send it", "yes do that") — gets that action's label (TASK, EMAIL, CALENDAR, or WEB): "send it" after an email was being discussed is EMAIL. A message merely commenting on a finished action ("thanks, that worked") is CHAT.
+A short follow-up that continues an action being discussed in that conversation — supplying a detail it was missing ("its in my downloads folder"), correcting it, or telling Jarvis to go ahead with it ("send it", "yes do that", "play it") — gets that action's label (TASK, EMAIL, CALENDAR, WEB, or BROWSE): "send it" after an email was being discussed is EMAIL; "play it" after a song on YouTube was being discussed is BROWSE. A message merely commenting on a finished action ("thanks, that worked") is CHAT.
 
 """
 

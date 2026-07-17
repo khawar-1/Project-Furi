@@ -2088,3 +2088,172 @@ the Initiative Engine as new gatherers/candidates; only 11.3 adds a store.
   `test_threads_api.py`, `test_initiative.py` (+people/threads/callbacks signals
   + mark-nudged). 1398 tests green; runtime-verified live: boot + migration,
   `/api/threads` create/dedupe/resolve/400, `next_check = event_date + 1 day`.
+
+### Universal browser control (Phase 14)
+"Jarvis does what I do in a browser" — ONE real Chromium plus an agent loop that
+reads a page and decides the next action, with NO per-site code. This INVERTS the
+Phases 1–13 doctrine: page content now drives the action loop directly (there is
+no corpus to exclude — the page IS the input), so the safety story is different
+and stated plainly in `app/core/browser_session.py`'s docstring.
+
+- **The guarantee (Part 1, `app/core/browser_session.py`)**: in READ mode the
+  session is structurally incapable of mutating anything. `_intercept()` runs on
+  every request, every frame, and (1) ABORTS every non-GET — a loop that cannot
+  POST cannot submit a form, send, or buy, so `browse`/`browse_page` are
+  PermissionLevel.READ and pass `execute_tool`'s gate untouched; (2) reuses
+  `browser_tools._host_is_blocked` (SSRF, shared not copied), re-checked after
+  navigation; (3) allowlists MAIN-FRAME navigation only (subresources/subframes
+  are not origin-gated — else YouTube's googlevideo/ytimg never render). HONEST
+  LIMIT, in the docstring: "non-GET = mutation" is an HTTP CONVENTION (RFC 7231),
+  a strong bound on the dominant case — NOT the structural proof
+  `_recipient_violation` is (GET-with-side-effects like `/logout?id=5` gets
+  through, bounded only by the allowlist). Separate `~/.jarvis/browser` profile
+  (never the user's real Chrome), HEADED (the watchable window is the last honest
+  control), `service_workers="block"` (a SW serves requests outside
+  `page.route()`), Playwright imported lazily (base install fails clean). Channel
+  fallback bundled→msedge→chrome. `BROWSER_FACTORY` is the injectable seam;
+  conftest `_hermetic_browser_session` REFUSES real launches suite-wide (the
+  planner splices steps on its own).
+- **DOM observation (Part 1, `app/core/dom_observe.py`)**: turns a live page into
+  a numbered element list + prose for a text-only LLM (no vision — `LLMMessage.
+  content` is a bare str and deepseek-chat has no image input; DOM gives real
+  element identity anyway). THE INDEX CONTRACT: each observation stamps elements
+  with a fresh obs-id + index (`data-jarvis-obs`/`-idx`); `resolve` requires BOTH
+  to match, so a re-rendered page's "element 3" can't be clicked in place of the
+  one named (a navigation destroys the attributes → clean `StaleObservation`).
+  HARD-SPLIT budget (the 5-wide trap): elements 6000 chars rendered FIRST, prose
+  4000 — prose can never crowd out the actionable half. Password values never
+  read.
+- **The loop (Part 2, `app/agents/browser_loop.py`)** — in agents/ not tools/
+  because it makes LLM calls (the summary.py-not-rendering.py rule). `run_browse`
+  observe→decide→act, BOUNDED (`MAX_BROWSER_ACTIONS=15` hard cap), TERMINAL
+  (explicit `done`), NON-SPINNING (DEDUPE on repeated action-against-same-element
+  — the ended-stream signature the prior ad-hoc attempt looped on forever). Fast
+  path (`placeholder_resolver`'s "nothing to decide, only to do"): a single
+  search box + a term extracted from the goal → fill+Enter in CODE, zero LLM
+  (asserted by call-count test). Actions: navigate/type/click/done. THREE LIVE
+  FINDINGS on YouTube (2026-07-17, "play Jane by The Long Faces"), each fixed
+  GENERICALLY, never per-site: (1) a JS click on an SPA result POSTs
+  (youtubei/v1/player) which READ mode aborts, so `_act` opens a LINK by
+  NAVIGATING to its href (a GET) — buttons without href still click; (2)
+  `settle()` waited for networkidle which fires before YouTube lazy-renders
+  results, so a `SETTLE_RENDER_SECONDS=2.5` pause after networkidle lets content
+  paint; (3) YouTube's in-page SEARCH submits via a blocked POST, so a `navigate`
+  action lets the model GET a results/watch URL directly — per-site URL knowledge
+  lives in the LLM, safety (allowlist + GET-only) in code. The model self-
+  recovered live: fast-path search → thin results → navigate to results URL (140
+  elements) → click the video → done, playing.
+- **Grounding (Part 2, `app/agents/browser_grounding.py` + planner
+  `_browse_origin_violation`)**: the sites a browse may visit must trace to the
+  USER'S words (goal + conversation + answers), NEVER page content — the
+  exfiltration bound, the `_recipient_grounding` mirror, checked in the
+  `_generate_steps` reject chain. Domain matching is dot-aware (subdomain yes,
+  `evil-youtube.com` no); a small known-sites map (youtube→youtube.com) is a
+  usability CONVENIENCE that fails CLOSED, explicitly NOT the forbidden
+  intent-classifier keyword-list shape.
+- **Media persistence (Part 2)**: a "play"/"watch" goal with `keep_open=true`
+  leaves the window OPEN and playing — a tool call normally closes its session in
+  a `finally`, which would stop the music. The live BrowserSession is held in a
+  module-level registry (`register_media`/`stop_media`/`active_media` in
+  browser_session — memory-only BY DESIGN, a running page is not serializable;
+  ONE at a time). `stop_media` tool + `POST /api/browser/stop-media` +
+  `GET /api/browser/media`; StatusBar "▶ Playing" indicator (browserStore,
+  `browser_media` push, in `notifications.ts` SILENT_TYPES).
+- **Tools**: `browse` (goal, start_url, allowed_origins, keep_open) and
+  `stop_media`, both READ, in `app/tools/browser_agent_tools.py`; plan rule 21
+  routes "do something on a live site" to `browse` (rule 20 keeps `browse_page`
+  the single-page reader, read_webpage the default). Provider via
+  `create_provider()`.
+- **Deferred (sketched, NOT built)**: 14.4 manual login walls (no credentials
+  ever — pause AWAITING_CHOICE, user logs in in the headed window), 14.5 COMMIT
+  mode (form submit behind approval with the code-read form state as the
+  signature; session registry, never replay), 14.6 upload. Do not build until
+  asked. RESIDUAL RISK, stated: within an allowlisted, authenticated origin a
+  compromised loop has full user authority — no precedent covers that, which is
+  why the read-only half ships first and the window stays watchable.
+- Tests: `test_browser_session.py`, `test_dom_observe.py` (Part 1),
+  `test_browser_grounding.py` (origins from user words only, the planner
+  violation), `test_browser_loop.py` (fast-path zero-call, link-navigates-GET,
+  navigate action, dedupe halts the ended-stream loop, action cap, hallucinated
+  index refused, blocked-mutations pass through, media registry). 1726 green.
+  Live-verified end to end (real Chromium + DeepSeek). Uncommitted (user defers
+  git).
+- **Phase 14 chat wiring + Chrome + one-time sign-in (2026-07-17, user request
+  "when I say play something on youtube it should open and play on my chrome
+  browser signed in as the account I added — not Edge")**: three pieces, all in
+  code. (1) CHAT ROUTING — a new `BROWSE` classifier label (`task_router._ACTION_
+  LABELS`/`_CLASSIFY_PROMPT`: "ACT on a live site — play/watch a video", distinct
+  from WEB which only LOOKS UP) so "play jane by the long faces on youtube" reaches
+  the planner (rule 21 → the `browse` tool with `keep_open`) instead of the chat
+  LLM. Gate widened recall-first: named media/streaming sites (youtube/spotify/
+  netflix/…) are STRONG nouns firing alone; play/watch/listen/stream verbs + a
+  weak media noun (song/track/episode/movie/trailer/podcast) fire the weak path.
+  All action labels still feed the SAME planner — the label buys recall + a
+  telemetry seam; the browse step is still READ (non-GET aborted), so no approval.
+  Live-verified: "play … on youtube" → BROWSE, "what's the most-viewed youtube
+  video" → WEB (a lookup), "how are you today" → CHAT. (2) CHROME OVER EDGE —
+  `browser_session._CHANNELS` reordered to `("chrome", None, "msedge")` (real
+  Chrome first; bundled/Edge fallbacks stay load-bearing for a box without Chrome),
+  plus `--disable-blink-features=AutomationControlled` in `_LAUNCH_ARGS` (drops the
+  `navigator.webdriver` flag Google reads to refuse sign-in — it does NOT weaken
+  the READ-mode guarantee, which bounds the AGENT, not the browser's honesty about
+  being scripted). Live-verified "launched via chrome". (3) ONE-TIME SIGN-IN (the
+  deferred 14.4 manual-login-wall, brought forward): the Gmail account connected in
+  Settings is a Google API TOKEN — it does NOT put a session cookie in a browser;
+  the only honest path is the USER signing in by hand, once. `browser_session.
+  open_login_window(url)` opens the persistent `~/.jarvis/browser` profile as a
+  NORMAL, user-driven window with NO interceptor (the user completes the sign-in
+  POST the interceptor would abort — safe because the AGENT LOOP never touches this
+  window); the persistent profile keeps the session for later playback. ONE profile
+  = ONE live context: opening login stops any media session, and `BrowseTool` calls
+  `close_login_window()` before launching. Credentials are NEVER seen/stored by
+  Jarvis. API `GET /api/browser/account`, `POST /api/browser/{login,close-login}`
+  (503 when no browser); `browserApi` + a Settings "Browser account" card
+  (`BrowserAccountCard`) with the honest caveat that Google may refuse sign-in in an
+  automated window. HONEST LIMIT stated in code + UI: Google's bot detection can
+  still block an automated-browser login; the anti-detection flag improves the odds
+  but does not guarantee it. Tests: `test_browser_api.py` (media/account/login
+  endpoints incl. 503), `test_browser_session.py` (login window launches without an
+  interceptor, idempotent close, opening login stops active media), `test_task_
+  router.py` (BROWSE label + gate fires for play/media, stays closed on bare
+  mentions). 1749 green; typecheck + vite build clean. Uncommitted.
+- **Phase 14 event-loop fix — `browse` failed with `NotImplementedError` in
+  production (2026-07-17, live "it didn't work" with a screenshot)**: every
+  `browse` failed twice with `NotImplementedError` and the plan reported "no
+  tool can interact with YouTube". ROUTING WAS FINE (both steps were `browse`);
+  the TOOL raised. ROOT CAUSE: Playwright launches its Node driver as a
+  SUBPROCESS, and on Windows only a `ProactorEventLoop` can spawn subprocesses —
+  the `SelectorEventLoop` raises `NotImplementedError` from
+  `create_subprocess_exec`. `uvicorn/loops/asyncio.py` FORCES
+  `WindowsSelectorEventLoopPolicy()` whenever `use_subprocess=True`, which is
+  exactly the `--reload` mode `npm run dev` runs — so the backend's MAIN loop
+  cannot launch Playwright, and `async_playwright().start()` died before the
+  channel-fallback try/except (hence the raw `NotImplementedError`, not the
+  friendly `BrowserUnavailable`). ⚠️ THE PRIOR "live-verified" CLAIM NEVER
+  TOUCHED PRODUCTION: it ran in a standalone `asyncio.run()` script, which is
+  Proactor by DEFAULT on Windows — the one loop that works. **A live check that
+  does not use the app's real event loop is not a verification of the app.**
+  FIX (loop-independent, the voice `_TTS_EXECUTOR` precedent): NEW
+  `app/core/browser_runtime.py` runs ALL Playwright work on a dedicated daemon
+  thread owning its own `ProactorEventLoop`; `run_browser(coro)` marshals a
+  coroutine onto it (`run_coroutine_threadsafe` + `wrap_future`) and returns the
+  result/exception to the caller's loop. Playwright objects are loop-bound, so an
+  ENTIRE session life — launch → navigate → observe → act → close, plus the
+  loop's own LLM decision calls — runs inside ONE marshaled coroutine; nothing
+  inside calls `run_browser` again (no nesting, no self-deadlock). The marshaling
+  boundary is the three tool `execute()`s (`browse`/`browse_page`/`stop_media`)
+  and the `/api/browser` routes (`stop-media`/`login`/`close-login`). Two things
+  STAY off the browser loop: `push()` (main-loop WebSocket objects) fires in the
+  tool AFTER the marshaled browse returns; and the LLM provider — the cached
+  `create_provider()` holds an httpx client bound to the main loop, so the
+  browse coroutine builds its OWN via the new uncached `factory.build_provider()`
+  (client binds to the browser loop) and closes it (`__aexit__`) when done.
+  `main.py` shutdown calls `shutdown_browser_runtime()` (best-effort; daemon
+  thread). VERIFIED under the EXACT `_WindowsSelectorEventLoop`: a direct
+  `create_subprocess_exec` raises `NotImplementedError` while `run_browser`
+  succeeds, AND the real end-to-end (real Chrome + DeepSeek) played
+  `youtube.com/watch?v=HydkjjDNTmY` "Jane! - YouTube" with `playing=True`, 48
+  non-GET requests blocked (READ mode intact), media registered then cleanly
+  stopped. Tests: `test_browser_runtime.py` (off-thread/off-loop marshaling,
+  result + exception propagation, Proactor-on-Windows, loop reuse). 1754 green;
+  uncommitted.

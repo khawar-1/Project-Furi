@@ -126,7 +126,8 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
         "create_email_draft", "send_email", "reply_email",
         "list_events", "find_events",
         "create_event", "update_event", "delete_event",
-        "web_search", "read_webpage",
+        "web_search", "read_webpage", "browse_page",
+        "browse", "stop_media",
     }
     assert tools["read_file"]["permission_level"] == "read"
     assert tools["recall_memory"]["permission_level"] == "read"
@@ -149,6 +150,17 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
     assert tools["create_event"]["permission_level"] == "write"
     assert tools["update_event"]["permission_level"] == "write"
     assert tools["delete_event"]["permission_level"] == "destructive"
+    # Phase 14 Part 1: driving a browser is READ, and that is a claim about
+    # CODE, not a judgement call — browser_session's interceptor aborts every
+    # non-GET, so the tool cannot submit anything. If this ever needs to become
+    # write/destructive, the guarantee has been broken, not the classification.
+    assert tools["browse_page"]["permission_level"] == "read"
+    # Phase 14 Part 2: the browse LOOP and stop_media are READ for the same
+    # structural reason — the interceptor aborts every non-GET, so the loop can
+    # navigate and click but never submit. stop_media only closes a window Jarvis
+    # itself opened. Neither needs approval.
+    assert tools["browse"]["permission_level"] == "read"
+    assert tools["stop_media"]["permission_level"] == "read"
     assert "parameters" in tools["search_files"]
 
 

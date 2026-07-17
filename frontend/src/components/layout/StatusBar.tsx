@@ -4,11 +4,12 @@
  */
 import { useEffect, useState } from 'react';
 import { clsx } from 'clsx';
-import { Circle, Cpu, Eye, Mic, Sparkles, Wifi, WifiOff, RefreshCw } from 'lucide-react';
+import { Circle, Cpu, Eye, Mic, Play, Sparkles, Wifi, WifiOff, RefreshCw, X } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 import { usePushStore } from '@/stores/pushStore';
 import { useContextStore } from '@/stores/contextStore';
 import { useVoiceStore } from '@/stores/voiceStore';
+import { useBrowserStore } from '@/stores/browserStore';
 import { initiativeApi } from '@/lib/api';
 
 const SENSING_POLL_MS = 10_000;
@@ -24,6 +25,9 @@ export function StatusBar() {
     (s) => !!s.settings?.enabled && !!s.settings?.wake_word
   );
   const [initiativeOn, setInitiativeOn] = useState(false);
+  // Phase 14: the "▶ Playing" indicator + stop control for a browse window.
+  const media = useBrowserStore((s) => ({ playing: s.playing, title: s.title, stopping: s.stopping }));
+  const stopMedia = useBrowserStore((s) => s.stop);
 
   // The required visible "sensing on" indicator — poll the cheap status.
   useEffect(() => {
@@ -156,6 +160,24 @@ export function StatusBar() {
           <div className="flex items-center gap-1" title="Initiative engine on — Jarvis may suggest things proactively">
             <Sparkles size={10} className="text-cyan-400" />
             <span className="text-cyan-400">Initiative: On</span>
+          </div>
+        )}
+
+        {/* Browser playback (Phase 14) — a browse window is open and playing */}
+        {media.playing && (
+          <div className="flex items-center gap-1" title={media.title || 'Playing in the browser'}>
+            <Play size={10} className="text-emerald-500 fill-current" />
+            <span className="text-emerald-500 max-w-[220px] truncate">
+              Playing{media.title ? `: ${media.title}` : ''}
+            </span>
+            <button
+              onClick={() => void stopMedia()}
+              disabled={media.stopping}
+              className="ml-0.5 text-muted hover:text-danger transition-fast disabled:opacity-50"
+              title="Stop playback"
+            >
+              <X size={11} />
+            </button>
           </div>
         )}
       </div>

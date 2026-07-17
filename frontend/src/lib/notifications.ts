@@ -17,7 +17,7 @@ import type { PushEvent } from '@/types';
 /** Event types that must never raise a notification: the channel handshake,
  *  and per-step plan narration (Phase 4, Part 6) — a plan can emit dozens of
  *  step ticks; the plan-level "task" events are the ones worth a toast. */
-const SILENT_TYPES = new Set(['connected', 'plan_step']);
+const SILENT_TYPES = new Set(['connected', 'plan_step', 'browser_media']);
 
 function asText(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;

@@ -41,7 +41,21 @@ _MAX_NAMES = 120           # names listed before "… and N more"
 # extra evidence away — turning the fan-out into a more expensive way to starve
 # the record, which is the exact defect (content starvation) the whole web
 # hardening round exists to prevent.
-_STEP_RESULT_CAPS = {"web_search": 11000, "read_webpage": 12000}
+# browse_page renders an element list (dom_observe._ELEMENT_BUDGET = 6000) plus
+# page prose (_PAGE_TEXT_BUDGET = 4000) plus a URL/TITLE head. Clipping it here
+# would silently eat the element list's tail — the actionable half — which is the
+# 5-wide trap exactly: a budget widened upstream and not downstream STARVES the
+# record. test_dom_observe.py asserts this cap stays above what dom_observe can
+# emit, so moving one number without the other fails loudly.
+_STEP_RESULT_CAPS = {
+    "web_search": 11000,
+    "read_webpage": 12000,
+    # browse renders the SAME dom_observe observation browse_page does (element
+    # budget + prose budget + head), so it needs the same headroom — clipping it
+    # eats the element list's tail (the 5-wide trap). test_dom_observe pins both.
+    "browse_page": 11000,
+    "browse": 11000,
+}
 
 # Chars of the whole results block. Raised 8000 → 20000 together with the
 # per-tool caps above: web evidence is bulkier than a file listing, and the
@@ -509,6 +523,55 @@ def _fmt_read_webpage(output: dict) -> str:
     return head + "\n" + _fence(content)
 
 
+def _fmt_browse_page(output: dict) -> str:
+    """The rendered observation, fenced. Fenced because it is untrusted page
+    prose carrying its own markdown (the _fmt_web_search lesson: a snippet that
+    literally contained '##' headers), and because the element list is a
+    structural listing that must survive as one block."""
+    title = str(output.get("title") or "").strip()
+    url = str(output.get("url") or "")
+    head = f"Browser page **{title}** — {url}" if title else f"Browser page {url}"
+    rendered = str(output.get("rendered") or "").strip()
+    if not rendered:
+        return head + "\n(The page rendered nothing readable.)"
+
+    # An aborted mutation is a BREAKAGE, not a mutation — the guard worked. Say
+    # so plainly: a page that misbehaved silently is the confusing outcome.
+    blocked = output.get("blocked") or {}
+    note = ""
+    if isinstance(blocked, dict) and blocked.get("blocked_mutations"):
+        note = (
+            f"\n({blocked['blocked_mutations']} request(s) the page tried to send "
+            f"were blocked — browsing is read-only.)"
+        )
+    return head + note + "\n" + _fence(rendered)
+
+
+def _fmt_browse(output: dict) -> str:
+    """A browse run's result: what it accomplished, then the final page rendered
+    (fenced, for the _fmt_browse_page reasons). Leads with the outcome — 'playing'
+    or the done reason — so a summary can answer 'did it play?' without parsing the
+    element list."""
+    title = str(output.get("title") or "").strip()
+    url = str(output.get("url") or "")
+    where = f"**{title}** — {url}" if title else url
+    if output.get("playing"):
+        head = f"Now playing in the browser: {where}"
+    else:
+        reason = str(output.get("done_reason") or "").strip()
+        head = f"Browsed to {where}" + (f" — {reason}" if reason else "")
+
+    blocked = output.get("blocked") or {}
+    if isinstance(blocked, dict) and blocked.get("blocked_mutations"):
+        head += (
+            f"\n({blocked['blocked_mutations']} request(s) the page tried to send "
+            f"were blocked — browsing is read-only.)"
+        )
+
+    rendered = str(output.get("rendered") or "").strip()
+    return head + ("\n" + _fence(rendered) if rendered else "")
+
+
 def _fmt_lookup_contact(output: dict) -> str:
     status = output.get("status")
     if status == "resolved":
@@ -539,6 +602,8 @@ _RESULT_FORMATTERS = {
     "find_events": _fmt_calendar_events,
     "web_search": _fmt_web_search,
     "read_webpage": _fmt_read_webpage,
+    "browse_page": _fmt_browse_page,
+    "browse": _fmt_browse,
 }
 
 

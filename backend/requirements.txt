@@ -100,6 +100,22 @@ kokoro-onnx==0.5.0
 # RapidOCR runs the OCR models on whatever onnxruntime is installed (CPU or the
 # CUDA EP), so screen OCR rides the same GPU acceleration as the voice engines.
 
+# Browser control (Phase 14 — universal web automation via a real Chromium).
+# The Python package is a clean add: it pulls only greenlet (already here via
+# SQLAlchemy) and pyee — no torch, no onnxruntime, so it stays clear of the
+# libiomp5md OpenMP clash and the onnxruntime-gpu conflict documented above.
+#
+# The BROWSER BINARY is a separate ~150MB download and is NOT installed by pip:
+#
+#   playwright install chromium
+#
+# app/core/browser_session.py imports playwright LAZILY and raises a clean
+# BrowserUnavailable naming that command, so a base install without the binary
+# leaves the app fully working and browse_page simply reports what to run (the
+# rapidocr-onnxruntime precedent — an optional capability fails clean, never at
+# startup).
+playwright==1.48.0
+
 # Google integration (Phase 5 Part 1 — OAuth loopback flow + Gmail/Calendar clients)
 google-auth==2.35.0
 google-auth-oauthlib==1.2.1

@@ -419,6 +419,44 @@ def test_own_action_questions_survive_the_self_reference_test():
     assert looks_like_task("what was the name of the folder that u created?") is True
 
 
+@pytest.mark.parametrize("message", [
+    # A named media/streaming site fires the strong gate alone (any wording).
+    "play jane by the long faces on youtube",
+    "search and play some lofi on youtube",
+    "open youtube and play the new severance trailer",
+    "watch this on youtube",
+    "play despacito on spotify",
+    # A media noun + a play/watch/listen verb fires via the weak-signal path,
+    # no site named.
+    "play the new taylor swift song",
+    "watch the trailer",
+    "listen to some music",
+])
+def test_gate_fires_for_play_and_media_requests(message):
+    assert looks_like_task(message) is True
+
+
+@pytest.mark.parametrize("message", [
+    # Ordinary conversation that merely mentions a media site or activity — a
+    # false fire here costs one temp-0 call that answers CHAT (recall-first),
+    # but bare mentions with no action verb must not fire the weak path.
+    "i love this song",
+    "that was a great movie",
+])
+def test_gate_stays_closed_for_bare_media_mentions(message):
+    assert looks_like_task(message) is False
+
+
+def test_classify_prompt_has_browse_label():
+    # BROWSE (Phase 14) routes "act on a live site" (play/watch a video) to the
+    # planner, which drafts a `browse` step (rule 21). Distinct from WEB, which
+    # only looks information up.
+    from app.api.task_router import _CLASSIFY_PROMPT, _ACTION_LABELS
+    assert "BROWSE" in _ACTION_LABELS
+    assert "BROWSE —" in _CLASSIFY_PROMPT
+    assert "play jane by the long faces on youtube" in _CLASSIFY_PROMPT.lower()
+
+
 def test_classify_prompt_routes_entity_lookups_to_web():
     # The WEB label was broadened from time-sensitive-only to also cover a
     # factual question about a specific real-world entity — so a knowledge
@@ -528,11 +566,13 @@ async def test_unknown_verb_phrasing_reaches_the_approval_gate(client, tmp_path)
     ("EMAIL", "EMAIL"),
     ("CALENDAR", "CALENDAR"),
     ("WEB", "WEB"),
+    ("BROWSE", "BROWSE"),
     ("CHAT", "CHAT"),
     # Real models append stray text/punctuation — startswith parsing handles it.
     ("EMAIL.", "EMAIL"),
     ("calendar", "CALENDAR"),
     ("web", "WEB"),
+    ("browse", "BROWSE"),
     ("  TASK\n", "TASK"),
 ])
 async def test_classify_message_returns_label(reply, expected):

@@ -434,6 +434,39 @@ export const contextApi = {
 };
 
 // ============================================================
+// Browser media control (Phase 14, Part 2)
+// ============================================================
+export interface BrowserMedia {
+  playing: boolean;
+  title: string;
+  url: string;
+}
+
+export const browserApi = {
+  /** What the browser is currently playing (for the StatusBar indicator). */
+  getMedia: (): Promise<BrowserMedia> => apiFetch<BrowserMedia>('/api/browser/media'),
+
+  /** Stop and close a browse window left playing. */
+  stopMedia: (): Promise<{ stopped: boolean }> =>
+    apiFetch<{ stopped: boolean }>('/api/browser/stop-media', { method: 'POST' }),
+
+  /** Whether a one-time sign-in window is currently open. */
+  accountStatus: (): Promise<{ login_open: boolean }> =>
+    apiFetch<{ login_open: boolean }>('/api/browser/account'),
+
+  /** Open a user-driven sign-in window in the Jarvis browser profile. */
+  openLogin: (url?: string): Promise<{ login_open: boolean }> =>
+    apiFetch<{ login_open: boolean }>('/api/browser/login', {
+      method: 'POST',
+      body: JSON.stringify(url ? { url } : {}),
+    }),
+
+  /** Close the sign-in window. */
+  closeLogin: (): Promise<{ closed: boolean }> =>
+    apiFetch<{ closed: boolean }>('/api/browser/close-login', { method: 'POST' }),
+};
+
+// ============================================================
 // Semantic file index (Phase 6, Part 2)
 // ============================================================
 export const indexApi = {
