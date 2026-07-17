@@ -29,6 +29,8 @@ from typing import AsyncIterator, List, Optional
 import pytest
 
 from app.agents.summary import (
+    _FABRICATION_MIN_BULLETS,
+    _enumerated_items,
     _is_fabricated_enumeration,
     _plan_has_unresolved_web_gap,
     stream_completed_summary,
@@ -192,6 +194,79 @@ def test_file_listing_bullets_are_grounded():
     assert _is_fabricated_enumeration(text, ", ".join(names)) is False
 
 
+# ------------------------------------- shape independence (incident #2)
+# Every test above this line lays its enumeration out as "- " bullets, which
+# is exactly how a guard that only READ bullets stayed green while blind. The
+# second incident wrote the same fabrication as comma-separated prose under
+# bold labels and scored ZERO items against a record holding none of the names.
+
+# Verbatim in shape from the 2026-07-17 screenshot.
+_COMMA_FABRICATION = """I searched for the teams that have qualified for the 2026 FIFA World Cup.
+
+The 2026 World Cup tournament is currently underway, with the final scheduled for 19 July between Spain and Argentina. The full list of 48 qualified teams, drawn from the FIFA and ESPN sources, is as follows:
+
+**AFC (Asia):** Australia, Bahrain, China, Indonesia, Iran, Iraq, Japan, Jordan, Kuwait, Kyrgyz Republic, North Korea, Oman, Palestine, Qatar, Saudi Arabia, South Korea, United Arab Emirates, Uzbekistan
+
+**CAF (Africa):** Algeria, Cape Verde, Congo DR, Egypt, Senegal, South Africa, Tunisia
+
+**CONMEBOL (South America):** Argentina, Colombia, Paraguay
+
+**UEFA (Europe):** Austria, Belgium, Bosnia and Herzegovina, Croatia, Czechia, England, France, Germany, Netherlands, Norway, Portugal, Scotland, Spain, Sweden, Switzerland, Turkiye"""
+
+_FINAL_ONLY_RECORD = (
+    "The 2026 World Cup final is scheduled for 19 July at MetLife Stadium "
+    "between Spain and Argentina."
+)
+
+
+def test_comma_separated_fabrication_is_caught():
+    """The incident, frozen. A guard that fires only on markdown bullets is
+    coupled to a formatting choice the model makes freely — which is no guard.
+    The record here names none of these countries."""
+    assert _is_fabricated_enumeration(_COMMA_FABRICATION, _FINAL_ONLY_RECORD) is True
+
+
+def test_the_items_are_seen_at_all():
+    """The measurement that exposed it: 0 items scored before, so gate 1 short-
+    circuited and the grounding test never ran."""
+    items = _enumerated_items(_COMMA_FABRICATION)
+    assert len(items) >= _FABRICATION_MIN_BULLETS
+    assert "Australia" in items and "Bosnia and Herzegovina" in items
+    # The label is not an item, and neither is the prose around the list.
+    assert not any("AFC" in i or "full list" in i for i in items)
+
+
+def test_a_grounded_comma_list_still_passes():
+    """Shape is not the offence. The same wall of text, when the record does
+    contain the names, is a real answer and must survive."""
+    record = _FINAL_ONLY_RECORD + " " + ", ".join(_enumerated_items(_COMMA_FABRICATION))
+    assert _is_fabricated_enumeration(_COMMA_FABRICATION, record) is False
+
+
+def test_prose_with_commas_is_not_an_enumeration():
+    """The over-reading risk. A sentence has commas; it is not a list, and one
+    long segment is what tells them apart."""
+    prose = (
+        "I found that the final is on 19 July, that Spain and Argentina are "
+        "playing, and that the match is at MetLife Stadium, which holds 82,500."
+    )
+    assert _enumerated_items(prose) == []
+    assert _is_fabricated_enumeration(prose, "x") is False
+
+
+def test_a_comma_run_inside_a_bullet_expands():
+    """An 18-name bullet used to score as ONE item, and one item is grounded the
+    moment any single name appears in the record."""
+    text = "\n".join([
+        "- AFC: Australia, Bahrain, China, Indonesia, Iran, Iraq, Japan, Jordan",
+        "- UEFA: Austria, Belgium, Croatia, Czechia, England, France, Germany",
+    ])
+    items = _enumerated_items(text)
+    assert "Australia" in items and "Germany" in items
+    assert len(items) == 15
+    assert _is_fabricated_enumeration(text, "nothing relevant here") is True
+
+
 # ------------------------------------------------------------ the stream
 
 async def test_fabricated_summary_is_rejected():
@@ -325,14 +400,55 @@ async def test_summary_prompt_carries_the_current_date():
 
 async def test_summary_prompt_carries_the_ambiguity_clause():
     """An ambiguous question must never be answered by silently picking one
-    reading — the user gets the likely answer AND is told the other exists."""
+    reading — the user gets the likely answer AND the other one covered."""
     provider = _CapturingProvider()
     plan = _plan(_web_step([_row("Spain and Argentina reach the final. " * 40)]))
     [d async for d in stream_completed_summary(provider, plan)]
 
     prompt = provider.prompts[0]
-    assert "read more than one way" in prompt
-    assert "most likely meant" in prompt
+    assert "THE READING TO ANSWER above names a reading" in prompt
+    assert "BOTH readings must be covered SHORT" in prompt
+
+
+async def test_an_ambiguous_question_forbids_a_data_dump_for_EITHER_reading():
+    """REWRITTEN 2026-07-17 (fourth round), and the rewrite is the fix.
+
+    This used to assert "ANSWER ONLY THAT ONE" — a contract that bet everything
+    on ranking the reading correctly. Then the ranking was MEASURED: wrong from
+    the goal alone, 2 of 3 from snippets, 2 of 5 from fuller evidence. When both
+    readings have live coverage the verdict is a coin flip, and three prompt
+    revisions moved it exactly as far as the two before them did (nowhere).
+
+    So the contract stops betting. Both readings get covered, briefly, and
+    NEITHER gets a wall of data — which is what the user actually complained
+    about twice. A wrong verdict now costs one line instead of a screen. That is
+    the fan-out doctrine (cover, don't choose) applied to the answer."""
+    provider = _CapturingProvider()
+    plan = _plan(_web_step([_row("Spain and Argentina reach the final. " * 40)]))
+    [d async for d in stream_completed_summary(provider, plan)]
+
+    prompt = provider.prompts[0]
+    assert "no data dump for either one" in prompt
+    assert "Never give either reading its own list, section, table or data dump" in prompt
+    # A long answer becomes its shape, not its list: "48 teams have qualified".
+    assert "give the shape of it instead of the list" in prompt
+    # And the reading we did NOT lead with is still ANSWERED, not just offered,
+    # when the evidence allows — that is what makes a wrong lead survivable.
+    assert "answer it outright when the results say so" in prompt
+
+
+async def test_show_all_the_data_rule_is_scoped_away_from_web_pages():
+    """The other half of the wall of text. "present ALL of it … Never summarize
+    the data away" is written for the user's own files and command output; with
+    a qualification page in evidence the model read it as licence to reprint the
+    page. Two rules pointing opposite ways get resolved by doing both."""
+    provider = _CapturingProvider()
+    plan = _plan(_web_step([_row("Spain and Argentina reach the final. " * 40)]))
+    [d async for d in stream_completed_summary(provider, plan)]
+
+    prompt = provider.prompts[0]
+    assert "user's own machine and accounts ONLY" in prompt
+    assert "evidence to answer FROM, never data to reproduce" in prompt
 
 
 def test_summary_prompt_still_formats_with_every_placeholder():
@@ -340,7 +456,75 @@ def test_summary_prompt_still_formats_with_every_placeholder():
     call must not drift apart."""
     from app.agents.summary import SUMMARY_PROMPT
 
-    rendered = SUMMARY_PROMPT.format(goal="g", steps="s", now="2026-07-17 09:00 (Friday)")
+    rendered = SUMMARY_PROMPT.format(
+        goal="g", steps="s", now="2026-07-17 09:00 (Friday)", reading="",
+    )
     assert "2026-07-17 09:00 (Friday)" in rendered
-    for placeholder in ("{goal}", "{steps}", "{now}"):
+    for placeholder in ("{goal}", "{steps}", "{now}", "{reading}"):
         assert placeholder not in rendered
+
+
+# ================ which reading gets ANSWERED (2026-07-17, the third round)
+#
+# Fan-out fixed retrieval and stopped there. Live, BOTH readings were in
+# evidence and the reply still led with the 48-team qualification list, offering
+# the Spain-v-Argentina final — two days away, and the thing actually asked for
+# — as a closing afterthought. Google, given the same words, leads with the
+# final.
+#
+# The rule ("pick the reading the user most likely meant") was one clause among
+# ten, read by a call whose job is writing prose, with "qualified" sitting in the
+# goal anchoring it. reading_enumerator makes that judgement as its ONLY job,
+# with the date, before any result exists to bias it — and we already pay for the
+# call. These tests pin that its answer is carried, not discarded.
+
+def _reading_plan(primary: str) -> AgentPlan:
+    plan = _plan(_web_step([_row("Spain and Argentina reach the final. " * 40)]))
+    plan.primary_reading = primary
+    return plan
+
+
+async def test_the_decided_reading_reaches_the_summary_prompt():
+    provider = _CapturingProvider()
+    plan = _reading_plan("which teams are playing the 2026 World Cup final")
+    [d async for d in stream_completed_summary(provider, plan)]
+
+    prompt = provider.prompts[0]
+    assert "which teams are playing the 2026 World Cup final" in prompt
+    # The block itself, not the static rule that refers to it by name.
+    assert "THE READING TO ANSWER (this question has more than one" in prompt
+
+
+async def test_the_directive_outranks_the_models_own_reading_of_the_wording():
+    """The load-bearing clause. Without "trust it over your own reading", an
+    anchoring word in the goal ("qualified") wins the tie — which is the whole
+    failure. The block also bounds the damage of its own verdict being wrong
+    (MEASURED as a coin flip): lead briefly, cover the other in one sentence,
+    and give neither a data dump."""
+    provider = _CapturingProvider()
+    [d async for d in stream_completed_summary(provider, _reading_plan("the final"))]
+
+    prompt = provider.prompts[0]
+    assert "trust it over your own reading" in prompt
+    assert "Lead with that reading, briefly." in prompt
+    assert "Cover the OTHER reading in ONE sentence" in prompt
+    assert "Neither reading gets a list, section, table, or data dump" in prompt
+
+
+async def test_an_unambiguous_plan_adds_no_directive():
+    """No verdict, no block — the summary's own judgement is untouched on the
+    overwhelming majority of turns, which never had two readings to weigh."""
+    provider = _CapturingProvider()
+    [d async for d in stream_completed_summary(provider, _reading_plan(""))]
+
+    # NOT the header string: the static ambiguity rule names the block, so it is
+    # in the template either way. The block's own words are what must be absent.
+    assert "trust it over your own reading" not in provider.prompts[0]
+
+
+def test_the_reading_block_is_empty_without_a_verdict():
+    from app.agents.summary import _reading_block
+
+    assert _reading_block(_reading_plan("")) == ""
+    assert _reading_block(_reading_plan("   ")) == ""   # whitespace is not a verdict
+    assert "the final" in _reading_block(_reading_plan("the final"))

@@ -73,6 +73,14 @@ class PlanStep(BaseModel):
     # construction, so it can never affect what the user approved; defaulted,
     # so plans parked before this field existed still deserialize.
     auto_escalated: bool = False
+    # True when CODE widened this web_search from one query to several, because
+    # an independent reading enumeration found the goal ambiguous and the draft
+    # had committed to a single reading (reading_enumerator, 2026-07-17).
+    # Observability, not control: it is the ONLY way to tell a model-authored
+    # fan-out from a code-authored one, and so the only way to ever measure
+    # whether plan rule 16 does anything. Excluded from signature() by
+    # construction; defaulted, so plans parked before this field deserialize.
+    auto_fanout: bool = False
 
     def signature(self) -> str:
         """Stable identity of WHAT this step does — used to check that an
@@ -112,6 +120,15 @@ class AgentPlan(BaseModel):
     user_answers: list[str] = Field(default_factory=list, exclude=True)
     # How many questions this plan has asked (capped — see MAX_QUESTIONS).
     questions_asked: int = Field(default=0, exclude=True)
+    # When the goal reads more than one way, the reading the user most likely
+    # meant — decided by reading_enumerator (one job, today's date in view),
+    # NOT by the model writing the answer (reading_enumerator, 2026-07-17).
+    # SERIALIZED deliberately, unlike the planner inputs above: it is a
+    # judgement this plan committed to and acted on, so it belongs in the
+    # parked payload (the summary runs long after a background task's plan
+    # left memory) and is fair to audit. Empty = the goal had one reading, or
+    # we could not tell — both mean "leave the summary's own judgement alone".
+    primary_reading: str = ""
 
     def next_pending_index(self) -> Optional[int]:
         for i, step in enumerate(self.steps):

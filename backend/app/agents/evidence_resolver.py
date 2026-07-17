@@ -161,11 +161,33 @@ def _rows_of_reading(rows: list[dict], reading: str) -> list[dict]:
     return [r for r in rows if reading in (r.get("found_by") or [])]
 
 
+def read_gave_nothing(step: PlanStep) -> bool:
+    """True when a read_webpage step left its reading no better evidenced.
+
+    A 403 and a 200 carrying a JavaScript shell are the SAME event here: the
+    page yielded nothing to answer from. Only the 403 was ever treated that way.
+    Live 2026-07-17: a fan-out ranked a YouTube WATCH page first, the escalation
+    read it, the read "succeeded" with a player stub, and because it had not
+    FAILED it counted as covering the reading — so the retry never ran, the
+    qualification reading kept only its teasers, and the summary invented into
+    the gap. Reading a video page for prose is a category error, not bad luck.
+
+    A read still PENDING or RUNNING is not judged: it may yet deliver, and
+    treating it as dead would splice a duplicate for the same reading."""
+    if step.status == StepStatus.FAILED:
+        return True
+    if step.status != StepStatus.COMPLETED:
+        return False
+    output = step.result.output if step.result else None
+    content = output.get("content") if isinstance(output, dict) else None
+    return len(str(content or "")) < WEB_THIN_CONTENT_CHARS
+
+
 def _reading_is_covered(plan: AgentPlan, rows: list[dict]) -> bool:
     """True when some page belonging to this reading is already being read AND
-    that read has not failed.
+    that read has not come back empty-handed.
 
-    The failed-read distinction is the whole point of separating this from
+    This distinction is the whole point of separating this from
     _already_targeted. Live 2026-07-17: the ESPN bracket 403'd, and because the
     failed step still sat in plan.steps carrying that url, a url-only check
     considered the reading handled — escalation stopped and the turn answered
@@ -174,7 +196,7 @@ def _reading_is_covered(plan: AgentPlan, rows: list[dict]) -> bool:
     urls = {normalize_url(u) for u in _candidate_urls(rows)}
     return any(
         s.tool == _READ_TOOL
-        and s.status != StepStatus.FAILED
+        and not read_gave_nothing(s)
         and normalize_url(str(s.parameters.get("url") or "")) in urls
         for s in plan.steps
     )
@@ -261,7 +283,8 @@ def escalate(plan: AgentPlan, index: int, max_steps: int) -> Optional[PlanStep]:
 def escalate_after_failed_read(
     plan: AgentPlan, failed_index: int, max_steps: int
 ) -> Optional[PlanStep]:
-    """An auto-escalated read FAILED — try the next candidate for its reading.
+    """An auto-escalated read came back with nothing — try the next candidate
+    for its reading.
 
     Big sites block scrapers, and a 403 on the top result is ordinary, not
     exceptional. Live 2026-07-17: "which teams are playing fifa final 2026"
@@ -270,13 +293,20 @@ def escalate_after_failed_read(
     still cited "the bracket data from ESPN", a page it never read. One fetch
     away from having nothing.
 
+    Called on BOTH dead-read paths — a step that failed, and one that completed
+    carrying nothing usable (see read_gave_nothing, which self-gates this so a
+    substantive read never triggers a pointless retry). The two are the same
+    event: the reading is still unevidenced.
+
     The retry costs no LLM call and no replan budget, and stays under the same
-    MAX_WEB_ESCALATIONS bound as any other escalation (the failed step counts
+    MAX_WEB_ESCALATIONS bound as any other escalation (the dead step counts
     toward it, so a site that keeps refusing cannot spin)."""
     try:
         failed = plan.steps[failed_index]
         if not failed.auto_escalated or failed.tool != _READ_TOOL:
             return None
+        if not read_gave_nothing(failed):
+            return None   # it delivered — nothing to retry
         # The search this read was spliced from — the nearest completed one
         # above it. Splices only ever go BELOW their search, so scanning back is
         # exact even after several of them shifted the indices.

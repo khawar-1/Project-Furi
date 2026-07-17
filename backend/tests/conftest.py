@@ -70,6 +70,41 @@ def _hermetic_question_gate(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_reading_enumerator():
+    """The planner asks reading_enumerator whether a goal is ambiguous whenever
+    a draft carries a single-query web_search, and that costs a provider call.
+
+    Unlike _hermetic_browser below, this is NOT about the network — the
+    enumerator has no default factory and only ever uses the provider it is
+    handed, which in tests is always a fake. The hazard is ISOLATION: the
+    planner's FakeProvider is a scripted queue, so an unrelated enumeration call
+    silently eats the next scripted response and breaks the call-count
+    assertions that prove things like "escalation costs no LLM call" (it broke
+    exactly those three tests in test_evidence_resolver.py when this shipped).
+    Default to "no readings" — the goal is unambiguous, nothing is widened, no
+    call is made. Fan-out tests patch this with their own enumeration."""
+    from app.agents import reading_enumerator
+
+    real = reading_enumerator.enumerate_readings
+    real_rank = reading_enumerator.rank_readings
+
+    async def _no_readings(goal, provider, now=None):
+        return []
+
+    async def _no_rank(goal, readings, rows, provider, now=None):
+        return ""
+
+    # Both halves are stubbed: the ranking call fires from _execute_node the
+    # moment a fanned-out search completes, so a test that patches only the
+    # enumeration would still spend a scripted response on the ranking.
+    reading_enumerator.enumerate_readings = _no_readings
+    reading_enumerator.rank_readings = _no_rank
+    yield
+    reading_enumerator.enumerate_readings = real
+    reading_enumerator.rank_readings = real_rank
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_folder_resolver(tmp_path_factory):
     """The same-named-folder guard probes the machine's home + drive roots for
     duplicate well-known folders. Tests must never touch real drives: every

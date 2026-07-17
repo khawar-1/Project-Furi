@@ -443,6 +443,73 @@ async def test_a_blocked_page_falls_through_to_the_next_end_to_end(db_session):
     assert provider.calls == 1
 
 
+async def test_a_page_that_returns_nothing_falls_through_end_to_end(db_session):
+    """The YouTube incident, end to end. A fan-out ranked a video WATCH page
+    first; read_webpage fetched it and SUCCEEDED with a player stub. Because the
+    step had not FAILED it counted as covering the reading, escalation stopped,
+    and the summary was left inventing into a gap the retry existed to close.
+
+    An empty 200 was strictly worse than a 403: the 403 fell through, this did
+    not. Same fallthrough, same zero LLM calls."""
+    fetched: list = []
+
+    def _fetch(url: str):
+        fetched.append(url)
+        if "youtube" in url:
+            # 200 OK, and nothing to answer from — the shape a video page,
+            # cookie wall, or JS shell actually returns.
+            return browser_tools.FetchedPage(
+                url=url, status_code=200, content_type="text/html",
+                text="<html><body><div id='player'></div></body></html>",
+            )
+        return browser_tools.FetchedPage(
+            url=url, status_code=200, content_type="text/html",
+            text="<html><body><p>" + ("Spain v Argentina. " * 80) + "</p></body></html>",
+        )
+
+    provider = FakeProvider(list(_ONE_SEARCH))
+    browser_tools.SEARCH_PROVIDER_FACTORY = lambda q, n: [
+        _row("https://youtube.com/watch?v=JJAEGvFpXlY", "tiny"),
+        _row("https://fifa.com/final", "tiny"),
+    ]
+    browser_tools.HTTP_FETCH_FACTORY = _fetch
+    planner = AgentPlanner(db_session, provider, session_id="s-dead")
+    plan = await planner.start("which teams have qualified for fifa finals 2026")
+
+    assert fetched == ["https://youtube.com/watch?v=JJAEGvFpXlY", "https://fifa.com/final"]
+    reads = [s for s in plan.steps if s.tool == "read_webpage"]
+    assert len(reads) == 2, "the empty page must not have ended the escalation"
+    assert "Spain" in reads[1].result.output["content"], "the answer rests on a real page"
+    assert plan.status == PlanStatus.COMPLETED
+    assert provider.calls == 1, "the recovery decided and acted entirely in code"
+
+
+async def test_a_substantive_read_triggers_no_retry(db_session):
+    """The cost ceiling on the fallthrough above. A read that delivered must not
+    spend a second fetch — read_gave_nothing is what self-gates it."""
+    fetched: list = []
+
+    def _fetch(url: str):
+        fetched.append(url)
+        return browser_tools.FetchedPage(
+            url=url, status_code=200, content_type="text/html",
+            text="<html><body><p>" + ("Spain v Argentina. " * 80) + "</p></body></html>",
+        )
+
+    provider = FakeProvider(list(_ONE_SEARCH))
+    browser_tools.SEARCH_PROVIDER_FACTORY = lambda q, n: [
+        _row("https://fifa.com/final", "tiny"),
+        _row("https://bbc.com/final", "tiny"),
+    ]
+    browser_tools.HTTP_FETCH_FACTORY = _fetch
+    planner = AgentPlanner(db_session, provider, session_id="s-live")
+    plan = await planner.start("which teams are playing fifa final 2026")
+
+    assert fetched == ["https://fifa.com/final"], "one good page is enough"
+    assert plan.status == PlanStatus.COMPLETED
+    assert provider.calls == 1
+
+
 async def test_cancel_beats_a_spliced_step(db_session):
     """The cancel check sits at the top of the execute loop, so a spliced step
     re-enters through it like any other."""

@@ -47,9 +47,32 @@ from app.providers.base import LLMMessage, LLMProvider
 # record — the same shape as _recipient_violation / _scope_violation, which
 # reject output tokens not traceable to a grounding corpus.
 _FABRICATION_MIN_BULLETS = 8    # below this a list is an answer, not an enumeration
-_FABRICATION_UNGROUNDED = 0.6   # share of bullets absent from the record
+_FABRICATION_UNGROUNDED = 0.6   # share of items absent from the record
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*\S)\s*$", re.MULTILINE)
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z'\-]{2,}")
+
+# --- shape independence (2026-07-17, the second FIFA incident) ---------------
+# The guard above was written against a fabrication formatted as 112 markdown
+# bullets, and it only ever looked for markdown bullets. Live, the model
+# enumerated 51 countries as COMMA-SEPARATED PROSE grouped under bold
+# confederation labels ("**AFC (Asia):** Australia, Bahrain, China, …") and the
+# guard scored ZERO items, so it could not fire — measured against a record
+# containing none of the names.
+#
+# That is a guard coupled to a FORMATTING CHOICE the model makes freely, which
+# is no guard at all: markdown layout is not a property of the defect. Every
+# test written for it used "- " bullets, so the coupling was invisible. An
+# enumeration is a run of short items, whatever punctuation separates them.
+#
+# The inline reader is deliberately conservative — one long segment means the
+# line is prose and the whole line is discarded. It does not need to be greedy:
+# gate 2 (grounding) is what convicts, so the cost of missing a list is the
+# status quo, while the cost of over-reading prose is bounded by the same
+# substring test everything else passes.
+_INLINE_MIN_ITEMS = 5        # fewer commas than this on a line is a sentence
+_INLINE_MAX_ITEM_WORDS = 4   # "Bosnia and Herzegovina", "United States (co-host)"
+_LABEL_RE = re.compile(r"^\s*[*_#>\s]*[^:,]{0,60}?[*_\s]*:\s*")
+_AND_RE = re.compile(r"^(?:and|&)\s+", re.IGNORECASE)
 # Words that carry no grounding signal — a bullet made only of these is skipped
 # rather than judged.
 _STOPWORDS = frozenset({
@@ -110,16 +133,50 @@ def _plan_has_unresolved_web_gap(plan: AgentPlan) -> bool:
     return False
 
 
+def _inline_items(body: str) -> list[str]:
+    """A comma-separated run of short items on one line, else []."""
+    body = _LABEL_RE.sub("", body, count=1)
+    if "," not in body:
+        return []
+    items: list[str] = []
+    for raw in body.split(","):
+        item = _AND_RE.sub("", raw.strip(" \t*_.;:")).strip()
+        if not item or len(item.split()) > _INLINE_MAX_ITEM_WORDS:
+            return []   # a long segment: this is a sentence, not a list
+        items.append(item)
+    return items if len(items) >= _INLINE_MIN_ITEMS else []
+
+
+def _enumerated_items(text: str) -> list[str]:
+    """Every item the summary lists, independent of how it chose to lay them out.
+
+    Reads each line as a bullet, an inline comma run, or both — a bullet whose
+    body is itself a comma run ("- AFC: Australia, Bahrain, …") expands to its
+    items rather than counting once, which is what stopped an 18-name bullet
+    from being scored as a single grounded item."""
+    out: list[str] = []
+    for line in text.splitlines():
+        bullet = _BULLET_RE.match(line)
+        body = bullet.group(1) if bullet else line
+        inline = _inline_items(body)
+        if inline:
+            out.extend(inline)
+        elif bullet and body.strip():
+            out.append(body.strip())
+    return out
+
+
 def _is_fabricated_enumeration(text: str, rendered: str) -> bool:
     """True when the summary enumerates many items the record never mentions.
 
     Two gates, both of which must hold — the caller has already established
     that a web step left an open evidence gap:
       1. it is a long list (>= _FABRICATION_MIN_BULLETS), not a short answer;
-      2. and most bullets' significant words appear NOWHERE in the record.
+      2. and most items' significant words appear NOWHERE in the record.
     A 40-name file listing passes (the names are in the record). A two-line
-    answer passes (gate 1). 112 invented countries do not."""
-    bullets = [b for b in _BULLET_RE.findall(text) if b.strip()]
+    answer passes (gate 1). 112 invented countries do not — nor do 51 invented
+    ones separated by commas instead of bullets."""
+    bullets = _enumerated_items(text)
     if len(bullets) < _FABRICATION_MIN_BULLETS:
         return False
     haystack = rendered.lower()
@@ -144,15 +201,15 @@ CURRENT DATE/TIME: {now}
 
 THE USER ASKED:
 {goal}
-
+{reading}
 WHAT WAS DONE AND WHAT IT FOUND (already rendered as readable text — this is the COMPLETE record):
 {steps}
 
 Write the reply to the user:
 - Start with one short first-person sentence saying what was done.
-- When the user asked to SEE data (file/folder names, file contents, command output), present ALL of it from the results above: names as a markdown bullet list (you may group folders and files), file contents and command output in a fenced code block. Never summarize the data away.
+- When the user asked to SEE data (file/folder names, file contents, command output), present ALL of it from the results above: names as a markdown bullet list (you may group folders and files), file contents and command output in a fenced code block. Never summarize the data away. This rule covers data from the user's own machine and accounts ONLY — it is not licence to reprint a web page. Web results are evidence to answer FROM, never data to reproduce.
 - When the user asked a QUESTION that web results answer, ANSWER IT: lead with the answer in a sentence or two and name the source once. Do NOT walk through the results one by one, quote each source, or describe what each page "states" — the results are evidence for you to read, not a report to recite. Answer each of several questions in its own short section.
-- If the question could reasonably be read more than one way and the results answer more than one of those readings, lead with the reading the user most likely meant — use the current date above and what they said to judge it — and then add ONE short line offering the other (e.g. "If you meant X instead, say the word."). Never silently answer only the less likely reading, and never make the user re-ask to get the obvious one.
+- When THE READING TO ANSWER above names a reading, the question was ambiguous and BOTH readings must be covered SHORT — no data dump for either one, however much data the results hold. Lead with a direct answer to the named reading in a sentence or two; if its answer is a long list, give the shape of it instead of the list ("48 teams have qualified") and offer the list. Then give the OTHER reading exactly ONE sentence: answer it outright when the results say so ("If you meant the final match itself: Spain play Argentina on 19 July."), otherwise offer to look it up. Never give either reading its own list, section, table or data dump, and never make the user re-ask to get the one they wanted. When no reading is named there, the question had only one sensible reading — answer it normally.
 - Copy names, paths, numbers, and contents EXACTLY as written above — never invent, drop, round, or embellish anything.
 - Only call a list truncated if the results above literally say so — otherwise it is complete.
 - When a result says its content was cut off, SAY SO and report only what is actually there — never present a cut-off list as if it were the whole of it, and never fill the gap from your own knowledge.
@@ -173,6 +230,60 @@ def _now_text() -> str:
     "this quarter", "who is the champion" all turn on today's date."""
     now = datetime.now()
     return f"{now.strftime('%Y-%m-%d %H:%M')} ({now.strftime('%A')})"
+
+
+def _reading_block(plan: AgentPlan) -> str:
+    """The likeliest reading of an ambiguous goal, handed to the summary as a
+    decision already made — or "" when the goal had only one reading.
+
+    WHY THE SUMMARY IS NOT ASKED TO WORK THIS OUT ITSELF (2026-07-17): it was,
+    and it lost. Live, "which teams have qualified for fifa finals 2026" two days
+    before the final retrieved BOTH readings — fan-out and escalation did their
+    jobs — and the reply led with the 48-team qualification list, offering the
+    Spain-v-Argentina final as a closing afterthought. Google, given the same
+    words, leads with the final.
+
+    The rule below ("pick the reading the user most likely meant") was one clause
+    among ten, read by a call whose actual job is writing prose, with the word
+    "qualified" sitting in the goal anchoring it. reading_enumerator makes the
+    same judgement as its ONLY job, with today's date in view, before any result
+    exists to bias it — and we already pay for that call. This block is just
+    carrying its answer instead of discarding it.
+
+    Deliberately framed as "trust this over your own reading": without that, an
+    anchoring word in the goal wins the tie, which is the entire failure.
+
+    WHY THIS BLOCK ALSO BOUNDS THE DAMAGE (2026-07-17, the fourth round)
+    -------------------------------------------------------------------
+    Because the verdict it carries is a coin flip, and MEASURED as one. Ranking
+    from the goal alone got it wrong; ranking from the evidence got it right 2 of
+    3, then 2 of 5 when the extract grew. When both readings have live coverage,
+    "which did they mean?" has no answer in anything we can see — Google is not
+    reasoning better here, it has click data we do not. Three prompt revisions
+    bought nothing, which is the third time that road has been measured to zero
+    in this feature.
+
+    So this block does not only name a lead — it forbids a data dump for EITHER
+    reading. That is the fan-out doctrine one layer on: stop trying to be right,
+    make being wrong cheap. The user's complaint in both screenshots was never
+    really the ranking; it was 48 country names burying the two words they
+    wanted. Under a wrong verdict this shape still answers them in line two.
+    Code knows exactly when to apply it — primary_reading is set only when an
+    independent enumeration found more than one reading, so an unambiguous "list
+    every file in this folder" is untouched."""
+    primary = (plan.primary_reading or "").strip()
+    if not primary:
+        return ""
+    return (
+        "\nTHE READING TO ANSWER (this question has more than one sensible reading; "
+        "which one the user meant was worked out separately, from the evidence and "
+        "today's date — trust it over your own reading of the wording):\n"
+        f"{primary}\n"
+        "Lead with that reading, briefly. Cover the OTHER reading in ONE sentence — "
+        "answering it outright if the results allow. Neither reading gets a list, "
+        "section, table, or data dump: this question was ambiguous, so a short "
+        "answer to both beats a wall of data about one.\n"
+    )
 
 
 async def stream_completed_summary(provider: LLMProvider, plan: AgentPlan):
@@ -198,7 +309,9 @@ async def stream_completed_summary(provider: LLMProvider, plan: AgentPlan):
     if not rendered.strip():
         yield deterministic_plan_text(plan)
         return
-    prompt = SUMMARY_PROMPT.format(goal=plan.goal, steps=rendered, now=_now_text())
+    prompt = SUMMARY_PROMPT.format(
+        goal=plan.goal, steps=rendered, now=_now_text(), reading=_reading_block(plan),
+    )
     verify = _plan_has_unresolved_web_gap(plan)
     parts: list[str] = []
     produced = False

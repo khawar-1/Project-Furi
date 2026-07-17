@@ -118,6 +118,7 @@ from app.agents import (
     folder_resolver,
     placeholder_resolver,
     question_gate,
+    reading_enumerator,
 )
 from app.agents.cancellation import apply_cancellation, log_cancellation
 from app.agents.narration import narrate_step
@@ -681,6 +682,40 @@ def _repeated_failure(
 _EXTENSION_QUERY_RE = re.compile(r"^\*?\.[A-Za-z][A-Za-z0-9]{0,4}$")
 
 
+_WEB_SEARCH_TOOL = "web_search"
+
+
+def _has_web_search(steps: list[PlanStep]) -> bool:
+    """Is this a web turn at all? The gate on enumerating anything — file,
+    email and calendar plans never pay for a reading call."""
+    return any(s.tool == _WEB_SEARCH_TOOL for s in steps)
+
+
+def _single_query_web_steps(steps: list[PlanStep]) -> list[PlanStep]:
+    """The web_search steps that committed to ONE reading — the only ones a
+    reading enumeration could WIDEN. A step already carrying a non-empty
+    `queries` list is the model doing what rule 16 asks, and its queries are
+    left exactly as written.
+
+    Note this is no longer the same question as "should we enumerate?" — a
+    model-authored fan-out still needs a RANKING (which of its readings did the
+    user mean?), and that was the live failure: the model fanned out correctly,
+    retrieved both readings, and then led with the wrong one."""
+    out: list[PlanStep] = []
+    for s in steps:
+        if s.tool != _WEB_SEARCH_TOOL:
+            continue
+        queries = s.parameters.get("queries")
+        if isinstance(queries, (list, tuple)) and any(
+            isinstance(q, str) and q.strip() for q in queries
+        ):
+            continue
+        if not str(s.parameters.get("query") or "").strip():
+            continue  # no query at all — the tool will reject it; not ours to fix
+        out.append(s)
+    return out
+
+
 def _scope_violation(steps: list[PlanStep], goal: str, grounding: str) -> Optional[str]:
     """Retry-feedback text when a step narrows an explicitly-universal goal
     ("delete ALL files in X") to a file extension the user never mentioned.
@@ -989,6 +1024,15 @@ class AgentPlanner:
         # lazily by _load_folder_signal so every entry point (start/resume/
         # answer) has it without each call site plumbing it in.
         self._folders = ""
+        # Reading enumeration for this run's goal (reading_enumerator,
+        # 2026-07-17): None = not computed yet, [] = computed and the goal has
+        # exactly one sensible reading. The goal is fixed for the life of a
+        # plan, so one entry is the whole cache — and a revise round must never
+        # pay for the call twice.
+        self._readings: Optional[list[str]] = None
+        # Has the post-search ranking run? The draft-time order is only a prior;
+        # the real verdict needs evidence, and is taken once (_rank_readings).
+        self._ranked = False
         self._graph = self._build_graph()
 
     async def _load_folder_signal(self) -> None:
@@ -1005,6 +1049,119 @@ class AgentPlanner:
         except Exception as e:
             logger.warning(f"Frequent-folder signal failed (non-critical): {e}")
             self._folders = ""
+
+    async def _apply_web_fanout(
+        self, steps: list[PlanStep], goal: str, plan: Optional[AgentPlan] = None
+    ) -> None:
+        """Widen any single-query web_search into a fan-out when an INDEPENDENT
+        reading enumeration says the goal means more than one thing — and record
+        WHICH reading the user most likely meant, for the summary to answer.
+
+        The two halves are one decision. Fan-out only fixed retrieval: live
+        2026-07-17, the model fanned out on its own, both readings were in
+        evidence, and the answer still led with the 48-team qualification list
+        instead of the final two days away. So the enumeration runs on EVERY web
+        turn, not only the ones with a single query to widen: a model-authored
+        fan-out needs no widening but still needs a ranking, and that turn is
+        exactly the one that failed.
+
+        This is the comparator plan rule 16 never had. The rule asks the drafting
+        model to notice its own ambiguity, and the same forward pass that writes
+        the query decides whether the query is enough — so it can never be caught
+        being wrong (2026-07-16 and 2026-07-17, both measured at zero effect).
+        Here the readings come from a separate call with one job, and CODE, not
+        the model, decides what runs.
+
+        Mutates in place, best-effort, and only ever ADDS readings to a READ tool
+        — the worst case is one extra parallel HTTP request nobody sees, which is
+        the cost asymmetry fan-out exists for. Approval is untouched: web_search
+        is READ, and this runs at draft time, long before any pause."""
+        try:
+            if not _has_web_search(steps):
+                return  # not a web turn — file/email/calendar plans pay nothing
+            if self._readings is None:
+                self._readings = await reading_enumerator.enumerate_readings(
+                    goal, self.provider
+                )
+            if len(self._readings) < 2:
+                return  # one sensible reading (or we could not tell) — leave it
+            if plan is not None:
+                # A PRIOR, not the verdict. Nothing here can know which reading
+                # is live — that takes evidence, and _rank_readings overwrites
+                # this the moment the search returns. It is stamped anyway so a
+                # plan whose search fails outright still carries a reading for
+                # the summary to lead with, rather than falling back to the prose
+                # call's own anchored guess (which is what lost, twice).
+                plan.primary_reading = self._readings[0]
+            for step in _single_query_web_steps(steps):
+                step.parameters["queries"] = list(self._readings)
+                step.auto_fanout = True
+                # `query` stays: the tool prefers `queries` when both are
+                # present, and keeping it preserves the reading the model
+                # committed to — the evidence for whether rule 16 earns its
+                # tokens.
+                logger.info(
+                    f"Fanned out single-query web_search in code: "
+                    f"{step.parameters.get('query')!r} -> {self._readings}"
+                )
+        except Exception as e:
+            # enumerate_readings already swallows its own failures, so this is
+            # belt-and-braces — and deliberately so: a plan that would have
+            # worked must never die because an OPTIONAL widening blew up. The
+            # cost of being wrong here is one reading unsearched; the cost of
+            # propagating is the whole turn. Same rule as _load_folder_signal.
+            logger.warning(f"Web fan-out failed (non-critical): {e}")
+            self._readings = []  # do not retry on the next planning round
+
+    async def _rank_readings(self, plan: AgentPlan, step: PlanStep) -> None:
+        """Re-decide which reading the summary answers, now that the search has
+        told us what the world is doing.
+
+        _apply_web_fanout stamps the enumeration's own order as a PRIOR, because
+        a plan must always carry some verdict (a search can fail, and the summary
+        still has to lead with something). This overwrites it with a judgement
+        that could see the evidence — which is the only judgement that was ever
+        possible for this question. Live 2026-07-17: "which teams have qualified
+        for fifa finals" ranked the qualification list first at draft time, while
+        the very rows this reads carried a Yahoo "spain vs argentina" bracket and
+        an Al Jazeera final preview published the day before.
+
+        Once per plan (`_ranked`): the goal is fixed for a plan's life, and a
+        revise round that adds a second search must not re-open a decision the
+        first one's evidence already settled. Best-effort — a plan that would
+        have worked never dies for an optional signal (_load_folder_signal)."""
+        try:
+            if self._ranked:
+                return
+            # Rank over the queries that ACTUALLY RAN, not over self._readings.
+            # They are usually the same list (code spliced it), but when the
+            # model fans out by itself they are not — and then the enumeration's
+            # wording matches no row's `found_by`, so every reading groups zero
+            # evidence and the ranker judges blind. It did exactly that live and
+            # got the right answer by echoing a prompt example, which is the kind
+            # of luck that reads as a passing test. The executed queries are the
+            # ground truth: they produced the rows, and they are what the summary
+            # is answering from.
+            queries = step.parameters.get("queries")
+            readings = [
+                q.strip()
+                for q in (queries if isinstance(queries, list) else [])
+                if isinstance(q, str) and q.strip()
+            ]
+            if len(readings) < 2:
+                return  # a single search has nothing to choose between
+            output = step.result.output if step.result else None
+            rows = output.get("results") if isinstance(output, dict) else None
+            if not isinstance(rows, list) or not rows:
+                return  # nothing came back — the draft-time prior stands
+            self._ranked = True  # one verdict per plan, evidence or not
+            primary = await reading_enumerator.rank_readings(
+                plan.goal, readings, rows, self.provider
+            )
+            if primary:
+                plan.primary_reading = primary
+        except Exception as e:
+            logger.warning(f"Reading ranking failed (non-critical): {e}")
 
     # ---------------------------------------------------------- entry points
 
@@ -1202,6 +1359,7 @@ class AgentPlanner:
             grounding=self.conversation,
             recipient_grounding=_recipient_grounding(plan, self.conversation),
             event_ids=_event_id_grounding(plan),
+            plan=plan,
         )
         if error:
             plan.status = PlanStatus.FAILED
@@ -1246,6 +1404,7 @@ class AgentPlanner:
             grounding=self.conversation,
             recipient_grounding=_recipient_grounding(plan, self.conversation),
             event_ids=_event_id_grounding(plan),
+            plan=plan,
         )
         _ms = (time.perf_counter() - _t0) * 1000
         if steps:
@@ -1412,6 +1571,22 @@ class AgentPlanner:
                         break
                     plan.steps.insert(insert_at, escalation)
                     insert_at += 1
+                # A read can SUCCEED and still leave its reading unevidenced: a
+                # video page, a cookie wall, a JS shell all return 200 with no
+                # prose. That is the same event as the 403 handled below, and it
+                # was strictly worse — a 403 fell through to the next candidate,
+                # while an empty 200 counted as coverage and stopped escalation
+                # dead. Self-gating (a substantive read returns None), so this
+                # costs nothing on every other step.
+                dead_retry = evidence_resolver.escalate_after_failed_read(
+                    plan, idx, MAX_PLAN_STEPS
+                )
+                if dead_retry is not None:
+                    plan.steps.insert(idx + 1, dead_retry)
+                # The results are in — NOW the "which reading did they mean?"
+                # question is answerable, and this is the earliest moment it is.
+                if step.tool == _WEB_SEARCH_TOOL:
+                    await self._rank_readings(plan, step)
             else:
                 step.status = StepStatus.FAILED
                 logger.info(f"Plan step failed: '{step.description}' — {result.error}")
@@ -1540,6 +1715,7 @@ class AgentPlanner:
             # Event ids grow as calendar reads complete, so a post-read revise
             # can legitimately name a real id (or a PENDING one, filled later).
             event_ids=_event_id_grounding(plan),
+            plan=plan,
             completed_signatures={
                 s.signature()
                 for s in plan.steps
@@ -1637,6 +1813,7 @@ class AgentPlanner:
         recipient_grounding: str = "",
         event_ids: Optional[set[str]] = None,
         completed_signatures: Optional[set[str]] = None,
+        plan: Optional[AgentPlan] = None,
     ) -> tuple[Optional[list[PlanStep]], Optional[str], Optional[PlanQuestion], Optional[str]]:
         """
         One planning/reflection/revision LLM call with one validation retry.
@@ -1729,6 +1906,10 @@ class AgentPlanner:
                                 steps, completed_signatures or set()
                             )
                             if reject is None:
+                                # Last, on steps that are otherwise final: a
+                                # draft about to be thrown away must never cost
+                                # an enumeration call.
+                                await self._apply_web_fanout(steps, goal, plan)
                                 return steps, None, None, None
                         error = reject  # structural reject → retry feedback
 
