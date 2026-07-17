@@ -2,83 +2,68 @@
  * Jarvis OS — Wake Word "Hey Jarvis" (Phase 12.2)
  *
  * Fully ON-DEVICE wake-word detection. An always-on 16 kHz mic stream is
- * consumed by three tiny local ONNX models (openWakeWord's pretrained
- * melspectrogram → embedding → hey_jarvis classifier, Apache-2.0) running in
- * the renderer via onnxruntime-web. Raw detection audio NEVER leaves the
- * machine — only the post-wake utterance is posted to the loopback STT, exactly
- * like the hotkey path. On a score over threshold we fire
- * voiceStore.beginWakeListen(), which reuses the existing hands-free capture
- * pipeline (review/speak rules + continuous conversation all apply).
+ * captured on the main thread and forwarded to a Web Worker (wakeWorker.ts),
+ * which runs three tiny local ONNX models (openWakeWord's pretrained
+ * melspectrogram → embedding → hey_jarvis classifier, Apache-2.0) via
+ * onnxruntime-web. Raw detection audio NEVER leaves the machine — only the
+ * post-wake utterance is posted to the loopback STT, exactly like the hotkey
+ * path. On a score over threshold we fire voiceStore.beginWakeListen(), which
+ * reuses the existing hands-free capture pipeline (review/speak rules +
+ * continuous conversation all apply).
+ *
+ * ROOT-CAUSE HISTORY (2026-07-16): the inference used to run on the renderer's
+ * main thread against onnxruntime-web 1.19.2, whose ONLY wasm build is
+ * threaded/shared-memory and needs cross-origin isolation the renderer lacks —
+ * so session.run() faulted natively and killed the renderer (blank window,
+ * exitCode 0xC0000005). Fixed by pinning onnxruntime-web to 1.17.3 and running a
+ * single-threaded, non-shared wasm inside a worker with explicit wasmPaths — see
+ * wakeWorker.ts for the full explanation. The worker also de-contends the audio
+ * thread and makes ORT errors catchable instead of a silent process death.
  *
  * Structural gates (the caller keys start/stop on enabled && wake_word):
  * - Detection is SUSPENDED whenever the mic is otherwise in use (phase !==
  *   'idle') or Jarvis is speaking — prevents self-trigger and mic contention;
- *   buffers reset on suspend so no stale audio triggers on resume.
+ *   the worker's buffers reset on suspend so no stale audio triggers on resume.
  * - A cooldown after each trigger avoids double-fires.
  *
  * Everything is best-effort: a model-load or inference failure logs once and
  * degrades to "no wake word", never a crash or a broken chat turn.
- *
- * NOTE (live-tuning): the streaming frame arithmetic follows openWakeWord's
- * reference (80 ms chunks → 8 mel frames; 76-frame embedding window; 16
- * embeddings per prediction). THRESHOLD is conservative and may want tuning
- * against the real model on this hardware — see the plan's verification step.
  */
-import type * as Ort from 'onnxruntime-web';
 import { useVoiceStore } from '@/stores/voiceStore';
 import melspecUrl from '@/assets/wakeword/melspectrogram.onnx?url';
 import embeddingUrl from '@/assets/wakeword/embedding_model.onnx?url';
 import wakewordUrl from '@/assets/wakeword/hey_jarvis_v0.1.onnx?url';
-// The onnxruntime-web runtime binary is resolved by Vite: the default "bundle"
-// build references its .wasm via `new URL(..., import.meta.url)`, which Vite
-// rewrites to a hashed asset URL that resolves in both dev (http://) and
-// packaged Electron (file://). So we do NOT override ort.env.wasm.wasmPaths —
-// the package's `exports` map blocks importing the .wasm as a module anyway.
-// DEV GOTCHA (live failure 2026-07-16): that URL rewrite does NOT happen
-// inside a Vite-PRE-BUNDLED dep — the .wasm request resolved into
-// .vite/deps/, got index.html back, and WASM compile aborted on the "<!do"
-// magic word, silently killing the wake word. vite.config.ts therefore
-// carries `optimizeDeps.exclude: ['onnxruntime-web']`; keep it there.
+// Non-threaded, non-shared wasm binaries, self-hosted. Copied from
+// onnxruntime-web/dist into src/assets/ort (the package's `exports` map blocks
+// deep-importing its .wasm directly). Vite resolves these to hashed asset URLs
+// that work in dev (http://) and packaged Electron (file://), exactly like the
+// .onnx models above; they are handed to the worker, which points
+// ort.env.wasm.wasmPaths at them. This is the fix: NOT the shared-memory 1.19
+// build, and no cross-origin isolation required. See wakeWorker.ts.
+import ortWasmSimdUrl from '@/assets/ort/ort-wasm-simd.wasm?url';
+import ortWasmUrl from '@/assets/ort/ort-wasm.wasm?url';
 
-// ---- openWakeWord streaming constants
-const SAMPLE_RATE = 16_000;
-const CHUNK = 1_280; // 80 ms of audio per processing step
-const MEL_LOOKBACK = 480; // 3 hops of context so the newest mel frames are correct
-const MEL_STEP = 8; // new mel frames produced per 80 ms chunk
-const MEL_WINDOW = 76; // mel frames consumed per embedding
-const WAKE_FRAMES = 16; // embeddings per wake-word prediction
-const EMBEDDING_DIM = 96;
-const MEL_BINS = 32;
+// ---- audio capture
+// TARGET_RATE is what the models expect. We DELIBERATELY do NOT force the
+// AudioContext to this rate: `new AudioContext({ sampleRate: 16000 })` + a
+// deprecated ScriptProcessorNode was the whole crash — it faulted the renderer
+// natively (0xC0000005) on this machine, proven by an audio-only diagnostic that
+// crashed with ZERO onnx loaded. Instead we run a native-rate context + an
+// AudioWorklet (the shape STT uses safely) and resample to 16 kHz in JS.
+const TARGET_RATE = 16_000;
 
 // ---- detection tuning
 const THRESHOLD = 0.5;
 const COOLDOWN_MS = 3_000;
 
-// ---- real-time backpressure
-// If the three-model chain can't keep up with the mic, unconsumed samples pile
-// up in `pending`. Unbounded, that backlog (plus the per-chunk slice churn
-// over an ever-growing array) grew until the renderer was OOM-killed — blank
-// window, DevTools disconnected (live failure 2026-07-16, the first day this
-// path actually ran; the WASM load failure had masked it). Wake detection
-// only needs the last ~1.3s of audio, so a backlog covering seconds means the
-// CPU is simply too slow: drop the buffered audio, and after repeated
-// overflows stop entirely — honest degradation beats a pegged CPU and a dead
-// renderer.
-const MAX_BACKLOG_SAMPLES = SAMPLE_RATE * 3; // 3s of unprocessed audio
-const MAX_OVERFLOWS = 5;
-
-// ---- crash-loop breaker
-// The renderer died repeatedly right after wake-word start (live failure
-// 2026-07-16: blank→reload→blank cycles until the main-process reload cap),
-// and nothing inside a renderer can catch its own process death. So the
-// module keeps a strike counter in localStorage: a strike is written when
-// detection starts, and cleared only on a GRACEFUL outcome — stopWakeWord()
-// or 30s of stable running. A crash can never clear it. Two fresh strikes =
-// wake word is what's killing this renderer → skip starting it (console-
-// warned) so the reload lands on a usable app. Strikes go stale after 10
-// minutes, so the feature retries on a later launch (self-healing; the cost
-// of a wrong strike — e.g. two rapid quit-after-launch cycles — is 10 wake-
-// word-less minutes, never a broken app).
+// ---- crash-loop breaker (safety net; the worker/wasm fix should mean it never
+// trips now). The renderer once died repeatedly right after wake-word start and
+// nothing inside a renderer can catch its own process death. The module keeps a
+// strike counter in localStorage: a strike is written when detection starts, and
+// cleared only on a GRACEFUL outcome — stopWakeWord() or 30s of stable running.
+// A crash can never clear it. Two fresh strikes = wake word is what's killing
+// this renderer → skip starting it so the reload lands on a usable app. Strikes
+// go stale after 10 minutes, so the feature retries on a later launch.
 const CRASH_GUARD_KEY = 'jarvis.wakeword.crash-strikes';
 const CRASH_GUARD_LIMIT = 2;
 const CRASH_GUARD_STABLE_MS = 30_000;
@@ -87,28 +72,24 @@ const CRASH_GUARD_FRESH_MS = 10 * 60_000;
 // ------------------------------------------------------------- module state
 let running = false;
 let suspended = false;
-let ort: typeof Ort | null = null;
-let melSession: Ort.InferenceSession | null = null;
-let embedSession: Ort.InferenceSession | null = null;
-let wakeSession: Ort.InferenceSession | null = null;
+let worker: Worker | null = null;
 
 let stream: MediaStream | null = null;
 let audioCtx: AudioContext | null = null;
-let processor: ScriptProcessorNode | null = null;
+let workletNode: AudioWorkletNode | null = null;
 let sink: GainNode | null = null;
 let unsubStore: (() => void) | null = null;
 
-/** Incoming 16 kHz samples awaiting processing (drained in CHUNK-sized steps). */
-let pending: number[] = [];
-let processingQueue = false;
-let prevTail = new Float32Array(MEL_LOOKBACK); // lookback context for the mel window
-let melBuffer: Float32Array[] = []; // rolling mel frames (each MEL_BINS long)
-let featureBuffer: Float32Array[] = []; // rolling embeddings (each EMBEDDING_DIM long)
 let lastTriggerAt = 0;
-let overflowCount = 0; // per-session; see MAX_OVERFLOWS
 let crashGuardTimer: number | null = null;
-let inferredOnce = false; // first full inference chain completed (see noteStage)
+let inferredOnce = false; // first score received from the worker (see noteStage)
 
+// ---- streaming linear resampler: native context rate → TARGET_RATE. State
+// persists across worklet frames so there's no discontinuity at chunk seams.
+let resampleStep = 1; // native samples per output sample (nativeRate / TARGET_RATE)
+let resampleT = 0; // fractional read cursor into the current [prev | chunk]
+let resamplePrev = 0; // last sample of the previous native-rate chunk
+let workletUrl: string | null = null; // cached Blob URL for the inline worklet
 
 function readStrikes(): { strikes: number; at: number; stage?: string } {
   try {
@@ -127,10 +108,9 @@ function readStrikes(): { strikes: number; at: number; stage?: string } {
   return { strikes: 0, at: 0 };
 }
 
-/** Record how far startup got on the CURRENT strike — a crash freezes the
- *  last stage written, so the breaker (and the ~/.jarvis crash log's
- *  timestamps) can say WHERE the renderer died: loading models, opening the
- *  mic, or only once real inference began. Forensics only; best-effort. */
+/** Record how far startup got on the CURRENT strike — a crash freezes the last
+ *  stage written, so the breaker can say WHERE the renderer died: loading
+ *  models, opening the mic, or only once real inference began. Best-effort. */
 function noteStage(stage: string): void {
   try {
     const raw = localStorage.getItem(CRASH_GUARD_KEY);
@@ -182,11 +162,11 @@ export async function startWakeWord(): Promise<void> {
     // Best-effort.
   }
   running = true;
-  overflowCount = 0;
+  suspended = false;
   inferredOnce = false;
   try {
     noteStage('loading-models');
-    await ensureModels();
+    await startWorker();
     noteStage('opening-mic');
     await openMic();
     subscribeSuspend();
@@ -199,12 +179,12 @@ export async function startWakeWord(): Promise<void> {
   }
 }
 
-/** Stop detection and release the mic. Safe to call any time. */
+/** Stop detection, terminate the worker, and release the mic. Safe any time. */
 export function stopWakeWord(): void {
   // A graceful stop of a LIVE session is not a crash. Guarded on `running`
-  // because App.tsx calls this on mount before settings load — an
-  // unconditional clear would wipe the strikes before startWakeWord ever
-  // reads them and the breaker could never trip.
+  // because App.tsx calls this on mount before settings load — an unconditional
+  // clear would wipe the strikes before startWakeWord ever reads them and the
+  // breaker could never trip.
   if (running) clearStrikes();
   running = false;
   suspended = false;
@@ -213,63 +193,177 @@ export function stopWakeWord(): void {
     unsubStore = null;
   }
   closeMic();
-  resetBuffers();
+  if (worker) {
+    worker.onmessage = null;
+    worker.onerror = null;
+    worker.terminate();
+    worker = null;
+  }
 }
 
-// ------------------------------------------------------------- model loading
+// ------------------------------------------------------------- worker
 
-async function ensureModels(): Promise<void> {
-  if (melSession && embedSession && wakeSession) return;
-  ort = await import('onnxruntime-web');
-  ort.env.wasm.numThreads = 1; // renderer: keep it light, no cross-origin isolation needed
-  const opts: Ort.InferenceSession.SessionOptions = {
-    executionProviders: ['wasm'],
-    graphOptimizationLevel: 'all',
-  };
-  // Sequential, not Promise.all: three concurrent session builds spike the
-  // wasm-heap allocation at the exact moment the renderer has been dying
-  // (2026-07-16 crash rounds). Serial costs ~nothing at startup and keeps
-  // the peak flat.
-  melSession = await ort.InferenceSession.create(melspecUrl, opts);
-  embedSession = await ort.InferenceSession.create(embeddingUrl, opts);
-  wakeSession = await ort.InferenceSession.create(wakewordUrl, opts);
+/** Spin up the inference worker and resolve once its three sessions are built
+ *  (or reject on an init error). */
+function startWorker(): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const w = new Worker(new URL('./wakeWorker.ts', import.meta.url), {
+      type: 'module',
+    });
+    worker = w;
+    let settled = false;
+    w.onmessage = (e: MessageEvent) => {
+      const msg = e.data as {
+        type: string;
+        value?: number;
+        message?: string;
+        fatal?: boolean;
+        count?: number;
+        max?: number;
+      };
+      switch (msg.type) {
+        case 'ready':
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+          break;
+        case 'score':
+          if (!inferredOnce) {
+            inferredOnce = true;
+            noteStage('inference-ok');
+          }
+          handleScore(msg.value ?? 0);
+          break;
+        case 'overflow':
+          if (msg.fatal) {
+            console.warn(
+              '[WakeWord] inference cannot keep up with real-time audio on this ' +
+                'machine; disabling wake word for this session.'
+            );
+            stopWakeWord();
+          } else {
+            console.warn(
+              `[WakeWord] audio backlog overflowed (${msg.count}/${msg.max}) — dropping buffered audio.`
+            );
+          }
+          break;
+        case 'error':
+          console.warn('[WakeWord] worker error (wake word inactive):', msg.message);
+          if (!settled) {
+            settled = true;
+            reject(new Error(msg.message ?? 'worker init failed'));
+          } else {
+            stopWakeWord();
+          }
+          break;
+      }
+    };
+    w.onerror = (e) => {
+      console.warn('[WakeWord] worker crashed (wake word inactive):', e.message);
+      if (!settled) {
+        settled = true;
+        reject(new Error(e.message || 'worker crashed'));
+      } else {
+        stopWakeWord();
+      }
+    };
+    w.postMessage({
+      type: 'init',
+      melUrl: melspecUrl,
+      embedUrl: embeddingUrl,
+      wakeUrl: wakewordUrl,
+      wasmSimdUrl: ortWasmSimdUrl,
+      wasmUrl: ortWasmUrl,
+    });
+  });
 }
 
 // ------------------------------------------------------------- mic capture
+
+/** Inline AudioWorklet processor: accumulates the native-rate mic samples and
+ *  posts them to the main thread in ~2048-sample batches (keeps postMessage
+ *  overhead low). Runs on the audio render thread; writes no output (silent).
+ *  Loaded from a Blob URL so it resolves in dev (http://) and packaged (file://)
+ *  without any asset-path plumbing. */
+function ensureWorkletUrl(): string {
+  if (workletUrl) return workletUrl;
+  const code = `
+class WakeCapture extends AudioWorkletProcessor {
+  constructor() { super(); this._buf = []; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch && ch.length) {
+      const b = this._buf;
+      for (let i = 0; i < ch.length; i++) b.push(ch[i]);
+      if (b.length >= 2048) {
+        this.port.postMessage(Float32Array.from(b));
+        b.length = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('wake-capture', WakeCapture);
+`;
+  workletUrl = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+  return workletUrl;
+}
+
+/** Streaming linear resample of one native-rate chunk to TARGET_RATE. Keeps the
+ *  fractional cursor and the previous chunk's last sample so consecutive chunks
+ *  join seamlessly. */
+function resampleTo16k(chunk: Float32Array): Float32Array {
+  if (resampleStep === 1) return chunk; // native already 16 kHz (rare on desktop)
+  const ext = new Float32Array(chunk.length + 1);
+  ext[0] = resamplePrev;
+  ext.set(chunk, 1);
+  const last = ext.length - 1;
+  const out: number[] = [];
+  let t = resampleT;
+  while (Math.floor(t) + 1 <= last) {
+    const i = Math.floor(t);
+    const f = t - i;
+    out.push(ext[i] * (1 - f) + ext[i + 1] * f);
+    t += resampleStep;
+  }
+  resampleT = t - last; // ext[last] becomes the next chunk's ext[0]
+  resamplePrev = chunk[chunk.length - 1];
+  return Float32Array.from(out);
+}
 
 async function openMic(): Promise<void> {
   stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true },
   });
-  // A dedicated 16 kHz context resamples the mic to the rate the models expect.
-  audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+  // Native-rate context (NOT forced 16 kHz) — the STT path's safe shape.
+  audioCtx = new AudioContext();
   if (audioCtx.state === 'suspended') await audioCtx.resume();
+  resampleStep = audioCtx.sampleRate / TARGET_RATE;
+  resampleT = 0;
+  resamplePrev = 0;
+  await audioCtx.audioWorklet.addModule(ensureWorkletUrl());
   const source = audioCtx.createMediaStreamSource(stream);
-  // ScriptProcessor is deprecated but simplest + reliable in Electron; a
-  // zero-gain sink keeps it running without routing the mic to the speakers.
-  processor = audioCtx.createScriptProcessor(4096, 1, 1);
+  workletNode = new AudioWorkletNode(audioCtx, 'wake-capture');
+  // A zero-gain sink keeps the graph pulled without routing the mic to speakers.
   sink = audioCtx.createGain();
   sink.gain.value = 0;
-  processor.onaudioprocess = (e: AudioProcessingEvent) => {
-    if (!running || suspended) return;
-    const input = e.inputBuffer.getChannelData(0);
-    for (let i = 0; i < input.length; i++) pending.push(input[i]);
-    if (pending.length > MAX_BACKLOG_SAMPLES) {
-      handleOverflow();
-      return;
-    }
-    void drainQueue();
+  workletNode.port.onmessage = (e: MessageEvent) => {
+    if (!running || suspended || !worker) return;
+    const buf = resampleTo16k(e.data as Float32Array);
+    if (buf.length === 0) return;
+    worker.postMessage({ type: 'audio', buf }, [buf.buffer]);
   };
-  source.connect(processor);
-  processor.connect(sink);
+  source.connect(workletNode);
+  workletNode.connect(sink);
   sink.connect(audioCtx.destination);
 }
 
 function closeMic(): void {
-  if (processor) {
-    processor.onaudioprocess = null;
-    try { processor.disconnect(); } catch { /* already gone */ }
-    processor = null;
+  if (workletNode) {
+    workletNode.port.onmessage = null;
+    try { workletNode.disconnect(); } catch { /* already gone */ }
+    workletNode = null;
   }
   if (sink) {
     try { sink.disconnect(); } catch { /* already gone */ }
@@ -288,14 +382,15 @@ function closeMic(): void {
 // ------------------------------------------------------------- suspend/resume
 
 /** Suspend while the mic is otherwise busy or Jarvis is speaking; resume on a
- *  return to idle. Reset buffers on suspend so no stale audio triggers later. */
+ *  return to idle. Tell the worker to drop its buffers on suspend so no stale
+ *  audio triggers later. */
 function subscribeSuspend(): void {
   const evaluate = () => {
     const v = useVoiceStore.getState();
     const shouldSuspend = v.phase !== 'idle' || v.speaking;
     if (shouldSuspend && !suspended) {
       suspended = true;
-      resetBuffers();
+      worker?.postMessage({ type: 'reset' });
     } else if (!shouldSuspend && suspended) {
       suspended = false;
     }
@@ -304,114 +399,20 @@ function subscribeSuspend(): void {
   unsubStore = useVoiceStore.subscribe(evaluate);
 }
 
-function resetBuffers(): void {
-  pending = [];
-  prevTail = new Float32Array(MEL_LOOKBACK);
-  melBuffer = [];
-  featureBuffer = [];
-}
-
-/** Inference fell seconds behind the mic (see MAX_BACKLOG_SAMPLES). Drop the
- *  backlog; after repeated overflows this machine demonstrably can't run wake
- *  word in real time — stop it for the session rather than melt the CPU. */
-function handleOverflow(): void {
-  overflowCount += 1;
-  resetBuffers();
-  if (overflowCount >= MAX_OVERFLOWS) {
-    console.warn(
-      '[WakeWord] inference cannot keep up with real-time audio on this machine; ' +
-        'disabling wake word for this session.'
-    );
-    stopWakeWord();
-  } else {
-    console.warn(
-      `[WakeWord] audio backlog overflowed (${overflowCount}/${MAX_OVERFLOWS}) — dropping buffered audio.`
-    );
-  }
-}
-
-// ------------------------------------------------------------- inference loop
-
-/** Drain pending audio in CHUNK-sized steps, single-in-flight so slow inference
- *  self-paces (the interim-transcription discipline). */
-async function drainQueue(): Promise<void> {
-  if (processingQueue) return;
-  processingQueue = true;
-  try {
-    while (running && !suspended && pending.length >= CHUNK) {
-      const chunk = Float32Array.from(pending.slice(0, CHUNK));
-      pending = pending.slice(CHUNK);
-      await processChunk(chunk);
-      if (!inferredOnce) {
-        inferredOnce = true;
-        noteStage('inference-ok');
-      }
-    }
-  } catch (e) {
-    console.warn('[WakeWord] inference error (ignored):', e);
-  } finally {
-    processingQueue = false;
-  }
-}
-
-async function processChunk(chunk: Float32Array): Promise<void> {
-  if (!ort || !melSession || !embedSession || !wakeSession) return;
-
-  // 1) Mel spectrogram over [lookback | chunk]; keep the newest MEL_STEP frames.
-  const melInput = new Float32Array(MEL_LOOKBACK + CHUNK);
-  melInput.set(prevTail, 0);
-  melInput.set(chunk, MEL_LOOKBACK);
-  prevTail = chunk.slice(CHUNK - MEL_LOOKBACK);
-
-  const melOut = await run(melSession, melInput, [1, melInput.length]);
-  const frameCount = Math.floor(melOut.length / MEL_BINS);
-  // openWakeWord normalizes the raw mel: x/10 + 2.
-  const startFrame = Math.max(0, frameCount - MEL_STEP);
-  for (let f = startFrame; f < frameCount; f++) {
-    const frame = new Float32Array(MEL_BINS);
-    for (let m = 0; m < MEL_BINS; m++) frame[m] = melOut[f * MEL_BINS + m] / 10 + 2;
-    melBuffer.push(frame);
-  }
-
-  // 2) Embeddings: one per MEL_STEP new frames over a MEL_WINDOW window.
-  while (melBuffer.length >= MEL_WINDOW) {
-    const windowData = new Float32Array(MEL_WINDOW * MEL_BINS);
-    for (let i = 0; i < MEL_WINDOW; i++) windowData.set(melBuffer[i], i * MEL_BINS);
-    melBuffer.splice(0, MEL_STEP);
-
-    const embOut = await run(embedSession, windowData, [1, MEL_WINDOW, MEL_BINS, 1]);
-    featureBuffer.push(Float32Array.from(embOut.slice(0, EMBEDDING_DIM)));
-    if (featureBuffer.length > WAKE_FRAMES) featureBuffer.shift();
-
-    // 3) Wake-word score over the last WAKE_FRAMES embeddings.
-    if (featureBuffer.length === WAKE_FRAMES) {
-      const feats = new Float32Array(WAKE_FRAMES * EMBEDDING_DIM);
-      for (let i = 0; i < WAKE_FRAMES; i++) feats.set(featureBuffer[i], i * EMBEDDING_DIM);
-      const scoreOut = await run(wakeSession, feats, [1, WAKE_FRAMES, EMBEDDING_DIM]);
-      handleScore(scoreOut[0] ?? 0);
-    }
-  }
-}
-
-/** Run one session with a single float32 input tensor; return the first
- *  output's data. Input/output names are read from the session so the models'
- *  exact names don't have to be hard-coded. */
-async function run(
-  session: Ort.InferenceSession,
-  data: Float32Array,
-  dims: number[]
-): Promise<Float32Array> {
-  const tensor = new ort!.Tensor('float32', data, dims);
-  const feeds: Record<string, Ort.Tensor> = { [session.inputNames[0]]: tensor };
-  const out = await session.run(feeds);
-  return out[session.outputNames[0]].data as Float32Array;
-}
+// ------------------------------------------------------------- trigger
 
 function handleScore(score: number): void {
+  // TEMP tuning aid: surface elevated scores so THRESHOLD can be calibrated to
+  // this mic/voice. Speech near "hey jarvis" spikes; silence sits ~0.0002.
+  if (score >= 0.1) {
+    console.log(
+      `[WakeWord] score ${score.toFixed(3)}${score >= THRESHOLD ? ' → TRIGGER' : ` (below ${THRESHOLD})`}`
+    );
+  }
   if (score < THRESHOLD) return;
   const now = Date.now();
   if (now - lastTriggerAt < COOLDOWN_MS) return;
   lastTriggerAt = now;
-  resetBuffers(); // don't re-fire on the tail of the same utterance
+  worker?.postMessage({ type: 'reset' }); // don't re-fire on the same utterance's tail
   void useVoiceStore.getState().beginWakeListen();
 }

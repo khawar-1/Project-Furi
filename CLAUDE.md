@@ -859,6 +859,13 @@ API endpoints (`main.py`): `POST /api/agent/execute`, `POST /api/agent/approve`,
 
 **System-voice impersonation guard** (`_SYSTEM_VOICE_RE` in chat.py): because fail-open means gate misses land in plain chat, the chat LLM can fabricate the backend's own deterministic message formats — live bug 2026-07-09: it streamed an entire invented background-task lifecycle ('Finished the background task "please del all files…". Done — 1 step(s) completed. 1 file(s) deleted: firstname.txt…') for a delete that never ran, with the CAPABILITIES "do NOT pretend you did it" rule already in the prompt. Prompt rules don't stop this, so the guard is STRUCTURAL: both chat routes scan the response for backend-owned phrases ("finished the background task", the background ack, "Done — N step(s) completed", "Reminder set —", the approval/choice texts, and — 2026-07-10 — initiation claims: "the task/deletion/operation … has been initiated/started/queued/launched", always a fabrication since chat cannot start anything; the CAPABILITIES prompt also forbids promising actions or claiming initiation). The streaming route cuts the stream at the first marker (the invented results are never delivered) and appends a deterministic correction ("no task ran, no reminder was created, nothing was touched — say it as a direct instruction"), also persisted; the non-streaming route cuts BEFORE the marker. Memory extraction is skipped on a corrected turn — a fabrication must never seed memories. A response merely QUOTING an old system message trips it too (rare, and the correction stays factually true: nothing ran this turn). The prompt additionally forbids imitating system messages (belt; the regex is the suspenders).
 
+**The question tier + the dead-end backstop (2026-07-17 — "why is it telling me to say some magic word")**. Two defects with one face: *"which teams qualified for fifa finals 2026"* → *"Worth looking up for the latest — ask me to search the web for it, sir."* The user is left guessing the phrase that would have routed.
+
+- **The gate inverted its own doctrine, and three rounds of keywords proved it.** `looks_like_task` says it is "tuned for RECALL… deliberately over-inclusive — the LLM confirmation prunes it", and for domain nouns it is (a strong noun fires alone, any wording). For QUESTIONS it did the opposite: it demanded the question prove it needed the web, using keyword lists, BEFORE the classifier could judge. 2026-07-16 added a time-marker list; round 2 added typo tolerance to that list; 2026-07-17 added a lead-in list. Each round the next phrasing missed. **MEASURED against the user's own transcripts, which ended the argument: the gate blocked 7 of 8 ordinary external-fact questions while the classifier labelled 8/8 of them WEB and 9/9 control questions CHAT.** The lists were not incomplete — they were the only thing between the user and a correct answer. *"Does this need current information?"* is not answerable from keywords; it is what the classifier is for. Same shape as the 2026-07-16 rule-16 lesson: **a predicate the component cannot evaluate at the moment it is asked to.** So `is_external_question` now fires on ANY question or information request whose subject is not the user, Jarvis, or a pointer back into the conversation (`_SELF_REFERENTIAL_RE` / `_DEICTIC_SUBJECT_RE`, applied AFTER `_QUESTION_REQUEST_RE` strips the request frame — that strip is what separates "i want to know the gold price" from "why is my script slow"). `_WEB_QUESTION_MARKER_RE`, `_QUESTION_SHAPE_RE` and `_KNOWLEDGE_QUESTION_RE` are DELETED. Own-action detection must stay AHEAD of it (`what did you do today` is second-person but is a real TASK). **Accepted cost, chosen knowingly:** one temp-0 call on impersonal concept questions ("what is a monad") that answers CHAT. **Rejected on measurement:** fuzzy-matching a typo'd question word — rapidfuzz scores `whihc`→which at 80 but `here`→where at 89 and `there`→where at 80, so no threshold separates a typo from an ordinary opening word.
+- **The dead-end backstop** (`_DEAD_END_OFFER_RE` + `task_router.rescue_web_turn`) is the recall net under EVERY routing miss, whatever its cause — a gate hole, a typo'd question word, a flaked classifier call, a provider error (routing rests on ONE nondeterministic LLM call that fails OPEN to chat, and no gate work can rule that out; the second live message routes correctly in code yet still fell to chat). `_SYSTEM_VOICE_RE` deliberately spares "conditional capability offers" and is RIGHT to — they are not fabrications, Jarvis genuinely can search. They are dead ends, a different defect needing a different remedy: **take the model at its word and DO the search.** The admission is a better label than any keyword — it was produced with the whole conversation in view. The rescue does NOT re-classify (routing already had its chance; asking the same classifier twice buys the same answer) and adds no authority: same planner, same registry, same approval gate; `web_search`/`read_webpage` are READ tools. Two details, both learned the hard way: every branch must name a LOOKUP (a bare "just say the word" was in the first draft and the suite caught it inside a minute — the existing fixture "I can help with that — just say the word." answers an EMAIL message, and rescuing it would have run the planner on a turn that worked); and the stream holds back `_OFFER_LOOKBEHIND` chars, because an offer is only recognizable once its last word arrives and a naive emitter has already sent the opening ones — live, the first cut of this guard put "…as matches are played. Ask me to" on screen and then answered anyway, which reads exactly like asking permission and ignoring it. The chat prefix is NOT persisted (a false start; history holds the real answer), extraction is skipped (a lookup is not autobiography), and a failed rescue degrades to `_DEAD_END_FALLBACK` — honest, and still never a magic word.
+- **No routing audit trail** (known gap, not yet closed): ActivityLog records tool calls, so a fail-open leaves ZERO evidence. That is why the second live miss could not be root-caused from data. For a system whose main failure mode is "it didn't do the thing", the not-doing is the one thing unaudited.
+- Verified live (isolated :8001, real DeepSeek + Tavily): the 21:19 message now routes → `web_search` + `read_webpage` → a real sourced answer; the typo'd `whihc teams have qualified…` still misses the gate, is rescued by the backstop, and reads "Worth looking up for the latest — I searched the web for…" with zero leak of any offer prefix; `how are you today` stays free (no plan, 15 deltas, tail intact).
+
 Task turns stream normal SSE plus one special chunk first: `{"type": "plan", "plan": {...}, "delta": ""}` — same serialized shape as `/api/agent/execute`, including the parked plan id the approval UI answers. Approval requests and failure texts are DETERMINISTIC (`_deterministic_text` — never let an LLM paraphrase what the user is approving or spin a failure); a clarifying question is the one LLM-authored text rendered verbatim (answering it executes nothing — anything it leads to still gets deterministic approval text); only COMPLETED plans get an LLM-streamed summary grounded in real step results, with a deterministic fallback. The summary LLM NEVER sees raw JSON: its prompt carries the code-rendered readable step results (`steps_for_summary` in rendering.py — same per-tool formatters as the deterministic text) — live bug 2026-07-10: the prompt used to carry `json.dumps` of step output cut at 2000 chars, so the LLM pasted escaped JSON into the chat showing ~11 of 52 search matches and called the complete list "truncated". Memory extraction does NOT run on task turns — ActivityLog is the audit; a command is not autobiography.
 
 When a session has an AWAITING_CHOICE plan parked (`get_choice_plan_for_session`), the session's NEXT chat message is routed as the answer (`_stream_answer` → `planner.answer`) — before the task gate, before classification, and with precedence over a parked Phase 2 memory question (the plan question is the one the user just saw). Typed answers and clicked options are equivalent; the pop is atomic so a concurrent click can't double-answer.
@@ -1091,6 +1098,220 @@ not act on it. Rules, all in code:
 - Tests: `test_browser_tools.py` (query building, the SSRF guard incl.
   redirect-revalidation, HTML extraction, the untrusted-content framing, fake
   fetch/search factories). Live smoke-tested search + fetch.
+
+### Web evidence → answer grounding (2026-07-16 fabrication incident)
+The defect that forced this layer: *"…and which teams are going to fifa finals
+2026"* searched correctly, and the summary answered with **112 invented country
+bullets** (India, Brunei, Timor-Leste, Seychelles…) for a 48-team tournament,
+credited to FIFA, plus a false "qualification is still ongoing". The record
+contained **zero** team names: `_tavily_search` did `content[:SNIPPET_MAX_CHARS]`
+with the 300 cap sized for DuckDuckGo's short scraped teasers, cutting FIFA's
+page mid-word exactly where the list began. The record's silence then
+*certified* the fragment — `SUMMARY_PROMPT` says "only call a list truncated if
+the results literally say so — otherwise it is complete". **Fabrication was the
+compliant reading: the record lied, in code, and the prompt notarized it.**
+`SUMMARY_PROMPT` already said "never invent" and "Copy names EXACTLY" — this
+defect is the PROOF of the prompts-are-not-guarantees doctrine, not an exception.
+- **Content budget** (`browser_tools.py`): rows carry `snippet` (300, the short
+  preview every provider fills) AND `content` (`CONTENT_MAX_CHARS = 1200`,
+  substantive extract) + `truncated` — the `read_webpage` output shape verbatim,
+  one contract across providers. DDG sets `content=""`: honest, a teaser is
+  genuinely all it has (that's *thin*, not *cut*). Tavily uses
+  `search_depth="advanced"`; **never `include_raw_content`** (no per-result flag
+  → full markdown for all 5, blowing every budget and duplicating read_webpage).
+  The mapping is a PURE `_tavily_rows` — the DDG parsers already had that seam
+  and it is exactly why their caps never shipped a bug like this.
+- **Fair-share render budget** (`rendering.py`): `_STEP_RESULT_CAPS`
+  (web_search 7000 — must stay above 5 × CONTENT_MAX_CHARS; read_webpage 12000)
+  and `_fair_shares` splitting `_RESULTS_TOTAL_CAP` (20000) with one
+  redistribution pass, `_MIN_STEP_SHARE = 800`. **Position no longer determines
+  survival**: both renderers used to accumulate and `break`, so the LAST step's
+  results were dropped — and the FIFA question was the third of three. Fixing the
+  content cap WITHOUT this would have made the incident worse (an *empty* record
+  instead of a thin one). Also fixed a live defect of its own: `read_webpage`
+  fetches 20k chars and every step was clipped to 3500 — 82% discarded.
+  `_RESULT_TRUNC = 1200` (planner.py) is deliberately NOT raised: it feeds the
+  *revise* LLM, which plans next steps rather than reading pages.
+- **Truth in rendering** (`_fmt_web_search`): long content is FENCED (untrusted
+  prose carrying its own markdown — the FIFA snippet literally contained `##`
+  headers) and a cut is MARKED. The marker states the fact and ONLY the fact:
+  an earlier cut also named the remedy ("read_webpage on <url> returns the
+  rest") on the `_missing_target` principle, and live verification showed the
+  summary LLM copying it verbatim into the user's reply a dozen times, leaking a
+  tool name into prose that must never mention tools. The remedy is automatic now.
+- **`evidence_resolver.py` — escalation in CODE.** Planner rule 16 ("follow up
+  with read_webpage when the snippets don't answer it") had **never once
+  executed and could not**: the planner drafts every step *before* any snippet
+  exists, and `_after_execute` re-enters `revise` only on `failed_step` — a
+  SUCCESSFUL-but-starved step never gets a second look. **The rule's predicate is
+  unbound at the only time the rule is read**; that needs a different evaluation
+  TIME, not a stronger prompt. So `escalate()` runs the instant a `web_search`
+  hits COMPLETED and splices a `read_webpage` on the top url — **zero LLM calls,
+  zero replan budget** (the url is already in the completed step's own output;
+  nothing to decide, only to do — `placeholder_resolver`'s architecture).
+  Trigger: `_needs_more` — no row is both substantive (≥ `WEB_THIN_CONTENT_CHARS
+  = 600`) and whole. **Truncated counts**: the first cut treated it as "plenty"
+  since it carries a full budget; live verification falsified that (every source
+  truncated at 1200, nothing escalated, the summary honestly reported a partial
+  answer while the real one sat two paragraphs down). A cut before the data is a
+  gap whatever its size. Bounds: edge-triggered, never recursive, idempotent per
+  url, `MAX_PLAN_STEPS`, `MAX_WEB_ESCALATIONS = 3`. **A failed escalation is
+  NON-FATAL** (`PlanStep.auto_escalated`, excluded from `signature()` by
+  construction): it stays FAILED and visible, and execution CONTINUES — letting
+  it set `pause="failed_step"` would hand the plan to the replan loop over an
+  opportunistic extra. Verified live: Instagram 403'd while Wikipedia succeeded,
+  in the same turn, and the plan completed.
+  **Rejected: "thin = FAILED ToolResult"** (the cheap-looking option) — it
+  DELETES the evidence (`_render_step` returns None for non-COMPLETED, `_fail`
+  sets `output=None`), hard-fails the incident turn at `MAX_REPLANS=2` (3 thin
+  searches = 3 failures), and shows a red row for a search that worked — the
+  exact mistake `placeholder_resolver.py` was written to undo.
+- **Summary grounding guard** (`summary.py`): the 2026-07-13 empty-record guard
+  asks *does the record have anything?* — certain. This one asks **does the
+  OUTPUT rest on the RECORD?** — because the defect was 112 names in the output
+  appearing nowhere in the input, which is a substring test, not a judgement
+  (the `_recipient_violation` / `_scope_violation` shape). Gating on "is the
+  record thin?" is deliberately NOT done: "who is the president of pakistan" has
+  a thin record holding the complete correct answer. So a gap only selects the
+  verification MODE. `_plan_has_unresolved_web_gap` = **ANY** completed search
+  whose evidence is incomplete and which no successful escalated read followed
+  (ANY, not ALL — the incident was MIXED, 2 substantive + 1 starved, and a
+  plan-level test would never fire on it; "no read filled it" is what keeps
+  verification rare, so an enriched web turn still streams live and Phase 7's
+  sentence-by-sentence speech is untouched). Verdict: ≥ 8 bullets AND > 60% of
+  their significant tokens absent from the record → discard the reply for
+  `deterministic_plan_text` (which still carries the COMPLETE real record).
+- **Query formulation is NOT solved, and deliberately so.** *(SUPERSEDED
+  2026-07-17 — see "Query fan-out" below. The prediction in this bullet held
+  exactly: the rule stayed at ZERO and the same question misfired again live.
+  Kept because the reasoning for the deferral, and its cost, are the argument
+  for the fan-out.)* Rule 16 gained "search for what the user ASKED, not an
+  adjacent concept — 'who is in the final' is not 'who qualified'", credited as
+  ZERO. Live it lands ~half the time; "the World Cup Finals" legitimately means
+  the tournament in football usage, so the misreading is defensible English.
+  **The bug worth killing is fabrication, not misunderstanding** — a wrong
+  reading is now sourced, checkable and correctable in one turn, where an
+  invented one was neither. Rejected: hard-coding "finals ⇒ 2 teams" (world
+  knowledge with an expiry date), and a clarifying question (ambiguity
+  detection is itself an LLM judgement and `MAX_QUESTIONS = 3` is scarce).
+- Tests: `test_evidence_resolver.py` (decision matrix; end-to-end splice
+  asserting the provider call count is UNCHANGED — zero LLM cost is the thesis;
+  `test_escalated_failure_is_non_fatal`), `test_summary_guard.py` (the incident
+  frozen; the president-of-pakistan false-positive; live-streaming preserved),
+  `test_browser_tools.py` (+`_tavily_rows` budget, the verbatim FIFA fragment,
+  DDG unchanged), `test_plan_rendering.py` (+fair-share, last-step-not-starved).
+  `conftest.py` gained autouse `_hermetic_browser` — both factories default to
+  `None` module-wide, so once the planner could splice a fetch, any planner test
+  with thin rows would have gone to the real network.
+
+### Query fan-out — cover readings instead of guessing one (2026-07-17)
+The incident: *"which teams have qualified for fifa worldcup final 2026"* returned
+the 48 teams that qualified for the TOURNAMENT, sourced from Wikipedia's
+qualification page — two days before a two-team final. Reworded to *"which teams
+are playing fifa final 2026"* it answered correctly. Google answers BOTH, and the
+user's own observation is the diagnosis: FIFA has one page for qualification and
+one for the final, and Google surfaced both. **Google is not comprehending
+better — it fans the question out, retrieves for each reading, and lets synthesis
+decide with the evidence in hand.** (Google's own term is "query fan-out"; the RAG
+literature calls it multi-query retrieval / RAG-Fusion.)
+
+- **Root cause: premature commitment, not bad wording.** `one query → one ranked
+  list → _top_url → one page → one answer`. The planner fixes the interpretation
+  in `_plan_node`, BEFORE any step runs — the moment it knows the least — and
+  nothing downstream can revisit it. In the incident every stage worked
+  perfectly: the answer was sourced, grounded, honestly attributed, and every
+  fabrication guard passed. It faithfully executed the wrong commitment. **This
+  is `evidence_resolver`'s own defect class, one layer up**: that module fixed
+  the SUFFICIENCY predicate ("do the snippets answer it?") by moving evaluation
+  to when snippets exist; INTERPRETATION ("which question is this?") was still
+  decided at draft time and never revisited.
+- **Prompt-tuning was already falsified — do not retry it.** Rule 16 contained
+  *"'who is in the final' is not 'who qualified'"* VERBATIM when this happened.
+  The prior round measured it at ZERO and predicted the recurrence. A rule cannot
+  fix a decision made at the wrong time.
+- **Stop choosing. Cover.** Rule 16 asked the model to PICK the right reading — a
+  precision problem it loses ~half the time. Fan-out asks it to ENUMERATE
+  readings — a recall problem, where the right reading need only APPEAR, never be
+  chosen. That is the routing gate's own doctrine ("tuned for RECALL,
+  deliberately over-inclusive") applied to search. **Why this does not contradict
+  the recorded rejection of clarifying questions:** ambiguity detection is STILL
+  an LLM judgement — but the blast radius inverts. A wrong guess here costs one
+  extra parallel HTTP request nobody sees; a wrong clarifying question interrupts
+  the user and burns 1 of 3 `MAX_QUESTIONS`. Same judgement, opposite cost.
+- **L1 — the fan-out** (`browser_tools.py`): `web_search` gained
+  `queries: list[str]` (`query` kept — back-compat, and what an unambiguous
+  question still uses; `queries` wins when both are sent). `FANOUT_MAX_QUERIES=5`
+  is enforced in CODE (the planner proposes readings, it does not decide how many
+  searches run); blanks/case-dupes collapse in `_parse_queries`. Readings run in
+  PARALLEL over the existing per-query `_search` — **the `SEARCH_PROVIDER_FACTORY`
+  seam is untouched, so the suite stays hermetic and single-query fakes still
+  work**. Merged by **Reciprocal Rank Fusion** (`score = Σ 1/(60+rank)`,
+  deterministic, no LLM): rank is the only signal comparable ACROSS readings, and
+  a page several readings agree on outranks one that is #1 for exactly one — the
+  property that makes the merge cut safe. Dedupe on `normalize_url` (now PUBLIC in
+  browser_tools and SHARED with `evidence_resolver._already_targeted` — two copies
+  of "same page" would drift). Rows carry `found_by: [query…]`. Resilience: one
+  dead reading is dropped; only ALL-failed re-raises (infrastructure) and
+  ALL-empty keeps the "reword and retry" failure.
+- **⚠️ THE TRAP, and it is the whole reason 5-wide needed design.** The ORIGINAL
+  FIFA fabrication was content STARVATION. 5 queries × 5 results ≈ 15-20 rows ×
+  `CONTENT_MAX_CHARS` ≈ 18-24k chars into a `_STEP_RESULT_CAPS["web_search"]` of
+  7000 → the fair-share allocator clips → **the same bug with MORE sources
+  feeding it**. So: `FANOUT_MERGED_MAX = 8` (RRF top-8) AND the cap raised
+  7000 → 11000. MEASURED, not reasoned: at 7000 only **6 of 8 sources survive to
+  the record**; at 11000, 8/8. `test_a_full_fanout_result_set_renders_without_
+  starving_any_source` + a test asserting the invariant
+  (`cap ≥ FANOUT_MERGED_MAX × CONTENT_MAX_CHARS`) so a constant move fails loudly
+  instead of quietly clipping evidence.
+- **L2 — escalate per READING, and survive a blocked page** (`evidence_resolver`):
+  sufficiency is judged PER READING (`_pending_url`), not over the whole pile — a
+  global test calls the record satisfied the moment the TOP reading comes back
+  whole, leaving the other interpretation (possibly the one meant) on teasers.
+  Still structural only (thin/truncated), never "does this answer it?".
+  `escalate()` serves ONE uncovered reading per call and returns None when all are
+  served — that idempotence is what lets `_execute_node` loop it (bounded by
+  `range(MAX_WEB_ESCALATIONS)` as a hard stop). **Failed-read fallthrough**: a url
+  we must not re-fetch and a reading we have COVERED are different questions —
+  `_reading_is_covered` ignores FAILED reads, so a 403 falls through to the next
+  candidate via `escalate_after_failed_read` (called from the existing
+  `auto_escalated`-failure branch). Live 2026-07-17 the "good" run had escalated
+  to ESPN, ESPN 403'd, escalation STOPPED, and the answer came from snippets
+  alone — right by luck, while still citing "the bracket data from ESPN", a page
+  it never read. **Verified live: Instagram + Facebook both 403'd on the control
+  question and the retry recovered to a working page in the same turn.**
+- **L3 — the summary knows what day it is** (`summary.py`): `SUMMARY_PROMPT.format`
+  passed goal+steps ONLY. The planner has the date (`_context_block`); the model
+  WRITING the answer did not. It is 2026-07-17; the final is 2026-07-19 — *"the
+  final is in two days"* is exactly the signal that settles which reading a person
+  means, and it was the one thing not on the table. `{now}` added (planner's
+  format), plus the **lead + one-line note** ambiguity clause: lead with the
+  likely reading, then ONE line offering the other; never silently answer the less
+  likely one. A prompt, and acceptable HERE specifically because writing the reply
+  is irreducibly a judgement, it is already the one LLM-authored surface, and the
+  guarantee layer (`_is_fabricated_enumeration`) sits under it. **L1 is what makes
+  L3 possible** — it cannot offer a reading whose evidence was never retrieved.
+- **Honest limit:** fan-out guarantees the right page is IN evidence; it does not
+  guarantee the summary picks the right reading. The failure mode degrades from
+  "confidently answered the wrong question, unrecoverable" to "the right data was
+  on the table" — the same trade as "the bug worth killing is fabrication, not
+  misunderstanding". Cost: up to 5× Tavily credits on AMBIGUOUS web turns only
+  (rule 16's "one query when unambiguous" is load-bearing); latency ~flat.
+- **VERIFIED LIVE** (isolated :8001, real DeepSeek + Tavily): the incident prompt
+  now fans out to `["which teams are playing the 2026 World Cup final", "which
+  teams qualified for the 2026 World Cup"]`, reads BOTH a final page and the
+  qualification page, and answers *"…between **Spain** and **Argentina** on Sunday,
+  July 19 at MetLife Stadium… If you meant the full list of all 48 teams that
+  qualified for the tournament rather than just the finalists, say the word."* The
+  reworded prompt stays a SINGLE query and is correct; `who is the president of
+  pakistan` stays a SINGLE query (1× credits, no fan-out); `how are you today`
+  still drafts no plan. Also removed: dead `summary._WEB_TOOLS`.
+- Tests: `test_browser_tools.py` (+19 — RRF order, dedupe on normalized url,
+  richer-copy merge, `truncated` travels with its content, code-enforced cap,
+  merged cap, one-dead-reading, all-failed vs all-empty, single-query
+  back-compat), `test_evidence_resolver.py` (+8 — per-reading sufficiency,
+  each-reading-then-stop, failed-read fallthrough incl. end-to-end 403 recovery
+  costing ZERO LLM calls), `test_plan_rendering.py` (+3 starvation guard),
+  `test_summary_guard.py` (+3 date/clause/format). 1578 green.
 
 ### File-index foundation (Phase 6, Part 2)
 The INGEST half of semantic file search — walk configured folders, extract +

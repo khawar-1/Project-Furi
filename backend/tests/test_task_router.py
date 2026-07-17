@@ -139,15 +139,23 @@ async def post_chat(client, message: str, session_id: str) -> list[dict]:
 
 
 @pytest_asyncio.fixture
-async def client(tmp_path_factory, monkeypatch):
-    """HTTP client against the real app: file-backed DB, no Qdrant, and the
-    Phase 2 background extraction stubbed out (it would call the exhausted
-    FakeProvider against the real dev database)."""
+async def db_factory(tmp_path_factory):
+    """The session factory behind `client`, exposed so a test can inspect what
+    a turn actually wrote (e.g. that a rescued turn persists ONE user row)."""
     db_dir = tmp_path_factory.mktemp("router-db")
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_dir / 'router-test.db'}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def client(db_factory, monkeypatch):
+    """HTTP client against the real app: file-backed DB, no Qdrant, and the
+    Phase 2 background extraction stubbed out (it would call the exhausted
+    FakeProvider against the real dev database)."""
+    factory = db_factory
 
     async def _get_db():
         async with factory() as session:
@@ -170,7 +178,6 @@ async def client(tmp_path_factory, monkeypatch):
         yield c
     app.dependency_overrides.clear()
     plan_store._PENDING_PLANS.clear()
-    await engine.dispose()
 
 
 # ======================================================= the deterministic gate
@@ -228,7 +235,6 @@ def test_gate_fires_for_task_messages(message):
     "my sister is a doctor in lahore",
     "what's my brother's name?",
     "i want to learn guitar",
-    "tell me a joke",
     "yes",
     "i meant jamil ali",
 ])
@@ -313,12 +319,12 @@ def test_gate_fires_on_bare_search_verb():
     assert looks_like_task("just look it up") is True
 
 
-def test_gate_current_info_tier_needs_question_and_marker():
-    # A statement with a marker is small talk; a question without a marker is
-    # ordinary conversation — neither may cost a classifier call.
+def test_gate_question_tier_ignores_statements():
+    # A STATEMENT is never a question, however current its subject — small talk
+    # about the new season must not cost a classifier call.
     assert looks_like_task("i love this season of the show") is False
     assert looks_like_task("the new season finally came out yesterday") is False
-    assert looks_like_task("what do you think of vector databases?") is False
+    assert looks_like_task("explain recursion") is False
 
 
 def test_classify_prompt_routes_own_action_questions_to_task():
@@ -328,6 +334,98 @@ def test_classify_prompt_routes_own_action_questions_to_task():
     from app.api.task_router import _CLASSIFY_PROMPT
     assert "JARVIS'S OWN actions is TASK" in _CLASSIFY_PROMPT
     assert "audit log" in _CLASSIFY_PROMPT
+
+
+def test_gate_fires_on_knowledge_lookups():
+    # A factual lookup about a specific entity names no domain noun and carries
+    # no time-sensitive marker ("what do you know about black clover" — the
+    # exact live bug 2026-07-16 that fell to plain chat and got a stale /
+    # dead-end-offer answer). The explicit information-request lead-ins reach
+    # the classifier, which makes the WEB/CHAT call.
+    assert looks_like_task("hey what do you know about black clover") is True
+    assert looks_like_task("tell me about the framework laptop") is True
+    assert looks_like_task("who is the ceo of tesla?") is True
+    assert looks_like_task("have you heard of the rivian r1t") is True
+    assert looks_like_task("give me a rundown on the new pixel phone") is True
+    assert looks_like_task("do you know anything about quokkas") is True
+
+
+@pytest.mark.parametrize("message", [
+    # THE INCIDENT, FROZEN — the user's own words, verbatim from the DB.
+    # Both fell to plain chat and got "ask me to search the web" back.
+    "which teams qualified for fifa finals 2026",
+    "tell me when is the new season of black clover coming out, and who is the "
+    "prime minister of pakistan and whihc teams have qualified for fifa finals 2026",
+    # …and its first clause alone, which is what actually broke: the old shape
+    # rule allowed ONE filler word before the question word, so "tell me when"
+    # (two) missed. The full message only survived on "who is the prime minister".
+    "tell me when is the new season of black clover coming out",
+    # Ordinary external-fact questions the marker list never covered. Measured
+    # 2026-07-17: the gate blocked 7 of these 8 while the classifier labelled
+    # all 8 WEB — the list was the only thing between the user and an answer.
+    "tell me who won the match last night",
+    "let me know when the next iphone is out",
+    "find out which teams qualified for the world cup",
+    "i want to know the current gold price",
+    "is bitcoin up today",
+    "what is the population of karachi",
+])
+def test_gate_fires_for_external_questions(message):
+    assert looks_like_task(message) is True
+
+
+@pytest.mark.parametrize("message", [
+    # A question about the USER, about JARVIS, or about the two of them is
+    # answered from memory and context — the web cannot help, so these stay
+    # free. This exclusion is the whole reason the wider tier is affordable.
+    "how are you today",
+    "what do you think of black clover?",
+    "who are you?",
+    "who is this?",
+    "what should i name my project",
+    "do you remember what i told you about jamil",
+    "what's my brother's name?",
+])
+def test_gate_stays_closed_for_self_referential_questions(message):
+    assert looks_like_task(message) is False
+
+
+def test_question_frame_pronouns_do_not_count_as_self_reference():
+    # The subtle one. "i want to know the gold price" is about the WORLD; the
+    # "i" belongs to the request frame, not the subject. Stripping the frame
+    # before the self-reference test is what separates it from "why is my
+    # script slow" — without that, the pronoun would refuse the whole class.
+    assert looks_like_task("i want to know the current gold price") is True
+    assert looks_like_task("have you heard of the framework laptop") is True
+    assert looks_like_task("what do you know about black clover") is True
+
+
+def test_wider_question_tier_costs_one_call_on_concept_questions():
+    # The accepted cost, stated out loud rather than discovered later: an
+    # impersonal concept question now reaches the classifier, which answers
+    # CHAT and falls open. One temperature-0 call buys the end of the
+    # phrasing lottery. If this ever needs revisiting, revisit it knowingly.
+    assert looks_like_task("how does anime production work?") is True
+    assert looks_like_task("what is a monad") is True
+    assert looks_like_task("tell me a joke") is True
+
+
+def test_own_action_questions_survive_the_self_reference_test():
+    # Order dependency, load-bearing: "what did you do today" is second-person,
+    # so the question tier's self-reference test would refuse it — but it is a
+    # real TASK answered from the audit log. The own-action tier must stay
+    # AHEAD of the question tier in looks_like_task.
+    assert looks_like_task("what did you do today") is True
+    assert looks_like_task("what was the name of the folder that u created?") is True
+
+
+def test_classify_prompt_routes_entity_lookups_to_web():
+    # The WEB label was broadened from time-sensitive-only to also cover a
+    # factual question about a specific real-world entity — so a knowledge
+    # lookup is looked up, not answered from stale training data.
+    from app.api.task_router import _CLASSIFY_PROMPT
+    assert "specific real-world" in _CLASSIFY_PROMPT.lower()
+    assert "black clover" in _CLASSIFY_PROMPT.lower()
 
 
 # --------------------------------------------------- short action follow-ups
@@ -1114,4 +1212,121 @@ async def test_normal_chat_stream_is_untouched_by_the_guard(client):
     text = streamed_text(events)
     assert "Correction" not in text
     assert "reviewing the notes" in text
+    assert events[-1]["done"] is True
+
+
+# ==================================================== dead-end offer backstop
+#
+# Live 2026-07-17, twice in one evening: "which teams qualified for fifa
+# finals 2026" → "Worth looking up for the latest — ask me to search the web
+# for it, sir." The user is left guessing the phrase that would have routed.
+#
+# Routing had already failed by then, and this backstop deliberately does not
+# care WHY: a gate hole, a typo'd question word ("whihc"), a flaked classifier
+# call, a provider error — every one of them degrades silently to CHAT, and
+# every one of them ends here. The signal is the model's own admission that
+# the answer needs the live web, which needs no keyword list to recognize.
+
+
+async def test_dead_end_offer_is_rescued_into_a_real_search(client):
+    """THE INCIDENT, FROZEN. The gate cannot see this is a question — "whihc"
+    is a typo, and fuzzy-matching question words was measured and rejected
+    (see is_external_question). So chat answers, offers a search it cannot
+    run, and the backstop turns that offer into the search itself."""
+    provider = use_provider(
+        streams=["Worth looking up for the latest — ask me to search the web for it, sir."],
+        responses=[plan_json([step("search the web", "web_search", query="fifa 2026 finalists")])],
+    )
+    events = await post_chat(
+        client, "whihc teams have qualified for fifa finals 2026", "s-rescue-1"
+    )
+
+    # Routing never fired, so the planner was reached only by the rescue.
+    plans = plan_events(events)
+    assert plans, "the dead-end offer should have been rescued into a plan"
+    assert provider.stream_calls == 1   # chat answered once…
+    assert provider.chat_calls >= 1     # …and the planner then really ran
+
+
+async def test_the_offer_itself_never_reaches_the_user(client):
+    """Jarvis must not appear to ask permission and then act anyway. The cut
+    happens BEFORE the offer is emitted — unlike the impersonation guard,
+    which deliberately shows its marker so the correction has a referent.
+
+    Asserts NO WORD of the offer escapes, not merely the whole phrase. The
+    first version of this test checked only the full string and passed while
+    the guard was in fact broken: live, "…as matches are played. Ask me to"
+    reached the screen and the answer followed it, because an offer is not
+    recognizable until its last word arrives and the opening words had already
+    been emitted by then. Hence the look-behind buffer."""
+    use_provider(
+        streams=["Worth looking up for the latest — ask me to search the web for it, sir."],
+        responses=[plan_json([step("search the web", "web_search", query="q")])],
+    )
+    events = await post_chat(client, "whihc teams qualified for fifa 2026", "s-rescue-2")
+
+    text = streamed_text(events).lower()
+    assert "ask me to search" not in text
+    assert "ask me to" not in text     # the leak the first cut shipped
+    assert "ask me" not in text
+    assert "Worth looking up for the latest" in streamed_text(events)  # honest prefix stays
+
+
+async def test_an_offer_chat_can_actually_keep_is_not_a_dead_end(client):
+    """The false positive the suite caught on the first draft: a bare "just
+    say the word" answering an EMAIL message offers mail help, not a web
+    lookup. An offer is only a dead end when it offers what chat cannot do."""
+    provider = use_provider(
+        responses=["CHAT"],
+        streams=["I can help with that — just say the word."],
+    )
+    events = await post_chat(client, "i got an email from jamil yesterday", "s-rescue-3")
+
+    assert plan_events(events) == []
+    assert "just say the word" in streamed_text(events)
+    assert provider.chat_calls == 1  # the classifier only; no planner run
+
+
+async def test_a_past_tense_search_report_is_never_rescued(client):
+    """The plan path's own voice reports searches in the past tense. If that
+    ever tripped the backstop, a completed search would be re-run forever."""
+    use_provider(streams=["I searched the web and found three results, sir."])
+    events = await post_chat(client, "hows it going", "s-rescue-4")
+
+    assert plan_events(events) == []
+    assert "I searched the web and found three results" in streamed_text(events)
+
+
+async def test_rescue_does_not_duplicate_the_user_message(client, db_factory):
+    """The chat path already persisted the user's turn before it began
+    streaming; the plan path normally writes it itself. Exactly one row."""
+    use_provider(
+        streams=["Worth looking up — ask me to search the web for it, sir."],
+        responses=[plan_json([step("search the web", "web_search", query="q")])],
+    )
+    await post_chat(client, "whihc teams qualified for fifa 2026", "s-rescue-5")
+
+    from sqlalchemy import select
+    from app.db.models import Message
+    async with db_factory() as session:
+        rows = (await session.execute(
+            select(Message).where(
+                Message.session_id == "s-rescue-5", Message.role == "user"
+            )
+        )).scalars().all()
+    assert len(rows) == 1
+
+
+async def test_a_failed_rescue_degrades_honestly_not_into_a_magic_word(client):
+    """If the rescue itself dies, the turn must still not send the user
+    hunting for a phrase. The planner has no scripted response here, so it
+    fails for real."""
+    use_provider(
+        streams=["Worth looking up — ask me to search the web for it, sir."],
+        responses=[],   # planner LLM exhausted → the plan run fails
+    )
+    events = await post_chat(client, "whihc teams qualified for fifa 2026", "s-rescue-6")
+
+    text = streamed_text(events).lower()
+    assert "ask me to search" not in text
     assert events[-1]["done"] is True

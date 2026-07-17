@@ -66,6 +66,13 @@ class PlanStep(BaseModel):
     # command / paths from the parameters). Shown to the user alongside the
     # LLM's description so an approval can never rest on prose alone.
     action_detail: Optional[str] = None
+    # True when CODE added this step to enrich thin evidence, not the LLM
+    # (evidence_resolver, 2026-07-16). Such a step is OPPORTUNISTIC: the goal
+    # does not depend on it, so its failure must NOT drive the replan loop —
+    # the step it enriches already succeeded. Excluded from signature() by
+    # construction, so it can never affect what the user approved; defaulted,
+    # so plans parked before this field existed still deserialize.
+    auto_escalated: bool = False
 
     def signature(self) -> str:
         """Stable identity of WHAT this step does — used to check that an

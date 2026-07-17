@@ -176,51 +176,154 @@ _OWN_ACTION_RE = re.compile(
 _OWN_ACTION_AUX_RE = re.compile(r"\b(?:did|have|had)\s+(?:you|u)\b")
 
 
-# Current-info questions ("when is the new season of Black Clover coming
-# out?") name no domain noun at all — the object is a fact out in the world,
-# not a file or a website. Live bug 2026-07-16: exactly that question missed
-# the gate, fell to plain chat, and the chat LLM fabricated "Searching the
-# web for the latest… One moment, sir." — a search it structurally cannot
-# run, so no answer ever came. With web_search available these are WEB-class,
-# so a QUESTION carrying a time-sensitive marker reaches the classifier,
-# which makes the real WEB/CHAT call (the recall-first trade-off: a false
-# fire costs one temp-0 call). Statements never fire this tier — "I love the
-# new season" is small talk.
-# TYPO TOLERANCE (live bug 2026-07-16, round 2: "when is new seasom of black
-# clover comming" missed every exact-word marker and fell to chat again):
-# people type fast — season-shaped words match on the "seaso" stem and
-# "coming" accepts the doubled-m misspelling. A "new seasoning" false fire
-# costs one temp-0 call answering CHAT; the miss cost a fabricated answer.
-_WEB_QUESTION_MARKER_RE = re.compile(
-    r"\b(latest|newest|news|release date|released?|releasing|"
-    r"comm?ing (?:out|up)|come out|came out|"
-    r"(?:new|next) seaso\w+|season \d+|"
-    r"price of|stock price|who won|score|weather|upcoming|announced?|update on)\b"
-)
-# A question reads as one: ends with "?" or opens with a question word — an
-# optional greeting/affirmation + one vocative word ("hey jarvis, when …",
-# "yes, when is …") may precede it.
-_QUESTION_SHAPE_RE = re.compile(
-    r"^\W*(?:hey|hi|yo|ok|okay|so|yes|yeah|yep|sure|please)?[\s,!.]*(?:\w+[\s,!.]+)?"
-    r"(?:when|what|whats|who|whos|where|which|how|is|are|was|were|"
-    r"did|does|do|has|have|will|any)\b"
+# ------------------------------------------------------- external questions
+#
+# A QUESTION is the one message shape this gate cannot pre-judge, and three
+# rounds of trying proved it the hard way. 2026-07-16 added a time-sensitive
+# MARKER list ("latest", "release date", "new season"); round 2 the same day
+# added typo tolerance to that list; 2026-07-17 added an information-request
+# LEAD-IN list ("tell me about", "who is"). Every round, the next phrasing the
+# user typed missed again.
+#
+# MEASURED 2026-07-17 against the user's own transcripts, which is what ended
+# the argument: of 8 ordinary external-fact questions the gate blocked 7 —
+# "which teams qualified for fifa finals 2026" (no marker word), "is bitcoin
+# up today" (no marker word), "tell me who won the match last night" (marker
+# present, but the shape rule allowed only ONE filler word before the question
+# word and "tell me" is two). Handed those same 8, the classifier labelled
+# 8/8 WEB — and 9/9 control questions ("explain recursion", "what do you think
+# of vector databases", "how are you today") CHAT.
+#
+# So the lists were not merely incomplete. They were the ONLY thing standing
+# between the user and a correct answer, and they INVERTED this gate's own
+# doctrine (fire wide, let the classifier prune — a strong domain noun already
+# fires alone, in any wording). "Does this need current information?" is not
+# answerable from keywords; it is the exact question the classifier exists to
+# answer. The rule is therefore now: A QUESTION REACHES THE CLASSIFIER UNLESS
+# IT IS ABOUT THE USER OR JARVIS THEMSELVES.
+#
+# Cost, accepted deliberately: one temperature-0 call on impersonal
+# conversational questions ("what is a monad") that the classifier answers
+# CHAT. Self-referential small talk ("how are you", "why is my script slow")
+# stays free, and an imperative that is not a question ("explain recursion")
+# never enters this tier at all.
+#
+# KNOWN LIMIT, measured not assumed: a TYPO'd question word hides the question
+# ("whihc teams have qualified for fifa finals 2026" — the user's own words).
+# Fuzzy-matching the first word against the question set was tried and
+# REJECTED on the numbers: rapidfuzz scores "whihc"→which at 80, but "here"→
+# where at 89 and "there"→where at 80, so no threshold separates a typo from
+# an ordinary opening word — it would fire on half of all English sentences.
+# This class is left to the chat.py dead-end backstop, which re-routes on the
+# model's own admission and therefore needs no keyword to recognize.
+
+# Leading noise a question may hide behind: greetings, vocatives, fillers.
+_QUESTION_GREETING_RE = re.compile(
+    r"^\W*(?:(?:hey|hi|hello|yo|ok|okay|so|well|now|yes|yeah|yep|sure|please|"
+    r"and|also|but|um+|uh+|jarvis)\b[\s,!.]*)*"
 )
 
+# An explicit information-request frame. Two jobs, and the second is the
+# subtle one: matching it fires the tier (an imperative request for
+# information is not question-SHAPED — "tell me about black clover" has no
+# question word), and stripping it removes the pronouns that belong to the
+# REQUEST rather than to its subject. That strip is what lets "i want to know
+# the gold price" (about the world) fire while "why is my script slow" (about
+# the user) stays free — without it the self-reference test below would read
+# the "i" in the frame and refuse the whole class.
+_QUESTION_REQUEST_RE = re.compile(
+    r"(?:"
+    r"tell\s+me|show\s+me|let\s+me\s+know|find\s+out|look\s+up|"
+    r"i\s+(?:just\s+)?(?:want|need|wanna)\s+to\s+know|"
+    r"i(?:'d|\s+would)\s+like\s+to\s+know|"
+    r"what\s+do\s+(?:you|u)\s+know\s+about|"
+    r"do\s+(?:you|u)\s+know|"
+    r"(?:have|has)\s+(?:you|u)\s+heard\s+(?:of|about)|"
+    r"give\s+me\s+(?:a\s+|an\s+)?(?:rundown|summary|overview|briefing|info|"
+    r"information|details)\s+(?:on|about|of)|"
+    r"any\s+idea"
+    r")\b[\s,!.:]*"
+)
+
+_QUESTION_WORD_RE = re.compile(
+    r"(?:when|what|what's|whats|who|who's|whos|where|which|why|how|"
+    r"is|are|was|were|did|does|do|has|have|had|will|can|could|should|any)\b"
+)
+
+# A question about the user, about Jarvis, or about the two of them is CHAT by
+# construction — Jarvis's own memory and context answer it, the web cannot.
+# Applied to the SUBJECT (after the request frame is stripped), never to the
+# raw message.
+_SELF_REFERENTIAL_RE = re.compile(
+    r"\b(?:you|your|yours|you're|u|ur|i|i'm|me|my|mine|myself|we|we're|our|"
+    r"ours|us|let's)\b"
+)
+
+# A question whose subject is a bare POINTER ("who is this?", "what is that?",
+# "who are they?") refers to something in the conversation, not out in the
+# world: Jarvis answers it from context and the web could not help. Matched
+# only immediately after the question word and its copula — so "what's the
+# latest on that iphone rumour", where "that" is a determiner rather than a
+# pointer, still reaches the classifier.
+_DEICTIC_SUBJECT_RE = re.compile(
+    r"^(?:who|whos|who's|what|whats|what's|which|where)"
+    r"(?:'s|\s+(?:is|are|was|were))?\s+"
+    r"(?:this|that|it|these|those|they|them|he|she|him|her|there)\b"
+)
+
+# A one- or two-word question ("really?", "why?", "how come?") is a
+# conversational reaction, never an external-fact lookup — an external
+# question always names its subject. Cheap guard against paying a classifier
+# call for a shrug.
+_QUESTION_MIN_WORDS = 3
+
+
+def _question_subject(text: str) -> Optional[str]:
+    """The thing a question is ABOUT, with greeting noise and any
+    information-request frame stripped — or None when the message is not a
+    question or information request at all."""
+    t = text.strip().lower()
+    if len(t.split()) < _QUESTION_MIN_WORDS:
+        return None
+    greeting = _QUESTION_GREETING_RE.match(t)
+    rest = t[greeting.end():] if greeting else t
+    frame = _QUESTION_REQUEST_RE.match(rest)
+    if frame:
+        return rest[frame.end():]
+    if _QUESTION_WORD_RE.match(rest) or t.rstrip().endswith("?"):
+        return rest
+    return None
+
+
+def is_external_question(text: str) -> bool:
+    """Deterministic: is this a question the classifier should judge? True for
+    any question or information request whose subject is neither the user, nor
+    Jarvis, nor a pointer back into the conversation. The classifier makes the
+    real WEB/CHAT call."""
+    subject = _question_subject(text)
+    if subject is None:
+        return False
+    if _SELF_REFERENTIAL_RE.search(subject):
+        return False
+    return not _DEICTIC_SUBJECT_RE.match(subject.lstrip())
 
 def looks_like_task(text: str) -> bool:
     """Deterministic pre-filter, tuned for RECALL: a strong computer-domain
-    noun fires alone (any verb, any phrasing); weak signals need an action
-    verb. Deliberately over-inclusive — the LLM confirmation prunes it."""
+    noun fires alone (any verb, any phrasing); an external question fires
+    alone; weak signals need an action verb. Deliberately over-inclusive —
+    the LLM confirmation prunes it."""
     t = text.lower()
     if _STRONG_DOMAIN_RE.search(t):
         return True
+    # Own-action questions are checked BEFORE the question tier and must stay
+    # that way: "what did you do today" is second-person, so the question
+    # tier's self-reference test would refuse it — but it is a real TASK,
+    # answered from the audit log by recall_actions.
     if _OWN_ACTION_RE.search(t):
         return True
     if _OWN_ACTION_AUX_RE.search(t) and _ACTION_VERB_RE.search(t):
         return True
-    if _WEB_QUESTION_MARKER_RE.search(t) and (
-        t.rstrip().endswith("?") or _QUESTION_SHAPE_RE.match(t)
-    ):
+    if is_external_question(text):
         return True
     return bool(_ACTION_VERB_RE.search(t)) and bool(_WEAK_DOMAIN_RE.search(t))
 
@@ -263,8 +366,8 @@ Reply with EXACTLY one word:
 TASK — asks Jarvis to perform a FILES/SYSTEM action now, OR asks what Jarvis ITSELF did on the machine (the folder/file it created, what it deleted, what it has done today).
 EMAIL — asks Jarvis to search, read, draft, send, or reply to email now.
 CALENDAR — asks Jarvis to look at or change calendar events now.
-WEB — asks Jarvis to search the web or open/read a web page now, OR asks a question that needs CURRENT information from the internet (news, release dates, upcoming seasons or products, prices, scores, weather — anything time-sensitive that built-in knowledge cannot reliably answer). Jarvis looks it up rather than guessing or promising.
-CHAT — anything else: conversation, questions Jarvis can answer from its own knowledge, sharing information about their life, talking ABOUT the user's own past or hypothetical actions, an answer to an earlier question, or a request none of these tools can do (reminders — handled elsewhere).
+WEB — asks Jarvis to search the web or open/read a web page now, OR asks a factual question better answered from the live internet than from stale built-in knowledge. This covers two cases: (a) anything CURRENT or time-sensitive (news, release dates, upcoming seasons or products, prices, scores, weather), and (b) a factual question about a SPECIFIC real-world entity — a person, company, product, place, organization, or a creative work such as a show, anime, movie, game, or book ("what do you know about Black Clover", "who is the CEO of X", "tell me about the Framework laptop"). Jarvis looks these up rather than guessing, promising, or reciting possibly-outdated training data.
+CHAT — anything else: casual conversation; OPINION, reasoning, or general/timeless concepts Jarvis can reason about ("what do you think of vector databases", "explain recursion", "how does TCP work"); help writing or debugging code; questions about the user's own life or about Jarvis itself; sharing information about their life; talking ABOUT the user's own past or hypothetical actions; an answer to an earlier question; or a request none of these tools can do (reminders — handled elsewhere).
 
 Judge the INTENT, not the vocabulary:
 - "I sent him the files yesterday" or "my desktop is such a mess" is CHAT (mentioning files while talking), while "get rid of the txt files in that folder" is TASK even though it names no tool.
@@ -273,6 +376,7 @@ Judge the INTENT, not the vocabulary:
 - "my calendar is packed this week" is CHAT, while "put a meeting with jamil on my calendar tomorrow at 3" is CALENDAR.
 - "what do you think of vector databases?" is CHAT (answerable from knowledge), while "search the web for the latest LangGraph release" or "look up who won the match today" or "open https://example.com and summarize it" is WEB.
 - A question about something CURRENT is WEB even when it never says "search": "when is the new season of Black Clover coming out?" or "what's the latest iPhone price?" needs up-to-date information — never answer it from stale knowledge or promise to look it up later.
+- A factual question about a SPECIFIC real-world thing is WEB even when it isn't time-sensitive and never says "search": "what do you know about Black Clover", "who is Grigori Perelman", "tell me about the Framework laptop" — look them up for an accurate, current answer rather than reciting possibly-stale training data. But a question of OPINION, REASONING, or a general/timeless concept is CHAT: "what do you think of Black Clover", "how does anime production work", "what is recursion".
 - A question about JARVIS'S OWN actions is TASK, not CHAT — Jarvis answers it from its action record, never from memory: "what was the name of the folder you created?", "did you delete anything today?", "who created the jarvis_test folder?" (Jarvis may have) are all TASK; "I deleted a bunch of files yesterday" is CHAT (the user talking about their own actions).
 Any wording that asks for one of those actions now — or asks about actions Jarvis itself performed — gets its action label; anything else is CHAT.
 
@@ -655,7 +759,33 @@ def _stream_plan_run(
     session_id: str,
     db: AsyncSession,
     provider: LLMProvider,
+    persist_user: bool = True,
 ) -> StreamingResponse:
+    return StreamingResponse(
+        plan_run_events(
+            user_text, conversation, memory, run, session_id, db, provider,
+            persist_user=persist_user,
+        ),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
+
+
+def plan_run_events(
+    user_text: str,
+    conversation: str,
+    memory: str,
+    run,  # async (AgentPlanner) -> AgentPlan
+    session_id: str,
+    db: AsyncSession,
+    provider: LLMProvider,
+    persist_user: bool = True,
+):
+    """The plan-run SSE generator, exposed so a caller that is ALREADY
+    streaming can delegate to it mid-flight (chat.py's dead-end backstop).
+    `persist_user=False` is for exactly that caller: the chat path has already
+    written the user's Message row, and writing it twice would duplicate the
+    turn in history."""
 
     def _text_chunk(delta: str, done: bool = False) -> str:
         chunk = StreamChunk(
@@ -667,9 +797,10 @@ def _stream_plan_run(
     async def event_generator():
         # Persist the user message here — the Phase 2 path that normally does
         # this was bypassed. Same Message row it would have written.
-        await persist_message_best_effort(
-            db, session_id, "user", user_text, what="task user message",
-        )
+        if persist_user:
+            await persist_message_best_effort(
+                db, session_id, "user", user_text, what="task user message",
+            )
 
         try:
             planner = AgentPlanner(
@@ -717,9 +848,44 @@ def _stream_plan_run(
                 model=provider.model_name, what="task response",
             )
 
-    return StreamingResponse(
-        event_generator(), media_type="text/event-stream", headers=_SSE_HEADERS,
-    )
+    return event_generator()
+
+
+async def rescue_web_turn(
+    goal: str,
+    request: ChatRequest,
+    session_id: str,
+    db: AsyncSession,
+    provider: LLMProvider,
+):
+    """Re-run a chat turn as a plan after the chat model itself admitted the
+    answer needs a web lookup (chat.py's `_DEAD_END_OFFER_RE`).
+
+    Deliberately does NOT re-classify. Routing already had its chance at this
+    message and got it wrong — that failure is the entire reason this path
+    exists, and asking the same classifier the same question a second time
+    would just buy the same answer. The model's own "ask me to search" IS the
+    label, and it is a better one: it was produced with the whole
+    conversation, the memory context, and its own knowledge in view.
+
+    Everything downstream is the ordinary task path — same planner, same
+    registry, same structural approval gate. `web_search` and `read_webpage`
+    are READ tools, so a rescued turn cannot write anything; and if the
+    planner drafts a write step anyway, it pauses for approval exactly as it
+    would have on the front door. A rescue widens recall, never authority."""
+    conversation = conversation_context(request)
+    memory = await planner_memory_context(db, goal)
+
+    async def run(planner: AgentPlanner) -> AgentPlan:
+        return await planner.start(goal)
+
+    async for sse in plan_run_events(
+        goal, conversation, memory, run, session_id, db, provider,
+        # The chat path persisted the user's message before it started
+        # streaming; writing it again would double the turn in history.
+        persist_user=False,
+    ):
+        yield sse
 
 
 # ================================================================ rendering

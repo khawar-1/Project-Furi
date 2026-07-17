@@ -119,6 +119,34 @@ def _hermetic_voice_tts():
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_browser():
+    """browser_tools' default paths go to the REAL internet (Tavily, then the
+    DuckDuckGo scrapers, then any URL a plan names). Both factories default to
+    None module-wide, so nothing but a test's own patching stood between the
+    suite and the network.
+
+    That was survivable while only test_browser_tools.py exercised these paths.
+    It stopped being survivable when the planner gained the power to SPLICE a
+    read_webpage step of its own accord (evidence_resolver, 2026-07-16): any
+    planner test whose fake web_search returns thin rows would now try a real
+    fetch. Refuse outright so such a test fails LOUDLY instead of flaking on
+    someone's network. Web tests swap in their own fakes on top."""
+    from app.tools import browser_tools
+
+    def _refuse_fetch(url: str):
+        raise RuntimeError(f"test tried to fetch a real URL: {url}")
+
+    def _refuse_search(query: str, max_results: int):
+        raise RuntimeError(f"test tried a real web search: {query!r}")
+
+    browser_tools.HTTP_FETCH_FACTORY = _refuse_fetch
+    browser_tools.SEARCH_PROVIDER_FACTORY = _refuse_search
+    yield
+    browser_tools.HTTP_FETCH_FACTORY = None
+    browser_tools.SEARCH_PROVIDER_FACTORY = None
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_screen_ocr():
     """screen_ocr's default factory imports rapidocr_onnxruntime + loads OCR
     models. Tests must never trigger that: every test starts with a cleared

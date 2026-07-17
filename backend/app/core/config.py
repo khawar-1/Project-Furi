@@ -92,6 +92,14 @@ class Settings(BaseSettings):
     # Set explicitly only for scripted/dev use; never commit a real value.
     API_AUTH_TOKEN: str = ""
 
+    # ------------------------------------------------------------------ Web search (Phase 6)
+    # Optional. When set, web_search uses the Tavily API (purpose-built for LLM
+    # agents — returns clean extracted page content, not just links) as the
+    # primary provider, falling back to the keyless DuckDuckGo scrapers if
+    # Tavily errors or returns nothing. Blank = DuckDuckGo only (the default —
+    # a fresh clone works with no signup). Get a free key at https://tavily.com.
+    TAVILY_API_KEY: str = ""
+
     # ------------------------------------------------------------------ Voice
     WHISPER_MODEL: str = "base"
 

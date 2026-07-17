@@ -227,16 +227,52 @@ def test_plan_message_is_kept_and_results_appended():
 
 def test_results_block_is_capped():
     """Dozens of steps with big outputs must not produce an unbounded toast/
-    chat message — the block is capped and says where the rest lives. The
-    cap is sized so a real 'show me the files' answer (~100 names) always
-    fits — only genuinely huge multi-step dumps are cut."""
+    chat message — the block stays bounded and says where the rest lives. The
+    budget is sized so a real 'show me the files' answer (~100 names) always
+    fits — only genuinely huge multi-step dumps are cut.
+
+    Bound raised with _RESULTS_TOTAL_CAP (8000 → 20000, 2026-07-16) when web
+    evidence got its own per-tool budget. The block is bounded by n × each
+    step's fair share, never by arrival order."""
     steps = [
-        done_step("read_file", {"path": f"C:\\f{i}.txt", "content": "x" * 600})
+        done_step("read_file", {"path": f"C:\\f{i}.txt", "content": "x" * 3000})
         for i in range(20)
     ]
     text = completed_results_text(completed_plan(*steps))
-    assert len(text) < 9500
+    assert len(text) < 22_000
     assert "Activity timeline" in text
+
+
+def test_every_step_is_represented_never_dropped_by_position():
+    """Fair-share allocation: with many big steps, the LAST step's results are
+    still present. The old accumulate-and-break dropped whichever steps came
+    last — live bug 2026-07-16: a three-question turn drafted three web
+    searches and the FIFA question was third, so the moment evidence got bulky
+    the third question's record would vanish entirely and the summary LLM was
+    handed nothing about the very thing it had to answer."""
+    steps = [
+        done_step("read_file", {"path": f"C:\\f{i}.txt", "content": f"MARKER{i} " + "x" * 3000})
+        for i in range(20)
+    ]
+    text = completed_results_text(completed_plan(*steps))
+    # Every step, including the last, appears — none omitted for being late.
+    for i in range(20):
+        assert f"MARKER{i}" in text, f"step {i} was dropped from the record"
+    assert "(further step results omitted)" not in text
+
+
+def test_small_steps_are_never_clipped_and_need_no_pointer():
+    """The common case is untouched: a handful of modest steps renders in full
+    with no truncation marker and no timeline pointer."""
+    steps = [
+        done_step("read_file", {"path": f"C:\\f{i}.txt", "content": f"body {i}"})
+        for i in range(3)
+    ]
+    text = completed_results_text(completed_plan(*steps))
+    assert "truncated" not in text
+    assert "Activity timeline" not in text
+    for i in range(3):
+        assert f"body {i}" in text
 
 
 def test_name_lists_are_clipped_by_item_never_mid_name():
@@ -358,3 +394,64 @@ def test_aggregates_survive_the_step_cap_on_huge_listings():
     assert "Largest: the-biggest-file-of-all.pdf (99.0 MB)" in text
     assert "Newest: the-biggest-file-of-all.pdf (modified 2026-07-12)" in text
     assert text.index("Largest:") < text.index("In `D:\\dl`")  # answer first
+
+
+# ------------------------------------- the fan-out must not starve the record
+#
+# THE TRAP (2026-07-17). The original FIFA fabrication was content STARVATION:
+# 300 chars of a page survived, cut exactly where the answer began, and the
+# summary filled the hole with 112 invented countries. Widening web_search to
+# fan a question out over several readings multiplies the rows competing for the
+# same render budget — so a fan-out with the cap left at its old value would
+# have re-created that exact bug, with MORE sources feeding it. These tests are
+# the guard on the arithmetic.
+
+def _fanout_search_output(n_rows: int, content_len: int) -> dict:
+    from app.tools.browser_tools import FANOUT_MERGED_MAX
+    assert n_rows <= FANOUT_MERGED_MAX, "the merge caps before rendering ever sees them"
+    return {
+        "query": "which teams are playing the 2026 World Cup final",
+        "queries": ["which teams are playing the 2026 World Cup final",
+                    "which teams qualified for the 2026 World Cup"],
+        "results": [
+            {"title": f"Source {i}", "url": f"https://src{i}.example/page",
+             "snippet": "s", "content": f"EVIDENCE{i} " + ("x" * content_len),
+             "truncated": False, "found_by": ["which teams are playing the 2026 World Cup final"]}
+            for i in range(n_rows)
+        ],
+        "count": n_rows,
+    }
+
+
+def test_a_full_fanout_result_set_renders_without_starving_any_source():
+    """Every merged row must survive to the record. If one is dropped, the
+    summary answers from a partial record and cannot know it — which is the
+    silence that certified the FIFA fragment as complete."""
+    from app.tools.browser_tools import CONTENT_MAX_CHARS, FANOUT_MERGED_MAX
+
+    text = steps_for_summary(completed_plan(done_step(
+        "web_search", _fanout_search_output(FANOUT_MERGED_MAX, CONTENT_MAX_CHARS - 20),
+    )))
+    for i in range(FANOUT_MERGED_MAX):
+        assert f"EVIDENCE{i}" in text, f"source {i} was starved out of the record"
+
+
+def test_fanout_readings_are_named_in_the_summary_record():
+    """The summary cannot offer the reading it did not lead with unless the
+    record tells it the question was read more than one way."""
+    from app.tools.browser_tools import CONTENT_MAX_CHARS, FANOUT_MERGED_MAX
+
+    text = steps_for_summary(completed_plan(done_step(
+        "web_search", _fanout_search_output(FANOUT_MERGED_MAX, CONTENT_MAX_CHARS - 20),
+    )))
+    assert "which teams qualified for the 2026 World Cup" in text
+
+
+def test_web_search_step_cap_covers_a_full_merged_set():
+    """The invariant stated in rendering.py, asserted rather than trusted to a
+    comment: if FANOUT_MERGED_MAX or CONTENT_MAX_CHARS moves, this fails loudly
+    instead of quietly clipping evidence."""
+    from app.agents.rendering import _STEP_RESULT_CAPS
+    from app.tools.browser_tools import CONTENT_MAX_CHARS, FANOUT_MERGED_MAX
+
+    assert _STEP_RESULT_CAPS["web_search"] >= FANOUT_MERGED_MAX * CONTENT_MAX_CHARS

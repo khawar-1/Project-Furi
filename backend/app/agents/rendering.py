@@ -19,13 +19,75 @@ _PERMISSION_TAGS = {"read": "read", "write": "WRITE", "destructive": "DESTRUCTIV
 # tools themselves cap results (SEARCH_MAX_RESULTS=100), and 100 grouped
 # names fit comfortably here. The old 700/2000 caps cut real answers —
 # live bug 2026-07-10: a 52-match search rendered ~11 matches.
-_STEP_RESULT_CAP = 3500    # chars of one step's rendered output
-_RESULTS_TOTAL_CAP = 8000  # chars of the whole results block
+_STEP_RESULT_CAP = 3500    # chars of one step's rendered output (default)
 _MAX_NAMES = 120           # names listed before "… and N more"
+
+# Per-tool caps. Web steps carry PROSE, not name lists: a fetched page is the
+# evidence a factual answer rests on, so clipping it to the default starves the
+# answer. Live bug 2026-07-16: read_webpage fetches PAGE_MAX_CHARS=20_000 and
+# _render_step clipped every step to 3500 — 82% of every page the tool went and
+# got was thrown away before any consumer saw it.
+#
+# web_search is sized to fit a FULL result set: FANOUT_MERGED_MAX(8) ×
+# CONTENT_MAX_CHARS(1200) + per-row title/url/fence overhead ≈ 10500. It was
+# 6000 for one live run, which sat just under the then-5-row set and silently
+# clipped the fifth result — the same "the last one loses" defect as the
+# block-level cap, one level down.
+#
+# THE INVARIANT: keep this ABOVE FANOUT_MERGED_MAX × CONTENT_MAX_CHARS if
+# either constant moves. Raised 7000 → 11000 when web_search learned to fan a
+# question out over several readings (2026-07-17): the merged set is now up to
+# 8 rows rather than 5, and leaving the cap at 7000 would have clipped the
+# extra evidence away — turning the fan-out into a more expensive way to starve
+# the record, which is the exact defect (content starvation) the whole web
+# hardening round exists to prevent.
+_STEP_RESULT_CAPS = {"web_search": 11000, "read_webpage": 12000}
+
+# Chars of the whole results block. Raised 8000 → 20000 together with the
+# per-tool caps above: web evidence is bulkier than a file listing, and the
+# fair-share allocator below (not arrival order) now decides who gets what.
+_RESULTS_TOTAL_CAP = 20000
+_MIN_STEP_SHARE = 800      # a step is never starved to nothing
+
+
+def _step_cap(tool: str) -> int:
+    return _STEP_RESULT_CAPS.get(tool, _STEP_RESULT_CAP)
 
 
 def _clip(text: str, cap: int) -> str:
     return text if len(text) <= cap else text[:cap] + "… (truncated)"
+
+
+def _fair_shares(rendered: list[str]) -> list[int]:
+    """Split _RESULTS_TOTAL_CAP across N rendered step blocks so that POSITION
+    NEVER DETERMINES SURVIVAL.
+
+    Both result renderers used to accumulate in step order and `break` at the
+    total cap, so the LAST step's results were the ones dropped. Live bug
+    2026-07-16: a three-question turn ("black clover … president of pakistan …
+    fifa finals") drafted three web searches, and the FIFA question was third —
+    first-come-first-served meant the moment web evidence got bulky, the third
+    question's record would be omitted entirely, handing the summary LLM
+    literally nothing about the very thing it had to answer.
+
+    Every step gets an equal share; steps needing less than their share release
+    the remainder, which is redistributed (one pass) to the steps that want
+    more. A cut is always MARKED by _clip — never silent."""
+    n = len(rendered)
+    if n == 0:
+        return []
+    share = max(_RESULTS_TOTAL_CAP // n, _MIN_STEP_SHARE)
+    shares = [share] * n
+    # One redistribution pass: the under-budget steps hand their slack to the
+    # over-budget ones, split evenly among them.
+    hungry = [i for i, r in enumerate(rendered) if len(r) > share]
+    if hungry:
+        slack = sum(share - len(r) for r in rendered if len(r) < share)
+        if slack > 0:
+            bonus = slack // len(hungry)
+            for i in hungry:
+                shares[i] += bonus
+    return shares
 
 
 def _names(names: list[str], limit: int = _MAX_NAMES) -> str:
@@ -371,19 +433,69 @@ def _fmt_calendar_events(output: dict) -> str:
     return "\n".join(lines)
 
 
+# A result's content is worth rendering as its own fenced block past this;
+# below it, it is a teaser and belongs inline, exactly as before.
+_WEB_CONTENT_INLINE_MAX = 300
+
+
 def _fmt_web_search(output: dict) -> str:
+    """Render search results — INCLUDING the fact that a result's content was
+    cut, when it was.
+
+    Live bug 2026-07-16: Tavily's extracted page content was cut to 300 chars
+    with NO marker, so a fragment ending mid-word at "## FIFA World Cup 2026™
+    qualified t" entered the record looking like the whole of FIFA's
+    qualified-teams page. That is worse than thin — SUMMARY_PROMPT tells the
+    model "only call a list truncated if the results above literally say so —
+    otherwise it is complete", so the record's SILENCE actively certified the
+    fragment as complete. The model filled the gap with 112 invented countries.
+    A marked cut is a signpost; an unmarked one is a lie the prompt notarizes."""
     results = output.get("results") or []
     if not results:
         return "No web results found."
-    lines = [f"Found {len(results)} web result(s):"]
+    lines: list[str] = []
+    # When the question was ambiguous the planner searched each reading, and the
+    # merged rows alone would hide that: the summary would see one pile of pages
+    # and could not tell that the user's wording admitted two answers. Naming the
+    # readings is what lets it lead with the likely one and offer the other
+    # (SUMMARY_PROMPT's ambiguity clause) instead of silently picking.
+    queries = [str(q) for q in (output.get("queries") or []) if str(q).strip()]
+    if len(queries) > 1:
+        lines.append(
+            "The question could be read more than one way, so each reading was "
+            "searched: " + "; ".join(f'"{q}"' for q in queries)
+        )
+    lines.append(f"Found {len(results)} web result(s):")
     for r in results[:_MAX_NAMES]:
         title = str(r.get("title") or r.get("url") or "(untitled)")
         url = str(r.get("url") or "")
         snippet = str(r.get("snippet") or "").strip()
-        line = f"- **{title}** — {url}" if url else f"- **{title}**"
-        if snippet:
-            line += f": {snippet}"
-        lines.append(line)
+        content = str(r.get("content") or "").strip()
+        lines.append(f"- **{title}** — {url}" if url else f"- **{title}**")
+        # Substantive content becomes its own fenced block: it is untrusted
+        # prose that may carry markdown of its own (the FIFA page's own "##"
+        # headers would otherwise be injected straight into the record and into
+        # the user's chat). Fencing is this file's existing containment
+        # convention — see _fmt_read_webpage / _fmt_semantic_file_search.
+        if content and len(content) > _WEB_CONTENT_INLINE_MAX:
+            lines.append(_fence(content))
+            if r.get("truncated"):
+                # States the FACT and nothing else. An earlier cut of this
+                # marker also named the remedy ("read_webpage on <url> returns
+                # the rest") on the _missing_target principle — a record whose
+                # own text steers the next move. Live verification 2026-07-16
+                # showed why that was wrong here: the summary LLM copied the
+                # remedy verbatim into the user's answer, a dozen times,
+                # leaking a tool name into prose that must never mention tools.
+                # The steer is unnecessary now anyway — evidence_resolver goes
+                # and reads the page in CODE, so the only job left for this
+                # marker is honesty about what the record does NOT contain.
+                lines.append("  (this content is a partial extract, not the whole page)")
+        else:
+            # Short result: unchanged rendering — the teaser inline on the bullet.
+            inline = content or snippet
+            if inline:
+                lines[-1] += f": {inline}"
     return "\n".join(lines)
 
 
@@ -433,19 +545,23 @@ _RESULT_FORMATTERS = {
 def _render_step(step) -> str | None:
     """One completed step's real output as readable text, or None when there
     is nothing to show. Shared by the deterministic completion text and the
-    inline summary LLM's input — both always see the same rendering."""
+    inline summary LLM's input — both always see the same rendering.
+
+    The cap is PER TOOL (_step_cap): web steps carry the prose a factual answer
+    rests on, so the file-listing default would starve them."""
     if step.status != StepStatus.COMPLETED:
         return None
+    cap = _step_cap(step.tool)
     output = step.result.output if step.result else None
     formatter = _RESULT_FORMATTERS.get(step.tool)
     if formatter is not None and isinstance(output, dict):
-        return _clip(formatter(output), _STEP_RESULT_CAP)
+        return _clip(formatter(output), cap)
     if step.requires_approval:
         # Write/destructive tools: the approved description IS the record
         # of what happened; their outputs are bookkeeping (trash paths).
         return f"Done: {step.description}"
     if output is not None:
-        return _clip(json.dumps(output, default=str), _STEP_RESULT_CAP)
+        return _clip(json.dumps(output, default=str), cap)
     return None
 
 
@@ -454,19 +570,23 @@ def completed_results_text(plan: AgentPlan) -> str:
     Background completions never get an LLM summary, so this block IS the
     answer — without it, "how many files are in phase3test" finished as
     "Done — 1 step(s) completed." with the answer nowhere (live bug,
-    2026-07-09). Also the inline flow's fallback when the summary LLM fails."""
-    blocks: list[str] = []
-    total = 0
-    for step in plan.steps:
-        rendered = _render_step(step)
-        if rendered is None:
-            continue
-        if total + len(rendered) > _RESULTS_TOTAL_CAP:
-            blocks.append("… more results not shown — see the Activity timeline.")
-            break
-        blocks.append(rendered)
-        total += len(rendered)
-    return "\n\n".join(blocks)
+    2026-07-09). Also the inline flow's fallback when the summary LLM fails.
+
+    Allocation is FAIR-SHARE, not arrival order (_fair_shares) — the last step's
+    results can never be dropped to make room for the first's. Every step is
+    therefore represented; a step that did not fit its share is clipped with a
+    visible marker rather than omitted, and the block then points at the
+    complete record."""
+    rendered = [r for r in (_render_step(s) for s in plan.steps) if r is not None]
+    shares = _fair_shares(rendered)
+    blocks = [_clip(r, share) for r, share in zip(rendered, shares)]
+    text = "\n\n".join(blocks)
+    if any(len(b) > share for b, share in zip(rendered, shares)):
+        # Something was cut. Nothing is silently MISSING (every step rendered,
+        # every cut is marked), but the user still needs to know where the
+        # untruncated record lives.
+        text += "\n\n… some results were truncated — see the Activity timeline."
+    return text
 
 
 def steps_for_summary(plan: AgentPlan) -> str:
@@ -475,20 +595,22 @@ def steps_for_summary(plan: AgentPlan) -> str:
     formatter already made readable. Live bug 2026-07-10: the summary prompt
     carried json.dumps of the step output cut at 2000 chars, so the LLM
     pasted escaped JSON into the chat showing ~11 of 52 search matches and
-    called the complete list "truncated"."""
-    blocks: list[str] = []
-    total = 0
-    for step in plan.steps:
-        rendered = _render_step(step)
-        if rendered is None:
-            continue
-        block = f"ACTION: {step.description}\nRESULT: {rendered}"
-        if total + len(block) > _RESULTS_TOTAL_CAP:
-            blocks.append("(further step results omitted)")
-            break
-        blocks.append(block)
-        total += len(block)
-    return "\n\n".join(blocks)
+    called the complete list "truncated".
+
+    Allocation is FAIR-SHARE, not arrival order (_fair_shares). The old
+    accumulate-and-break dropped the LAST steps — and a step whose RESULT is
+    "(further step results omitted)" is precisely the empty record that invites
+    invention (live bug 2026-07-16: the third of three questions)."""
+    pairs = [
+        (step, rendered)
+        for step, rendered in ((s, _render_step(s)) for s in plan.steps)
+        if rendered is not None
+    ]
+    shares = _fair_shares([r for _, r in pairs])
+    return "\n\n".join(
+        f"ACTION: {step.description}\nRESULT: {_clip(rendered, share)}"
+        for (step, rendered), share in zip(pairs, shares)
+    )
 
 
 def serialize_plan_for_api(plan: AgentPlan) -> dict:

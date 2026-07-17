@@ -20,6 +20,13 @@ export default defineConfig({
     // Build output is unaffected (optimizeDeps is dev-only).
     exclude: ['onnxruntime-web'],
   },
+  worker: {
+    // The wake-word worker dynamic-imports onnxruntime-web, so its bundle is
+    // code-split — Vite's default `iife` worker format can't do that. ES-module
+    // workers can, and Electron's Chromium supports `new Worker(url, {type:
+    // 'module'})`.
+    format: 'es',
+  },
   server: {
     port: 5173,
     strictPort: true,
