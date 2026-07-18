@@ -4,7 +4,7 @@
  */
 import { useEffect, useState } from 'react';
 import { clsx } from 'clsx';
-import { Circle, Cpu, Eye, Mic, Play, Sparkles, Wifi, WifiOff, RefreshCw, X } from 'lucide-react';
+import { Circle, Cpu, Eye, FileCheck, Mic, Play, Sparkles, Wifi, WifiOff, RefreshCw, X } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 import { usePushStore } from '@/stores/pushStore';
 import { useContextStore } from '@/stores/contextStore';
@@ -28,6 +28,13 @@ export function StatusBar() {
   // Phase 14: the "▶ Playing" indicator + stop control for a browse window.
   const media = useBrowserStore((s) => ({ playing: s.playing, title: s.title, stopping: s.stopping }));
   const stopMedia = useBrowserStore((s) => s.stop);
+  // Phase 14.6: a commit result window left open so the user can see the response.
+  const resultWindow = useBrowserStore((s) => ({
+    open: s.windowOpen,
+    title: s.windowTitle,
+    closing: s.closingWindow,
+  }));
+  const closeWindow = useBrowserStore((s) => s.closeWindow);
 
   // The required visible "sensing on" indicator — poll the cheap status.
   useEffect(() => {
@@ -175,6 +182,27 @@ export function StatusBar() {
               disabled={media.stopping}
               className="ml-0.5 text-muted hover:text-danger transition-fast disabled:opacity-50"
               title="Stop playback"
+            >
+              <X size={11} />
+            </button>
+          </div>
+        )}
+
+        {/* Committed-form result window (Phase 14.6) — left open to show the response */}
+        {resultWindow.open && (
+          <div
+            className="flex items-center gap-1"
+            title={resultWindow.title || 'A form result is open in the browser'}
+          >
+            <FileCheck size={10} className="text-cyan-400" />
+            <span className="text-cyan-400 max-w-[220px] truncate">
+              Form submitted{resultWindow.title ? `: ${resultWindow.title}` : ''}
+            </span>
+            <button
+              onClick={() => void closeWindow()}
+              disabled={resultWindow.closing}
+              className="ml-0.5 text-muted hover:text-danger transition-fast disabled:opacity-50"
+              title="Close the result window"
             >
               <X size={11} />
             </button>

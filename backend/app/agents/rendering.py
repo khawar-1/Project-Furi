@@ -572,6 +572,31 @@ def _fmt_browse(output: dict) -> str:
     return head + ("\n" + _fence(rendered) if rendered else "")
 
 
+def _fmt_browse_commit(output: dict) -> str:
+    """A SUBMITTED form's result. Lead with the CONFIRMED facts — the submit fired
+    and the site's own response — never a restated goal: browse_commit had no
+    formatter before (2026-07-18), so a commit's completion fell to the generic
+    path and the summary LLM turned it into an ungrounded 'All done'. This grounds
+    it in what the SERVER returned. The response prose is the site's, so it is
+    untrusted and fenced (the _fmt_web_search lesson)."""
+    url = str(output.get("url") or "")
+    title = str(output.get("title") or "").strip()
+    head = "Submitted the form" + (f" to {url}" if url else "")
+    if title:
+        head += f". The site responded: **{title}**"
+    else:
+        head += "."
+    if output.get("window_open"):
+        head += (
+            "\n(The browser window is left open so you can see the result — "
+            "close it from the status bar when done.)"
+        )
+    response = str(output.get("response_text") or "").strip()
+    if response:
+        return head + "\nThe page shows:\n" + _fence(response)
+    return head
+
+
 def _fmt_lookup_contact(output: dict) -> str:
     status = output.get("status")
     if status == "resolved":
@@ -604,6 +629,7 @@ _RESULT_FORMATTERS = {
     "read_webpage": _fmt_read_webpage,
     "browse_page": _fmt_browse_page,
     "browse": _fmt_browse,
+    "browse_commit": _fmt_browse_commit,
 }
 
 

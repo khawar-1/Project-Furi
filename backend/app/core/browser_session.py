@@ -423,9 +423,12 @@ def _normalize_commit_url(raw: str) -> str:
 
 def _commit_fingerprint(state: dict[str, Any]) -> tuple:
     """A comparable identity for an approved submit — method + normalized action
-    URL + the ordered (name, value) of every field. Accepts either the JS read
-    shape ({action, ...}) or the stored shape ({url, ...}); the same fingerprint
-    is what verify_commit compares, so an approval binds to the exact values."""
+    URL + the ordered (name, value) of every field + the ordered (name, path) of
+    every attached file (14.6). Accepts either the JS read shape ({action, ...})
+    or the stored shape ({url, ...}); the same fingerprint is what verify_commit
+    compares, so an approval binds to the exact values AND the exact files. An
+    absent `uploads` yields () — a pre-14.6 no-upload state fingerprints exactly
+    as before, so the change is backwards compatible."""
     method = str(state.get("method") or "POST").upper()
     url = _normalize_commit_url(str(state.get("url") or state.get("action") or ""))
     fields = tuple(
@@ -433,7 +436,12 @@ def _commit_fingerprint(state: dict[str, Any]) -> tuple:
         for f in (state.get("fields") or [])
         if isinstance(f, dict)
     )
-    return (method, url, fields)
+    uploads = tuple(
+        (str(u.get("name") or ""), str(u.get("path") or ""))
+        for u in (state.get("uploads") or [])
+        if isinstance(u, dict)
+    )
+    return (method, url, fields, uploads)
 
 
 class BrowserSession:
@@ -459,6 +467,12 @@ class BrowserSession:
         # one the site never issued. See the module docstring.
         self._armed_commit: Optional[tuple[str, str]] = None
         self._commit_fired = False
+        # COMMIT + UPLOAD (14.6): files attached to the form during discovery via
+        # set_input_files. Python is the source of truth for the PATH — a browser
+        # strips file paths from JS, so _READ_COMMIT_FORM_JS cannot see them. Each
+        # entry {name, path} is folded into commit_state (the approval binds to
+        # the exact file) and re-checked by verify_commit before the one submit.
+        self.uploads: list[dict[str, str]] = []
 
     # ------------------------------------------------------------ lifecycle
     @classmethod
@@ -681,12 +695,69 @@ class BrowserSession:
             return None
         return raw if isinstance(raw, dict) else None
 
+    async def upload_file(
+        self, observation: Any, index: int, path: str
+    ) -> tuple[bool, str]:
+        """Attach `path` to the file input at `index` via Playwright
+        set_input_files — the 14.6 upload action. This issues NO network request
+        (the file only leaves the machine on the approved submit), so it stays
+        inside READ mode; the interceptor never sees it. Returns (ok, note),
+        NEVER raises — a bad target or an unsafe path is an event the loop reacts
+        to (re-observe, try again), not a crash.
+
+        Path safety is re-checked here in code even though the planner already
+        grounded and safety-checked upload_path before discovery: the
+        belt-and-suspenders rule, so the one place that actually touches the
+        filesystem can never be handed a protected path. The recorded upload
+        (Python is the source of truth — the DOM hides file paths) is folded into
+        commit_state and re-verified before the submit."""
+        from app.agents import browser_grounding  # lazy: agents↔core cycle
+        from app.core import dom_observe  # local: dom_observe never imports us
+        from app.tools.file_tools import _resolve_path
+
+        unsafe = browser_grounding.upload_path_unsafe(path)
+        if unsafe:
+            logger.info(f"browser: refused upload — {unsafe}")
+            return False, unsafe
+        try:
+            resolved = _resolve_path(path)
+        except Exception as exc:
+            return False, f"could not resolve the file path ({type(exc).__name__})"
+
+        try:
+            handle = await dom_observe.resolve(self.page, observation, index)
+        except dom_observe.StaleObservation:
+            return False, "the file input changed before it could be used"
+        except Exception as exc:
+            return False, f"could not find the file input ({type(exc).__name__})"
+        try:
+            await handle.set_input_files(str(resolved))
+        except Exception as exc:
+            return False, f"could not attach the file ({type(exc).__name__})"
+
+        name = ""
+        try:
+            name = str(await handle.get_attribute("name") or "")
+        except Exception:
+            pass
+        if not name:
+            name = resolved.name
+        # Dedupe per input: re-attaching to the same field replaces, so a
+        # retried upload never records the same file twice.
+        self.uploads = [u for u in self.uploads if u.get("name") != name]
+        self.uploads.append({"name": name, "path": str(resolved)})
+        logger.info(f"browser: attached file {resolved} to input '{name}'")
+        return True, ""
+
     async def verify_commit(self, approved: dict[str, Any]) -> bool:
         """Re-read the stamped form and confirm it STILL matches what the user
-        approved (method + action + every field value). Nothing should have
-        changed the form between approval and submit — the held session just
-        sat there — so a mismatch means the page tampered with it, and the
-        submit is refused (fail closed). Password presence also disqualifies."""
+        approved (method + action + every field value + every attached file).
+        Nothing should have changed the form between approval and submit — the
+        held session just sat there — so a mismatch means the page tampered with
+        it, and the submit is refused (fail closed). Password presence also
+        disqualifies. The attached FILES come from self.uploads (the DOM hides
+        their paths), which is stable across the pause because nothing navigated
+        the held session."""
         try:
             raw = await self.page.evaluate(_REREAD_COMMIT_FORM_JS)
         except Exception as exc:
@@ -694,7 +765,8 @@ class BrowserSession:
             return False
         if not isinstance(raw, dict) or raw.get("has_password"):
             return False
-        return _commit_fingerprint(raw) == _commit_fingerprint(approved)
+        current = {**raw, "uploads": self.uploads}
+        return _commit_fingerprint(current) == _commit_fingerprint(approved)
 
     async def submit_commit(self) -> None:
         """Fire the stamped form's own submit — the one request the arm permits.
@@ -833,7 +905,74 @@ async def reset_media() -> None:
     Mirrors reset_host_cache: the registry is live state, never persisted."""
     await stop_media()
     await discard_commit()
+    await close_result_window()
     await close_login_window()
+
+
+# ------------------------------------------------ committed-form result window
+# After an APPROVED commit submit (14.5), the window can be LEFT OPEN so the user
+# can SEE the site's response — the "File Uploaded!" page — instead of it closing
+# the instant the submit reports success (user report 2026-07-18). This is the
+# grounded-confirmation UI's visual half: the completion text quotes the response,
+# and this window shows it.
+#
+# SECURITY — why leaving it open is safe, and why it is NOT enter_playback_mode().
+# The submit consumed the one-shot commit arm (arm_commit → the interceptor
+# clears _armed_commit the instant the approved request fires) and _read_only is
+# still True, so the interceptor still ABORTS every non-GET. A lingering result
+# window is therefore structurally incapable of issuing a second mutation: there
+# is no armed permit, and only the SUBMIT phase — after a fresh signature approval
+# — can ever arm one. That is exactly the property the old `finally: close()`
+# protected ("the approval can never be replayed against a lingering window"); the
+# spent permit protects it now, so keeping the window open reintroduces no risk.
+# We deliberately do NOT call enter_playback_mode() here — media LIFTS interception
+# for streaming speed, but a static result page needs no throughput and MUST stay
+# read-only. The window is a viewer, nothing more.
+#
+# One live persistent context (the media/login rule): a new browse/commit/login
+# closes this first (BrowseTool, browser_commit.discover, and open_login_window
+# call close_result_window() before launching). Memory-only — a restart just
+# closes it, like every browser registry.
+_result_window: Optional["BrowserSession"] = None
+_result_meta: dict[str, str] = {}
+_result_lock = asyncio.Lock()
+
+
+async def register_result_window(
+    session: "BrowserSession", *, title: str, url: str
+) -> None:
+    """Adopt a just-submitted session as THE open result window, closing any
+    previous one. After this the caller must NOT close the session — the registry
+    owns its lifetime until close_result_window()."""
+    global _result_window, _result_meta
+    async with _result_lock:
+        previous = _result_window
+        _result_window = session
+        _result_meta = {"title": title or "", "url": url or ""}
+    if previous is not None and previous is not session:
+        await previous.close()
+
+
+async def close_result_window() -> bool:
+    """Close the open result window and clear the registry. True when a window was
+    actually closed. Idempotent — closing nothing is not an error."""
+    global _result_window, _result_meta
+    async with _result_lock:
+        session = _result_window
+        _result_window = None
+        _result_meta = {}
+    if session is None:
+        return False
+    await session.close()
+    return True
+
+
+def active_result_window() -> Optional[dict[str, str]]:
+    """{title, url} for the open result window, or None. Cheap, no I/O — the
+    StatusBar polls it (the active_media precedent)."""
+    if _result_window is None:
+        return None
+    return dict(_result_meta)
 
 
 # ---------------------------------------------------------- commit sessions
@@ -928,6 +1067,7 @@ async def open_login_window(url: str = DEFAULT_LOGIN_URL) -> None:
     context). Raises BrowserUnavailable when no browser can launch."""
     global _login_browser
     await stop_media()
+    await close_result_window()  # one live persistent context (the profile lock)
     async with _login_lock:
         if _login_browser is not None:
             # Already open — bring the existing window forward to the URL rather

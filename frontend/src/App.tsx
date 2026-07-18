@@ -199,7 +199,13 @@ export default function App() {
     const stopBrowserMedia = onPush('browser_media', (event) => {
       useBrowserStore.getState().receive(event.payload ?? {});
     });
+    // Phase 14.6: a commit result window opened or closed — update the
+    // StatusBar "window open" indicator live.
+    const stopBrowserWindow = onPush('browser_window', (event) => {
+      useBrowserStore.getState().receiveWindow(event.payload ?? {});
+    });
     return () => {
+      stopBrowserWindow();
       stopBrowserMedia();
       stopSuggestion();
       stopRoutineOffer();

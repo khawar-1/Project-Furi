@@ -440,15 +440,23 @@ export interface BrowserMedia {
   playing: boolean;
   title: string;
   url: string;
+  /** A kept-open commit result window (Phase 14.6): the "File Uploaded!" page. */
+  window_open: boolean;
+  window_title: string;
+  window_url: string;
 }
 
 export const browserApi = {
-  /** What the browser is currently playing (for the StatusBar indicator). */
+  /** What the browser is currently playing/showing (for the StatusBar indicators). */
   getMedia: (): Promise<BrowserMedia> => apiFetch<BrowserMedia>('/api/browser/media'),
 
   /** Stop and close a browse window left playing. */
   stopMedia: (): Promise<{ stopped: boolean }> =>
     apiFetch<{ stopped: boolean }>('/api/browser/stop-media', { method: 'POST' }),
+
+  /** Close a commit result window left open so the user could see the response. */
+  closeWindow: (): Promise<{ closed: boolean }> =>
+    apiFetch<{ closed: boolean }>('/api/browser/close-window', { method: 'POST' }),
 
   /** Whether a one-time sign-in window is currently open. */
   accountStatus: (): Promise<{ login_open: boolean }> =>

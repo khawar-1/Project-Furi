@@ -2257,3 +2257,98 @@ and stated plainly in `app/core/browser_session.py`'s docstring.
   stopped. Tests: `test_browser_runtime.py` (off-thread/off-loop marshaling,
   result + exception propagation, Proactor-on-Windows, loop reuse). 1754 green;
   uncommitted.
+- **Phase 14.6 — file upload (2026-07-18), the LAST Phase 14 part; an EXTENSION
+  of 14.5 commit mode, NO new tool.** (14.4 in-loop sign-in walls and 14.5 COMMIT
+  mode shipped in between — the "Deferred" bullet above is stale; both are now in
+  the tree, committed as `aa31d4b`/`917eb7d`.) A commit-mode browse may attach ONE
+  file to a form via Playwright `set_input_files`. THE KEY INSIGHT that makes this
+  safe cheaply: `set_input_files` issues NO network request — the file leaves the
+  machine ONLY on the form SUBMIT, which is already 14.5's one approved, one-shot
+  POST. So 14.6 does not add a "send" path; it folds the attached file into the
+  APPROVED commit contract, and *upload-without-approval is impossible by
+  construction*. Three structural guards, each mirroring a 14.5 pattern:
+  - **Grounding — WHICH file is bounded by the user's words, never a page**
+    (the `_recipient_grounding` / `_browse_origin_violation` exfiltration bound
+    applied to a path). New `browser_grounding.upload_path_is_grounded`
+    (the file's BASENAME, or the full path, must appear in the goal +
+    conversation + answers — page content is never in that corpus),
+    `upload_path_unsafe` (REUSES `file_tools._resolve_path` + `_blocked_reason`
+    — no root/protected/nonexistent/directory), and `upload_violation` (the
+    combined retry-feedback). Enforced in the planner reject chain by
+    `_upload_path_violation` (+ `_upload_grounding`, threaded through
+    `_generate_steps` at the three call sites beside `browse_origins`), on every
+    draft/reflect/revise round, BEFORE discovery — a doomed path never reaches
+    approval.
+  - **The loop attaches it; CODE supplies the path, the LLM only picks the input**
+    (the recipient-lock principle — the model never chooses a file path).
+    `browse_commit` gains an optional `upload_path` param (the pre-grounded file);
+    `browser_loop` gains an `upload` action offered ONLY when `commit and
+    upload_path` (`_UPLOAD_ACTION_LINE` / `_UPLOAD_RULES`, `_parse_action` handles
+    it, a non-terminal loop branch → `session.upload_file`). `BrowserSession.
+    upload_file` re-checks path safety in code (defense in depth), calls
+    `set_input_files`, and records `{name, path}` in `self.uploads` — Python is the
+    source of truth because a browser strips file paths from JS.
+  - **The file rides the approval gate.** `run_browse` folds `session.uploads`
+    into `commit_state["uploads"]`; `_commit_fingerprint` is extended with an
+    ordered `uploads` tuple (absent → `()`, so pre-14.6 states fingerprint
+    identically — backwards compatible), so `PlanStep.signature()` BINDS the
+    approval to the exact file and `verify_commit` fails closed on a swapped file;
+    `planner._render_commit_detail` renders `attach file: <path>` on the approval
+    card (the send_email full-contract rule). `browse_commit` stays DESTRUCTIVE,
+    `browse` stays READ.
+  - Tests: `test_browser_grounding.py` (grounding / path-safety / violation
+    matrices, incl. a page-named file refused and the gate scoped to browse_commit)
+    + `test_browser_commit.py` (real `upload_file` safe/unsafe, `_commit_fingerprint`
+    + `verify_commit` bind-and-fail-closed, the loop's upload→submit folding uploads
+    into commit_state, the planner grounded-discover-pause-shows-the-file,
+    ungrounded-refused-before-discovery, and the unapproved-submit structural block).
+    **1816 green; typecheck + vite build clean.** The live browser + approval +
+    upload acceptance run (on the real Selector loop via `npm run dev`; a public
+    `<input type=file>` page such as the-internet.herokuapp.com/upload as a grounded
+    target) is not yet done — the automated suite is the gate met so far. Uncommitted.
+  - **Residual risk (unchanged):** within an allowlisted, authenticated origin a
+    compromised loop has full user authority; `set_input_files` is bounded by
+    grounding + path safety + the approval gate, but the READ-mode "non-GET =
+    mutation" guarantee is an HTTP convention, not the structural proof
+    `_recipient_violation` is. The headed, watchable window remains the last honest
+    control. Classic multipart `<form>` uploads only (an SPA background-fetch upload
+    has no readable form contract — out of scope, the same limit 14.5 documents).
+- **Grounded commit confirmation + kept-open result window (2026-07-18 — live
+  report: an upload's "All done, sir" read like a fabrication, and the window
+  closed before the user could see the success page)**. The upload had genuinely
+  succeeded (audit: `browse_commit` row, `submitted:true`, `allowed_commits:1`,
+  the file in `_commit.uploads`) — but two real gaps made it look otherwise.
+  (1) NO GROUNDING: `browse_commit` had no entry in `rendering._RESULT_FORMATTERS`,
+  so a commit's completion fell to the generic path and the summary LLM restated
+  the GOAL as "All done" — ungrounded, indistinguishable from the fabrications the
+  rest of the stack guards against. Fix: `browser_commit.perform` now returns
+  `response_text` (the post-submit page's own visible prose, `observation.page_text`
+  clipped 1500), and NEW `_fmt_browse_commit` leads with the CONFIRMED facts —
+  "Submitted the form to `<url>`. The site responded: **`<title>`**" + the fenced
+  response ("File Uploaded! / dummy_upload.txt") — so the confirmation quotes the
+  SERVER, never the goal (the untrusted-web-prose fence rule). (2) WINDOW CLOSED
+  ON SUBMIT: `perform`'s `finally: close()` tore the window down immediately. That
+  close was CLEANUP, not the replay protection — the replay protection is the
+  ONE-SHOT commit arm, already consumed by `submit_commit` (`_armed_commit=None`,
+  `_read_only` still True → the interceptor aborts every non-GET thereafter). So a
+  lingering window is STRUCTURALLY incapable of a second mutation, and `keep_open`
+  (new `browse_commit` param, default **True**) hands the fired session to a NEW
+  one-slot `browser_session` result-window registry (`register_/close_/active_
+  result_window`, the media-registry pattern: memory-only, one live persistent
+  context — a new browse/commit/login calls `close_result_window()` first, so the
+  `~/.jarvis/browser` profile lock never contends) instead of closing it. We
+  DELIBERATELY do NOT call `enter_playback_mode()` (media lifts interception for
+  streaming throughput; a static result page needs none and MUST stay read-only —
+  a viewer, not a driver). A submit that did NOT fire never lingers (only `fired`
+  earns the window). API: `GET /api/browser/media` gains `window_open/window_title/
+  window_url`; `POST /api/browser/close-window` (idempotent, pushes `browser_window`
+  cleared). Frontend: `browser_window` push (in `notifications.ts` SILENT_TYPES),
+  `browserStore` window state + `refresh` recovery poll, a StatusBar "Form
+  submitted — window open" indicator + Close button (the media-stop mirror). NO
+  migration, NO new dep. Tests: `test_browser_commit.py` (keep_open registers-not-
+  closes + stays read-only via a stub `enter_playback_mode` flag that must stay
+  False; `response_text` grounded; a non-fired submit still closes),
+  `test_plan_rendering.py` (`_fmt_browse_commit` grounds in the response, honest
+  without prose), `test_browser_api.py` (`/media` window fields, `/close-window`).
+  **1823 green; typecheck + vite build clean.** Live end-to-end acceptance on the
+  real Selector loop still pending. Uncommitted.

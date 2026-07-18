@@ -46,13 +46,51 @@ async def client():
 async def test_media_status_empty(client):
     resp = await client.get("/api/browser/media")
     assert resp.status_code == 200
-    assert resp.json() == {"playing": False, "title": "", "url": ""}
+    assert resp.json() == {
+        "playing": False,
+        "title": "",
+        "url": "",
+        "window_open": False,
+        "window_title": "",
+        "window_url": "",
+    }
 
 
 async def test_stop_media_idempotent(client):
     resp = await client.post("/api/browser/stop-media")
     assert resp.status_code == 200
     assert resp.json() == {"stopped": False}
+
+
+async def test_close_window_idempotent(client):
+    """Closing a result window when none is open is fine, not an error."""
+    resp = await client.post("/api/browser/close-window")
+    assert resp.status_code == 200
+    assert resp.json() == {"closed": False}
+
+
+async def test_media_status_reports_an_open_result_window(client):
+    """A kept-open commit result window (14.6) surfaces in the same status the
+    StatusBar polls, and POST /close-window clears it."""
+
+    class _FakeWindow:
+        async def close(self):
+            pass
+
+    await browser_session.register_result_window(
+        _FakeWindow(), title="File Uploaded!", url="https://the-internet.herokuapp.com/upload"
+    )
+    try:
+        status = (await client.get("/api/browser/media")).json()
+        assert status["window_open"] is True
+        assert status["window_title"] == "File Uploaded!"
+        assert status["window_url"] == "https://the-internet.herokuapp.com/upload"
+
+        closed = (await client.post("/api/browser/close-window")).json()
+        assert closed == {"closed": True}
+        assert browser_session.active_result_window() is None
+    finally:
+        await browser_session.close_result_window()
 
 
 async def test_account_status_reports_login_closed(client):

@@ -449,6 +449,15 @@ def _render_commit_detail(state: dict[str, Any]) -> str:
         name = str(field.get("name") or "").strip()
         value = str(field.get("value") or "")
         lines.append(f"  {name}: {value}")
+    # Attached files (14.6): name each file being uploaded on the approval card,
+    # so the user approves exactly which file leaves the machine — the LLM's
+    # description can never hide it (the send_email full-contract rule).
+    for upload in state.get("uploads") or []:
+        if not isinstance(upload, dict):
+            continue
+        path = str(upload.get("path") or "").strip()
+        if path:
+            lines.append(f"  attach file: {path}")
     if len(lines) == 1:
         lines.append("  (no fields)")
     return "\n".join(lines)
@@ -973,6 +982,36 @@ def _browse_origin_violation(steps: list[PlanStep], grounded: set[str]) -> Optio
     return None
 
 
+def _upload_grounding(plan: AgentPlan, conversation: str) -> str:
+    """The user's own words a browse_commit upload_path must trace to — goal +
+    conversation + their answers. Page content is excluded by construction (never
+    passed in): a page can never name a file to upload. Sibling of
+    _recipient_grounding / _browse_grounding."""
+    return "\n".join([plan.goal, conversation, *plan.user_answers])
+
+
+def _upload_path_violation(
+    steps: list[PlanStep], upload_grounding: str
+) -> Optional[str]:
+    """Retry-feedback when a browse_commit step's upload_path is not a file the
+    user named, or is not a safe/real file (the file-tools path safety). The
+    upload mirror of _browse_origin_violation: WHICH file leaves the machine is
+    bounded by the user's own words, never by a page, and it can never be a
+    system/protected file. Checked on every draft/reflect/revise round, before
+    discovery — a doomed path never reaches approval. None = allowed (or no
+    upload requested)."""
+    for s in steps:
+        if s.tool != _BROWSE_COMMIT_TOOL:
+            continue
+        path = str(s.parameters.get("upload_path") or "").strip()
+        if not path:
+            continue
+        reason = browser_grounding.upload_violation(path, upload_grounding or "")
+        if reason:
+            return f"step '{s.description}' cannot upload '{path}': {reason}"
+    return None
+
+
 _BROWSE_TOOL = "browse"
 
 
@@ -1487,6 +1526,7 @@ class AgentPlanner:
             recipient_grounding=_recipient_grounding(plan, self.conversation),
             event_ids=_event_id_grounding(plan),
             browse_origins=_browse_grounding(plan, self.conversation),
+            upload_grounding=_upload_grounding(plan, self.conversation),
             plan=plan,
         )
         if error:
@@ -1533,6 +1573,7 @@ class AgentPlanner:
             recipient_grounding=_recipient_grounding(plan, self.conversation),
             event_ids=_event_id_grounding(plan),
             browse_origins=_browse_grounding(plan, self.conversation),
+            upload_grounding=_upload_grounding(plan, self.conversation),
             plan=plan,
         )
         _ms = (time.perf_counter() - _t0) * 1000
@@ -1908,6 +1949,7 @@ class AgentPlanner:
             # can legitimately name a real id (or a PENDING one, filled later).
             event_ids=_event_id_grounding(plan),
             browse_origins=_browse_grounding(plan, self.conversation),
+            upload_grounding=_upload_grounding(plan, self.conversation),
             plan=plan,
             completed_signatures={
                 s.signature()
@@ -2006,6 +2048,7 @@ class AgentPlanner:
         recipient_grounding: str = "",
         event_ids: Optional[set[str]] = None,
         browse_origins: Optional[set[str]] = None,
+        upload_grounding: str = "",
         completed_signatures: Optional[set[str]] = None,
         plan: Optional[AgentPlan] = None,
     ) -> tuple[Optional[list[PlanStep]], Optional[str], Optional[PlanQuestion], Optional[str]]:
@@ -2095,6 +2138,7 @@ class AgentPlanner:
                             or _recipient_violation(steps, recipient_grounding)
                             or _event_id_violation(steps, event_ids or set())
                             or _browse_origin_violation(steps, browse_origins or set())
+                            or _upload_path_violation(steps, upload_grounding)
                         )
                         if reject is None:
                             steps, reject = _drop_completed_duplicates(

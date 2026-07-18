@@ -216,10 +216,12 @@ class BrowseTool(BaseTool):
             session = None
             handed_off = False
             try:
-                # One profile = one live persistent context. If a sign-in window
-                # is open on ~/.jarvis/browser, close it first or the launch below
-                # fails on the profile lock (the login/browse coordination rule).
+                # One profile = one live persistent context. A sign-in window OR a
+                # kept-open commit result window on ~/.jarvis/browser would hold the
+                # profile lock, so close both first (the login/browse coordination
+                # rule) or the launch below fails on the lock.
                 await browser_session.close_login_window()
+                await browser_session.close_result_window()
                 session = await BrowserSession.open(allowlist)
                 await session.goto(start_url)
                 outcome = await browser_loop.run_browse(session, goal, provider)
@@ -439,9 +441,27 @@ class BrowseCommitTool(BaseTool):
                 "runs after a form has been discovered and you approved it.",
             )
 
-        result = await browser_commit.perform(approved)
+        # Leave the result window open by default so the user can SEE the site's
+        # response (user request 2026-07-18). Safe — the window stays read-only
+        # after the one approved submit (see browser_commit.perform). A caller can
+        # pass keep_open=False to restore close-on-submit.
+        keep_open = kwargs.get("keep_open")
+        keep_open = True if keep_open is None else bool(keep_open)
+
+        result = await browser_commit.perform(approved, keep_open=keep_open)
         if not result.get("submitted"):
             return _fail(self, result.get("error") or "The form was not submitted.")
+
+        # Light up the StatusBar "window open" indicator immediately (it also
+        # polls /api/browser/media to recover on reload). push() touches main-loop
+        # WebSocket objects, so it fires here — after perform's browser-loop work.
+        if result.get("window_open"):
+            from app.core.push import push
+
+            await push(
+                "browser_window",
+                {"open": True, "title": result.get("title", ""), "url": result.get("url", "")},
+            )
 
         return _ok(
             self,
@@ -450,6 +470,8 @@ class BrowseCommitTool(BaseTool):
                 "url": result.get("url", ""),
                 "title": result.get("title", ""),
                 "rendered": result.get("rendered", ""),
+                "response_text": result.get("response_text", ""),
+                "window_open": result.get("window_open", False),
                 "blocked": result.get("blocked", {}),
                 "message": "Submitted the approved form.",
             },
@@ -467,9 +489,11 @@ class BrowseCommitTool(BaseTool):
                 "URL, method, and every field value) to approve before ANYTHING is "
                 "sent. Nothing is submitted without your approval, and it submits "
                 "exactly one form, once. It will NOT enter or submit passwords "
-                "(that is a sign-in). Provide the goal, the starting URL, and the "
-                "sites the user named in allowed_origins. Use `browse` (not this) "
-                "for read-only goals like searching or playing a video."
+                "(that is a sign-in). If the user asked to attach a file, give its "
+                "path in upload_path (a file the USER named). Provide the goal, the "
+                "starting URL, and the sites the user named in allowed_origins. Use "
+                "`browse` (not this) for read-only goals like searching or playing a "
+                "video."
             ),
             parameters={
                 "type": "object",
@@ -489,6 +513,24 @@ class BrowseCommitTool(BaseTool):
                             "The sites the loop may visit (e.g. ['example.com']). "
                             "Must be sites the USER named — grounded in their "
                             "request, never taken from a page."
+                        ),
+                    },
+                    "upload_path": {
+                        "type": "string",
+                        "description": (
+                            "OPTIONAL. The path of a file to attach to the form, "
+                            "ONLY when the user asked to upload a file (e.g. "
+                            "'upload my resume.pdf'). It MUST be a file the USER "
+                            "named in their request — never a path taken from a "
+                            "web page. Leave unset for forms with no file upload."
+                        ),
+                    },
+                    "keep_open": {
+                        "type": "boolean",
+                        "description": (
+                            "OPTIONAL. Leave the browser window open after the "
+                            "submit so the user can see the site's response page. "
+                            "Defaults to true; set false to close it on submit."
                         ),
                     },
                 },

@@ -17,14 +17,34 @@ from app.core.push import push
 router = APIRouter()
 
 
-@router.get("/media", summary="What the browser is currently playing")
+@router.get("/media", summary="What the browser is currently playing or showing")
 async def get_media() -> dict:
-    """{playing, title, url}. Cheap and I/O-free — the StatusBar polls it to
-    recover the indicator after a reload (the context_status precedent)."""
+    """{playing, title, url} for a media window PLUS {window_open, window_title,
+    window_url} for a kept-open commit result window. Cheap and I/O-free — the
+    StatusBar polls it to recover both indicators after a reload (the
+    context_status precedent)."""
     active = browser_session.active_media()
-    if active is None:
-        return {"playing": False, "title": "", "url": ""}
-    return {"playing": True, "title": active.get("title", ""), "url": active.get("url", "")}
+    result = browser_session.active_result_window()
+    return {
+        "playing": active is not None,
+        "title": active.get("title", "") if active else "",
+        "url": active.get("url", "") if active else "",
+        "window_open": result is not None,
+        "window_title": result.get("title", "") if result else "",
+        "window_url": result.get("url", "") if result else "",
+    }
+
+
+@router.post("/close-window", summary="Close a kept-open commit result window")
+async def close_window() -> dict:
+    """Close the browser window left open after a form submit/upload so the user
+    could see the response. Idempotent — closing nothing is fine. Pushes a cleared
+    state so any open StatusBar drops the indicator live."""
+    # The result window lives on the dedicated browser loop — close it there.
+    closed = await browser_runtime.run_browser(browser_session.close_result_window())
+    if closed:
+        await push("browser_window", {"open": False})
+    return {"closed": closed}
 
 
 @router.post("/stop-media", summary="Stop and close a playing browser window")

@@ -122,11 +122,21 @@ async def discover(params: dict, session_id: Optional[str] = None) -> CommitDisc
         session = None
         held = False
         try:
-            # One profile = one live persistent context (the browse rule).
+            # One profile = one live persistent context (the browse rule): a
+            # sign-in window OR a kept-open result window from a prior submit
+            # would hold the profile lock, so close both before launching.
             await browser_session.close_login_window()
+            await browser_session.close_result_window()
             session = await BrowserSession.open(allowlist)
             await session.goto(start_url)
-            outcome = await browser_loop.run_browse(session, goal, provider, commit=True)
+            # upload_path (14.6): the file the user named to attach, already
+            # grounded + path-safety-checked by the planner before this ran. The
+            # loop attaches it and folds it into commit_state; None = a plain
+            # form with no upload.
+            outcome = await browser_loop.run_browse(
+                session, goal, provider, commit=True,
+                upload_path=str(params.get("upload_path") or "").strip() or None,
+            )
 
             if outcome.login_required:
                 return CommitDiscovery(
@@ -173,12 +183,22 @@ async def discover(params: dict, session_id: Optional[str] = None) -> CommitDisc
         return CommitDiscovery(error=f"Preparing the form failed: {type(exc).__name__}")
 
 
-async def perform(approved: dict) -> dict:
+async def perform(approved: dict, *, keep_open: bool = False) -> dict:
     """SUBMIT phase — the one approved mutation. Takes the held session,
     re-verifies the form is UNCHANGED from what was approved (fail closed), arms
     the interceptor for exactly that request, fires the form's own submit, and
     re-locks. Runs on the dedicated browser loop. Returns a plain result dict;
-    the tool wraps it in a ToolResult. Never raises."""
+    the tool wraps it in a ToolResult. Never raises.
+
+    `keep_open`: after a submit that FIRED, leave the window open (registered in
+    browser_session's result-window registry) so the user can SEE the site's
+    response, instead of closing it. Safe by construction — the submit consumed
+    the one-shot commit arm and the interceptor is still READ-mode (we never call
+    enter_playback_mode here), so the lingering window can issue no further non-GET;
+    a second submit would need a fresh approval-armed permit. See
+    browser_session.register_result_window for the full argument. `response_text`
+    (the site's own visible response prose) is returned either way so the
+    completion text is GROUNDED in what the server actually said, not the goal."""
     from app.core import browser_runtime, browser_session, dom_observe
 
     async def _run() -> dict:
@@ -191,6 +211,7 @@ async def perform(approved: dict) -> dict:
                     "timeout) — nothing was sent. Ask me to do it again."
                 ),
             }
+        handed_off = False
         try:
             if not await session.verify_commit(approved):
                 return {
@@ -208,18 +229,24 @@ async def perform(approved: dict) -> dict:
             await session.settle()
 
             fired = session.commit_fired()
+            response_text = ""
             try:
                 observation = await dom_observe.observe(session.page)
                 summary = dom_observe.summarize(observation)
+                # The page's own visible prose — the "File Uploaded! / <name>"
+                # text — clipped. This is what grounds the confirmation.
+                response_text = str(getattr(observation, "page_text", "") or "").strip()
             except Exception as exc:
                 logger.debug(f"commit post-observe: {type(exc).__name__}: {exc}")
                 summary = {"url": "", "title": "", "rendered": ""}
 
-            return {
+            result = {
                 "submitted": fired,
                 "url": summary.get("url", ""),
                 "title": summary.get("title", ""),
                 "rendered": summary.get("rendered", ""),
+                "response_text": response_text[:1500],
+                "window_open": False,
                 "blocked": session.stats.as_dict(),
                 "error": (
                     ""
@@ -231,10 +258,25 @@ async def perform(approved: dict) -> dict:
                     )
                 ),
             }
+
+            # Keep the window OPEN on a real submission so the user can see the
+            # result. The registry owns the session's lifetime now — the finally
+            # below must NOT close it. Safe: the commit arm is spent and the
+            # interceptor stays locked (READ mode), so no second mutation can fire.
+            if keep_open and fired:
+                await browser_session.register_result_window(
+                    session, title=result["title"], url=result["url"]
+                )
+                handed_off = True
+                result["window_open"] = True
+            return result
         finally:
-            # One submit per held session, ever: close it here so the approval
-            # can never be replayed against a lingering window.
-            await session.close()
+            # One submit per held session, ever: close it here so the approval can
+            # never be replayed against a lingering window — UNLESS it was handed
+            # to the result-window registry (a read-only viewer with the arm
+            # already spent), which owns it until the user closes it.
+            if not handed_off:
+                await session.close()
 
     try:
         return await browser_runtime.run_browser(_run())

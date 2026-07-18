@@ -455,3 +455,39 @@ def test_web_search_step_cap_covers_a_full_merged_set():
     from app.tools.browser_tools import CONTENT_MAX_CHARS, FANOUT_MERGED_MAX
 
     assert _STEP_RESULT_CAPS["web_search"] >= FANOUT_MERGED_MAX * CONTENT_MAX_CHARS
+
+
+# ----------------------------------- 14.6: a submitted form's grounded result
+def test_browse_commit_completion_is_grounded_in_the_server_response():
+    """A commit had no formatter before 2026-07-18, so its completion fell to the
+    generic path and read as an ungrounded 'All done'. Now it leads with the
+    submit fact and QUOTES the site's own response — the fix for the 'did it
+    really happen?' trust gap."""
+    text = completed_results_text(completed_plan(done_step(
+        "browse_commit",
+        {
+            "submitted": True,
+            "url": "https://the-internet.herokuapp.com/upload",
+            "title": "The Internet",
+            "response_text": "File Uploaded!\ndummy_upload.txt",
+            "window_open": True,
+        },
+        permission=PermissionLevel.DESTRUCTIVE,
+    )))
+    assert "Submitted the form" in text
+    assert "https://the-internet.herokuapp.com/upload" in text
+    assert "File Uploaded!" in text            # the server's own words, not the goal
+    assert "dummy_upload.txt" in text
+    assert "window is left open" in text       # the kept-open note
+
+
+def test_browse_commit_completion_without_response_text_is_still_honest():
+    """No readable response prose (e.g. a bare redirect) — the confirmation still
+    states the submit fact, it just has nothing to quote. Never invents a page."""
+    text = completed_results_text(completed_plan(done_step(
+        "browse_commit",
+        {"submitted": True, "url": "https://example.com/contact", "title": "", "response_text": ""},
+        permission=PermissionLevel.DESTRUCTIVE,
+    )))
+    assert "Submitted the form" in text
+    assert "https://example.com/contact" in text
