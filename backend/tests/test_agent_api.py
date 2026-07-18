@@ -127,7 +127,7 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
         "list_events", "find_events",
         "create_event", "update_event", "delete_event",
         "web_search", "read_webpage", "browse_page",
-        "browse", "stop_media",
+        "browse", "browse_commit", "stop_media",
     }
     assert tools["read_file"]["permission_level"] == "read"
     assert tools["recall_memory"]["permission_level"] == "read"
@@ -161,6 +161,11 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
     # itself opened. Neither needs approval.
     assert tools["browse"]["permission_level"] == "read"
     assert tools["stop_media"]["permission_level"] == "read"
+    # Phase 14 Part 5: submitting a form is the one browser action that mutates —
+    # it sends data that leaves the machine — so browse_commit is DESTRUCTIVE and
+    # pauses for signature approval on the code-read form contract, while `browse`
+    # stays READ. This split is the whole point of COMMIT mode.
+    assert tools["browse_commit"]["permission_level"] == "destructive"
     assert "parameters" in tools["search_files"]
 
 

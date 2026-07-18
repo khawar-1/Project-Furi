@@ -56,14 +56,32 @@ class FakePage:
         self.url = url
         self.main_frame = "main"
         self.routes = []
+        self.unroute_calls = []
         self.goto_calls = []
+        self.reload_calls = 0
+        # ensure_playing() calls page.evaluate; queue the dicts it should return in
+        # order (default: a page with no media).
+        self.evaluate_results = []
+        self.evaluate_calls = 0
 
     async def route(self, pattern, handler):
         self.routes.append((pattern, handler))
 
+    async def unroute(self, pattern, handler=None):
+        self.unroute_calls.append((pattern, handler))
+
     async def goto(self, url, **kwargs):
         self.goto_calls.append(url)
         self.url = url
+
+    async def reload(self, **kwargs):
+        self.reload_calls += 1
+
+    async def evaluate(self, expression, *args):
+        self.evaluate_calls += 1
+        if self.evaluate_results:
+            return self.evaluate_results.pop(0)
+        return {"found": 0, "playing": 0}
 
     async def wait_for_load_state(self, *a, **kw):
         pass
@@ -303,6 +321,128 @@ def test_intercept_stats_clip_their_url_list():
     assert len(stats.as_dict()["mutation_urls"]) == 10
 
 
+# -------------------------------------------------- handoff (playback) lifts
+#                                                     interception
+# enter_playback_mode() is the keep_open media handoff: once the autonomous loop
+# is done and the window is the user's own to watch, the interceptor is LIFTED
+# ENTIRELY (unroute) so streaming runs at native network speed — keeping the
+# per-request interceptor on a continuously-streaming video taxed every segment
+# (round-trip + per-host DNS) and made the net crawl (user report 2026-07-18).
+# This is the open_login_window posture: user-driven, no interception, sound
+# because all three rules bound the AGENT LOOP, which never touches this window
+# again. _read_only=False is a best-effort FALLBACK: if unroute fails the
+# interceptor stays installed but stops aborting non-GET, so the player still
+# works while Rules 2 & 3 keep guarding — these pin both halves.
+async def test_playback_handoff_lifts_interception(fake_browser):
+    """THE fix: the handoff unroutes the interceptor so the user-driven window
+    runs at native speed (no per-request round-trip / DNS tax)."""
+    session = await _session()
+    assert session._read_only is True
+    await session.enter_playback_mode(reload=False)
+    assert session._read_only is False
+    # The interceptor was removed — the window is user-driven, like the sign-in one.
+    assert ("**/*", session._intercept) in fake_browser.page.unroute_calls
+
+
+async def test_playback_fallback_flag_allows_non_get_when_intercept_still_runs(fake_browser):
+    """The FALLBACK path: if unroute failed the interceptor is still installed,
+    but _read_only=False means the same POST that was aborted before now passes —
+    the player API can talk, so the video plays even in the degraded mode."""
+    session = await _session()
+    assert await _verdict(session, url="https://example.com/api", method="POST") == "abort"
+    await session.enter_playback_mode(reload=False)
+    assert await _verdict(session, url="https://example.com/api", method="POST") == "continue"
+
+
+async def test_playback_fallback_still_guards_ssrf_and_allowlist(fake_browser, monkeypatch):
+    """If unroute fails, the degraded path is still SAFE: with the interceptor
+    installed, Rules 2 (SSRF) and 3 (allowlist) keep aborting even though Rule 1
+    has relaxed — a slow window is acceptable, an unguarded one is not."""
+
+    async def _unroute_boom(pattern, handler=None):
+        raise RuntimeError("unroute not supported")
+
+    fake_browser.page.unroute = _unroute_boom
+    monkeypatch.setattr(browser_session, "_host_is_blocked", lambda h: h == "localhost")
+    browser_session.reset_host_cache()
+    session = await _session(allowlist={"example.com"})
+    await session.enter_playback_mode(reload=False)  # unroute raises, caught
+
+    # Rule 2 — a private host is still aborted (even for a GET).
+    assert await _verdict(session, url="http://localhost:8000/api") == "abort"
+    # Rule 3 — an off-allowlist main-frame navigation is still aborted.
+    assert (
+        await _verdict(session, url="https://attacker.com/?data=secret", navigation=True)
+        == "abort"
+    )
+
+
+async def test_enter_playback_mode_reloads_the_page(fake_browser):
+    """The reload is what makes an already-stuck player retry the POST it needs.
+    A GET subresource still passes after the handoff (the video stream itself)."""
+    session = await _session(allowlist={"youtube.com"})
+    await session.enter_playback_mode()  # reload=True default
+    assert fake_browser.page.reload_calls == 1
+    assert (
+        await _verdict(
+            session, url="https://rr3.googlevideo.com/videoplayback", navigation=False
+        )
+        == "continue"
+    )
+
+
+async def test_enter_playback_mode_survives_a_reload_failure(fake_browser):
+    """Best-effort: flipping the flag must not depend on the reload, and a reload
+    that raises must never break the already-open window."""
+
+    async def _boom(**kwargs):
+        raise RuntimeError("page went away mid-reload")
+
+    fake_browser.page.reload = _boom
+    session = await _session()
+    await session.enter_playback_mode()  # must not raise
+    assert session._read_only is False
+
+
+# --------------------------------------------------------- ensure_playing
+# An automation-launched window opens media PAUSED (no user gesture), so a
+# "play"/"watch" goal otherwise reaches the video and it just sits there (user
+# report 2026-07-17). ensure_playing() presses play via the native HTML5 media
+# API — generic across sites, never a per-site button. These pin: it polls until
+# a media element reports playing, gives up cleanly, and never raises.
+async def test_ensure_playing_starts_a_paused_media_element(fake_browser):
+    session = await _session()
+    # First tick: found but still paused (play() is async). Second tick: playing.
+    fake_browser.page.evaluate_results = [
+        {"found": 1, "playing": 0},
+        {"found": 1, "playing": 1},
+    ]
+    ok = await session.ensure_playing(gap_seconds=0)
+    assert ok is True
+    assert fake_browser.page.evaluate_calls == 2  # stopped as soon as it played
+
+
+async def test_ensure_playing_gives_up_after_its_attempts(fake_browser):
+    """A page that never reports playback (no <video>, or a site that plays via
+    Web Audio) is not an error — bounded, returns False."""
+    session = await _session()
+    fake_browser.page.evaluate_results = [{"found": 0, "playing": 0}] * 10
+    ok = await session.ensure_playing(attempts=3, gap_seconds=0)
+    assert ok is False
+    assert fake_browser.page.evaluate_calls == 3  # bounded by attempts
+
+
+async def test_ensure_playing_survives_an_evaluate_failure(fake_browser):
+    """Best-effort: a page whose evaluate raises must never break the handoff."""
+
+    async def _boom(expression, *args):
+        raise RuntimeError("execution context was destroyed")
+
+    fake_browser.page.evaluate = _boom
+    session = await _session()
+    assert await session.ensure_playing(attempts=2, gap_seconds=0) is False  # no raise
+
+
 # ----------------------------------------------------- one-time sign-in window
 # The user-driven login window (Phase 14, brought forward 2026-07-17). It is a
 # NORMAL browser — NO interceptor — because the user completes the sign-in POST
@@ -340,3 +480,128 @@ async def test_opening_login_stops_active_media(fake_browser):
     assert browser_session.active_media() is None      # media was stopped
     assert media_browser.closed is True                # and its window closed
     assert browser_session.login_window_open() is True
+
+
+# --------------------------------------------------------------- COMMIT mode
+# COMMIT (14.5) is the ONE approved way past Rule 1: arm_commit permits a SINGLE
+# matching non-GET (a user-approved form submit), consumed the instant it fires
+# (re-lock). These pin the security-critical properties the whole feature rests
+# on — if any goes green while its rule is broken, the approval gate has been
+# bypassed rather than satisfied.
+async def test_an_unapproved_non_get_is_still_aborted_in_commit_capable_session(fake_browser):
+    """With no arm set, the default guarantee is unchanged: a POST dies."""
+    session = await _session(allowlist={"example.com"})
+    assert session._armed_commit is None
+    assert await _verdict(session, url="https://example.com/submit", method="POST") == "abort"
+    assert session.commit_fired() is False
+
+
+async def test_an_armed_commit_passes_exactly_once_then_relocks(fake_browser):
+    """THE commit guarantee: the one approved request passes, and the permit is
+    consumed in the same breath — a double-submit finds nothing armed."""
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/submit")
+    # The one approved request goes through...
+    assert await _verdict(session, url="https://example.com/submit", method="POST") == "continue"
+    assert session.commit_fired() is True
+    assert session.stats.allowed_commits == 1
+    assert session._armed_commit is None              # re-locked
+    # ...and a second identical request is aborted like any mutation.
+    assert await _verdict(session, url="https://example.com/submit", method="POST") == "abort"
+    assert session.stats.allowed_commits == 1         # not two
+
+
+async def test_an_armed_commit_matches_only_the_exact_request(fake_browser):
+    """The permit is for ONE request, named by method + URL. A different path or
+    method is aborted AND does not consume the permit (fail closed, no leak)."""
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/submit")
+
+    assert await _verdict(session, url="https://example.com/other", method="POST") == "abort"
+    assert session._armed_commit is not None          # untouched by a non-match
+    assert await _verdict(session, url="https://example.com/submit", method="PUT") == "abort"
+    assert session._armed_commit is not None
+    # The exact approved request still works afterwards.
+    assert await _verdict(session, url="https://example.com/submit", method="POST") == "continue"
+
+
+async def test_commit_url_matching_ignores_fragment_and_trailing_slash(fake_browser):
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/submit")
+    assert (
+        await _verdict(session, url="https://example.com/submit/#done", method="POST")
+        == "continue"
+    )
+
+
+async def test_an_approved_commit_still_obeys_the_ssrf_guard(fake_browser, monkeypatch):
+    """Approval buys past Rule 1, never Rules 2 & 3: a matching request to a
+    blocked host is STILL aborted (SSRF). Origin grounding should stop this
+    upstream; this is the code-level backstop."""
+    monkeypatch.setattr(browser_session, "_host_is_blocked", lambda h: h == "example.com")
+    browser_session.reset_host_cache()
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/submit")
+    assert await _verdict(session, url="https://example.com/submit", method="POST") == "abort"
+    assert session.stats.blocked_hosts == 1
+
+
+async def test_a_redirect_after_the_submit_is_re_guarded(fake_browser):
+    """After the one approved POST, the session is re-locked: a response that
+    redirects the top frame off-allowlist is aborted (Rule 3), and any further
+    non-GET is aborted again (Rule 1) — the permit did not linger."""
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/submit")
+    assert await _verdict(session, url="https://example.com/submit", method="POST") == "continue"
+    # The submit's response redirects to another site — refused.
+    assert (
+        await _verdict(session, url="https://attacker.com/thanks", navigation=True)
+        == "abort"
+    )
+    # And a further mutation is aborted again — re-locked, not "commit mode on".
+    assert await _verdict(session, url="https://example.com/again", method="POST") == "abort"
+
+
+def test_normalize_commit_url_canonicalizes_for_matching():
+    from app.core.browser_session import _normalize_commit_url
+
+    assert _normalize_commit_url("https://X.com/submit/#f") == "https://x.com/submit"
+    assert _normalize_commit_url("https://x.com/a?b=1") == "https://x.com/a?b=1"
+    assert _normalize_commit_url("https://x.com/a") != _normalize_commit_url("https://x.com/b")
+
+
+def test_commit_fingerprint_binds_method_url_and_every_field():
+    from app.core.browser_session import _commit_fingerprint
+
+    a = {"url": "https://x.com/s", "method": "POST", "fields": [{"name": "t", "value": "hi"}]}
+    # Same thing written the JS way (action/lowercase method) → identical fingerprint.
+    b = {"action": "https://x.com/s", "method": "post", "fields": [{"name": "t", "value": "hi"}]}
+    assert _commit_fingerprint(a) == _commit_fingerprint(b)
+    # A changed field value breaks it — the approval binds to the exact values.
+    c = {"url": "https://x.com/s", "method": "POST", "fields": [{"name": "t", "value": "BYE"}]}
+    assert _commit_fingerprint(a) != _commit_fingerprint(c)
+
+
+async def test_the_commit_registry_holds_and_hands_off_one_session(fake_browser):
+    """The live filled session survives the approval pause in a one-slot registry
+    (the media pattern). take_commit hands it off exactly once; a new hold closes
+    the previous one; discard closes without submitting."""
+    state = {"url": "https://example.com/s", "method": "POST", "fields": []}
+    s1 = BrowserSession(FakeBrowser(), FakePage(), {"example.com"})
+    await browser_session.hold_commit(s1, state=state)
+    assert browser_session.pending_commit() == state
+
+    taken = await browser_session.take_commit()
+    assert taken is s1
+    assert browser_session.pending_commit() is None      # handed off, slot empty
+    assert await browser_session.take_commit() is None    # cannot be taken twice
+
+    # A new discovery supersedes and CLOSES the previous held session.
+    s2, s3 = BrowserSession(FakeBrowser(), FakePage(), set()), BrowserSession(FakeBrowser(), FakePage(), set())
+    await browser_session.hold_commit(s2, state=state)
+    await browser_session.hold_commit(s3, state=state)
+    assert s2._browser.closed is True
+    # discard closes the held one and clears the slot.
+    assert await browser_session.discard_commit() is True
+    assert s3._browser.closed is True
+    assert await browser_session.discard_commit() is False

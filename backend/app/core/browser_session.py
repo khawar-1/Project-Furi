@@ -16,12 +16,30 @@ THE SAFETY MODEL, and its honest limits
 Every request the page makes passes through _intercept(). Three rules, in order:
 
 1. NON-GET IS ABORTED — everywhere, every origin, subresources included.
-   This is the guarantee. A loop that cannot issue a POST/PUT/PATCH/DELETE
-   cannot submit a form, send a message, or buy anything, no matter what the
-   page's text talks it into. It is what makes `browse` a READ tool that passes
-   registry.execute_tool's gate untouched, and why the whole YouTube case needs
-   ZERO approvals. Subresources are included deliberately and it is load-bearing:
-   an SPA (LinkedIn's included) submits via a background fetch, not a form POST.
+   This is the guarantee, and it bounds the AGENT LOOP. A loop that cannot issue
+   a POST/PUT/PATCH/DELETE cannot submit a form, send a message, or buy anything,
+   no matter what the page's text talks it into. It is what makes `browse` a READ
+   tool that passes registry.execute_tool's gate untouched, and why the whole
+   YouTube case needs ZERO approvals. Subresources are included deliberately and
+   it is load-bearing: an SPA (LinkedIn's included) submits via a background
+   fetch, not a form POST.
+
+   All three rules are in force for the ENTIRE autonomous loop. At the keep_open
+   media handoff — enter_playback_mode(), once the loop has reached `done` and the
+   window is the user's own to watch — the interceptor is LIFTED ENTIRELY (unroute)
+   and the window drops to exactly the open_login_window posture: user-driven, no
+   interception. This is not just to let the site's player/API POSTs through (else
+   YouTube reports "you're offline"): keeping the per-request interceptor on a
+   continuously-streaming video made the network unusably slow (user report
+   2026-07-18) — every media segment paid a round-trip to the single
+   browser_runtime loop thread plus a per-host DNS SSRF lookup, a tax a normal
+   Chrome never pays. It is sound because all three rules bound the AGENT LOOP, and
+   once the loop is `done` it never touches this window again — the only actor left
+   is the user watching or the site's own player, exactly as with the sign-in
+   window. As a best-effort FALLBACK, enter_playback_mode also flips _read_only so
+   that if unroute somehow fails the interceptor stays installed but stops aborting
+   non-GET — the player works while Rules 2 & 3 keep guarding: degraded (slow), never
+   unsafe. During the loop itself Rules 2 and 3 are unconditional.
 
    ⚠️ BE HONEST ABOUT WHAT THIS IS. "non-GET = mutation" is an HTTP CONVENTION
    (RFC 7231 safe methods), not a substring test. It is NOT the structural proof
@@ -31,6 +49,19 @@ Every request the page makes passes through _intercept(). Three rules, in order:
    through; the origin allowlist is all that bounds them. Overclaiming this as
    "the browser recipient lock" is how a future round gets surprised — the same
    way SUMMARY_PROMPT's "never invent" turned out not to be a guarantee either.
+
+   COMMIT MODE (14.5) — the ONE approved way past Rule 1, and it stays narrow.
+   arm_commit(method, url) permits a SINGLE non-GET matching exactly (method,
+   normalized-url); the interceptor lets that one request through and clears the
+   permit in the same breath (re-lock), so a double-submit finds nothing armed.
+   It is never a blanket "commit mode on" — no flag stays flipped. The permit is
+   set only in the SUBMIT phase, after the plan has PAUSED for signature approval
+   on the code-read form state (target URL + method + every field value, rendered
+   into the approval card by planner._render_commit_detail — the LLM's prose
+   cannot hide what is sent), and the approved request still passes Rules 2 & 3.
+   This is genuinely a mutation the tool performs, which is why the commit tool is
+   PermissionLevel.DESTRUCTIVE and `browse` stays READ. See app/agents/
+   browser_commit.py for the two-phase discover→approve→submit orchestration.
 
 2. BLOCKED HOSTS ARE ABORTED — reusing browser_tools._host_is_blocked, so the
    SSRF rule that governs read_webpage governs the browser too, and cannot drift
@@ -125,10 +156,105 @@ _CHANNELS: tuple[Optional[str], ...] = ("chrome", None, "msedge")
 # to serve degraded pages to "a bot". It does NOT weaken any guarantee here —
 # the READ-mode interceptor is what bounds the agent, not the browser's honesty
 # about being scripted — it just lets a real person sign in through the window.
+#
+# --autoplay-policy=no-user-gesture-required: an automation-launched window has no
+# user "gesture", so Chromium suppresses autoplay-with-sound and a "play"/"watch"
+# goal opens the video PAUSED (live report 2026-07-17). This lets the site's own
+# autoplay — and the explicit .play() ensure_playing() issues at the handoff —
+# start. It only affects MEDIA autoplay permission; it touches none of the
+# READ-mode guarantees (Rule 1 still aborts every non-GET during the agent loop).
 _LAUNCH_ARGS = [
     "--disable-background-networking",
     "--disable-blink-features=AutomationControlled",
+    "--autoplay-policy=no-user-gesture-required",
 ]
+
+# Native HTML5 media control, run at the playback handoff. GENERIC across every
+# site that uses <video>/<audio> (YouTube, Spotify web, Netflix, ...) — this is
+# deliberately NOT a per-site "Skip Ad"/"Play" button selector, which is exactly
+# the brittle, ToS-adjacent coupling Phase 14 exists to avoid. It starts whatever
+# the element has LOADED: an ad plays, then the content follows in the same
+# element on its own — ad-skipping is the user's, by design (their call,
+# 2026-07-17). play() returns a promise that rejects when autoplay is still
+# blocked; the .catch swallows it so there is no unhandled rejection.
+_ENSURE_PLAYING_JS = """() => {
+  const media = Array.from(document.querySelectorAll('video, audio'));
+  let playing = 0;
+  for (const m of media) {
+    try {
+      if (m.paused || m.ended) {
+        const p = m.play();
+        if (p && typeof p.catch === 'function') { p.catch(() => {}); }
+      }
+    } catch (e) {}
+    if (!m.paused && !m.ended && m.currentTime >= 0) { playing += 1; }
+  }
+  return { found: media.length, playing: playing };
+}"""
+
+# COMMIT mode (14.5). Reads the form ENCLOSING a chosen element and returns
+# exactly what a submit would send — the absolute action URL, the method, and
+# each named field's CURRENT value — so the approval card shows the real
+# contract, not the LLM's description. A PASSWORD field is never read (its value
+# is skipped and has_password is flagged); a form with one is a sign-in, handled
+# by 14.4's login-wall path, never submitted here. The chosen form is STAMPED
+# (data-jarvis-commit) so the submit phase can re-find and re-verify the exact
+# same form without trusting an index across the approval pause.
+_READ_COMMIT_FORM_JS = """(el) => {
+  const form = el.closest('form') || el.form || null;
+  if (!form) return null;
+  document.querySelectorAll('[data-jarvis-commit]').forEach(
+    (f) => f.removeAttribute('data-jarvis-commit'));
+  form.setAttribute('data-jarvis-commit', '1');
+  const method = (form.getAttribute('method') || 'GET').toUpperCase();
+  const action = form.action || location.href;   // form.action resolves absolute
+  const fields = [];
+  let hasPassword = false;
+  for (const c of Array.from(form.elements || [])) {
+    const type = (c.type || '').toLowerCase();
+    if (type === 'password') { hasPassword = true; continue; }  // never read a credential
+    if (!c.name) continue;
+    if (['submit', 'button', 'reset', 'file', 'image'].includes(type)) continue;
+    if ((type === 'checkbox' || type === 'radio') && !c.checked) continue;
+    let v = (c.value == null) ? '' : String(c.value);
+    if (v.length > 300) v = v.slice(0, 300) + '…';
+    fields.push({ name: String(c.name), value: v });
+  }
+  return { action: String(action), method: method, fields: fields, has_password: hasPassword };
+}"""
+
+# Re-read the STAMPED form (no element handle needed — the marker survives the
+# approval pause because nothing navigates the held session). Used to VERIFY the
+# form still matches what the user approved before the one allowed submit fires.
+_REREAD_COMMIT_FORM_JS = """() => {
+  const form = document.querySelector('form[data-jarvis-commit]');
+  if (!form) return null;
+  const method = (form.getAttribute('method') || 'GET').toUpperCase();
+  const action = form.action || location.href;
+  const fields = [];
+  let hasPassword = false;
+  for (const c of Array.from(form.elements || [])) {
+    const type = (c.type || '').toLowerCase();
+    if (type === 'password') { hasPassword = true; continue; }
+    if (!c.name) continue;
+    if (['submit', 'button', 'reset', 'file', 'image'].includes(type)) continue;
+    if ((type === 'checkbox' || type === 'radio') && !c.checked) continue;
+    let v = (c.value == null) ? '' : String(c.value);
+    if (v.length > 300) v = v.slice(0, 300) + '…';
+    fields.push({ name: String(c.name), value: v });
+  }
+  return { action: String(action), method: method, fields: fields, has_password: hasPassword };
+}"""
+
+# Fire the stamped form's own submit. requestSubmit() runs validation and fires
+# the submit event (an SPA handler can intercept it); .submit() is the fallback.
+_SUBMIT_COMMIT_FORM_JS = """() => {
+  const form = document.querySelector('form[data-jarvis-commit]');
+  if (!form) return false;
+  if (typeof form.requestSubmit === 'function') form.requestSubmit();
+  else form.submit();
+  return true;
+}"""
 
 # BROWSER_FACTORY() -> browser handle exposing async new_page() and close().
 # None = the real Chromium path below.
@@ -252,13 +378,15 @@ async def _launch() -> Any:
 # ------------------------------------------------------------- the session
 @dataclass
 class InterceptStats:
-    """What the guard refused. Surfaced in the tool result so a page that
-    misbehaves is VISIBLE rather than mysteriously broken — an aborted POST is
-    a breakage, not a mutation, and the user deserves to know which."""
+    """What the guard refused (and, for COMMIT, the one thing it let through).
+    Surfaced in the tool result so a page that misbehaves is VISIBLE rather than
+    mysteriously broken — an aborted POST is a breakage, not a mutation, and the
+    user deserves to know which."""
 
     blocked_mutations: int = 0
     blocked_navigations: int = 0
     blocked_hosts: int = 0
+    allowed_commits: int = 0
     mutation_urls: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -266,8 +394,46 @@ class InterceptStats:
             "blocked_mutations": self.blocked_mutations,
             "blocked_navigations": self.blocked_navigations,
             "blocked_hosts": self.blocked_hosts,
+            "allowed_commits": self.allowed_commits,
             "mutation_urls": self.mutation_urls[:10],
         }
+
+
+def _normalize_commit_url(raw: str) -> str:
+    """Canonical form used to match an armed commit against a live request:
+    scheme + host + path + query, fragment dropped, host lowercased. A trailing
+    slash on the path is normalized away so 'https://x/submit' and
+    'https://x/submit/' match. Matching is EXACT on this form — a request that
+    differs (a changed path, an added query) fails closed (aborted), which is
+    the safe direction: an approved submit that gets blocked is a visible
+    breakage, an unapproved one that slips through is a mutation."""
+    try:
+        p = urlparse((raw or "").strip())
+    except Exception:
+        return (raw or "").strip().lower()
+    host = (p.hostname or "").lower().rstrip(".")
+    port = f":{p.port}" if p.port else ""
+    path = p.path or "/"
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+    scheme = (p.scheme or "https").lower()
+    query = f"?{p.query}" if p.query else ""
+    return f"{scheme}://{host}{port}{path}{query}"
+
+
+def _commit_fingerprint(state: dict[str, Any]) -> tuple:
+    """A comparable identity for an approved submit — method + normalized action
+    URL + the ordered (name, value) of every field. Accepts either the JS read
+    shape ({action, ...}) or the stored shape ({url, ...}); the same fingerprint
+    is what verify_commit compares, so an approval binds to the exact values."""
+    method = str(state.get("method") or "POST").upper()
+    url = _normalize_commit_url(str(state.get("url") or state.get("action") or ""))
+    fields = tuple(
+        (str(f.get("name") or ""), str(f.get("value") or ""))
+        for f in (state.get("fields") or [])
+        if isinstance(f, dict)
+    )
+    return (method, url, fields)
 
 
 class BrowserSession:
@@ -278,6 +444,21 @@ class BrowserSession:
         self.page = page
         self.allowlist = allowlist
         self.stats = InterceptStats()
+        # Rule 1 (abort non-GET) is the AGENT-LOOP guarantee and is in force for
+        # the whole autonomous browse. enter_playback_mode() flips this to False
+        # at the keep_open handoff so the user's own playback window works; Rules
+        # 2 & 3 stay on regardless. See the module docstring.
+        self._read_only = True
+        # COMMIT mode (14.5): a ONE-SHOT permit for a single non-GET the user
+        # explicitly approved (a form submit). arm_commit() sets (method,
+        # normalized-url); the interceptor lets EXACTLY that request through once,
+        # then clears this (re-lock). It is never a blanket "commit mode on" — the
+        # permit is consumed by the first matching request. Rules 2 & 3 still
+        # apply to the approved request. _commit_fired records that the permit was
+        # actually consumed, so the submit phase can tell a real submission from
+        # one the site never issued. See the module docstring.
+        self._armed_commit: Optional[tuple[str, str]] = None
+        self._commit_fired = False
 
     # ------------------------------------------------------------ lifecycle
     @classmethod
@@ -334,13 +515,35 @@ class BrowserSession:
 
             # RULE 1 — the guarantee. Everywhere, every origin, subresources
             # included (an SPA submits via a background fetch, not a form POST).
+            # In force for the whole AGENT LOOP; relaxed only after the keep_open
+            # handoff (enter_playback_mode) so the user's playback window can use
+            # the site's own POST API. Rules 2 & 3 below never relax.
+            #
+            # COMMIT (14.5) is the ONE narrow exception: a non-GET that matches an
+            # armed, user-approved commit is let through EXACTLY ONCE. The permit
+            # is consumed here (re-lock) before the request even proceeds, so a
+            # duplicate — a double-submit — finds no permit and is aborted like any
+            # other mutation. The approved request still falls through to Rules 2 &
+            # 3 below (SSRF + allowlist), so approval never buys a way past them.
             if method not in _READ_METHODS:
-                self.stats.blocked_mutations += 1
-                if len(self.stats.mutation_urls) < 10:
-                    self.stats.mutation_urls.append(f"{method} {url[:120]}")
-                logger.info(f"browser: aborted {method} {url[:120]} — READ mode")
-                await route.abort()
-                return
+                if self._commit_allows(method, url):
+                    self._armed_commit = None       # one-shot: consume, re-lock
+                    self._commit_fired = True
+                    self.stats.allowed_commits += 1
+                    logger.info(
+                        f"browser: allowed APPROVED {method} {url[:120]} "
+                        "(commit) — re-locking"
+                    )
+                    # fall through to Rules 2 & 3 — an approved commit is not
+                    # exempt from the SSRF and allowlist guards.
+                elif self._read_only:
+                    self.stats.blocked_mutations += 1
+                    if len(self.stats.mutation_urls) < 10:
+                        self.stats.mutation_urls.append(f"{method} {url[:120]}")
+                    logger.info(f"browser: aborted {method} {url[:120]} — READ mode")
+                    await route.abort()
+                    return
+                # else: not read-only (playback handoff) — non-GET allowed, fall through
 
             # RULE 2 — SSRF, same rule read_webpage obeys, shared not copied.
             host = parsed.hostname
@@ -427,6 +630,147 @@ class BrowserSession:
         except Exception:
             pass
 
+    # -------------------------------------------------------------- commit
+    # COMMIT mode (14.5): the ONLY path by which this session ever issues a
+    # non-GET, and it does so exactly once, for exactly the request the user
+    # approved. arm_commit is called from the SUBMIT phase (after signature
+    # approval) with the same (method, url) the approval card showed; the
+    # interceptor consumes the permit on the first matching request and re-locks.
+    def arm_commit(self, method: str, url: str) -> None:
+        """Permit ONE non-GET matching (method, url) — the approved submit. The
+        permit is one-shot: the interceptor clears it the instant it fires, so a
+        double-submit finds nothing armed and is aborted like any mutation."""
+        self._armed_commit = ((method or "POST").upper(), _normalize_commit_url(url))
+        self._commit_fired = False
+        logger.info(f"browser: armed one-shot commit {self._armed_commit[0]} {url[:120]}")
+
+    def _commit_allows(self, method: str, url: str) -> bool:
+        """True only when a permit is armed AND this exact request matches it."""
+        if self._armed_commit is None:
+            return False
+        want_method, want_url = self._armed_commit
+        return (method or "GET").upper() == want_method and (
+            _normalize_commit_url(url) == want_url
+        )
+
+    def commit_fired(self) -> bool:
+        """Whether the armed commit was actually consumed by a live request —
+        so the submit phase can distinguish a real submission from a form the
+        site never posted (a JS handler that swallowed it, a validation block)."""
+        return self._commit_fired
+
+    async def read_commit_target(
+        self, observation: Any, index: int
+    ) -> Optional[dict[str, Any]]:
+        """Read the form ENCLOSING element `index`: its absolute action URL,
+        method, and every named field's current value — the exact contract a
+        submit would send, for the approval card. Stamps the form so the submit
+        phase can re-find it. None when the element is not in a form or the read
+        fails (never raises — a missing form is a normal 'nothing to submit')."""
+        from app.core import dom_observe  # local: dom_observe never imports us
+
+        try:
+            handle = await dom_observe.resolve(self.page, observation, index)
+        except Exception as exc:
+            logger.debug(f"read_commit_target resolve: {type(exc).__name__}: {exc}")
+            return None
+        try:
+            raw = await handle.evaluate(_READ_COMMIT_FORM_JS)
+        except Exception as exc:
+            logger.debug(f"read_commit_target eval: {type(exc).__name__}: {exc}")
+            return None
+        return raw if isinstance(raw, dict) else None
+
+    async def verify_commit(self, approved: dict[str, Any]) -> bool:
+        """Re-read the stamped form and confirm it STILL matches what the user
+        approved (method + action + every field value). Nothing should have
+        changed the form between approval and submit — the held session just
+        sat there — so a mismatch means the page tampered with it, and the
+        submit is refused (fail closed). Password presence also disqualifies."""
+        try:
+            raw = await self.page.evaluate(_REREAD_COMMIT_FORM_JS)
+        except Exception as exc:
+            logger.debug(f"verify_commit eval: {type(exc).__name__}: {exc}")
+            return False
+        if not isinstance(raw, dict) or raw.get("has_password"):
+            return False
+        return _commit_fingerprint(raw) == _commit_fingerprint(approved)
+
+    async def submit_commit(self) -> None:
+        """Fire the stamped form's own submit — the one request the arm permits.
+        Best-effort; whether the POST actually went out is read from
+        commit_fired() afterwards, not assumed here."""
+        try:
+            await self.page.evaluate(_SUBMIT_COMMIT_FORM_JS)
+        except Exception as exc:
+            logger.debug(f"submit_commit: {type(exc).__name__}: {exc}")
+
+    # ------------------------------------------------------------- handoff
+    async def enter_playback_mode(self, *, reload: bool = True) -> None:
+        """Hand this session off from the autonomous loop to the user.
+
+        LIFTS request interception entirely (unroute): after handoff the window is
+        the user's own to watch, and keeping the per-request interceptor on a
+        continuously-streaming video made the network unusably slow (user report
+        2026-07-18: "the net is very slow in your profile, normal in mine") — EVERY
+        media segment paid a round-trip to the single browser_runtime loop thread
+        plus a per-host DNS SSRF lookup, a persistent tax a normal Chrome never
+        pays. So this window drops to exactly the open_login_window posture:
+        user-driven, no interceptor. Sound because all three rules bound the AGENT
+        LOOP, and once the loop has reached `done` it never touches this window
+        again — the only actor left is the user (watching) or the site's own player.
+
+        Also flips _read_only=False as a best-effort FALLBACK: if unroute fails, the
+        interceptor stays installed but stops aborting non-GET, so the player's POST
+        still works (else YouTube reports "you're offline") while Rules 2 & 3 keep
+        guarding — degraded (slow) but never unsafe.
+
+        The reload makes an already-stuck player retry the POST that was aborted
+        while read-only (now permitted) and actually play. Best-effort throughout:
+        an unroute or reload failure must never break the already-open window."""
+        self._read_only = False
+        try:
+            await self.page.unroute("**/*", self._intercept)
+        except Exception as exc:
+            logger.debug(f"playback unroute: {type(exc).__name__}: {exc}")
+        if not reload:
+            return
+        try:
+            await self.page.reload(wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        except Exception as exc:
+            logger.debug(f"playback reload: {type(exc).__name__}: {exc}")
+
+    async def ensure_playing(
+        self, *, attempts: int = 6, gap_seconds: float = 1.0
+    ) -> bool:
+        """Best-effort: start any paused <video>/<audio> so a 'play'/'watch'/
+        'listen' goal actually produces sound. An automation-launched window opens
+        media PAUSED (no user gesture — see _LAUNCH_ARGS), and "press the play
+        button" is what the user asked for (2026-07-17).
+
+        Polls because the player and its media element appear a moment AFTER the
+        handoff reload's domcontentloaded — each tick re-issues .play() until an
+        element reports playing or the attempts run out (~attempts×gap seconds,
+        bounded). Generic native-media control, never a per-site button; must run
+        AFTER enter_playback_mode() lifts Rule 1, or the player's stream POST is
+        still aborted. Never raises — a page with no media, or an evaluate that
+        fails, just returns False."""
+        for _ in range(max(1, attempts)):
+            try:
+                result = await self.page.evaluate(_ENSURE_PLAYING_JS)
+            except Exception as exc:
+                logger.debug(f"ensure_playing: {type(exc).__name__}: {exc}")
+                result = None
+            if isinstance(result, dict) and result.get("playing"):
+                logger.info("browse: media is playing after the handoff")
+                return True
+            try:
+                await asyncio.sleep(gap_seconds)
+            except Exception:
+                pass
+        logger.debug("ensure_playing: no media reported playing within the window")
+        return False
+
 
 # ---------------------------------------------------------- media sessions
 # A "play"/"watch" browse leaves its window OPEN and playing after the tool
@@ -488,7 +832,69 @@ async def reset_media() -> None:
     """Test/shutdown hook — close and clear, without pretending it is a feature.
     Mirrors reset_host_cache: the registry is live state, never persisted."""
     await stop_media()
+    await discard_commit()
     await close_login_window()
+
+
+# ---------------------------------------------------------- commit sessions
+# COMMIT mode (14.5) discovers a form, then PAUSES for the user's signature
+# approval. The live BrowserSession — sitting on the filled form, ready to submit
+# — must survive that pause, and it is held here exactly as a media session is:
+# memory-only BY DESIGN, because a running Chromium page is not serializable and
+# pretending otherwise is where DOUBLE-SUBMIT lives (the deferred-14.5 note said
+# so). The session is never replayed or reconstructed — the ONE held session is
+# the only thing that can be submitted, and a restart drops it (the submit then
+# reports the session expired, and nothing silently re-sends).
+#
+# ONE pending commit at a time, one-slot like media: a new discovery closes the
+# previous held session. take_commit() removes AND returns it (the submit phase
+# owns it thereafter), so a taken commit can never be taken twice.
+_commit_session: Optional["BrowserSession"] = None
+_commit_meta: dict[str, Any] = {}
+_commit_lock = asyncio.Lock()
+
+
+async def hold_commit(session: "BrowserSession", *, state: dict[str, Any]) -> None:
+    """Hold a discovered-but-unsubmitted session across the approval pause,
+    closing any previously held one. After this the caller must NOT close the
+    session — the registry owns it until take_commit()/discard_commit()."""
+    global _commit_session, _commit_meta
+    async with _commit_lock:
+        previous = _commit_session
+        _commit_session = session
+        _commit_meta = dict(state or {})
+    if previous is not None and previous is not session:
+        await previous.close()
+
+
+async def take_commit() -> Optional["BrowserSession"]:
+    """Remove and return the held commit session (the submit phase owns it now),
+    or None when there is none — a restart/timeout dropped it, and the submit
+    must report that rather than invent a submission."""
+    global _commit_session, _commit_meta
+    async with _commit_lock:
+        session = _commit_session
+        _commit_session = None
+        _commit_meta = {}
+    return session
+
+
+async def discard_commit() -> bool:
+    """Close and clear a held commit session without submitting (cancel /
+    shutdown / a superseding discovery). True when one was actually closed."""
+    session = await take_commit()
+    if session is None:
+        return False
+    await session.close()
+    return True
+
+
+def pending_commit() -> Optional[dict[str, Any]]:
+    """The approved-form state of the held commit session, or None. Cheap, no
+    I/O (the active_media precedent)."""
+    if _commit_session is None:
+        return None
+    return dict(_commit_meta)
 
 
 # ----------------------------------------------------------- login window

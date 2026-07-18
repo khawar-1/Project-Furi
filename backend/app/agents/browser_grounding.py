@@ -127,10 +127,12 @@ def origin_is_grounded(candidate: str, grounded: set[str]) -> bool:
 
 
 # Tools whose target origins must be grounded in the user's words — the browse
-# loop, and any future site-driving tool. browse_page is deliberately NOT here:
+# loop and the commit (form-submit) loop. browse_page is deliberately NOT here:
 # it opens exactly the ONE url passed to it and its own origin is its allowlist,
-# so there is nothing for a page to widen.
-_BROWSE_TOOLS = {"browse"}
+# so there is nothing for a page to widen. browse_commit is grounded for the
+# stronger reason — where a mutation may be sent must trace to the user's words,
+# never a page (the exfiltration bound, now with a write behind it).
+_BROWSE_TOOLS = {"browse", "browse_commit"}
 
 
 def _step_origins(params: dict) -> list[str]:

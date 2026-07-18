@@ -8,6 +8,9 @@ Jarvis OS — Browser Agent Tools (Phase 14, Parts 1 & 2)
                        (search, click, open) via the observe→decide→act loop —
                        read-only (it cannot submit forms); may leave a video
                        playing in the window (keep_open)
+  browse_commit DESTR  fill ONE web form and submit it — pauses for signature
+                       approval on the code-read form contract, then sends
+                       exactly the one approved request (COMMIT mode, 14.5)
   stop_media    READ   close a browser window `browse` left playing
 
 Why this exists next to read_webpage rather than replacing it
@@ -233,10 +236,51 @@ class BrowseTool(BaseTool):
                     "error": outcome.error,
                 }
 
-                # A play/watch goal: leave the window OPEN and playing. The media
-                # registry takes ownership of the session; the finally below must
-                # not close it (that would stop the music the instant we succeed).
+                # A sign-in wall (14.4): the loop hit a login page it must never
+                # pass — it has no credentials and stores none. Close the agent
+                # session to free the single-profile lock, then open a real
+                # USER-DRIVEN sign-in window (no interceptor — the user types
+                # their own password there) at the wall's URL. The persistent
+                # ~/.jarvis/browser profile keeps the cookie, so the resumed
+                # browse runs authenticated. The planner turns login_required
+                # into an AWAITING_CHOICE pause ("sign in, then say continue");
+                # answering re-runs this browse. Jarvis never sees the password.
+                if outcome.login_required:
+                    await session.close()
+                    session = None  # the finally must not double-close it
+                    login_opened = True
+                    try:
+                        await browser_session.open_login_window(
+                            outcome.login_url or browser_session.DEFAULT_LOGIN_URL
+                        )
+                    except Exception as exc:
+                        login_opened = False
+                        logger.warning(
+                            f"could not open sign-in window: {type(exc).__name__}: {exc}"
+                        )
+                    output["login_required"] = True
+                    output["login_site"] = outcome.login_site
+                    output["login_url"] = outcome.login_url
+                    output["login_window_opened"] = login_opened
+                    return output
+
+                # A play/watch goal: leave the window OPEN and playing. Hand off
+                # FIRST (enter_playback_mode): the loop is done, so it LIFTS request
+                # interception entirely — the window becomes user-driven at native
+                # network speed (keeping the interceptor on a streaming video taxed
+                # every segment and made the net crawl — user report 2026-07-18) and
+                # the site's player POSTs work (else the video shows "you're
+                # offline", live 2026-07-17). The reload inside makes the stuck
+                # player retry those POSTs. Then ensure_playing() presses "play" — an
+                # automation window opens media paused (no user gesture), so a
+                # video/song otherwise sits there (user report 2026-07-17). Generic
+                # native-media control, not an ad-skipper: an ad plays then the
+                # content follows on its own. Then the media registry takes
+                # ownership; the finally below must not close it (that would stop the
+                # music the instant we succeed).
                 if outcome.success and keep_open:
+                    await session.enter_playback_mode()
+                    await session.ensure_playing()
                     await browser_session.register_media(
                         session, title=output["title"], url=output["url"]
                     )
@@ -263,6 +307,33 @@ class BrowseTool(BaseTool):
             return _fail(
                 self,
                 f"The browser task failed: {type(exc).__name__}: {str(exc)[:200]}",
+            )
+
+        if output.get("login_required"):
+            # A sign-in wall (14.4). Return a STRUCTURED signal (not a bare
+            # _fail, whose output is None) so the planner can pause the plan on
+            # a clarifying question instead of replanning a wall it cannot pass.
+            # The error text is the fallback for a direct (non-planner) caller.
+            site = output.get("login_site") or "the site"
+            opened = output.get("login_window_opened", True)
+            where = (
+                "I've opened a sign-in window"
+                if opened
+                else "Open the Jarvis browser window"
+            )
+            return ToolResult(
+                success=False,
+                output={
+                    "login_required": True,
+                    "login_site": site,
+                    "login_url": output.get("login_url", ""),
+                    "login_window_opened": opened,
+                },
+                error=(
+                    f"Sign-in required at {site}. {where} — please sign in there, "
+                    "then say 'continue'."
+                ),
+                permission_level=self.permission_level,
             )
 
         if not output.get("goal_reached"):
@@ -324,6 +395,101 @@ class BrowseTool(BaseTool):
                     "keep_open": {
                         "type": "boolean",
                         "description": "Leave the window open and playing (for play/watch/listen goals). Default false.",
+                    },
+                },
+                "required": ["goal", "start_url"],
+            },
+            permission_level=self.permission_level,
+        )
+
+
+@register_tool
+class BrowseCommitTool(BaseTool):
+    """Fill a web form for a goal and submit it — the ONE approved mutation."""
+
+    @property
+    def name(self) -> str:
+        return "browse_commit"
+
+    @property
+    def permission_level(self) -> PermissionLevel:
+        # DESTRUCTIVE: this is the one browser tool that actually SUBMITS — it
+        # sends data that leaves the machine and cannot be undone (post a
+        # comment, place an order, send a message). It pauses for signature
+        # approval exactly like send_email/delete_file, and the approval binds to
+        # the code-read form contract (see the planner's discovery branch). Every
+        # non-GET is still aborted by the interceptor EXCEPT the single request
+        # the user approved (browser_session COMMIT mode).
+        return PermissionLevel.DESTRUCTIVE
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        # This tool's execute() is the SUBMIT phase ONLY. execute_tool refuses a
+        # DESTRUCTIVE tool without approved=True, so we can only be here after the
+        # user approved the discovered form; the planner's discovery branch has
+        # already stamped the approved contract into COMMIT_PARAM.
+        from app.agents import browser_commit
+
+        approved = kwargs.get(browser_commit.COMMIT_PARAM)
+        if not isinstance(approved, dict) or not approved.get("url"):
+            # No discovered contract → this was invoked out of sequence. Never
+            # submit on a guess.
+            return _fail(
+                self,
+                "No approved form was prepared for this submission. This tool only "
+                "runs after a form has been discovered and you approved it.",
+            )
+
+        result = await browser_commit.perform(approved)
+        if not result.get("submitted"):
+            return _fail(self, result.get("error") or "The form was not submitted.")
+
+        return _ok(
+            self,
+            {
+                "submitted": True,
+                "url": result.get("url", ""),
+                "title": result.get("title", ""),
+                "rendered": result.get("rendered", ""),
+                "blocked": result.get("blocked", {}),
+                "message": "Submitted the approved form.",
+            },
+        )
+
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description=(
+                "Fill in a web form on a live site and SUBMIT it (e.g. 'post this "
+                "comment', 'send this contact-form message', 'place this order') — "
+                "the one browser action that actually sends data. It opens a "
+                "visible browser, navigates within the allowed sites, fills the "
+                "form's fields, and then STOPS and shows you the exact form (its "
+                "URL, method, and every field value) to approve before ANYTHING is "
+                "sent. Nothing is submitted without your approval, and it submits "
+                "exactly one form, once. It will NOT enter or submit passwords "
+                "(that is a sign-in). Provide the goal, the starting URL, and the "
+                "sites the user named in allowed_origins. Use `browse` (not this) "
+                "for read-only goals like searching or playing a video."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "What to fill in and submit, in plain words",
+                    },
+                    "start_url": {
+                        "type": "string",
+                        "description": "The full URL to start from, e.g. https://example.com/contact",
+                    },
+                    "allowed_origins": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "The sites the loop may visit (e.g. ['example.com']). "
+                            "Must be sites the USER named — grounded in their "
+                            "request, never taken from a page."
+                        ),
                     },
                 },
                 "required": ["goal", "start_url"],

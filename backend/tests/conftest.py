@@ -200,17 +200,22 @@ def _hermetic_browser_session():
 
     browser_session.BROWSER_FACTORY = _refuse
     browser_session.reset_host_cache()
-    # The media registry holds a live session across tool calls (Phase 14.2). A
-    # fake session left in it would leak into the next test, so clear it too —
-    # inert here (tests only ever register fakes), the reset_host_cache hygiene.
+    # The media/commit registries hold a live session across tool calls (Phase
+    # 14.2 / 14.5). A fake session left in either would leak into the next test,
+    # so clear them too — inert here (tests only ever register fakes), the
+    # reset_host_cache hygiene.
     browser_session._active_media = None
     browser_session._active_media_meta = {}
+    browser_session._commit_session = None
+    browser_session._commit_meta = {}
     browser_session._login_browser = None
     yield
     browser_session.BROWSER_FACTORY = None
     browser_session.reset_host_cache()
     browser_session._active_media = None
     browser_session._active_media_meta = {}
+    browser_session._commit_session = None
+    browser_session._commit_meta = {}
     browser_session._login_browser = None
 
 

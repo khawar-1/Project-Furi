@@ -6,6 +6,7 @@ background: it stops (action cap), it does not spin on a dead button (dedupe —
 the ended-stream bug), the fast path costs no model call, a hallucinated index
 cannot be acted on, and the media registry keeps exactly one window playing.
 """
+import asyncio
 import re
 
 import pytest
@@ -265,6 +266,56 @@ async def test_the_action_cap_stops_the_loop():
     assert provider.calls == 3
 
 
+async def test_the_wall_clock_deadline_stops_a_slow_run(monkeypatch):
+    """TIME, not just STEPS. The action cap bounds how MANY steps run, not how
+    LONG they take — a page or provider that is slow-but-not-hung on every step
+    still adds up to a multi-minute freeze (live report 2026-07-17). The
+    wall-clock deadline is the backstop; here a clock that jumps past the limit
+    makes the loop stop at step 0 before it ever consults the model."""
+    clock = {"t": 0.0}
+
+    def fake_monotonic():
+        v = clock["t"]
+        clock["t"] = browser_loop.BROWSE_DEADLINE_SECONDS + 100  # every later call is past the deadline
+        return v
+
+    monkeypatch.setattr(browser_loop.time, "monotonic", fake_monotonic)
+    session = FakeSession(ScriptedPage([_page([_el(1, name="anything")])]))
+    provider = FakeProvider(['{"action":"click","index":1}'] * 5)
+
+    outcome = await run_browse(session, "wander forever", provider)
+
+    assert outcome.success is False
+    assert "time limit" in outcome.error
+    assert provider.calls == 0  # the deadline fired before any decision
+
+
+async def test_a_stalled_decision_call_is_bounded_and_stops(monkeypatch):
+    """One _decide call must not freeze the whole browse for the shared LLM
+    client's 300s read timeout. A provider that stalls past
+    BROWSE_DECISION_TIMEOUT_SECONDS is cut off, reads as 'no usable action', and
+    the loop stops honestly instead of hanging."""
+    monkeypatch.setattr(browser_loop, "BROWSE_DECISION_TIMEOUT_SECONDS", 0.05)
+
+    class StallProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, messages, temperature=0.7, max_tokens=None):
+            self.calls += 1
+            await asyncio.sleep(1)  # far longer than the 0.05s cap above
+            return LLMResponse(content='{"action":"done"}', model="f", provider="f")
+
+    session = FakeSession(ScriptedPage([_page([_el(1, name="only element")])]))
+    provider = StallProvider()
+
+    outcome = await run_browse(session, "do something", provider)
+
+    assert outcome.success is False
+    assert "safe next action" in outcome.error
+    assert provider.calls == 1  # it asked once, the stall was bounded, it stopped
+
+
 async def test_a_hallucinated_index_stops_the_loop():
     """The index contract at the loop level: a chosen index not on the page is
     refused (never resolved against whatever is third), so the loop stops rather
@@ -341,6 +392,76 @@ def test_parse_action_rejects_garbage_and_unknown_verbs():
     assert _parse_action('{"action":"click"}') is None  # no index
     # tolerates a code fence and surrounding prose
     assert _parse_action('```json\n{"action":"done","reason":"y"}\n```') == {"action": "done", "reason": "y"}
+
+
+# ---------------------------------------------------------------- login walls
+def _obs(elements, url="https://site.test/"):
+    return browser_loop.dom_observe.Observation(
+        observation_id="o", url=url, title="", element_total=len(elements),
+        elements=elements, page_text="", text_truncated=False,
+    )
+
+
+def _El(**kw):
+    kw.setdefault("index", 1)
+    kw.setdefault("role", "link")
+    kw.setdefault("name", "x")
+    return browser_loop.dom_observe.Element(**kw)
+
+
+def test_detect_login_wall_on_a_password_field():
+    """The universal, site-agnostic tell: a visible password field."""
+    wall = browser_loop.detect_login_wall(
+        _obs([_El(role="password", name="Password")], url="https://some-site.test/in")
+    )
+    assert wall == "some-site.test"
+
+
+def test_detect_login_wall_on_a_dedicated_auth_host():
+    """The belt for an email-first step showing no password field yet."""
+    wall = browser_loop.detect_login_wall(
+        _obs([_El(role="input", name="Email")], url="https://accounts.google.com/signin")
+    )
+    assert wall == "accounts.google.com"
+
+
+def test_a_normal_page_is_not_a_login_wall():
+    """Conservative: an ordinary content page must never trip the guard, or a
+    false wall would abort a working task."""
+    assert browser_loop.detect_login_wall(
+        _obs([_El(role="link", name="Home"), _El(index=2, role="searchbox", name="Search")],
+             url="https://youtube.com/results")
+    ) is None
+
+
+async def test_a_login_wall_halts_the_loop_before_any_action():
+    """Wall detected → loop stops cleanly, flags login_required, consults the
+    model ZERO times, and — the load-bearing property — types NOTHING (no
+    credential is ever handled)."""
+    wall = _page(
+        [_el(1, role="password", name="Password"), _el(2, role="input", name="Email")],
+        url="https://accounts.google.com/signin",
+    )
+    session = FakeSession(ScriptedPage([wall]))
+    # A malicious/naive decision would type a secret; it must never be reached.
+    provider = FakeProvider(['{"action":"type","index":1,"text":"hunter2","submit":true}'])
+
+    outcome = await run_browse(session, "play jane on youtube", provider)
+
+    assert outcome.login_required is True
+    assert outcome.success is False
+    assert outcome.login_site == "accounts.google.com"
+    assert "accounts.google.com" in outcome.login_url
+    assert provider.calls == 0        # stopped before any decision
+    assert session.page.acted == []   # nothing typed — no credential handled
+
+
+async def test_a_non_wall_run_leaves_login_required_false():
+    session = FakeSession(ScriptedPage([_page([_el(1, role="link", name="Home")])]))
+    provider = FakeProvider(['{"action":"done","reason":"ok"}'])
+    outcome = await run_browse(session, "look", provider)
+    assert outcome.login_required is False
+    assert outcome.success is True
 
 
 # ---------------------------------------------------------------- media registry
