@@ -366,6 +366,14 @@ async def discover(
                 await browser_session.stop_media()
                 session = await BrowserSession.open(allowlist)
                 await session.goto(start_url)
+            # The pages whose sign-in offers the user already decided ride ON
+            # THE SESSION, because the session is what survives across the
+            # commit hold into perform() — the multi-commit resume reads it
+            # back so form N+1 never re-asks an offer the user answered.
+            try:
+                session.auth_resolved = set(auth_resolved or set())
+            except Exception:
+                pass
             # upload_path (14.6): the file the user named to attach, already
             # grounded + path-safety-checked by the planner before this ran. The
             # loop attaches it and folds it into commit_state; None = a plain
@@ -560,18 +568,43 @@ async def perform(
             # (read-only again) to reach the next form. Only after a submit that
             # actually fired; a submission that never went out ends the flow.
             if fired and commits_done < budget:
-                nxt = await _resume_for_next_form(
+                outcome = await _resume_for_next_form(
                     session, goal, upload_path, profile, fill_grounding, fields,
                     vision_config,
+                    auth_resolved=set(getattr(session, "auth_resolved", None) or set()),
                 )
-                if nxt is not None:
+                payload = (
+                    handoff_from_outcome(outcome) if outcome is not None else None
+                )
+                if (
+                    payload is not None
+                    and payload.reason is Handoff.COMMIT
+                    and payload.commit_state.get("url")
+                ):
+                    nxt = payload.commit_state
+                    logger.info(
+                        "browse_commit: reached the next form at "
+                        f"{str(nxt.get('url'))[:120]} — pausing for approval"
+                    )
                     await browser_session.hold_commit(session, state=nxt)
                     re_held = True   # the registry owns it across the next pause
                     result["next_commit_required"] = True
                     result["next_commit_state"] = nxt
                     return result
-                # No further form (done / login wall / couldn't reach one) — this
-                # was the last submit; fall through to close/keep-open.
+                if payload is not None:
+                    # A hand-off on the way to form N+1 — a fill value, a login
+                    # wall, a challenge, an off-site origin, an auth offer.
+                    # These used to be SILENTLY SWALLOWED ("no further form"),
+                    # abandoning a 2nd/3rd application the moment it needed any
+                    # human input. Park the live session exactly as a
+                    # first-form discovery does and surface the hand-off on the
+                    # result; the planner pauses, and the resumed discovery
+                    # re-attaches to the held window.
+                    re_held = await _hold_for_handoff(session, goal, payload)
+                    result["resume_handoff"] = payload.to_dict()
+                    return result
+                # The loop genuinely finished (or errored) — this was the last
+                # submit; fall through to close/keep-open.
 
             # Final submit: keep the window OPEN on a real submission so the user
             # can see the result. The registry owns the session now — the finally
@@ -609,16 +642,18 @@ async def _resume_for_next_form(
     fill_grounding: str = "",
     fields: Optional[dict] = None,
     vision_config: Any = None,
-) -> Optional[dict]:
-    """Drive the SAME (now read-only again) session onward to the next form for
-    the goal. Returns its code-read commit_state ({url, method, fields, uploads})
-    when a submittable form is reached, else None (the loop finished, hit a
-    sign-in wall, needed an ungrounded value, or could not reach one — all of
-    which end the multi-commit flow). Never raises: a failure to reach another
-    form is a normal end, not a crash. A separate provider is built here
+    auth_resolved: Optional[set] = None,
+) -> Optional[Any]:
+    """Drive the SAME (now read-only again) session onward toward the next form
+    for the goal. Returns the full BrowseOutcome — a reached form
+    (commit_required + commit_state), ANY hand-off raised on the way there
+    (fill/login/challenge/origin/auth — the caller parks and surfaces it; these
+    used to be silently swallowed as "no further form"), or a plain end. None
+    only on an internal error. Never raises. A separate provider is built here
     (build_provider, not the cached create_provider) so its httpx client binds to
-    the browser loop this runs on. The autofill `profile` is threaded through so
-    a later form fills from the same grounded data (15.2)."""
+    the browser loop this runs on. The autofill `profile` fills later forms from
+    the same grounded data (15.2); `auth_resolved` carries the pages whose
+    sign-in offers the user already decided, so form N+1 never re-asks them."""
     from app.agents import browser_loop
     from app.providers.factory import build_provider
     from app.providers.vision import build_vision_provider
@@ -626,13 +661,14 @@ async def _resume_for_next_form(
     provider = build_provider()
     vision = build_vision_provider(vision_config)
     try:
-        outcome = await browser_loop.run_browse(
+        return await browser_loop.run_browse(
             session, goal, provider, commit=True,
             upload_path=(str(upload_path).strip() or None) if upload_path else None,
             profile=profile,
             fill_grounding=fill_grounding,
             fields=fields if isinstance(fields, dict) else None,
             vision=vision,
+            auth_resolved=set(auth_resolved or set()),
         )
     except Exception as exc:
         logger.warning(f"multi-commit resume failed: {type(exc).__name__}: {exc}")
@@ -647,10 +683,3 @@ async def _resume_for_next_form(
                 await vision.aclose()
             except Exception:
                 pass
-    if outcome.commit_required and (outcome.commit_state or {}).get("url"):
-        logger.info(
-            "browse_commit: reached the next form at "
-            f"{str(outcome.commit_state.get('url'))[:120]} — pausing for approval"
-        )
-        return outcome.commit_state
-    return None

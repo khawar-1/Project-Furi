@@ -221,6 +221,14 @@ class AgentPlan(BaseModel):
     # into the browse loop so it skips the auth-offer detection for these URLs.
     # SERIALIZED (rides the parked payload across each pause); defaulted.
     auth_resolved_urls: list[str] = Field(default_factory=list)
+    # RESTART HONESTY: a browse pause can promise "the window stays open and
+    # I'll carry on there", but held sessions are memory-only — after a backend
+    # restart the resume relaunches from the start. When that happens this note
+    # is set and PREFIXES the next hand-off question, so the promise-break is
+    # said out loud instead of silently re-driving the form. SERIALIZED (the
+    # broken promise is only discoverable ON the resume, which may itself be
+    # after a park); defaulted for old payloads.
+    browse_note: str = ""
 
     def next_pending_index(self) -> Optional[int]:
         for i, step in enumerate(self.steps):

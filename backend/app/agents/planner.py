@@ -1376,6 +1376,21 @@ def _browse_origin_approval_signal(step: PlanStep, result: ToolResult) -> Option
     return None
 
 
+def _browse_resume_handoff(
+    step: PlanStep, result: ToolResult
+) -> Optional[browse_state.HandoffPayload]:
+    """The hand-off a multi-commit RESUME raised on the way to the next form
+    (perform() parked the session and surfaced the payload on its result), or
+    None. Reads only the tool's own structured signal — never page content."""
+    if step.tool != _BROWSE_COMMIT_TOOL:
+        return None
+    out = result.output if (result is not None and isinstance(result.output, dict)) else None
+    raw = out.get("resume_handoff") if out else None
+    if not isinstance(raw, dict):
+        return None
+    return browse_state.HandoffPayload.from_dict(raw)
+
+
 def _browse_commit_next(step: PlanStep, result: ToolResult) -> Optional[dict[str, Any]]:
     """The NEXT form contract a multi-commit browse_commit submit reached, or None
     (15.1). Reads only the tool's own structured next_commit_required signal —
@@ -2054,6 +2069,7 @@ class AgentPlanner:
         if pending_fill:
             plan.pending_fill_field = None
             await self._save_fill_answer(pending_fill, answer)
+            self._note_expired_window(plan)
 
         await self._load_fill_profile()
 
@@ -2083,6 +2099,7 @@ class AgentPlanner:
                 if norm not in plan.approved_origins:
                     plan.approved_origins.append(norm)
                 logger.info(f"user approved leaving the named site for {norm}")
+                self._note_expired_window(plan)
                 # RESUME AT THE APPROVED URL (2026-07-19, the WWR resume-blind
                 # incident): the paused browse step is intact and PENDING — there
                 # is nothing to re-plan, and the revise LLM, asked anyway, kept
@@ -2242,10 +2259,17 @@ class AgentPlanner:
     @staticmethod
     def _pause_on_browse_handoff(plan: AgentPlan, question: PlanQuestion) -> None:
         """Pause on a STRUCTURAL browse hand-off (missing form value / optional
-        sign-in offer / off-site origin approval). Counted against the separate
-        _MAX_BROWSE_HANDOFFS budget, NOT the MAX_QUESTIONS clarification cap — a
-        real application needs many of these and the 3-question cap would fail
-        the flow at the third field (2026-07-19)."""
+        sign-in offer / off-site origin approval / challenge). Counted against
+        the separate _MAX_BROWSE_HANDOFFS budget, NOT the MAX_QUESTIONS
+        clarification cap — a real application needs many of these and the
+        3-question cap would fail the flow at the third field (2026-07-19).
+        Consumes plan.browse_note (restart honesty): the one place every
+        hand-off question passes through, so the note prefixes whichever pause
+        comes next."""
+        note = (getattr(plan, "browse_note", "") or "").strip()
+        if note:
+            question = question.model_copy(update={"text": f"{note} {question.text}"})
+            plan.browse_note = ""
         plan.question = question
         plan.status = PlanStatus.AWAITING_CHOICE
         plan.browse_handoffs += 1
@@ -2253,6 +2277,38 @@ class AgentPlanner:
             f"Plan paused on a browse hand-off "
             f"({plan.browse_handoffs}/{_MAX_BROWSE_HANDOFFS}): '{question.text[:80]}'"
         )
+
+    @staticmethod
+    def _note_expired_window(plan: AgentPlan) -> None:
+        """RESTART HONESTY: a fill/auth/origin pause promised the browser window
+        would stay open — but held sessions are memory-only, so after a backend
+        restart the resume must relaunch from the start. Detect the broken
+        promise HERE (resume time, the only moment it is knowable) and say so,
+        via a note the next hand-off question carries, instead of silently
+        re-driving the form. Best-effort — never blocks the resume."""
+        try:
+            from app.core import browser_session
+
+            # Only a COMMIT flow ever holds a window across these pauses — a
+            # read-browse origin pause never promised one, so an empty registry
+            # there is not a broken promise.
+            if not any(s.tool == _BROWSE_COMMIT_TOOL for s in plan.pending_steps()):
+                return
+            if (
+                browser_session.pending_discovery() is None
+                and browser_session.pending_challenge() is None
+            ):
+                plan.browse_note = (
+                    "(The browser window from the earlier pause was closed in "
+                    "the meantime — likely a restart — so I'm redoing the form "
+                    "from the beginning.)"
+                )
+                logger.info(
+                    "browse resume: the held window is gone — restarting the "
+                    "form and saying so"
+                )
+        except Exception:
+            pass
 
     async def _handle_browse_handoff(
         self,
@@ -2484,6 +2540,7 @@ class AgentPlanner:
 
         # Apply as a guest — resume the browse; the held discovery session
         # re-attaches and carries on, and the resolved URL stops the re-ask.
+        self._note_expired_window(plan)
         plan.status = PlanStatus.EXECUTING
         state = await self._graph.ainvoke(self._initial_state(plan, set()))
         return state["plan"]
@@ -2733,6 +2790,10 @@ class AgentPlanner:
                     pause = "failed_step"
                     break
                 browse_state.stamp_commit_contract(step.parameters, discovery.state)
+                # A pending restart-honesty note not consumed by a hand-off
+                # pause is dropped here: the approval card that follows shows
+                # the complete, freshly-read contract — honest on its own.
+                plan.browse_note = ""
                 step.action_detail = _render_commit_detail(discovery.state)
                 # The parameters changed, so the signature changed — a form
                 # discovered this turn was never in the approved set.
@@ -2834,6 +2895,47 @@ class AgentPlanner:
                         "→ pausing for a fresh approval"
                     )
                     break
+
+                # A hand-off raised on the way to the NEXT form of a
+                # multi-commit flow: the fired submit STANDS (recorded onto the
+                # flow history), the plan pauses exactly like a first-form
+                # discovery pause, and the resumed discovery re-attaches to the
+                # window perform() held. Before this, any login/fill/challenge/
+                # origin on the way to form #2/#3 was silently swallowed as
+                # "no further form" and the flow abandoned mid-way.
+                resume_payload = _browse_resume_handoff(step, result)
+                if resume_payload is not None:
+                    _record_browse_commit(step, result)
+                    # The step must RE-DISCOVER on resume — the old approved
+                    # contract is spent. The done-count stays stamped so the
+                    # re-discovered contract's signature can never collide with
+                    # an earlier approval of an identical-looking form.
+                    browse_state.clear_commit_params(step.parameters)
+                    step.parameters[browse_state.COMMITS_DONE_PARAM] = int(
+                        (result.output or {}).get("commits_done") or 0
+                    )
+                    challenge_would_loop = (
+                        resume_payload.reason is browse_state.Handoff.CHALLENGE
+                        and (
+                            plan.challenge_attempts + 1 > _MAX_CHALLENGE_PAUSES
+                            or plan.browse_handoffs >= _MAX_BROWSE_HANDOFFS
+                        )
+                    )
+                    if not challenge_would_loop and await self._handle_browse_handoff(
+                        plan, step, resume_payload
+                    ):
+                        return {"plan": plan, "pause_reason": None}
+                    # No pause available (budget spent, or a challenge that
+                    # would only loop): END the flow honestly with the submits
+                    # that fired — never FAIL a plan whose submissions
+                    # succeeded — and release anything parked for the pause
+                    # that will not happen.
+                    await self._discard_discovery_hold()
+                    await self._discard_challenge_hold()
+                    _fold_commit_history(step)
+                    step.status = StepStatus.COMPLETED
+                    await narrate_step(plan, step, idx)
+                    continue
 
                 # The final (or only) browse_commit submit fired: record it, then
                 # fold the whole per-commit history into the result so the

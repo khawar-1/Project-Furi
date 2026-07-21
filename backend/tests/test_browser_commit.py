@@ -827,6 +827,132 @@ async def test_perform_stops_at_the_commit_budget(_direct_browser_runtime, monke
     assert stub.closed is True      # final submit → closed
 
 
+async def test_perform_surfaces_a_handoff_on_the_way_to_the_next_form(
+    _direct_browser_runtime, monkeypatch
+):
+    """Bug fix: a hand-off between submits (here a fill value on form #2) used
+    to be silently swallowed as 'no further form', abandoning the flow after
+    application #1. Now the live session is parked in the discovery registry
+    (the window stays open) and the hand-off is surfaced on the result for the
+    planner to pause on."""
+
+    class _Provider:
+        async def chat(self, *a, **k):
+            return None
+
+        async def __aexit__(self, *a):
+            return None
+
+    monkeypatch.setattr("app.providers.factory.build_provider", lambda: _Provider())
+
+    async def fake_run_browse(
+        session, goal, provider, *, commit=False, upload_path=None, **kwargs
+    ):
+        return browser_loop.BrowseOutcome(
+            success=False, actions_taken=2,
+            fill_required=True, fill_field="Cover letter",
+            error="need a cover letter",
+        )
+
+    monkeypatch.setattr(browser_loop, "run_browse", fake_run_browse)
+
+    stub = StubCommitSession(verify=True, fired=True)
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+    try:
+        result = await browser_commit.perform(
+            dict(_STATE), goal="apply to the first 3 jobs", max_commits=3
+        )
+        assert result["submitted"] is True
+        assert result.get("next_commit_required") is False
+        handoff = result["resume_handoff"]
+        assert handoff["reason"] == "fill_field"
+        assert handoff["field"] == "Cover letter"
+        assert stub.closed is False                             # parked, not closed
+        assert browser_session.pending_discovery() is not None  # window held open
+    finally:
+        await browser_session.discard_discovery()
+
+
+async def test_the_multicommit_resume_threads_resolved_auth_offers(
+    _direct_browser_runtime, monkeypatch
+):
+    """auth_resolved rides ON THE SESSION into the multi-commit resume, so form
+    #2 never re-asks a sign-in offer the user already decided (it used not to be
+    threaded at all)."""
+    seen = {}
+
+    class _Provider:
+        async def chat(self, *a, **k):
+            return None
+
+        async def __aexit__(self, *a):
+            return None
+
+    monkeypatch.setattr("app.providers.factory.build_provider", lambda: _Provider())
+
+    async def fake_run_browse(
+        session, goal, provider, *, commit=False, auth_resolved=None, **kwargs
+    ):
+        seen["auth"] = set(auth_resolved or set())
+        return browser_loop.BrowseOutcome(success=True, actions_taken=1)
+
+    monkeypatch.setattr(browser_loop, "run_browse", fake_run_browse)
+
+    stub = StubCommitSession(verify=True, fired=True)
+    stub.auth_resolved = {"https://jobs.example.com/apply/1"}
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    result = await browser_commit.perform(
+        dict(_STATE), goal="apply to 2 jobs", max_commits=2
+    )
+
+    assert seen["auth"] == {"https://jobs.example.com/apply/1"}
+    assert result.get("resume_handoff") is None   # plain end — no hand-off
+    assert stub.closed is True                    # final-submit path closes it
+
+
+async def test_a_handoff_between_submits_pauses_the_plan_and_rearms_discovery(
+    db_session, monkeypatch
+):
+    """The planner half of the multi-commit hand-off fix: the fired submit is
+    RECORDED on the flow history, the plan pauses on the fill question, and the
+    step re-arms for a fresh DISCOVERY (contract cleared, done-count stamped so
+    a look-alike form #2 can never collide with form #1's approval)."""
+
+    async def fake_discover(params, session_id=None, **kwargs):
+        return browser_commit.CommitDiscovery(state=dict(_STATE))
+
+    async def fake_exec(tool, params, db, session_id=None, approved=False):
+        out = {
+            "submitted": True, "next_commit_required": False, "commits_done": 1,
+            "url": "https://example.com/comment", "title": "Posted",
+            "response_text": "Comment received",
+            "resume_handoff": {"reason": "fill_field", "field": "Cover letter"},
+        }
+        return ToolResult(
+            success=True, output=out, permission_level=PermissionLevel.DESTRUCTIVE
+        )
+
+    monkeypatch.setattr(browser_commit, "discover", fake_discover)
+    monkeypatch.setattr(planner_mod, "execute_tool", fake_exec)
+
+    provider = FakeProvider([plan_json([_commit_step()])])
+    planner = AgentPlanner(db_session, provider, session_id="s-resume-handoff")
+    plan = await planner.start("post 'hello world' as a comment on example.com")
+    assert plan.status == PlanStatus.AWAITING_APPROVAL
+
+    plan = await planner.resume(plan, approved=True)
+
+    assert plan.status == PlanStatus.AWAITING_CHOICE
+    assert "Cover letter" in plan.question.text
+    s = plan.steps[0]
+    assert s.status == StepStatus.PENDING
+    assert len(s.browse_commits) == 1                        # submit #1 stands
+    assert browser_commit.COMMIT_PARAM not in s.parameters   # re-discovers on resume
+    assert s.parameters[browser_commit.COMMITS_DONE_PARAM] == 1
+    assert plan.browse_handoffs == 1
+
+
 async def test_a_two_form_flow_pauses_twice_each_with_its_own_contract(
     db_session, monkeypatch
 ):
