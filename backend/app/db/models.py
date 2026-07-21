@@ -490,6 +490,36 @@ class GoalThread(Base):
 
 
 # ============================================================
+# Autofill Profile — curated data for browser form-filling (Phase 15.2)
+# ============================================================
+class AutofillField(Base):
+    """One curated field of the user's autofill PROFILE — the grounded data
+    source a commit-mode browse fills forms from (full name, email, phone, a
+    resume path, ...). The profile is the grounding corpus for form fills
+    exactly as the recipient/upload locks work: a value the loop types must
+    trace to one of these rows or the user's own words, never a web page (see
+    app/agents/browser_grounding.fill_value_is_grounded).
+
+    `kind` distinguishes plain text, a link, a document (value is a file PATH,
+    validated with the file-tools path safety on write), and a SECRET (value is
+    sensitive — display-masked in the UI and NEVER placed in any LLM prompt or
+    chat history; code substitutes it at fill time, the password-never-read
+    rule). `key` is the stable lowercase identifier (unique); `label` is the
+    human name shown in Settings. The ONE accessor is app/core/autofill.py (the
+    reminders rule — the API router never touches this table directly)."""
+    __tablename__ = "autofill_fields"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    label: Mapped[str] = mapped_column(String(120), nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    # text | link | document | secret
+    kind: Mapped[str] = mapped_column(String(16), default="text", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+# ============================================================
 # Scheduled Jobs — Persisted timed work (Phase 4, Part 2)
 # ============================================================
 class ScheduledJob(Base):

@@ -53,6 +53,18 @@ def _element(index, role="link", name="x", value="", href=""):
 
 
 # -------------------------------------------------------- the index contract
+async def test_observe_surfaces_the_challenge_probe():
+    """15.4: the in-page CAPTCHA probe rides on the same observe() evaluate as the
+    elements, so a challenge is visible to the loop without a second round-trip.
+    A blocking probe is carried through; a normal page's None stays None."""
+    page = FakePage({**_payload([_element(1)]), "challenge": {"kind": "hCaptcha", "blocking": True}})
+    obs = await observe(page)
+    assert obs.challenge == {"kind": "hCaptcha", "blocking": True}
+
+    plain = await observe(FakePage(_payload([_element(1)])))
+    assert plain.challenge is None
+
+
 async def test_an_index_resolves_only_within_its_own_observation():
     """Both the observation id AND the index must match. This is the whole
     contract: it is what stops a re-rendered page's element 3 being clicked in
@@ -146,6 +158,33 @@ async def test_a_cut_marker_states_the_fact_and_stops_talking():
         assert leak not in marker.lower()
 
 
+async def test_skip_elements_slides_the_window_and_keeps_indexes():
+    """Element paging (2026-07-19, the WWR window trap): render(skip_elements=N)
+    shows the NEXT budget-worth of elements, with their ORIGINAL indexes — an
+    element deep in a long page becomes visible without re-stamping anything."""
+    from app.core.dom_observe import visible_span
+
+    obs = await observe(
+        FakePage(_payload([_element(i, name=f"Link number {i}") for i in range(1, 500)]))
+    )
+    start, end = visible_span(obs)
+    assert start == 0 and 0 < end < obs.element_total
+
+    second = render(obs, skip_elements=end)
+    assert f"[{end + 1}]" in second          # the window starts where the first ended
+    assert "[1] " not in second              # the first window's elements are gone
+    assert f"{end + 1}–" in second           # the header names the span
+
+    start2, end2 = visible_span(obs, end)
+    assert start2 == end and end2 > end      # the span helper agrees with render
+
+
+async def test_skip_elements_past_the_end_renders_an_empty_window():
+    obs = await observe(FakePage(_payload([_element(1, name="only")])))
+    out = render(obs, skip_elements=50)
+    assert "URL:" in out                     # still a valid rendering, no crash
+
+
 def test_the_render_cap_cannot_starve_an_observation():
     """The 5-wide invariant, pinned: moving a budget without moving the cap
     silently clips the element list's tail. Fail loudly instead."""
@@ -232,3 +271,67 @@ def test_the_extract_js_never_reads_a_password_value():
     """Read the source, because the JS runs in the page and no Python test can
     observe what it chose not to collect."""
     assert "role === 'password'" in dom_observe._EXTRACT_JS
+
+
+# ---------------------------------------------- challenge zones (2026-07-19)
+# The structural half of "Jarvis never touches a CAPTCHA": the probe reports
+# the widget boxes as `zones`, the element walk skips anything overlapping one,
+# and these Python helpers back the act-time and vision-path vetoes.
+def _challenge_obs(challenge):
+    return Observation(
+        observation_id="o", url="https://site.test/form", title="",
+        elements=[], element_total=0, page_text="", text_truncated=False,
+        challenge=challenge,
+    )
+
+
+def test_challenge_zone_rects_parse_defensively():
+    obs = _challenge_obs({
+        "kind": "reCAPTCHA", "mode": "embedded",
+        "zones": [
+            {"x": 10, "y": 20, "w": 304, "h": 78},
+            {"x": "bad", "y": {}, "w": 1, "h": 1},      # unparseable → dropped
+            {"x": 5, "y": 5, "w": 0, "h": 50},          # zero-width → dropped
+            "not-a-dict",                                # wrong shape → dropped
+        ],
+    })
+    assert obs.challenge_zone_rects() == [(10.0, 20.0, 304.0, 78.0)]
+    assert _challenge_obs(None).challenge_zone_rects() == []
+    assert _challenge_obs({"kind": "x"}).challenge_zone_rects() == []
+
+
+def test_challenge_mode_defaults_conservative():
+    """A challenge dict WITHOUT a mode (an old-shaped fake) reads as
+    interstitial — a stop is always safe; continuing on an unknown might not be.
+    No challenge at all reads as '' (nothing to decide)."""
+    assert _challenge_obs({"kind": "x", "blocking": True}).challenge_mode() == "interstitial"
+    assert _challenge_obs({"kind": "x", "mode": "embedded"}).challenge_mode() == "embedded"
+    assert _challenge_obs(None).challenge_mode() == ""
+
+
+def test_challenge_solved_reads_the_probe_flag():
+    assert _challenge_obs({"kind": "x", "solved": True}).challenge_solved() is True
+    assert _challenge_obs({"kind": "x", "solved": False}).challenge_solved() is False
+    assert _challenge_obs(None).challenge_solved() is False
+
+
+def test_rect_intersects_zones_matrix():
+    zones = [(100.0, 100.0, 300.0, 80.0)]
+    hits = dom_observe.rect_intersects_zones
+    assert hits((150, 120, 50, 20), zones) is True     # fully inside
+    assert hits((80, 90, 50, 30), zones) is True       # overlaps the corner
+    assert hits((500, 500, 50, 50), zones) is False    # far away
+    assert hits((0, 0, 100, 100), zones) is False      # edge-adjacent, no overlap
+    assert hits((150, 120, 0, 0), zones) is False      # zero-area element
+    assert hits((150, 120, 50, 20), []) is False       # no zones
+
+
+def test_the_extract_js_skips_elements_inside_challenge_zones():
+    """The walk-side half runs only in a real browser — pin the structural
+    contract: zones are computed BEFORE the walk and every stamped element is
+    checked against them (a challenge control is never listed, so the LLM can
+    never be handed it)."""
+    js = dom_observe._EXTRACT_JS
+    assert "inChallengeZone" in js
+    walk = js.split("for (const el of document.querySelectorAll(SELECTOR))")[1]
+    assert "inChallengeZone(el.getBoundingClientRect())" in walk

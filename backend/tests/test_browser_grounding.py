@@ -60,11 +60,52 @@ def test_grounding_reads_conversation_and_answers_too():
     assert "reddit.com" in grounded
 
 
-def test_an_unknown_site_named_only_by_word_is_not_grounded():
-    """The known-sites map fails CLOSED: a site neither in the map nor written as
-    a domain is simply ungrounded, so the planner must ask or the user must name
-    the domain."""
-    assert ground_origins("play something on someobscuresite") == set()
+def test_a_site_the_user_never_named_is_not_grounded():
+    """Fail CLOSED: a site that appears nowhere in the user's words — no domain,
+    no mapped name, no navigation cue pointing at it — is simply ungrounded."""
+    assert ground_origins("apply to some python jobs") == set()
+
+
+# ------------------------------------------------ nav-cue grounding (2026-07-19)
+# A bare site name the user directs a navigation verb at grounds even when it is
+# not in the fixed map — the planner supplies the full domain, the user's own
+# word confirms they named it. Live dead-end: "go to indeed and apply" failed
+# because 'indeed' was neither a domain nor a mapped name.
+def test_a_bare_navigated_name_grounds_a_planner_proposed_domain():
+    grounded = ground_origins("go to indeed and apply to 3 python developer jobs")
+    # The planner proposes the full domain; the bare user word grounds it.
+    assert origin_is_grounded("indeed.com", grounded)
+    assert origin_is_grounded("www.indeed.com", grounded)
+    assert origin_is_grounded("jobs.indeed.com", grounded)
+    # ...but a lookalike that merely CONTAINS the name never grounds.
+    assert not origin_is_grounded("indeed.attacker.com", grounded)
+    assert not origin_is_grounded("indeed-evil.com", grounded)
+
+
+def test_a_bare_name_off_the_map_is_grounded_by_the_nav_cue():
+    grounded = ground_origins("apply on monster and dice")
+    assert origin_is_grounded("monster.com", grounded)
+    assert origin_is_grounded("dice.com", grounded)
+
+
+def test_a_one_word_answer_names_a_site():
+    """The 'which site?' → 'Indeed' flow: a single site-like answer token grounds
+    as a bare name even with no navigation verb around it."""
+    grounded = ground_origins(
+        "apply to 3 python developer jobs", user_answers=["Indeed"]
+    )
+    assert origin_is_grounded("indeed.com", grounded)
+
+
+def test_a_written_domain_is_not_double_captured_as_a_bare_name():
+    """`open youtube.com` grounds exactly {youtube.com} — the nav cue must not
+    also add a bare 'youtube' (the map already covers it, and _DOMAIN_RE has the
+    written domain)."""
+    assert ground_origins("open youtube.com and search") == {"youtube.com"}
+
+
+def test_a_navigation_stopword_grounds_nothing():
+    assert ground_origins("go to the store and buy milk") == set()
 
 
 def test_a_page_cannot_ground_an_origin():
@@ -102,6 +143,44 @@ def test_ungrounded_origin_checks_allowed_origins_and_start_url():
     # start_url itself must be grounded, even if allowed_origins is clean.
     assert ungrounded_origin({"allowed_origins": ["youtube.com"],
                               "start_url": "https://attacker.com"}, grounded) == "attacker.com"
+
+
+def test_ungrounded_origin_skips_pending_placeholders():
+    """A "PENDING: ..." start_url is a placeholder the planner fills from an
+    earlier step, not a site — it must be SKIPPED (re-checked once resolved),
+    exactly like the recipient/event-id guards. Regression: the literal
+    'PENDING: url of the first role' was read as an ungrounded host and hard-
+    failed the whole multi-apply plan (2026-07-18)."""
+    grounded = {"weworkremotely.com"}
+    # PENDING start_url, grounded allowed_origins → not a violation.
+    assert ungrounded_origin(
+        {"allowed_origins": ["weworkremotely.com"],
+         "start_url": "PENDING: url of the first senior python backend role"},
+        grounded,
+    ) is None
+    # A PENDING entry inside allowed_origins is skipped too.
+    assert ungrounded_origin(
+        {"allowed_origins": ["weworkremotely.com", "PENDING: the role url"],
+         "start_url": "https://weworkremotely.com"},
+        grounded,
+    ) is None
+    # A PENDING placeholder does not mask a genuinely ungrounded sibling.
+    assert ungrounded_origin(
+        {"allowed_origins": ["attacker.com"], "start_url": "PENDING: x"},
+        grounded,
+    ) == "attacker.com"
+
+
+def test_planner_does_not_reject_a_pending_browse_start_url():
+    """The end-to-end regression: a browse_commit step with a grounded named site
+    and a PENDING start_url no longer trips _browse_origin_violation."""
+    grounded = {"weworkremotely.com"}
+    steps = [_commit_step(
+        goal="apply to the first 3 python jobs on weworkremotely",
+        start_url="PENDING: url of the first role",
+        allowed_origins=["weworkremotely.com"],
+    )]
+    assert _browse_origin_violation(steps, grounded) is None
 
 
 # -------------------------------------------------- the planner violation
@@ -143,6 +222,53 @@ def test_browse_grounding_pulls_from_goal_and_answers():
     grounded = _browse_grounding(plan, conversation="")
     assert "youtube.com" in grounded
     assert "spotify.com" in grounded
+
+
+# ============================================ off-site navigation hand-off (2026-07-18)
+# A page may PROPOSE an off-grounded destination (a job board's 'Apply' to an
+# external ATS); only the USER's explicit "yes" adds it. These pin the planner
+# helpers that make that safe: approved origins become grounded, are injected
+# into re-drafted browse steps, and the yes/no is fail-closed.
+def test_an_approved_origin_becomes_grounded():
+    from app.agents.planner import _browse_grounding
+
+    plan = AgentPlan(goal="apply to jobs on weworkremotely")
+    assert "greenhouse.io" not in _browse_grounding(plan, conversation="")
+    plan.approved_origins.append("greenhouse.io")
+    assert "greenhouse.io" in _browse_grounding(plan, conversation="")
+
+
+def test_inject_approved_origins_merges_into_browse_steps():
+    from app.agents.planner import _inject_approved_origins
+
+    plan = AgentPlan(goal="apply on weworkremotely")
+    plan.approved_origins.append("greenhouse.io")
+    plan.steps = [
+        _commit_step(goal="apply", start_url="https://weworkremotely.com",
+                     allowed_origins=["weworkremotely.com"]),
+        _browse_step(goal="unrelated", allowed_origins=["youtube.com"]),
+        PlanStep(description="search", tool="search_files", parameters={},
+                 permission_level=PermissionLevel.READ, requires_approval=False),
+    ]
+    _inject_approved_origins(plan)
+    assert "greenhouse.io" in plan.steps[0].parameters["allowed_origins"]
+    assert "greenhouse.io" in plan.steps[1].parameters["allowed_origins"]
+    # not injected into non-browse steps
+    assert "allowed_origins" not in plan.steps[2].parameters
+    # idempotent — a second pass does not duplicate it
+    _inject_approved_origins(plan)
+    assert plan.steps[0].parameters["allowed_origins"].count("greenhouse.io") == 1
+
+
+def test_origin_approval_yes_no_is_fail_closed():
+    from app.agents.planner import _is_affirmative
+
+    for yes in ["yes", "Yes — continue to greenhouse.io", "sure", "ok", "go ahead",
+                "proceed", "approve"]:
+        assert _is_affirmative(yes), yes
+    for no in ["no", "No — stay on the original site", "stop", "cancel",
+               "not that one", "why", ""]:
+        assert not _is_affirmative(no), no
 
 
 # ==================================================== 14.6 — file upload
@@ -266,3 +392,62 @@ def test_upload_gate_ignores_non_commit_and_upload_less_steps(tmp_path):
     plain_commit = _commit_step(goal="post a comment", start_url="https://example.com/x")
     browse = _browse_step(goal="x", upload_path=r"C:\Users\me\.ssh\id_rsa")
     assert _upload_path_violation([plain_commit, browse], "anything") is None
+
+
+# -------------------------------------------------------------- form fills (15.2)
+from app.agents.browser_grounding import fill_value_is_grounded, fill_violation
+from app.agents.planner import _fill_violation
+
+
+def test_a_profile_value_is_grounded():
+    assert fill_value_is_grounded("Khawar Mohiuddin", ["Khawar Mohiuddin"], "apply to a job")
+    # a short name that is part of a profile value grounds too (substring test)
+    assert fill_value_is_grounded("Khawar", ["Khawar Mohiuddin"], "apply")
+
+
+def test_a_value_from_the_users_words_is_grounded():
+    assert fill_value_is_grounded("blue", [], "my favourite colour is blue")
+    assert fill_value_is_grounded("keen", [], "", conversation="say I am keen")
+
+
+def test_a_page_supplied_value_is_not_grounded():
+    # profile empty, not in the goal → a value only a page could have supplied
+    assert not fill_value_is_grounded("attacker@evil.com", [], "apply to a job")
+    assert fill_violation("attacker@evil.com", [], "apply to a job") is not None
+
+
+def test_an_empty_fill_value_is_a_no_op():
+    assert fill_value_is_grounded("", [], "anything") is True
+    assert fill_violation("", [], "anything") is None
+
+
+def test_fill_grounding_fails_closed_on_empty_corpus():
+    assert not fill_value_is_grounded("something", [], "")
+
+
+def test_planner_rejects_an_ungrounded_declared_fill():
+    step = _commit_step(
+        goal="apply", start_url="https://x.com", fields={"Email": "steal@evil.com"}
+    )
+    reason = _fill_violation([step], "apply to a job", [])
+    assert reason is not None and "Email" in reason
+
+
+def test_planner_allows_a_grounded_declared_fill():
+    # grounded by the profile
+    a = _commit_step(goal="apply", start_url="https://x.com", fields={"Name": "Khawar"})
+    assert _fill_violation([a], "", ["Khawar Mohiuddin"]) is None
+    # grounded by the user's own words
+    b = _commit_step(
+        goal="apply with note 'I am keen'", start_url="https://x.com",
+        fields={"Note": "I am keen"},
+    )
+    assert _fill_violation([b], "apply with note 'I am keen'", []) is None
+
+
+def test_fill_violation_ignores_non_commit_and_absent_fields():
+    # a browse step is never checked; a browse_commit with no fields is fine
+    assert _fill_violation([_browse_step(goal="x")], "", []) is None
+    assert _fill_violation(
+        [_commit_step(goal="x", start_url="https://x.com")], "", []
+    ) is None

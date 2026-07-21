@@ -93,6 +93,28 @@ _EVENT_ID_PARAMS = {
 }
 _CALENDAR_READ_TOOLS = ("list_events", "find_events")
 
+# URL parameters: a read step whose url is a per-page template ("PENDING: the
+# three job listing URLs from the search results") expands into one concrete
+# step per result URL from the most recent completed web_search — the web
+# mirror of _FILE_PARAMS (2026-07-19: the WWR run died at the replan cap on
+# exactly this designed flow, "Step parameters still contain unresolved
+# 'PENDING:' placeholders"). URLs come EXCLUSIVELY from web_search's own ranked
+# results (RRF order), so the read targets stay grounded in a search the plan
+# ran — never in free text. Both tools are strictly READ.
+_URL_PARAMS = {
+    "read_webpage": "url",
+    "browse_page": "url",
+}
+
+# "the first three …" / "3 job listings" — the count the placeholder itself
+# asks for. Only small counts; no number found = expand every result (the
+# _expand_files ALL-found rule), still capped by max_new.
+_COUNT_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+_COUNT_RE = re.compile(r"\b(one|two|three|four|five|six|seven|eight|nine|ten|[1-9]\d?)\b", re.IGNORECASE)
+
 # An explicitly-universal file request: "all (the) files", "every file",
 # "all file/folders", "everything". When the goal says this, no extension
 # filter the user never mentioned may narrow it. Shared with the planner's
@@ -262,6 +284,77 @@ def _substitute_folder(
     return [_concrete_step(template, key, pick, description=template.description)]
 
 
+def urls_from_step(step: PlanStep) -> list[tuple[str, str]]:
+    """(url, title) pairs a COMPLETED web_search step's real output produced, in
+    the tool's own ranked (RRF) order — the ground truth URL expansion draws
+    from. Never LLM text, never page prose."""
+    if (
+        step.tool != "web_search"
+        or step.status != StepStatus.COMPLETED
+        or step.result is None
+    ):
+        return []
+    output = step.result.output
+    if not isinstance(output, dict):
+        return []
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for r in output.get("results") or []:
+        if isinstance(r, dict):
+            url = str(r.get("url") or "").strip()
+            if url and url not in seen:
+                seen.add(url)
+                pairs.append((url, str(r.get("title") or "").strip()))
+    return pairs
+
+
+def _requested_count(text: str) -> Optional[int]:
+    """The small count the placeholder itself asks for ("the first three …",
+    "3 job listings"), or None when it names none."""
+    m = _COUNT_RE.search(text or "")
+    if not m:
+        return None
+    token = m.group(1).lower()
+    return _COUNT_WORDS.get(token) or int(token)
+
+
+def _expand_urls(
+    template: PlanStep,
+    key: str,
+    completed: list[PlanStep],
+    max_new: int,
+) -> Optional[list[PlanStep]]:
+    """The web mirror of _expand_files: a read step whose url is a PENDING
+    template expands into one concrete read per result URL from the most recent
+    completed web_search — top-N when the placeholder names a count ("the first
+    three"), every result otherwise. Both target tools are READ; the URLs come
+    exclusively from the search the plan already ran."""
+    source = next((s for s in reversed(completed) if urls_from_step(s)), None)
+    if source is None:
+        # A search DID run and produced no URLs → "read the found pages" is
+        # honestly zero steps — an outcome, not a failure (the _expand_files
+        # empty-search rule). No search at all → the LLM replan path decides.
+        if any(s.tool == "web_search" for s in completed):
+            return []
+        return None
+
+    pool = urls_from_step(source)
+    count = _requested_count(
+        f"{template.parameters.get(key) or ''} {template.description or ''}"
+    )
+    if count:
+        pool = pool[:count]
+    if len(pool) > max_new:
+        return None  # would blow the plan-size cap — let the replan explain
+    return [
+        _concrete_step(
+            template, key, url,
+            description=f"Read {title}" if title else f"Read {url}",
+        )
+        for url, title in pool
+    ]
+
+
 def _resolved_lookup_email(step: PlanStep) -> Optional[tuple[str, str]]:
     """(contact name, email) when a completed lookup_contact step RESOLVED a
     contact that has an email on file. This is the ONLY source recipient
@@ -407,6 +500,8 @@ def resolve(plan: AgentPlan, index: int, max_new: int) -> Optional[list[PlanStep
             return _substitute_recipient(template, key, completed)
         if _EVENT_ID_PARAMS.get(template.tool) == key:
             return _substitute_event_id(template, key, completed)
+        if _URL_PARAMS.get(template.tool) == key:
+            return _expand_urls(template, key, completed, max_new)
         return None
     except Exception as e:  # pragma: no cover — belt: never break the planner
         logger.warning(f"Placeholder resolution crashed (falling back to LLM): {e}")

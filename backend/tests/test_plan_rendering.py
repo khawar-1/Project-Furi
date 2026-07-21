@@ -491,3 +491,57 @@ def test_browse_commit_completion_without_response_text_is_still_honest():
     )))
     assert "Submitted the form" in text
     assert "https://example.com/contact" in text
+
+
+# ---------------------------- 15.5: a multi-commit flow quotes EACH response
+def test_multi_commit_completion_quotes_every_server_response():
+    """A flow that submitted several forms ("apply to 3 jobs") renders ONE grounded
+    block per commit — each site's OWN response, not just the last. Without this
+    the flow-level summary would drop the earlier submits' confirmations."""
+    text = completed_results_text(completed_plan(done_step(
+        "browse_commit",
+        {
+            "submitted": True,
+            "url": "https://jobs.example.com/apply/3",
+            "title": "Applied",
+            "response_text": "Application 3 received",
+            "window_open": True,
+            "commit_history": [
+                {"n": 1, "url": "https://jobs.example.com/apply/1", "title": "Applied",
+                 "response_text": "Application 1 received"},
+                {"n": 2, "url": "https://jobs.example.com/apply/2", "title": "Applied",
+                 "response_text": "Application 2 received"},
+                {"n": 3, "url": "https://jobs.example.com/apply/3", "title": "Applied",
+                 "response_text": "Application 3 received"},
+            ],
+        },
+        permission=PermissionLevel.DESTRUCTIVE,
+    )))
+    assert "Submitted 3 forms" in text
+    # Every commit's destination AND its own server response is quoted.
+    for i in (1, 2, 3):
+        assert f"apply/{i}" in text
+        assert f"Application {i} received" in text
+    assert "window is left open" in text          # the final form's kept-open note
+
+
+def test_single_entry_commit_history_renders_the_single_form_path():
+    """A one-commit flow (history length 1) is NOT a multi-form render — it stays
+    the ordinary single grounded confirmation (backwards compatible)."""
+    text = completed_results_text(completed_plan(done_step(
+        "browse_commit",
+        {
+            "submitted": True,
+            "url": "https://example.com/contact",
+            "title": "Sent",
+            "response_text": "Thanks!",
+            "commit_history": [
+                {"n": 1, "url": "https://example.com/contact", "title": "Sent",
+                 "response_text": "Thanks!"},
+            ],
+        },
+        permission=PermissionLevel.DESTRUCTIVE,
+    )))
+    assert "Submitted the form" in text          # single-form wording, not "Submitted N forms"
+    assert "Submitted 1 forms" not in text
+    assert "Thanks!" in text

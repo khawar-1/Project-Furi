@@ -34,6 +34,7 @@ import {
 } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import {
+  autofillApi,
   browserApi,
   indexApi,
   initiativeApi,
@@ -41,6 +42,9 @@ import {
   settingsApi,
   voiceApi,
   voiceUpdatePayload,
+  type AutofillField,
+  type AutofillKind,
+  type BrowserVisionState,
   type VoiceUpdateBody,
 } from '@/lib/api';
 import { useVoiceStore } from '@/stores/voiceStore';
@@ -1738,6 +1742,262 @@ function BrowserAccountCard() {
   );
 }
 
+function BrowserVisionCard() {
+  const [state, setState] = useState<BrowserVisionState | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setState(await browserApi.getVision());
+      } catch {
+        /* browser control is optional; a missing endpoint is not an error here */
+      }
+    })();
+  }, []);
+
+  const handleToggle = async () => {
+    if (!state || isBusy || !state.configured) return;
+    const next = !state.enabled;
+    // Optimistic + revert (the FileIndexCard lesson).
+    setState({ ...state, enabled: next });
+    setIsBusy(true);
+    setError(null);
+    try {
+      setState(await browserApi.setVision(next));
+    } catch (e) {
+      setState({ ...state, enabled: !next });
+      setError(e instanceof Error ? e.message : 'Could not update the setting');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const enabled = state?.enabled ?? false;
+  const configured = state?.configured ?? false;
+
+  return (
+    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
+      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
+        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
+          <Eye size={15} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-sm font-semibold text-slate-200">Browser vision fallback</h2>
+          <p className="text-xs text-muted truncate">
+            Let Jarvis "look" at a page when text alone can't find a control
+          </p>
+        </div>
+        <ToggleSwitch
+          checked={enabled}
+          disabled={isBusy || !configured}
+          onToggle={() => void handleToggle()}
+          label="Enable browser vision fallback"
+        />
+      </div>
+
+      <div className="px-4 py-3.5 space-y-3">
+        <p className="text-xs text-slate-400">
+          When driving a live site, Jarvis reads the page's structure to decide what to click.
+          On pages with icon-only buttons or visual-only controls that can fail. With this on,
+          it falls back to a <span className="text-slate-300">screenshot</span> sent to an
+          image-capable model <span className="text-slate-300">only when it gets stuck</span> —
+          the screenshot is held in memory and never saved. It still clicks a real page element,
+          never blind coordinates, so every safety rule is unchanged.
+        </p>
+
+        {!configured && (
+          <div className="p-2.5 rounded-lg bg-surface-2 border border-surface-border text-[11px] text-slate-500">
+            No vision key is configured. Add <span className="font-mono text-slate-400">VISION_API_KEY</span>{' '}
+            (or reuse <span className="font-mono text-slate-400">GEMINI_API_KEY</span>) in your{' '}
+            <span className="font-mono text-slate-400">.env</span> to use this. Until then Jarvis
+            stays text-only when driving the browser.
+          </div>
+        )}
+
+        {configured && state && (
+          <p className="text-[11px] text-slate-600">
+            Using <span className="text-slate-500">{state.provider}</span> ·{' '}
+            <span className="font-mono text-slate-500">{state.model}</span>. Off by default; each
+            fallback sends one screenshot and is bounded per task.
+          </p>
+        )}
+
+        {error && (
+          <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs">
+            {error}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const AUTOFILL_KINDS: { value: AutofillKind; label: string }[] = [
+  { value: 'text', label: 'Text' },
+  { value: 'link', label: 'Link' },
+  { value: 'document', label: 'Document (file path)' },
+  { value: 'secret', label: 'Secret (hidden)' },
+];
+
+/** The grounded autofill profile (Phase 15.2): the curated data Jarvis fills web
+ *  forms from. A form value must trace to one of these fields or the user's own
+ *  words — never a web page. Secrets are display-masked and never sent to the AI. */
+function AutofillCard() {
+  const [fields, setFields] = useState<AutofillField[]>([]);
+  const [label, setLabel] = useState('');
+  const [value, setValue] = useState('');
+  const [kind, setKind] = useState<AutofillKind>('text');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      setFields(await autofillApi.list());
+    } catch {
+      /* the profile is optional; a missing endpoint is not an error here */
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const add = async () => {
+    if (!label.trim() || !value.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await autofillApi.upsert({ label: label.trim(), value: value.trim(), kind });
+      setLabel('');
+      setValue('');
+      setKind('text');
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save the field');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (key: string) => {
+    try {
+      await autofillApi.remove(key);
+      await refresh();
+    } catch {
+      /* best-effort; the list re-syncs on the next load */
+    }
+  };
+
+  const shown = (f: AutofillField): string =>
+    f.is_secret ? '••••••••' : f.value ?? '';
+
+  return (
+    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
+      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
+        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
+          <ShieldCheck size={15} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-sm font-semibold text-slate-200">Autofill profile</h2>
+          <p className="text-xs text-muted truncate">
+            Your data for filling web forms — grounded, never invented
+          </p>
+        </div>
+      </div>
+
+      <div className="px-4 py-3.5 space-y-3">
+        <p className="text-[11px] text-slate-500">
+          When Jarvis fills a form on a live site, every value must come from this profile
+          or your own words — never from the page. Secrets are hidden from the AI and only
+          substituted at the moment of filling.
+        </p>
+
+        {fields.length > 0 && (
+          <div className="space-y-1.5">
+            {fields.map((f) => (
+              <div
+                key={f.id}
+                className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-surface-2 border border-surface-border"
+              >
+                <span className="text-xs font-medium text-slate-300 w-28 truncate">{f.label}</span>
+                <span
+                  className={clsx(
+                    'flex-1 text-xs truncate',
+                    f.is_secret ? 'text-slate-500 font-mono' : 'text-slate-400'
+                  )}
+                >
+                  {shown(f)}
+                </span>
+                {f.is_secret && (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                    secret
+                  </span>
+                )}
+                {f.kind === 'document' && (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+                    file
+                  </span>
+                )}
+                <button
+                  onClick={() => void remove(f.key)}
+                  className="text-slate-600 hover:text-red-400 transition-colors"
+                  title="Remove"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {error && (
+          <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs">
+            {error}
+          </div>
+        )}
+
+        {/* Add a field */}
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="Label (e.g. Full name)"
+            className="flex-1 min-w-[8rem] px-2.5 py-1.5 rounded-lg bg-surface-2 border border-surface-border text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/40"
+          />
+          <input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            type={kind === 'secret' ? 'password' : 'text'}
+            placeholder={kind === 'document' ? 'File path' : 'Value'}
+            className="flex-1 min-w-[8rem] px-2.5 py-1.5 rounded-lg bg-surface-2 border border-surface-border text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/40"
+          />
+          <select
+            value={kind}
+            onChange={(e) => setKind(e.target.value as AutofillKind)}
+            className="px-2 py-1.5 rounded-lg bg-surface-2 border border-surface-border text-xs text-slate-300 focus:outline-none focus:border-cyan-500/40"
+          >
+            {AUTOFILL_KINDS.map((k) => (
+              <option key={k.value} value={k.value}>
+                {k.label}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => void add()}
+            disabled={busy || !label.trim() || !value.trim()}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-200 bg-cyan-500/15 border border-cyan-500/30 hover:bg-cyan-500/25 transition-colors disabled:opacity-40"
+          >
+            {busy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+            Add
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SettingsPanel() {
   return (
     <div className="flex flex-col h-full bg-surface overflow-hidden">
@@ -1759,6 +2019,8 @@ export function SettingsPanel() {
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1">Integrations</p>
         <GoogleAccountCard />
         <BrowserAccountCard />
+        <BrowserVisionCard />
+        <AutofillCard />
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Files</p>
         <FileIndexCard />
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Proactive</p>

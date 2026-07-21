@@ -123,7 +123,15 @@ _STRONG_DOMAIN_RE = re.compile(
     # call — the recall-first trade-off). These are the sites a user says "play
     # X on ___" about — a small, stable vocabulary.
     r"\byoutube\b|\byou\s?tube\b|\bspotify\b|\bnetflix\b|\bvimeo\b|"
-    r"\bsoundcloud\b|\btwitch\b|"
+    r"\bsoundcloud\b|\btwitch\b|\bgithub\b|\bgitlab\b|"
+    # Sign in to / operate a web app the user names (Phase 14 BROWSE, the github
+    # sign-in incident 2026-07-18: "sign in to github and open my oldest repo"
+    # named no domain noun, missed the gate, fell to plain chat — which then
+    # asked the user for their password). "sign in / log in / sign into / log
+    # into" (incl. signin/login/sign-in) is an act-on-a-site intent that fires
+    # the gate ALONE; the classifier makes the BROWSE/CHAT call. Rare in small
+    # talk, so a false fire costs one temp-0 call — the recall-first trade-off.
+    r"\bsign(?:ing|ed)?[\s-]?in(?:to)?\b|\blog(?:ging|ged)?[\s-]?in(?:to)?\b|"
     # "search" / "look it up" as verbs fire alone (live bug 2026-07-16,
     # round 2: "yes search and tell me when is the new seasopn of blackclover
     # comming out" — a go-ahead to the chat LLM's own "I can search the web,
@@ -375,14 +383,14 @@ _CLASSIFY_PROMPT = """You route messages for Jarvis OS, a personal AI that can a
 - EMAIL: search and read Gmail; draft, send, or reply to email.
 - CALENDAR: list/find Google Calendar events; create, update, or delete events.
 - WEB: search the web and open/read a web page to look up online information.
-- BROWSE: drive a real web browser to ACT on a live site — play or watch a video (YouTube and the like), or navigate an interactive web app the user names.
+- BROWSE: drive a real web browser to ACT on a live site the user names — play or watch a video (YouTube and the like), sign in to a site and navigate it, open something in a web app (a repo on GitHub, a page in an account), or fill in and submit a web form (e.g. apply to jobs).
 
 Reply with EXACTLY one word:
 TASK — asks Jarvis to perform a FILES/SYSTEM action now, OR asks what Jarvis ITSELF did on the machine (the folder/file it created, what it deleted, what it has done today).
 EMAIL — asks Jarvis to search, read, draft, send, or reply to email now.
 CALENDAR — asks Jarvis to look at or change calendar events now.
 WEB — asks Jarvis to search the web or open/read a web page now, OR asks a factual question better answered from the live internet than from stale built-in knowledge. This covers two cases: (a) anything CURRENT or time-sensitive (news, release dates, upcoming seasons or products, prices, scores, weather), and (b) a factual question about a SPECIFIC real-world entity — a person, company, product, place, organization, or a creative work such as a show, anime, movie, game, or book ("what do you know about Black Clover", "who is the CEO of X", "tell me about the Framework laptop"). Jarvis looks these up rather than guessing, promising, or reciting possibly-outdated training data.
-BROWSE — asks Jarvis to DO something on a live website by driving a browser: play or watch a video ("play jane by the long faces on youtube", "watch the new trailer on youtube", "open youtube and play some lofi"), or operate an interactive web app. This is ACTING on a live site — distinct from WEB, which only LOOKS UP information.
+BROWSE — asks Jarvis to DO something on a live website by driving a browser: play or watch a video ("play jane by the long faces on youtube", "watch the new trailer on youtube", "open youtube and play some lofi"); sign in to a site and then navigate or open something in it ("sign in to github and open my oldest repo", "log into my account and download the invoice"); operate an interactive web app; or fill in and submit a web form ("apply to the first 3 python jobs on weworkremotely"). This is ACTING on a live site — distinct from WEB, which only LOOKS UP information. Jarvis never asks the user for a password: if a site needs signing in, it opens the sign-in page for the user and continues after — so "sign in to X and ..." is BROWSE, never a request for credentials.
 CHAT — anything else: casual conversation; OPINION, reasoning, or general/timeless concepts Jarvis can reason about ("what do you think of vector databases", "explain recursion", "how does TCP work"); help writing or debugging code; questions about the user's own life or about Jarvis itself; sharing information about their life; talking ABOUT the user's own past or hypothetical actions; an answer to an earlier question; or a request none of these tools can do (reminders — handled elsewhere).
 
 Judge the INTENT, not the vocabulary:
@@ -392,6 +400,7 @@ Judge the INTENT, not the vocabulary:
 - "my calendar is packed this week" is CHAT, while "put a meeting with jamil on my calendar tomorrow at 3" is CALENDAR.
 - "what do you think of vector databases?" is CHAT (answerable from knowledge), while "search the web for the latest LangGraph release" or "look up who won the match today" or "open https://example.com and summarize it" is WEB.
 - "play jane by the long faces on youtube", "watch the new severance trailer on youtube", or "open youtube and play some lofi" is BROWSE (act on a live site), while "what's the most-viewed youtube video" or "who owns youtube" is WEB (just look it up).
+- "sign in to github and open my oldest repo", "log into linkedin and open my messages", or "apply to the first 3 python jobs on weworkremotely" is BROWSE (act on a live site — signing in, navigating, or submitting a form), while "what is github" or "who founded linkedin" is WEB (just look it up).
 - A question about something CURRENT is WEB even when it never says "search": "when is the new season of Black Clover coming out?" or "what's the latest iPhone price?" needs up-to-date information — never answer it from stale knowledge or promise to look it up later.
 - A factual question about a SPECIFIC real-world thing is WEB even when it isn't time-sensitive and never says "search": "what do you know about Black Clover", "who is Grigori Perelman", "tell me about the Framework laptop" — look them up for an accurate, current answer rather than reciting possibly-stale training data. But a question of OPINION, REASONING, or a general/timeless concept is CHAT: "what do you think of Black Clover", "how does anime production work", "what is recursion".
 - A question about JARVIS'S OWN actions is TASK, not CHAT — Jarvis answers it from its action record, never from memory: "what was the name of the folder you created?", "did you delete anything today?", "who created the jarvis_test folder?" (Jarvis may have) are all TASK; "I deleted a bunch of files yesterday" is CHAT (the user talking about their own actions).
@@ -400,7 +409,7 @@ Any wording that asks for one of those actions now — or asks about actions Jar
 {context_block}USER MESSAGE:
 {message}
 
-One word (TASK, EMAIL, CALENDAR, WEB, or CHAT):"""
+One word (TASK, EMAIL, CALENDAR, WEB, BROWSE, or CHAT):"""
 
 # The recognized action labels. All three feed the SAME planner and the same
 # approval gates — there is one execution path. The label buys recall +

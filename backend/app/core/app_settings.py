@@ -32,6 +32,7 @@ VOICE_CONFIG_KEY = "voice.config"
 CONTEXT_CONFIG_KEY = "context.config"
 INITIATIVE_CONFIG_KEY = "initiative.config"
 INITIATIVE_JOB_ID_KEY = "initiative.job_id"
+BROWSER_VISION_CONFIG_KEY = "browser_vision.config"
 
 
 # --------------------------------------------------------- generic accessor
@@ -651,3 +652,46 @@ async def get_initiative_job_id(db: AsyncSession) -> Optional[str]:
 
 async def set_initiative_job_id(db: AsyncSession, job_id: Optional[str]) -> None:
     await set_setting(db, INITIATIVE_JOB_ID_KEY, job_id)
+
+
+# ------------------------------------------- browser-vision config (Phase 15.3)
+
+
+@dataclass(frozen=True)
+class BrowserVisionConfig:
+    """Phase 15.3 — the browser loop's DOM-first vision fallback toggle.
+
+    `enabled` defaults OFF: vision uses a SECOND, image-capable model (the
+    primary deepseek-chat has none) and sends a screenshot to it, so it is
+    strictly opt-in like sensing/index/voice. Even enabled, it only actually runs
+    when a vision key is configured in .env (VISION_API_KEY / GEMINI_API_KEY) and
+    only when the loop is STUCK — otherwise the loop stays DOM-only. There is no
+    credential field here on purpose: the key lives in .env (the OAuth/API-key
+    convention), only the toggle is a runtime setting."""
+    enabled: bool
+
+
+def default_browser_vision_config() -> BrowserVisionConfig:
+    return BrowserVisionConfig(enabled=False)
+
+
+def _coerce_browser_vision(raw: Any) -> BrowserVisionConfig:
+    """A stored dict → BrowserVisionConfig, defaulting a missing/invalid part
+    (never a crash from a hand-edited row) — the ContextConfig discipline."""
+    default = default_browser_vision_config()
+    if not isinstance(raw, dict):
+        return default
+    return BrowserVisionConfig(enabled=bool(raw.get("enabled", default.enabled)))
+
+
+async def get_browser_vision_config(db: AsyncSession) -> BrowserVisionConfig:
+    raw = await get_setting(db, BROWSER_VISION_CONFIG_KEY, default=None)
+    if raw is None:
+        return default_browser_vision_config()
+    return _coerce_browser_vision(raw)
+
+
+async def set_browser_vision_config(
+    db: AsyncSession, config: BrowserVisionConfig
+) -> None:
+    await set_setting(db, BROWSER_VISION_CONFIG_KEY, {"enabled": config.enabled})

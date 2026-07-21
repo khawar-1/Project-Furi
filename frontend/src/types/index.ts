@@ -177,6 +177,11 @@ export type PlanStatus =
 export interface PlanQuestion {
   text: string;
   options: string[];
+  /** A non-plain question the UI renders distinctly. "login"/"signup" mark a
+   *  credential handoff where the USER signs in / creates the account in the
+   *  opened window — Jarvis never enters the credentials. Empty/undefined = a
+   *  plain clarifying question. */
+  kind?: string;
 }
 
 export type PlanStepStatus =

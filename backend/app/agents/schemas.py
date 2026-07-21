@@ -44,10 +44,16 @@ class PlanQuestion(BaseModel):
     """A clarifying question the planner needs answered before it can continue
     ("three files are named notes.txt — which one?"). Answering a question
     never executes anything: the answer only feeds the next planning round,
-    and any write/destructive step still pauses for approval afterwards."""
+    and any write/destructive step still pauses for approval afterwards.
+
+    `kind` tags a question that is not an ordinary clarification so the UI can
+    render it distinctly: "login"/"signup" mark a credential handoff where the
+    USER signs in / creates the account in the opened window (Jarvis never enters
+    the credentials). Empty = a plain clarifying question."""
 
     text: str
     options: list[str] = Field(default_factory=list)
+    kind: str = ""
 
 
 class PlanStep(BaseModel):
@@ -81,6 +87,16 @@ class PlanStep(BaseModel):
     # whether plan rule 16 does anything. Excluded from signature() by
     # construction; defaulted, so plans parked before this field deserialize.
     auto_fanout: bool = False
+    # MULTI-COMMIT flow record (15.5): one entry per approved form this
+    # browse_commit step has SUBMITTED so far — {n, url, title, response_text}
+    # from each fired submit. It ACCUMULATES across the approval pauses (the
+    # step object is re-armed and re-parked between commits, so its result is
+    # cleared each time — this is where the per-commit server responses survive),
+    # and the completion folds it into result.output["commit_history"] so the
+    # grounded flow summary can quote each server response, not just the last.
+    # SERIALIZED (rides the parked payload); excluded from signature() by
+    # construction; defaulted, so plans parked before this field deserialize.
+    browse_commits: list[dict[str, Any]] = Field(default_factory=list)
 
     def signature(self) -> str:
         """Stable identity of WHAT this step does — used to check that an
@@ -129,6 +145,82 @@ class AgentPlan(BaseModel):
     # left memory) and is fair to audit. Empty = the goal had one reading, or
     # we could not tell — both mean "leave the summary's own judgement alone".
     primary_reading: str = ""
+    # Off-site navigation hand-off (2026-07-18): page-derived origins the USER
+    # explicitly approved visiting (a job board's 'Apply' link to an external
+    # ATS, &c.). A browse loop never follows a page-derived site on its own — it
+    # pauses and asks; only a clear "yes" adds the origin here, and this list is
+    # then (a) folded into the browse grounding corpus (_browse_grounding) and
+    # (b) injected into every browse/browse_commit step's allowed_origins in code
+    # (_inject_approved_origins) so the re-drafted step may reach it. SERIALIZED
+    # (rides the parked payload across the approval/answer pause); defaulted so
+    # plans parked before this field deserialize.
+    approved_origins: list[str] = Field(default_factory=list)
+    # The page-derived origin currently awaiting the user's yes/no, set when the
+    # plan pauses on an origin-approval question and cleared when it is answered
+    # (answer() reads it to decide whether to approve). SERIALIZED for the same
+    # reason as approved_origins. Empty = no origin-approval is pending.
+    pending_origin_approval: Optional[str] = None
+    # The exact URL the paused browse wanted to open on that origin (2026-07-19,
+    # the WWR resume-blind incident: after the user's "yes" the revised browse
+    # restarted at the ORIGINAL start_url, wandered the homepage and hit the
+    # stuck-limit — the approved destination itself had been thrown away). On an
+    # affirmative answer, code stamps this into the paused browse step's
+    # start_url so the resumed run opens the page the user just approved.
+    # SERIALIZED beside pending_origin_approval; defaulted for old payloads.
+    pending_origin_url: Optional[str] = None
+    # How many times this plan has handed a browse CAPTCHA / verification
+    # challenge off to the user (2026-07-19). Some challenges (Cloudflare
+    # Turnstile) fingerprint the automated browser and RE-ISSUE no matter how
+    # many times the user solves the checkbox by hand — so pausing again would
+    # trap the user in an unwinnable loop (live report). This counter, checked in
+    # _execute_node's challenge branch, caps the retries: past the limit the plan
+    # STOPS honestly ("I couldn't get past it") instead of pausing forever.
+    # SERIALIZED so it survives the park/resume across each hand-off; defaulted so
+    # plans parked before this field deserialize.
+    challenge_attempts: int = 0
+    # True once this plan is known to require ACTING on a live website — its
+    # goal is a browse-submit goal (apply/sign-in/checkout/… on a named site) or
+    # some accepted draft used browse/browse_commit (2026-07-19). It only ever
+    # flips False→True and never back, so once a task is a browser task a later
+    # replan can never quietly downgrade it to a read-only web fetch
+    # (read_webpage/browse_page/web_search) — which 403s or cannot act on the
+    # very sites browse exists for. Consulted by _browse_downgrade_violation.
+    # SERIALIZED so it survives park/resume across an approval pause; defaulted
+    # so plans parked before this field deserialize.
+    is_browse_task: bool = False
+    # The form field a commit-mode browse paused on because its value was in
+    # neither the autofill profile nor the user's words (15.2, field-learning
+    # 2026-07-19). Its RAW name (e.g. "ctl00$ContentPlaceHolder1$txtEmail") is
+    # kept so answer() can, when the user supplies the value, DERIVE a clean
+    # profile key from it (autofill.derive_field_identity) and SAVE the answer to
+    # the autofill profile — so the same field never has to be asked again.
+    # SERIALIZED beside the other pending_* markers; defaulted for old payloads.
+    pending_fill_field: Optional[str] = None
+    # An OPTIONAL sign-in / sign-up offer the current commit page showed (the
+    # soft-auth hand-off, 2026-07-19). Unlike a hard login wall this does not
+    # block the form — the site merely OFFERS an account — so the user chooses:
+    # sign in, sign up, or apply as a guest. Set when the plan pauses on the
+    # auth-offer question; the site host is stored so answer() can open a sign-in
+    # window for it. SERIALIZED; defaulted for old payloads.
+    pending_auth_offer: Optional[str] = None
+    # The exact page URL the auth offer was seen on — recorded so that whatever
+    # the user chooses, that page is added to auth_resolved_urls and never
+    # re-asks. SERIALIZED beside pending_auth_offer; defaulted.
+    pending_auth_url: Optional[str] = None
+    # STRUCTURAL browse hand-offs made so far (missing form value / optional
+    # sign-in offer / off-site origin approval) — counted SEPARATELY from
+    # questions_asked because a real application legitimately needs many, and the
+    # MAX_QUESTIONS=3 clarification cap would fail the flow at the third field
+    # (2026-07-19). Bounded by _MAX_BROWSE_HANDOFFS. SERIALIZED so it survives
+    # each park/resume; defaulted for old payloads.
+    browse_handoffs: int = 0
+    # Pages (by URL) on which the user has already decided the sign-in offer —
+    # so a commit browse asks AT MOST once per distinct page (the "every time it
+    # sees one" setting means every distinct page, not every observation, or the
+    # loop would re-ask the same page forever after "apply as guest"). Carried
+    # into the browse loop so it skips the auth-offer detection for these URLs.
+    # SERIALIZED (rides the parked payload across each pause); defaulted.
+    auth_resolved_urls: list[str] = Field(default_factory=list)
 
     def next_pending_index(self) -> Optional[int]:
         for i, step in enumerate(self.steps):

@@ -572,28 +572,55 @@ def _fmt_browse(output: dict) -> str:
     return head + ("\n" + _fence(rendered) if rendered else "")
 
 
+def _one_commit_block(commit: dict, *, label: str = "") -> str:
+    """One submitted form's grounded confirmation — its destination, the site's
+    title, and the fenced response prose. `label` prefixes it in a multi-commit
+    flow ("Form 2 of 3"). The response prose is the site's own, so it is untrusted
+    and fenced (the _fmt_web_search lesson)."""
+    url = str(commit.get("url") or "")
+    title = str(commit.get("title") or "").strip()
+    head = (f"{label}: " if label else "") + "Submitted the form" + (
+        f" to {url}" if url else ""
+    )
+    head += f". The site responded: **{title}**" if title else "."
+    response = str(commit.get("response_text") or "").strip()
+    if response:
+        return head + "\nThe page shows:\n" + _fence(response)
+    return head
+
+
 def _fmt_browse_commit(output: dict) -> str:
     """A SUBMITTED form's result. Lead with the CONFIRMED facts — the submit fired
     and the site's own response — never a restated goal: browse_commit had no
     formatter before (2026-07-18), so a commit's completion fell to the generic
     path and the summary LLM turned it into an ungrounded 'All done'. This grounds
     it in what the SERVER returned. The response prose is the site's, so it is
-    untrusted and fenced (the _fmt_web_search lesson)."""
-    url = str(output.get("url") or "")
-    title = str(output.get("title") or "").strip()
-    head = "Submitted the form" + (f" to {url}" if url else "")
-    if title:
-        head += f". The site responded: **{title}**"
-    else:
-        head += "."
+    untrusted and fenced (the _fmt_web_search lesson).
+
+    MULTI-COMMIT (15.5): a flow that submitted several forms carries a
+    `commit_history` (one record per approved submit). Render ONE grounded block
+    per commit — every server response, not just the last — so a "applied to 3
+    jobs" flow quotes what each site actually said."""
+    history = output.get("commit_history")
+    if isinstance(history, list) and len(history) > 1:
+        n = len(history)
+        parts = [f"Submitted {n} forms — each one you approved separately:"]
+        for i, commit in enumerate(history, 1):
+            if isinstance(commit, dict):
+                parts.append(_one_commit_block(commit, label=f"Form {i} of {n}"))
+        if output.get("window_open"):
+            parts.append(
+                "(The last form's browser window is left open so you can see the "
+                "result — close it from the status bar when done.)"
+            )
+        return "\n\n".join(parts)
+
+    head = _one_commit_block(output)
     if output.get("window_open"):
         head += (
             "\n(The browser window is left open so you can see the result — "
             "close it from the status bar when done.)"
         )
-    response = str(output.get("response_text") or "").strip()
-    if response:
-        return head + "\nThe page shows:\n" + _fence(response)
     return head
 
 

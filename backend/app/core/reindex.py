@@ -18,6 +18,7 @@ SQLite is the truth: a reindex due while the backend slept fires late-but-fires
 (the pass is idempotent, so a late run is harmless). Guards mirror the briefing
 handler — a disabled-now or stale job no-ops WITHOUT re-arming.
 """
+import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -92,16 +93,26 @@ async def _reindex_job_handler(job: FiredJob) -> None:
         if pointer != job.id:
             return
 
-        # run_index opens its OWN session + resolves qdrant (a missing vector
-        # store is a safe no-op); it is the incremental pass — unchanged files
-        # are skipped by size+mtime.
-        await run_index(full=False)
+        try:
+            # run_index opens its OWN session + resolves qdrant (a missing vector
+            # store is a safe no-op); it is the incremental pass — unchanged files
+            # are skipped by size+mtime.
+            await run_index(full=False)
 
-        # Phase 6 Part 4 — the same cadence backfills newly-written messages
-        # (task/reminder/briefing turns the write-path hook doesn't cover, plus
-        # any the hook missed). Incremental (embedded_at cursor), best-effort.
-        from app.core.conversation_index import run_conversation_index
-        await run_conversation_index(full=False)
+            # Phase 6 Part 4 — the same cadence backfills newly-written messages
+            # (task/reminder/briefing turns the write-path hook doesn't cover, plus
+            # any the hook missed). Incremental (embedded_at cursor), best-effort.
+            from app.core.conversation_index import run_conversation_index
+            await run_conversation_index(full=False)
+        except asyncio.CancelledError:
+            # A backend shutdown cancels the in-flight pass mid-file (the heavy
+            # extract runs in a thread). That is expected teardown, not a crash —
+            # log it cleanly instead of letting a scary CancelledError traceback
+            # surface through APScheduler (2026-07-20). Skip the re-arm; startup's
+            # ensure_reindex_job re-arms next boot. Swallow (do not re-raise): the
+            # only thing cancelling a running pass is shutdown.
+            logger.info("reindex pass cancelled (backend shutting down)")
+            return
 
         # Recurrence: arm the next interval (cancels this fired job — a harmless
         # no-op — and stores the new id).

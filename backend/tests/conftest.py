@@ -192,13 +192,37 @@ def _hermetic_browser_session():
 
     Refuse outright. Browser tests swap in their own fake page/context on top.
     The host cache is cleared too — it memoizes DNS answers, so a cached verdict
-    could otherwise leak between tests."""
+    could otherwise leak between tests.
+
+    The 15.3 vision seam gets the same belt: VISION_PROVIDER_FACTORY is pointed at
+    a refuser so no test ever builds a real Gemini vision client. It only fires
+    when vision is ENABLED (build_vision_provider short-circuits to None when
+    disabled), so the default disabled suite is untouched; a test that enables
+    vision through the tool path gets a caught refusal → None (DOM-only), never a
+    real client. Vision-loop tests pass their own fake `vision` straight to
+    run_browse and never touch this seam."""
     from app.core import browser_session
+    from app.providers import vision
 
     def _refuse():
         raise RuntimeError("test tried to launch a real browser")
 
+    def _refuse_vision(_config):
+        raise RuntimeError("test tried to build a real vision provider")
+
     browser_session.BROWSER_FACTORY = _refuse
+    vision.VISION_PROVIDER_FACTORY = _refuse_vision
+    # The clean hand-off window launches a REAL Chrome subprocess in production
+    # (2026-07-19). Its launcher seam stays None here, and _clean_login_enabled()
+    # gates the clean path on BROWSER_FACTORY being None — which the refuser above
+    # is not — so the suite stays on the Playwright fake path and never spawns a
+    # process. A test that exercises the clean path injects CLEAN_BROWSER_LAUNCHER.
+    browser_session.CLEAN_BROWSER_LAUNCHER = None
+    # reclaim_orphaned_profile() enumerates the machine's processes and kills the
+    # ones on the ~/.jarvis/browser profile (2026-07-20). Point the reaper seam at
+    # a no-op that finds NOTHING, so a browse/startup/shutdown path that reclaims
+    # never touches a real process. A test exercising reclaim injects its own.
+    browser_session._PROFILE_REAPER = lambda _marker: []
     browser_session.reset_host_cache()
     # The media/commit registries hold a live session across tool calls (Phase
     # 14.2 / 14.5). A fake session left in either would leak into the next test,
@@ -209,14 +233,19 @@ def _hermetic_browser_session():
     browser_session._commit_session = None
     browser_session._commit_meta = {}
     browser_session._login_browser = None
+    browser_session._clean_login_proc = None
     yield
     browser_session.BROWSER_FACTORY = None
+    vision.VISION_PROVIDER_FACTORY = None
+    browser_session.CLEAN_BROWSER_LAUNCHER = None
+    browser_session._PROFILE_REAPER = None
     browser_session.reset_host_cache()
     browser_session._active_media = None
     browser_session._active_media_meta = {}
     browser_session._commit_session = None
     browser_session._commit_meta = {}
     browser_session._login_browser = None
+    browser_session._clean_login_proc = None
 
 
 @pytest.fixture(autouse=True)

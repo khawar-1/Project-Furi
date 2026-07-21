@@ -457,6 +457,29 @@ def test_classify_prompt_has_browse_label():
     assert "play jane by the long faces on youtube" in _CLASSIFY_PROMPT.lower()
 
 
+@pytest.mark.parametrize("message", [
+    # The github sign-in incident (2026-07-18): named no file/media domain noun,
+    # missed the gate, fell to plain chat which asked for the user's password.
+    # Now github/gitlab are browse nouns and "sign in / log in" fires the gate.
+    "sign in to github and open my oldest repo",
+    "signin to github and open my oldest repo",
+    "log into my linkedin and open my messages",
+    "sign into my account and download the invoice",
+    "open my oldest repo on github",
+])
+def test_gate_fires_for_sign_in_and_web_app_requests(message):
+    assert looks_like_task(message) is True
+
+
+def test_classify_prompt_covers_sign_in_and_lists_browse_in_the_answer():
+    """BROWSE must appear in the CLOSING answer enumeration (it was omitted —
+    'One word (TASK, EMAIL, CALENDAR, WEB, or CHAT)' — which biased the model
+    against ever choosing it), and the prompt must carry a sign-in example."""
+    from app.api.task_router import _CLASSIFY_PROMPT
+    assert "one word (task, email, calendar, web, browse, or chat)" in _CLASSIFY_PROMPT.lower()
+    assert "sign in to github and open my oldest repo" in _CLASSIFY_PROMPT.lower()
+
+
 def test_classify_prompt_routes_entity_lookups_to_web():
     # The WEB label was broadened from time-sensitive-only to also cover a
     # factual question about a specific real-world entity — so a knowledge

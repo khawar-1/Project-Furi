@@ -52,6 +52,14 @@ _loop: asyncio.AbstractEventLoop | None = None
 _thread: threading.Thread | None = None
 _start_lock = threading.Lock()
 
+# The OUTERMOST browse timeout (2026-07-20), owned here at the one marshaling
+# boundary every browse tool crosses. No single browse may wedge a chat turn
+# forever, whatever hangs inside (a locked-profile launch, a stuck LLM call, a
+# non-terminating loop). A continuous browse is bounded by the loop's own
+# MAX_BROWSER_ACTIONS and every pausing flow RETURNS promptly, so a generous cap
+# is only ever reached by a genuine hang. Callers pass it to run_browser(timeout=).
+BROWSE_HARD_TIMEOUT = 180.0
+
 
 def _new_loop() -> asyncio.AbstractEventLoop:
     # Windows: the Proactor loop is the ONLY one that can spawn subprocesses,
@@ -84,7 +92,16 @@ def _ensure_loop() -> asyncio.AbstractEventLoop:
         return loop
 
 
-async def run_browser(coro: Coroutine[Any, Any, Any]) -> Any:
+def is_running() -> bool:
+    """True when the dedicated browser loop has been started and is live. Lets
+    shutdown skip marshaling window-cleanup onto a loop that was never spun up
+    (a session with no browse ever run has no windows to close)."""
+    return _loop is not None and not _loop.is_closed()
+
+
+async def run_browser(
+    coro: Coroutine[Any, Any, Any], *, timeout: float | None = None
+) -> Any:
     """Run a Playwright-touching coroutine on the dedicated browser loop and
     return its result to the caller's loop. The ONE marshaling boundary: every
     caller that opens/drives/closes a BrowserSession goes through here, so
@@ -92,12 +109,24 @@ async def run_browser(coro: Coroutine[Any, Any, Any]) -> Any:
 
     Exceptions raised inside `coro` propagate to the caller unchanged (a
     BrowserUnavailable stays a BrowserUnavailable). Awaited from within the
-    caller's running loop, so it never blocks that loop."""
+    caller's running loop, so it never blocks that loop.
+
+    `timeout` (seconds) is the OUTERMOST belt: no browse may wedge a chat turn
+    forever, whatever hangs inside (a locked-profile launch, a stuck LLM call, a
+    non-terminating loop). On expiry the browser-loop coroutine is cancelled and
+    asyncio.TimeoutError propagates — the tool boundary turns it into a clean
+    failure. Legitimate pausing flows (sign-in hand-off, per-form approval)
+    RETURN promptly, so a generous cap never truncates real work."""
     loop = _ensure_loop()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
+        if timeout is not None:
+            return await asyncio.wait_for(asyncio.wrap_future(future), timeout)
         return await asyncio.wrap_future(future)
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        # wait_for already cancelled the wrapped future on timeout, but cancel the
+        # cross-thread Future too so the coroutine on the browser loop is torn down
+        # (closing its half-open browser) rather than left running detached.
         future.cancel()
         raise
 

@@ -7,11 +7,18 @@ app/core/browser_session.py (a live Chromium page is not serializable —
 memory-only BY DESIGN); this router only opens/reads/clears them. Behind
 AuthMiddleware like every route.
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel
 
 from app.core import browser_runtime, browser_session
+from app.core.app_settings import (
+    BrowserVisionConfig,
+    get_browser_vision_config,
+    set_browser_vision_config,
+)
+from app.core.config import settings
+from app.core.dependencies import get_db
 from app.core.push import push
 
 router = APIRouter()
@@ -101,3 +108,44 @@ async def close_login() -> dict:
     # The login window lives on the browser loop; close it there.
     closed = await browser_runtime.run_browser(browser_session.close_login_window())
     return {"closed": closed}
+
+
+# ----------------------------------------------------- vision fallback (15.3)
+class VisionUpdate(BaseModel):
+    enabled: bool
+
+
+def _vision_configured() -> bool:
+    """Whether a vision credential is present in .env — so the toggle can only
+    do something. The key lives in .env (the OAuth/API-key convention); only the
+    on/off flag is a runtime setting. Enabling with no key configured stays
+    DOM-only, so the card shows this to explain why."""
+    provider = (settings.VISION_PROVIDER or "gemini").lower().strip()
+    if provider == "gemini":
+        return bool(settings.VISION_API_KEY or settings.GEMINI_API_KEY)
+    return bool(settings.VISION_API_KEY)
+
+
+def _vision_state(cfg: BrowserVisionConfig) -> dict:
+    return {
+        "enabled": cfg.enabled,
+        "configured": _vision_configured(),
+        "provider": settings.VISION_PROVIDER,
+        "model": settings.VISION_MODEL,
+    }
+
+
+@router.get("/vision", summary="The DOM-first vision fallback toggle + whether a key is configured")
+async def get_vision(db=Depends(get_db)) -> dict:
+    """{enabled, configured, provider, model}. `configured` reflects .env (a key
+    present); `enabled` is the runtime toggle. The Settings card reads both to
+    disable the switch with a hint when no vision key is configured."""
+    return _vision_state(await get_browser_vision_config(db))
+
+
+@router.put("/vision", summary="Enable/disable the browser vision fallback")
+async def put_vision(update: VisionUpdate, db=Depends(get_db)) -> dict:
+    """Flip the vision fallback on/off. Even ON, it only runs when a vision key
+    is configured AND the loop is stuck — otherwise the loop stays DOM-only."""
+    await set_browser_vision_config(db, BrowserVisionConfig(enabled=bool(update.enabled)))
+    return _vision_state(await get_browser_vision_config(db))

@@ -138,3 +138,33 @@ async def test_close_login_idempotent(client):
     resp = await client.post("/api/browser/close-login")
     assert resp.status_code == 200
     assert resp.json() == {"closed": False}
+
+
+# ----------------------------------------------------- vision fallback (15.3)
+async def test_vision_defaults_off(client):
+    """The DOM-first vision fallback is opt-in — off before the user touches it."""
+    resp = await client.get("/api/browser/vision")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is False
+    assert "configured" in body and "provider" in body and "model" in body
+
+
+async def test_vision_put_round_trips(client, monkeypatch):
+    """PUT flips the toggle and persists; GET reflects it. `configured` mirrors
+    whether a key is present in .env (forced True here so the state is stable)."""
+    from app.api import browser as browser_api
+
+    monkeypatch.setattr(browser_api, "_vision_configured", lambda: True)
+
+    put = await client.put("/api/browser/vision", json={"enabled": True})
+    assert put.status_code == 200
+    assert put.json()["enabled"] is True
+    assert put.json()["configured"] is True
+
+    got = await client.get("/api/browser/vision")
+    assert got.json()["enabled"] is True
+
+    # And back off.
+    off = await client.put("/api/browser/vision", json={"enabled": False})
+    assert off.json()["enabled"] is False

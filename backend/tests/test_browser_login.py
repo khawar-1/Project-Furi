@@ -39,6 +39,21 @@ def _login_result() -> ToolResult:
     )
 
 
+def _challenge_result() -> ToolResult:
+    return ToolResult(
+        success=False,
+        output={
+            "challenge_required": True,
+            "challenge_kind": "Cloudflare",
+            "challenge_site": "shop.test",
+            "challenge_url": "https://shop.test/",
+            "challenge_window_opened": True,
+        },
+        error="A Cloudflare verification at shop.test needs to be completed.",
+        permission_level=PermissionLevel.READ,
+    )
+
+
 def _success_result() -> ToolResult:
     return ToolResult(
         success=True,
@@ -136,7 +151,171 @@ async def test_a_non_browse_failure_is_not_treated_as_a_login_wall(db_session, m
     assert plan.status != PlanStatus.AWAITING_CHOICE
 
 
+# --------------------------------------------------- CAPTCHA / challenge (15.4)
+async def test_a_browse_captcha_pauses_the_plan(db_session, monkeypatch):
+    """The tool's challenge signal → AWAITING_CHOICE, tagged kind='captcha', never
+    a failed/replanned step. The browse step is left PENDING with no terminal
+    result so the resume re-runs it once the user has completed the check."""
+    calls = {"n": 0}
+
+    async def fake_exec(tool, params, db, session_id=None, approved=False):
+        calls["n"] += 1
+        assert tool == "browse"
+        return _challenge_result()
+
+    monkeypatch.setattr(planner_mod, "execute_tool", fake_exec)
+    provider = FakeProvider([plan_json([_browse_step()])])
+
+    plan = await AgentPlanner(db_session, provider, session_id="s-cap").start(
+        "play jane by the long faces on youtube"
+    )
+
+    assert plan.status == PlanStatus.AWAITING_CHOICE
+    assert plan.question is not None
+    assert plan.question.kind == "captcha"
+    assert "cloudflare" in plan.question.text.lower()
+    assert plan.question.options == ["I've completed it — continue"]
+    assert calls["n"] == 1
+    assert all(s.status != StepStatus.COMPLETED for s in plan.steps)
+
+
+async def test_resume_after_a_captcha_reruns_the_browse(db_session, monkeypatch):
+    """Answering 'continue' re-plans and re-runs the browse — this time it
+    succeeds (the profile now holds the challenge-clearance cookie)."""
+    seq = [_challenge_result(), _success_result()]
+    seen: list[str] = []
+
+    async def fake_exec(tool, params, db, session_id=None, approved=False):
+        seen.append(tool)
+        return seq.pop(0)
+
+    monkeypatch.setattr(planner_mod, "execute_tool", fake_exec)
+    provider = FakeProvider([plan_json([_browse_step()]), plan_json([_browse_step()])])
+    planner = AgentPlanner(db_session, provider, session_id="s-cap2")
+
+    plan = await planner.start("play jane by the long faces on youtube")
+    assert plan.status == PlanStatus.AWAITING_CHOICE
+
+    resumed = await planner.answer(plan, "continue")
+
+    assert resumed.status == PlanStatus.COMPLETED
+    assert seen == ["browse", "browse"]
+
+
+async def test_a_re_issuing_challenge_stops_honestly_instead_of_looping(
+    db_session, monkeypatch
+):
+    """Honest loop detection (2026-07-19): a challenge that keeps re-issuing after
+    the user completes it — Cloudflare Turnstile fingerprinting the automated
+    browser — must not pause forever. After _MAX_CHALLENGE_PAUSES hand-offs the
+    plan FAILS honestly (never suggesting evasion) rather than trapping the user
+    in an unwinnable loop."""
+
+    async def fake_exec(tool, params, db, session_id=None, approved=False):
+        return _challenge_result()  # the challenge never passes, however often solved
+
+    monkeypatch.setattr(planner_mod, "execute_tool", fake_exec)
+    provider = FakeProvider(
+        [
+            plan_json([_browse_step()]),  # draft
+            plan_json([_browse_step()]),  # revise after hand-off 1
+            plan_json([_browse_step()]),  # revise after hand-off 2
+        ]
+    )
+    planner = AgentPlanner(db_session, provider, session_id="s-loop")
+
+    plan = await planner.start("play jane by the long faces on youtube")
+    assert plan.status == PlanStatus.AWAITING_CHOICE          # hand-off 1
+    assert plan.challenge_attempts == 1
+
+    plan = await planner.answer(plan, "continue")
+    assert plan.status == PlanStatus.AWAITING_CHOICE          # hand-off 2
+    assert plan.challenge_attempts == 2
+
+    plan = await planner.answer(plan, "continue")
+    # The third detection exceeds _MAX_CHALLENGE_PAUSES → honest STOP, not a pause.
+    assert plan.status == PlanStatus.FAILED
+    assert plan.challenge_attempts == 3
+    message = (plan.message or "").lower()
+    assert "evade" in message                                # never suggests evasion
+    assert "bot protection" in message
+    assert any(s.status == StepStatus.FAILED for s in plan.steps)
+
+
 # --------------------------------------------------------------- tool wiring
+async def test_browse_tool_opens_the_window_and_signals_a_captcha(monkeypatch):
+    """The BrowseTool closes its agent session, opens a USER-DRIVEN window at the
+    challenge (solving nothing itself), and returns a STRUCTURED challenge result
+    the planner can pause on."""
+    opened: list[str] = []
+    created: list = []
+
+    class FakeBrowseSession:
+        def __init__(self):
+            self.closed = False
+
+        async def goto(self, url):
+            pass
+
+        async def close(self):
+            self.closed = True
+
+    async def fake_session_open(allowlist):
+        s = FakeBrowseSession()
+        created.append(s)
+        return s
+
+    async def fake_run_browse(session, goal, provider, **kw):
+        return BrowseOutcome(
+            success=False, actions_taken=1,
+            final={"url": "https://shop.test/", "title": "Just a moment...", "rendered": ""},
+            error="a Cloudflare verification must be completed at shop.test",
+            challenge_required=True, challenge_kind="Cloudflare",
+            challenge_url="https://shop.test/", challenge_site="shop.test",
+        )
+
+    async def fake_open_login(url=browser_session.DEFAULT_LOGIN_URL):
+        opened.append(url)
+
+    async def fake_close_login():
+        return False
+
+    async def fake_close_result():
+        return False
+
+    async def fake_run_browser(coro, *, timeout=None):
+        return await coro
+
+    class FakeProv:
+        async def __aexit__(self, *a):
+            return False
+
+    from app.core.browser_session import BrowserSession
+
+    monkeypatch.setattr(BrowserSession, "open", fake_session_open)
+    monkeypatch.setattr(browser_loop, "run_browse", fake_run_browse)
+    monkeypatch.setattr(browser_session, "open_login_window", fake_open_login)
+    monkeypatch.setattr(browser_session, "close_login_window", fake_close_login)
+    monkeypatch.setattr(browser_session, "close_result_window", fake_close_result)
+    monkeypatch.setattr(browser_runtime, "run_browser", fake_run_browser)
+    monkeypatch.setattr("app.providers.factory.build_provider", lambda: FakeProv())
+
+    from app.tools.browser_agent_tools import BrowseTool
+
+    result = await BrowseTool().execute(
+        goal="open the shop",
+        start_url="https://shop.test",
+        allowed_origins=["shop.test"],
+    )
+
+    assert result.success is False
+    assert result.output["challenge_required"] is True
+    assert result.output["challenge_kind"] == "Cloudflare"
+    assert result.output["challenge_site"] == "shop.test"
+    assert opened == ["https://shop.test/"]          # user-driven window at the challenge
+    assert created and created[0].closed is True     # agent session freed
+
+
 async def test_browse_tool_opens_the_sign_in_window_and_signals_login(monkeypatch):
     """The BrowseTool closes its agent session, opens a USER-DRIVEN sign-in
     window (handling no credential itself), and returns a STRUCTURED login
@@ -174,7 +353,7 @@ async def test_browse_tool_opens_the_sign_in_window_and_signals_login(monkeypatc
     async def fake_close_login():
         return False
 
-    async def fake_run_browser(coro):
+    async def fake_run_browser(coro, *, timeout=None):
         return await coro  # run the coroutine on this loop — the fakes are loop-agnostic
 
     class FakeProv:

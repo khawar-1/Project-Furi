@@ -52,6 +52,21 @@ class Settings(BaseSettings):
     # planner generations on a local GPU (the 120s hardcoded default was tight).
     OLLAMA_TIMEOUT_SECONDS: int = 300
 
+    # ------------------------------------------------------------------ Vision
+    # The browser loop's DOM-first vision fallback (Phase 15.3): a SECOND,
+    # image-capable model used ONLY when the observe→decide→act loop is stuck on
+    # a page whose target has no usable DOM text (icon-only buttons, canvas apps).
+    # The primary provider (deepseek-chat) has no image input, so this is a
+    # separate model behind app/providers/vision.py's seam. Off unless the user
+    # opts in (browser_vision.config) AND a key is configured — otherwise the loop
+    # stays DOM-only. VISION_API_KEY falls back to GEMINI_API_KEY so a user who
+    # already has Gemini configured needs only to flip the toggle. The model must
+    # accept image input (gemini-2.0-flash does; a text-only model would fail the
+    # vision call and the loop degrades to DOM-only).
+    VISION_PROVIDER: str = "gemini"
+    VISION_API_KEY: str = ""
+    VISION_MODEL: str = "gemini-2.0-flash"
+
     # ------------------------------------------------------------------ Identity resolution / memory
     # Minimum fuzzy score for a contact-name match to count as a candidate
     IDENTITY_MIN_SCORE: int = 81

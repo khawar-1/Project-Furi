@@ -17,6 +17,7 @@ import {
   HelpCircle,
   ListChecks,
   Loader2,
+  Lock,
   MinusCircle,
   Send,
   X,
@@ -114,6 +115,41 @@ function paramSummary(step: PlanStep): string {
   if (typeof main === 'string' && main.trim()) return main;
   const json = JSON.stringify(p);
   return json && json !== '{}' ? json : '(no parameters)';
+}
+
+/** The host a browse_commit step is about to SEND its form to — for the "this
+ *  will send data" callout. Reads the code-read commit contract in the step's
+ *  parameters (the same values on the red step's action_detail), falling back to
+ *  a URL parsed out of action_detail, then a neutral label. Never throws. */
+function commitHost(step: PlanStep): string {
+  const params = (step.parameters ?? {}) as Record<string, unknown>;
+  const commit = params._commit as { url?: unknown } | undefined;
+  let url = typeof commit?.url === 'string' ? commit.url : undefined;
+  if (!url) url = step.action_detail?.match(/https?:\/\/[^\s]+/)?.[0];
+  if (typeof url === 'string') {
+    try {
+      return new URL(url).host;
+    } catch {
+      /* not a parseable URL — fall through */
+    }
+  }
+  return 'the site';
+}
+
+/** For a multi-commit browse_commit flow ("apply to the first 3 jobs"),
+ *  "form N of M" and how many remain — derived from the step's own serialized
+ *  parameters: max_commits, and the _commits_done counter the planner stamps as
+ *  each approved submit fires. Returns null for an ordinary single-form step, so
+ *  the flow-progress UI shows only when there really is a flow. */
+function commitProgress(
+  step: PlanStep
+): { current: number; total: number; remaining: number } | null {
+  const p = (step.parameters ?? {}) as Record<string, unknown>;
+  const total = Number(p.max_commits) || 1;
+  if (total <= 1) return null;
+  const done = Number(p._commits_done) || 0;
+  const current = Math.min(done + 1, total);
+  return { current, total, remaining: Math.max(0, total - current) };
 }
 
 function StepRow({ step, index }: { step: PlanStep; index: number }) {
@@ -252,6 +288,21 @@ export function PlanCard({
   const destructiveCount = plan.steps.filter(
     (s) => s.status === 'pending' && s.permission_level === 'destructive'
   ).length;
+  // A pending web-form submission (browse_commit) gets its own "this SENDS
+  // data" callout; the generic destructive banner then covers only the other
+  // destructive steps (delete/shell) so its trash/shell wording isn't shown for
+  // a pure form send.
+  const pendingCommitStep = plan.steps.find(
+    (s) => s.status === 'pending' && s.tool === 'browse_commit'
+  );
+  // Multi-commit flow progress ("form 2 of 3") — null for a single-form submit.
+  const commitFlow = pendingCommitStep ? commitProgress(pendingCommitStep) : null;
+  const otherDestructiveCount = plan.steps.filter(
+    (s) =>
+      s.status === 'pending' &&
+      s.permission_level === 'destructive' &&
+      s.tool !== 'browse_commit'
+  ).length;
   const completedCount = plan.steps.filter((s) => s.status === 'completed').length;
 
   const respond = (approved: boolean) => {
@@ -347,10 +398,28 @@ export function PlanCard({
           at the approval gate below with fresh signatures. */}
       {asking && plan.question && (
         <div className="px-4 pb-4 space-y-2.5">
-          <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-100 text-xs">
-            <HelpCircle size={14} className="flex-shrink-0 mt-0.5 text-cyan-400" />
-            <span className="break-words whitespace-pre-wrap">{plan.question.text}</span>
-          </div>
+          {plan.question.kind === 'login' || plan.question.kind === 'signup' || plan.question.kind === 'captcha' ? (
+            // Human handoff: the USER signs in / creates the account / completes
+            // the verification in the window Jarvis opened. Jarvis never enters
+            // the credentials and never solves a CAPTCHA — say so unmistakably,
+            // distinct from an ordinary clarifying question.
+            <div className="space-y-1.5 px-3 py-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-100 text-xs">
+              <div className="flex items-center gap-1.5 font-semibold text-amber-300">
+                <Lock size={13} className="flex-shrink-0" />
+                {plan.question.kind === 'captcha'
+                  ? 'You complete the check — Jarvis never solves CAPTCHAs'
+                  : `You ${plan.question.kind === 'signup' ? 'create the account' : 'sign in'} — Jarvis never enters your credentials`}
+              </div>
+              <span className="block break-words whitespace-pre-wrap text-amber-100/90">
+                {plan.question.text}
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-100 text-xs">
+              <HelpCircle size={14} className="flex-shrink-0 mt-0.5 text-cyan-400" />
+              <span className="break-words whitespace-pre-wrap">{plan.question.text}</span>
+            </div>
+          )}
           {responding ? (
             <div className="flex items-center gap-2 text-xs text-slate-400 py-1">
               <Loader2 size={14} className="animate-spin text-cyan-400" />
@@ -419,12 +488,41 @@ export function PlanCard({
       {/* Approval gate */}
       {awaiting && (
         <div className="px-4 pb-4 space-y-2.5">
-          {destructiveCount > 0 && (
+          {pendingCommitStep && (
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-200 text-xs">
+              <Send size={14} className="flex-shrink-0 mt-0.5 text-red-400" />
+              <span>
+                {commitFlow && (
+                  <span className="block mb-1 font-semibold text-red-300">
+                    Form {commitFlow.current} of {commitFlow.total} in this flow.
+                  </span>
+                )}
+                <span className="font-semibold text-red-300">
+                  This will SEND this web form to {commitHost(pendingCommitStep)}.
+                </span>{' '}
+                Review the exact URL and every field value on the step above —
+                this leaves the machine and cannot be undone. Nothing is sent
+                until you approve.
+                {commitFlow && (
+                  <span className="block mt-1 text-red-200/90">
+                    Approving sends only this one. Cancel stops the whole flow
+                    {commitFlow.remaining > 0
+                      ? ` — the ${commitFlow.remaining} remaining form${
+                          commitFlow.remaining !== 1 ? 's' : ''
+                        } will not be submitted`
+                      : ''}
+                    .
+                  </span>
+                )}
+              </span>
+            </div>
+          )}
+          {otherDestructiveCount > 0 && (
             <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-xs">
               <AlertTriangle size={14} className="flex-shrink-0 mt-0.5 text-red-400" />
               <span>
-                This plan includes {destructiveCount} destructive step
-                {destructiveCount !== 1 ? 's' : ''} — the exact command is
+                This plan includes {otherDestructiveCount} destructive step
+                {otherDestructiveCount !== 1 ? 's' : ''} — the exact command is
                 shown on each red step above. Files Jarvis deletes go to a
                 recoverable trash (~/.jarvis/trash); shell commands may make
                 changes Jarvis cannot undo.

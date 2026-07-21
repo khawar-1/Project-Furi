@@ -446,6 +446,16 @@ export interface BrowserMedia {
   window_url: string;
 }
 
+/** The DOM-first vision fallback toggle (Phase 15.3). `configured` reflects
+ *  whether a vision key is present in .env — enabling with no key stays DOM-only,
+ *  so the card disables the switch with a hint when `configured` is false. */
+export interface BrowserVisionState {
+  enabled: boolean;
+  configured: boolean;
+  provider: string;
+  model: string;
+}
+
 export const browserApi = {
   /** What the browser is currently playing/showing (for the StatusBar indicators). */
   getMedia: (): Promise<BrowserMedia> => apiFetch<BrowserMedia>('/api/browser/media'),
@@ -472,6 +482,54 @@ export const browserApi = {
   /** Close the sign-in window. */
   closeLogin: (): Promise<{ closed: boolean }> =>
     apiFetch<{ closed: boolean }>('/api/browser/close-login', { method: 'POST' }),
+
+  /** The vision-fallback toggle + whether a vision key is configured (15.3). */
+  getVision: (): Promise<BrowserVisionState> =>
+    apiFetch<BrowserVisionState>('/api/browser/vision'),
+
+  /** Enable/disable the DOM-first vision fallback. */
+  setVision: (enabled: boolean): Promise<BrowserVisionState> =>
+    apiFetch<BrowserVisionState>('/api/browser/vision', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
+};
+
+// ============================================================
+// Autofill profile — the grounded data source for form-filling (Phase 15.2)
+// ============================================================
+export type AutofillKind = 'text' | 'link' | 'document' | 'secret';
+
+export interface AutofillField {
+  id: string;
+  key: string;
+  label: string;
+  kind: AutofillKind;
+  /** null for a secret (display-masked, never returned by the API). */
+  value: string | null;
+  is_secret: boolean;
+  has_value: boolean;
+}
+
+export const autofillApi = {
+  list: (): Promise<AutofillField[]> => apiFetch<AutofillField[]>('/api/autofill'),
+
+  /** Create or update a field (upsert on the key derived from the label). */
+  upsert: (field: {
+    label: string;
+    value: string;
+    kind: AutofillKind;
+    key?: string;
+  }): Promise<AutofillField> =>
+    apiFetch<AutofillField>('/api/autofill', {
+      method: 'POST',
+      body: JSON.stringify(field),
+    }),
+
+  remove: (key: string): Promise<{ deleted: boolean }> =>
+    apiFetch<{ deleted: boolean }>(`/api/autofill/${encodeURIComponent(key)}`, {
+      method: 'DELETE',
+    }),
 };
 
 // ============================================================

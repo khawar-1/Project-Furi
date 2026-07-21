@@ -2,6 +2,7 @@
 Jarvis OS — Backend Entry Point
 Now includes memory API routes, contacts, episodes, preferences.
 """
+import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -25,12 +26,35 @@ from app.api import context as context_api
 from app.api import initiative as initiative_api
 from app.api import threads as threads_api
 from app.api import browser as browser_api
+from app.api import autofill as autofill_api
 import app.core.reminders  # noqa: F401 — registers the "reminder" job handler at import time
 import app.core.birthdays  # noqa: F401 — registers the "birthday" job handler at import time
 import app.core.daily_briefing  # noqa: F401 — registers the "daily_briefing" job handler at import time
 import app.core.reindex  # noqa: F401 — registers the "reindex" job handler at import time
 import app.core.initiative  # noqa: F401 — registers the "initiative" job handler at import time
 import app.core.scheduled_routines  # noqa: F401 — registers the "routine" job handler at import time
+
+# Persistent log file (2026-07-19): the dev terminal was the only record, and two
+# browser-flow diagnoses in a row died on lost scrollback — a backend that dies
+# mid-turn must leave evidence that survives it. Added at IMPORT time (not the
+# lifespan) so even a crash during startup is captured. enqueue=True keeps the
+# sink thread-safe across the browser/TTS worker threads. Best-effort: failing
+# to open the file must never block the app.
+try:
+    from pathlib import Path as _Path
+    _LOG_DIR = _Path.home() / ".jarvis" / "logs"
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    logger.add(
+        _LOG_DIR / "backend.log",
+        rotation="10 MB",
+        retention=5,
+        level="INFO",
+        enqueue=True,
+        backtrace=False,
+        diagnose=False,
+    )
+except Exception:  # pragma: no cover — logging must never take the app down
+    pass
 
 
 @asynccontextmanager
@@ -214,6 +238,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as e:
         logger.warning(f"⚠️  Routine-schedule reconciliation failed (non-critical): {e}")
 
+    # Phase 14: clear any Chromium a PRIOR backend left holding the shared
+    # ~/.jarvis/browser profile lock (a sign-in window not closed on shutdown, a
+    # context leaked by a crash) — else the first browse's launch hangs on it
+    # (2026-07-20 incident). Scoped to processes whose command line names that
+    # exact profile, so the user's everyday Chrome is never touched. Pure
+    # subprocess work → off the loop; best-effort, non-critical.
+    try:
+        from app.core.browser_session import reclaim_orphaned_profile
+        await asyncio.to_thread(reclaim_orphaned_profile)
+    except Exception as e:
+        logger.debug(f"browser profile reclaim (startup): {e}")
+
     logger.info(f"🤖 LLM Provider: {settings.LLM_PROVIDER}")
     logger.info(f"🌐 Backend ready at http://{settings.BACKEND_HOST}:{settings.BACKEND_PORT}")
 
@@ -222,8 +258,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("🛑 Jarvis OS backend shutting down...")
     await scheduler.shutdown()
 
-    # Phase 14: stop the dedicated browser loop thread (best-effort; it is a
-    # daemon, so a missed stop never blocks exit).
+    # Phase 14: close every browser window Jarvis has open BEFORE stopping the
+    # loop, so a clean shutdown never orphans a Chromium holding the profile lock
+    # (the orphan that hangs the next run's launch). Order: close windows (on the
+    # browser loop) → reclaim as a guaranteed sweep (covers the clean-subprocess
+    # sign-in windows + any leaked context) → stop the loop. Two independent
+    # best-effort steps so a stuck window-close never skips the reclaim sweep, and
+    # the close is time-bounded so it can never wedge process exit.
+    try:
+        from app.core import browser_runtime, browser_session
+        if browser_runtime.is_running():
+            await browser_runtime.run_browser(
+                browser_session.shutdown_browser_windows(), timeout=30.0
+            )
+    except Exception as e:
+        logger.debug(f"browser window close (shutdown): {e}")
+    try:
+        from app.core.browser_session import reclaim_orphaned_profile
+        await asyncio.to_thread(reclaim_orphaned_profile)
+    except Exception as e:
+        logger.debug(f"browser profile reclaim (shutdown): {e}")
+
+    # Then stop the dedicated browser loop thread (best-effort; it is a daemon, so
+    # a missed stop never blocks exit).
     try:
         from app.core.browser_runtime import shutdown_browser_runtime
         shutdown_browser_runtime()
@@ -305,6 +362,9 @@ def create_app() -> FastAPI:
 
     # Phase 14 — browser media control (stop a browse window left playing)
     app.include_router(browser_api.router, prefix="/api/browser", tags=["Browser"])
+
+    # Autofill profile — the grounded data source for browser form-filling (15.2)
+    app.include_router(autofill_api.router, prefix="/api/autofill", tags=["Autofill"])
 
     return app
 

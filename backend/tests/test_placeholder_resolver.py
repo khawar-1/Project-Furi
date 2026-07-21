@@ -261,6 +261,93 @@ def test_unresolvable_cases_fall_back_to_the_llm():
     assert resolve(plan, 1, max_new=3) is None
 
 
+# --------------------------------------------------------------- url expansion
+# 2026-07-19, the WWR incident: the replan produced "Read the first three …
+# job listing pages from the search results" with a PENDING url after a
+# COMPLETED web_search, the resolver had no URL branch, and the plan died at
+# the replan cap on "Step parameters still contain unresolved 'PENDING:'
+# placeholders" — with every URL it needed sitting in the search results.
+
+def web_search_result(*urls: str) -> dict:
+    return {
+        "results": [
+            {"url": u, "title": f"Title {i}", "snippet": ""}
+            for i, u in enumerate(urls)
+        ],
+        "count": len(urls),
+    }
+
+
+def test_url_placeholder_expands_to_the_requested_count_in_ranked_order():
+    search = make_step(
+        "web_search", {"query": "site:wwr.test python jobs"}, StepStatus.COMPLETED,
+        web_search_result(
+            "https://wwr.test/jobs/1", "https://wwr.test/jobs/2",
+            "https://wwr.test/jobs/3", "https://wwr.test/jobs/4",
+            "https://wwr.test/jobs/5",
+        ),
+    )
+    template = make_step(
+        "read_webpage",
+        {"url": "PENDING: the first three job listing URLs from the search results"},
+    )
+    plan = plan_with("find the three most recent python jobs", search, template)
+
+    out = resolve(plan, 1, max_new=28)
+
+    assert [s.parameters["url"] for s in out] == [
+        "https://wwr.test/jobs/1",
+        "https://wwr.test/jobs/2",
+        "https://wwr.test/jobs/3",
+    ]
+    assert all(s.tool == "read_webpage" for s in out)
+    # Descriptions are code-derived from the result's own title.
+    assert out[0].description.startswith("Read ")
+
+
+def test_url_placeholder_without_a_count_expands_every_result():
+    search = make_step(
+        "web_search", {"query": "q"}, StepStatus.COMPLETED,
+        web_search_result("https://a.test/", "https://b.test/"),
+    )
+    template = make_step(
+        "browse_page", {"url": "PENDING: the pages the search found"},
+    )
+    plan = plan_with("read the found pages", search, template)
+    out = resolve(plan, 1, max_new=28)
+    assert [s.parameters["url"] for s in out] == ["https://a.test/", "https://b.test/"]
+
+
+def test_url_placeholder_over_an_empty_search_is_zero_steps_not_a_failure():
+    search = make_step("web_search", {"query": "q"}, StepStatus.COMPLETED, web_search_result())
+    template = make_step("read_webpage", {"url": "PENDING: the found pages"})
+    plan = plan_with("read what the search finds", search, template)
+    assert resolve(plan, 1, max_new=28) == []
+
+
+def test_url_placeholder_without_any_search_falls_back_to_the_llm():
+    template = make_step("read_webpage", {"url": "PENDING: the found pages"})
+    plan = plan_with("read some pages", template)
+    assert resolve(plan, 0, max_new=28) is None
+
+
+def test_url_placeholder_count_can_come_from_the_step_description():
+    search = make_step(
+        "web_search", {"query": "q"}, StepStatus.COMPLETED,
+        web_search_result("https://a.test/", "https://b.test/", "https://c.test/"),
+    )
+    template = PlanStep(
+        description="Read the first 2 job listing pages",
+        tool="read_webpage",
+        parameters={"url": "PENDING: the job listing pages"},
+        permission_level=PermissionLevel.READ,
+        requires_approval=False,
+    )
+    plan = plan_with("apply to jobs", search, template)
+    out = resolve(plan, 1, max_new=28)
+    assert [s.parameters["url"] for s in out] == ["https://a.test/", "https://b.test/"]
+
+
 # --------------------------------------------------------- folder substitution
 
 def test_folder_placeholder_resolves_when_the_name_pins_one_candidate():

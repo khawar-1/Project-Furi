@@ -78,6 +78,13 @@ class Element:
     name: str
     value: str = ""
     href: str = ""
+    # The element's on-screen box in CSS pixels (x, y, width, height), viewport
+    # coords — the same space getBoundingClientRect() returns. Used ONLY by the
+    # 15.3 vision fallback to map a vision-reported point back to a real element
+    # (vision LOCATES, DOM ACTS). NOT rendered into the prompt — it is code data,
+    # so the element/text budgets are unchanged. Default zero so a fake element
+    # in a test (or an old observation shape) is valid.
+    rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
     def render(self) -> str:
         line = f'[{self.index}] {self.role} "{self.name}"' if self.name else f"[{self.index}] {self.role}"
@@ -97,9 +104,54 @@ class Observation:
     element_total: int
     page_text: str
     text_truncated: bool
+    # The page's viewport in CSS pixels (width, height). Lets the 15.3 vision
+    # fallback convert a FRACTIONAL point (0..1, independent of screenshot
+    # downscale) into the CSS-pixel space the element rects live in. (0, 0) when
+    # unknown (a fake page in a test) — resolve_point_to_index then no-ops safely.
+    viewport: tuple[float, float] = (0.0, 0.0)
+    # The 15.4 CAPTCHA/verification probe result — None (the common case) or
+    # {kind, mode, blocking, solved, zones} as _EXTRACT_JS documents. A challenge
+    # widget lives in a cross-origin iframe or closed shadow root the element
+    # list never captures, so it is detected structurally in-page, never from
+    # prose. browser_loop.detect_challenge reads this; Jarvis never solves one.
+    # mode 'interstitial' = the page IS the challenge; 'embedded' = a widget on
+    # an ordinary page. `zones` are viewport rects of the widget(s) — every
+    # overlapping element was already skipped during stamping, and the helpers
+    # below veto the vision path and act-time clicks as defense in depth.
+    # `solved` = a response field carries a token (the human completed it).
+    challenge: Optional[dict] = None
 
     def index_map(self) -> dict[int, Element]:
         return {e.index: e for e in self.elements}
+
+    def challenge_mode(self) -> str:
+        """'interstitial' | 'embedded' | '' (no challenge). A challenge dict
+        WITHOUT a mode (an old-shaped fake in a test) reads as 'interstitial' —
+        the conservative direction: an interstitial misread stops honestly,
+        an embedded misread would keep acting."""
+        if not isinstance(self.challenge, dict):
+            return ""
+        return str(self.challenge.get("mode") or "interstitial")
+
+    def challenge_solved(self) -> bool:
+        return bool(isinstance(self.challenge, dict) and self.challenge.get("solved"))
+
+    def challenge_zone_rects(self) -> list[tuple[float, float, float, float]]:
+        """The detected widget boxes (viewport CSS px), parsed defensively."""
+        if not isinstance(self.challenge, dict):
+            return []
+        rects: list[tuple[float, float, float, float]] = []
+        for zone in self.challenge.get("zones") or []:
+            if not isinstance(zone, dict):
+                continue
+            try:
+                rects.append((
+                    float(zone.get("x") or 0.0), float(zone.get("y") or 0.0),
+                    float(zone.get("w") or 0.0), float(zone.get("h") or 0.0),
+                ))
+            except (TypeError, ValueError):
+                continue
+        return [r for r in rects if r[2] > 0 and r[3] > 0]
 
 
 # ---------------------------------------------------------------- extraction
@@ -159,6 +211,136 @@ _EXTRACT_JS = """
     (el.tagName.toLowerCase() === 'input' ? (el.getAttribute('value') || '') : '')
   );
 
+  // CAPTCHA / verification CHALLENGE probe (15.4, widened 2026-07-19 after a
+  // live auto-click: the old probe matched only the api2 path on google.com,
+  // and only in the top document — so recaptcha.net, reCAPTCHA Enterprise,
+  // same-origin sub-frames, shadow-rooted Turnstile and custom checkboxes were
+  // all invisible to it, and one of them got clicked). A challenge widget is
+  // detected structurally, never by page prose, via THREE independent signals:
+  //   1. known vendor iframes, by src — any Google/recaptcha.net /recaptcha/
+  //      path (api2 AND enterprise), hCaptcha, Cloudflare;
+  //   2. known container classes (.g-recaptcha / .cf-turnstile / .h-captcha) —
+  //      Turnstile's iframe hides in a CLOSED shadow root querySelectorAll can
+  //      never pierce, but its host container is ordinary light DOM;
+  //   3. the hidden RESPONSE FIELD every major vendor injects into the host
+  //      page's light DOM (g-recaptcha-response / cf-turnstile-response /
+  //      h-captcha-response) — the one tell a shadow root, custom wrapper, or
+  //      renamed container cannot hide.
+  // Exclusions that must not regress: the invisible reCAPTCHA v3 badge
+  // (.grecaptcha-badge / size=invisible — it rides along on countless ordinary
+  // forms and blocks nothing; its injected response textarea lives INSIDE the
+  // badge, so the closest() check below skips it), and any widget not RENDERED
+  // on-screen at a real size (the 2026-07-18 hidden-modal false positive).
+  //
+  // Returns null or {kind, mode, blocking, solved, zones}:
+  //   mode  — 'interstitial' (the PAGE is the challenge — Cloudflare full-page
+  //           IDs) or 'embedded' (a widget sitting on an ordinary page).
+  //   zones — viewport rects (top-page CSS px) of every detected widget. The
+  //           element walk below SKIPS anything intersecting a zone, so a
+  //           challenge control can never be stamped, listed, or clicked — the
+  //           structural half of "Jarvis never touches a CAPTCHA".
+  //   solved — a response field carries a non-empty token (how a resumed commit
+  //           verifies the HUMAN's solve actually happened).
+  //   blocking — true only for an interstitial; an embedded widget no longer
+  //           halts observation (its policy lives in browser_loop).
+  const challengeInfo = (() => {
+    try {
+      const zones = [];
+      let kind = null;
+      let solved = false;
+      const addZone = (r) => { if (r) zones.push({ x: r.left, y: r.top, w: r.width, h: r.height }); };
+      // Rendered on-screen at a real size — a 0×0 widget in a display:none
+      // modal and the off-screen v3 badge both fail this.
+      const renderedRect = (el) => {
+        const r = el.getBoundingClientRect();
+        const ok = r.width > 60 && r.height > 40
+          && r.bottom > 0 && r.right > 0
+          && r.top < (window.innerHeight || 0) && r.left < (window.innerWidth || 0);
+        return ok ? r : null;
+      };
+      // Widget-sized only. A response-field climb that reaches something
+      // form-sized must NOT become a zone — it would swallow the form's own
+      // fields and blind the loop to legitimate inputs.
+      const widgetRect = (r) => (r && r.width <= 600 && r.height <= 800) ? r : null;
+
+      const scanDoc = (doc, offX, offY, depth) => {
+        const off = (r) => r && ({ left: r.left + offX, top: r.top + offY, width: r.width, height: r.height });
+        for (const f of Array.from(doc.querySelectorAll('iframe'))) {
+          const src = (f.getAttribute('src') || '').toLowerCase();
+          let k = null;
+          if ((src.includes('google.com/recaptcha/') || src.includes('recaptcha.net/recaptcha/'))
+              && !src.includes('size=invisible')) k = 'reCAPTCHA';
+          else if (src.includes('hcaptcha.com')) k = 'hCaptcha';
+          else if (src.includes('challenges.cloudflare.com')) k = 'Cloudflare';
+          if (!k) continue;
+          const r = renderedRect(f);
+          if (!r) continue;
+          kind = kind || k;
+          addZone(off(r));
+        }
+        const containers = [
+          ['.g-recaptcha', 'reCAPTCHA'], ['.cf-turnstile', 'Cloudflare'], ['.h-captcha', 'hCaptcha'],
+        ];
+        for (const pair of containers) {
+          for (const el of Array.from(doc.querySelectorAll(pair[0]))) {
+            const r = widgetRect(renderedRect(el));
+            if (!r) continue;
+            kind = kind || pair[1];
+            addZone(off(r));
+          }
+        }
+        const fields = doc.querySelectorAll(
+          '[name^=g-recaptcha-response], [name^=cf-turnstile-response], [name^=h-captcha-response]'
+        );
+        for (const field of Array.from(fields)) {
+          if (field.closest && field.closest('.grecaptcha-badge')) continue;  // v3 badge
+          const name = (field.getAttribute('name') || '');
+          const k = name.indexOf('cf-') === 0 ? 'Cloudflare'
+            : name.indexOf('h-') === 0 ? 'hCaptcha' : 'reCAPTCHA';
+          if ((field.value || '').trim()) solved = true;
+          let el = field.parentElement;
+          for (let hops = 0; el && hops < 4; hops++, el = el.parentElement) {
+            const r = widgetRect(renderedRect(el));
+            if (r) { kind = kind || k; addZone(off(r)); break; }
+          }
+        }
+        // Same-origin sub-frames (an embedded form iframe carrying its own
+        // widget). A cross-origin contentDocument throws — best-effort; the
+        // cross-origin widget iframes themselves are caught by src above.
+        if (depth < 2) {
+          for (const f of Array.from(doc.querySelectorAll('iframe'))) {
+            try {
+              const child = f.contentDocument;
+              if (!child) continue;
+              const fr = f.getBoundingClientRect();
+              scanDoc(child, offX + fr.left, offY + fr.top, depth + 1);
+            } catch (e) {}
+          }
+        }
+      };
+      scanDoc(document, 0, 0, 0);
+
+      // Cloudflare full-page interstitial: the PAGE is the challenge. These IDs
+      // only exist on the real challenge page, so no visibility guard needed.
+      if (document.querySelector('#challenge-running, #cf-challenge-running, #challenge-form, #cf-please-wait')) {
+        return { kind: kind || 'Cloudflare', mode: 'interstitial', blocking: true, solved: solved, zones: zones };
+      }
+      if (kind) {
+        return { kind: kind, mode: 'embedded', blocking: false, solved: solved, zones: zones };
+      }
+    } catch (e) {}
+    return null;
+  })();
+
+  // The no-touch exclusion: anything overlapping a challenge widget's box is
+  // never stamped or listed — the LLM cannot click what it is never shown, and
+  // a custom "I'm not a robot" checkbox in the light DOM dies here too.
+  const challengeZones = (challengeInfo && challengeInfo.zones) || [];
+  const inChallengeZone = (r) => challengeZones.some((z) =>
+    r.left < z.x + z.w && r.left + r.width > z.x &&
+    r.top < z.y + z.h && r.top + r.height > z.y
+  );
+
   document.querySelectorAll('[' + 'data-jarvis-obs' + ']').forEach((el) => {
     el.removeAttribute('data-jarvis-obs');
     el.removeAttribute('data-jarvis-idx');
@@ -173,6 +355,7 @@ _EXTRACT_JS = """
     if (el.disabled) continue;
     if (el.getAttribute('aria-hidden') === 'true') continue;
     if (!visible(el)) continue;
+    if (inChallengeZone(el.getBoundingClientRect())) continue;
     total++;
     idx++;
     el.setAttribute('data-jarvis-obs', obsId);
@@ -186,12 +369,16 @@ _EXTRACT_JS = """
       href = el.getAttribute('href') || '';
       if (href.startsWith('javascript:')) href = '';
     }
+    // The element's on-screen box (CSS px, viewport coords) — for the 15.3
+    // vision fallback to map a vision-reported point back to this element.
+    const r = el.getBoundingClientRect();
     out.push({
       index: idx,
       role: role,
       name: clip(nameOf(el), 120),
       value: value,
-      href: clip(href, 100)
+      href: clip(href, 100),
+      rect: { x: r.left, y: r.top, w: r.width, h: r.height }
     });
   }
 
@@ -200,7 +387,9 @@ _EXTRACT_JS = """
     title: document.title || '',
     elements: out,
     total: total,
-    text: (document.body ? document.body.innerText : '') || ''
+    text: (document.body ? document.body.innerText : '') || '',
+    viewport: { width: window.innerWidth || 0, height: window.innerHeight || 0 },
+    challenge: challengeInfo
   };
 }
 """
@@ -221,6 +410,7 @@ async def observe(page: Any) -> Observation:
             name=str(item.get("name") or "")[:_NAME_MAX],
             value=str(item.get("value") or "")[:_VALUE_MAX],
             href=str(item.get("href") or "")[:_HREF_MAX],
+            rect=_rect_of(item.get("rect")),
         )
         for item in (raw.get("elements") or [])
         if isinstance(item, dict)
@@ -239,7 +429,34 @@ async def observe(page: Any) -> Observation:
         element_total=int(raw.get("total") or len(elements)),
         page_text=text,
         text_truncated=truncated,
+        viewport=_viewport_of(raw.get("viewport")),
+        challenge=(raw.get("challenge") if isinstance(raw.get("challenge"), dict) else None),
     )
+
+
+def _rect_of(raw: Any) -> tuple[float, float, float, float]:
+    """A JS rect {x, y, w, h} → a tuple, best-effort (zero on any bad shape —
+    an element with no box simply never matches a vision point)."""
+    if not isinstance(raw, dict):
+        return (0.0, 0.0, 0.0, 0.0)
+    try:
+        return (
+            float(raw.get("x") or 0.0),
+            float(raw.get("y") or 0.0),
+            float(raw.get("w") or 0.0),
+            float(raw.get("h") or 0.0),
+        )
+    except (TypeError, ValueError):
+        return (0.0, 0.0, 0.0, 0.0)
+
+
+def _viewport_of(raw: Any) -> tuple[float, float]:
+    if not isinstance(raw, dict):
+        return (0.0, 0.0)
+    try:
+        return (float(raw.get("width") or 0.0), float(raw.get("height") or 0.0))
+    except (TypeError, ValueError):
+        return (0.0, 0.0)
 
 
 # ------------------------------------------------------------------ resolve
@@ -259,27 +476,48 @@ async def resolve(page: Any, observation: Observation, index: int) -> Any:
 
 
 # ------------------------------------------------------------------- render
-def render(observation: Observation) -> str:
+def visible_span(observation: Observation, skip_elements: int = 0) -> tuple[int, int]:
+    """The half-open [start, end) slice of `observation.elements` that
+    render(skip_elements=...) will fit inside the element budget. This is how the
+    browse loop's "more" paging knows where the NEXT window starts — the window
+    is a CHAR budget, not a fixed count, so only this loop can answer it (the
+    WWR incident: 240 elements, ~47 fit, and the Back-End Programming section
+    sat at index 173 — unreachable without paging)."""
+    start = max(0, min(int(skip_elements or 0), len(observation.elements)))
+    used = 0
+    end = start
+    for element in observation.elements[start:]:
+        line = element.render()
+        if used + len(line) + 1 > _ELEMENT_BUDGET:
+            break
+        used += len(line) + 1
+        end += 1
+    return start, end
+
+
+def render(observation: Observation, *, skip_elements: int = 0) -> str:
     """The observation as the LLM sees it. Elements first and within their own
-    budget — prose can never crowd out the actionable half (see THE BUDGET)."""
+    budget — prose can never crowd out the actionable half (see THE BUDGET).
+
+    `skip_elements` slides the element WINDOW (the browse loop's "more" paging):
+    the first N elements are skipped so the next budget-worth renders. Indexes
+    are unchanged — every element keeps its stamped index, so an element shown
+    in an earlier window is still clickable by that index."""
     head = [f"URL: {observation.url}"]
     if observation.title:
         head.append(f"TITLE: {observation.title}")
 
-    lines: list[str] = []
-    used = 0
-    shown = 0
-    for element in observation.elements:
-        line = element.render()
-        if used + len(line) + 1 > _ELEMENT_BUDGET:
-            break
-        lines.append(line)
-        used += len(line) + 1
-        shown += 1
+    start, end = visible_span(observation, skip_elements)
+    lines = [e.render() for e in observation.elements[start:end]]
+    shown = end - start
 
-    if shown < observation.element_total:
-        header = f"ELEMENTS ({shown} of {observation.element_total} shown):"
-        footer = f"… {observation.element_total - shown} more elements not shown."
+    if start > 0 or shown < observation.element_total:
+        span = f"{start + 1}–{end} of {observation.element_total}" if start > 0 else f"{shown} of {observation.element_total}"
+        header = f"ELEMENTS ({span} shown):"
+        remaining = observation.element_total - end
+        footer = (
+            f"… {remaining} more elements not shown." if remaining > 0 else None
+        )
     else:
         header = f"ELEMENTS ({shown}):"
         footer = None
@@ -311,3 +549,125 @@ def summarize(observation: Observation) -> dict[str, Any]:
         "text_truncated": observation.text_truncated,
         "observation_id": observation.observation_id,
     }
+
+
+# ----------------------------------------------------- vision fallback (15.3)
+# The Phase 8 screen-OCR discipline: a DOWNSCALED capture, held in memory, NEVER
+# persisted. Only taken when the loop is stuck, and only sent to the vision model
+# in that moment.
+_SCREENSHOT_MAX_DIM = 1280        # px — the longer viewport edge, after downscale
+_SCREENSHOT_JPEG_QUALITY = 60
+
+
+async def capture_screenshot(
+    page: Any, *, max_dim: int = _SCREENSHOT_MAX_DIM
+) -> Optional[bytes]:
+    """A JPEG of the current VIEWPORT (not the full page), downscaled so its
+    longer edge is at most `max_dim`. Held in memory by the caller and dropped
+    after the one vision call — never written to disk (the Phase 8 no-full-res
+    rule). Best-effort: returns None on any failure, and the loop then stops
+    honestly rather than crashing.
+
+    Downscaling uses Pillow when importable and is skipped otherwise (the raw
+    viewport JPEG is returned) — dimension downscale is a cost/privacy nicety,
+    not a correctness requirement: the vision fallback asks for FRACTIONAL
+    coordinates, so mapping a point back to an element never depends on the
+    image's pixel size."""
+    try:
+        raw = await page.screenshot(type="jpeg", quality=_SCREENSHOT_JPEG_QUALITY)
+    except Exception as exc:
+        logger.debug(f"screenshot capture: {type(exc).__name__}: {exc}")
+        return None
+    if not raw:
+        return None
+    return _downscale_jpeg(bytes(raw), max_dim)
+
+
+def _downscale_jpeg(data: bytes, max_dim: int) -> bytes:
+    """Shrink a JPEG so its longer edge ≤ max_dim, via a lazy Pillow import.
+    Returns the original bytes unchanged when Pillow is absent or already small —
+    the capture is best-effort, so a missing optional dep never fails it."""
+    try:
+        import io
+
+        from PIL import Image  # optional — not a base dependency
+    except Exception:
+        return data
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            width, height = img.size
+            longest = max(width, height)
+            if longest <= max_dim:
+                return data
+            scale = max_dim / float(longest)
+            resized = img.convert("RGB").resize(
+                (max(1, int(width * scale)), max(1, int(height * scale)))
+            )
+            buffer = io.BytesIO()
+            resized.save(buffer, format="JPEG", quality=_SCREENSHOT_JPEG_QUALITY)
+            return buffer.getvalue()
+    except Exception as exc:
+        logger.debug(f"screenshot downscale: {type(exc).__name__}: {exc}")
+        return data
+
+
+def rect_intersects_zones(
+    rect: tuple[float, float, float, float],
+    zones: list[tuple[float, float, float, float]],
+) -> bool:
+    """Does an element box overlap any challenge-widget box? The act-time half
+    of the no-touch rule (browser_loop._act refuses the action) — the JS walk
+    already skipped overlapping elements at stamping time; this catches drift
+    (a widget that rendered between observation and act) and any path that
+    hands an element to the loop without the walk."""
+    x, y, w, h = rect
+    if w <= 0 or h <= 0:
+        return False
+    return any(
+        x < zx + zw and x + w > zx and y < zy + zh and y + h > zy
+        for zx, zy, zw, zh in zones
+    )
+
+
+def resolve_point_to_index(
+    observation: Observation, x_frac: float, y_frac: float
+) -> Optional[int]:
+    """A fractional viewport point (0..1 on each axis, as the vision model
+    reports) → the index of the element whose on-screen box CONTAINS it, or None.
+
+    This is the "vision LOCATES, DOM ACTS" hinge: vision gives a location, and
+    this returns a real element index the loop then acts on through the ordinary
+    index contract (resolve() by obs-id + index). A point over no listed element
+    (a canvas with nothing clickable there) returns None — an honest miss, never
+    a click on whatever happens to be nearby.
+
+    On overlap (nested boxes — a label inside a button) the SMALLEST-area element
+    wins: it is the most specific, tightest target under the cursor. Zero-area or
+    unknown-viewport cases no-op to None (a fake page in a test)."""
+    vw, vh = observation.viewport
+    if vw <= 0 or vh <= 0:
+        return None
+    try:
+        px = float(x_frac) * vw
+        py = float(y_frac) * vh
+    except (TypeError, ValueError):
+        return None
+
+    # A point inside a challenge widget's box maps to NOTHING — vision may
+    # locate the "I'm not a robot" checkbox, but it can never be acted on
+    # (the no-touch rule; the honest miss beats a click on whatever overlaps).
+    if rect_intersects_zones((px, py, 1.0, 1.0), observation.challenge_zone_rects()):
+        return None
+
+    best_index: Optional[int] = None
+    best_area = float("inf")
+    for element in observation.elements:
+        x, y, w, h = element.rect
+        if w <= 0 or h <= 0:
+            continue
+        if x <= px <= x + w and y <= py <= y + h:
+            area = w * h
+            if area < best_area:
+                best_area = area
+                best_index = element.index
+    return best_index

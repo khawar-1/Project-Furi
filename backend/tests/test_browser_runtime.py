@@ -81,3 +81,56 @@ async def test_the_loop_is_reused_across_calls():
     first = await browser_runtime.run_browser(_which_loop())
     second = await browser_runtime.run_browser(_which_loop())
     assert first == second  # one long-lived loop, not one per call
+
+
+# ---------------------------------------------- the outermost browse timeout
+async def test_timeout_cancels_a_hanging_coro():
+    """The belt (2026-07-20): a browse that never returns must not wedge the chat
+    turn. run_browser(timeout=…) raises TimeoutError AND tears down the coroutine
+    on the browser loop, rather than leaving it running detached."""
+    cancelled = threading.Event()
+
+    async def _hang() -> None:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    with pytest.raises((asyncio.TimeoutError, TimeoutError)):
+        await browser_runtime.run_browser(_hang(), timeout=0.2)
+
+    # the browser-loop coroutine was actually cancelled, not left running
+    assert cancelled.wait(timeout=2.0)
+
+
+async def test_timeout_none_lets_a_slow_coro_finish():
+    async def _slow() -> str:
+        await asyncio.sleep(0.1)
+        return "done"
+
+    assert await browser_runtime.run_browser(_slow(), timeout=None) == "done"
+
+
+async def test_a_coro_within_the_timeout_returns_normally():
+    async def _quick() -> int:
+        await asyncio.sleep(0.01)
+        return 7
+
+    assert await browser_runtime.run_browser(_quick(), timeout=5.0) == 7
+
+
+# ------------------------------------------------------ the is_running guard
+async def test_is_running_reflects_loop_lifecycle():
+    # A fresh runtime (the _shutdown_runtime teardown reset _loop) is not running…
+    browser_runtime.shutdown_browser_runtime()
+    assert browser_runtime.is_running() is False
+
+    async def _noop() -> None:
+        return None
+
+    await browser_runtime.run_browser(_noop())   # spins the loop
+    assert browser_runtime.is_running() is True   # …and now it is
+
+    browser_runtime.shutdown_browser_runtime()
+    assert browser_runtime.is_running() is False   # …and stopped again

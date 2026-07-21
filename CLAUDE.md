@@ -2352,3 +2352,326 @@ and stated plainly in `app/core/browser_session.py`'s docstring.
   without prose), `test_browser_api.py` (`/media` window fields, `/close-window`).
   **1823 green; typecheck + vite build clean.** Live end-to-end acceptance on the
   real Selector loop still pending. Uncommitted.
+
+### Agentic multi-step browser flows (Phase 15)
+"Jarvis does the multi-step things I do in a browser" — search a job board, open
+each posting, fill and submit an application, upload a file, sign in when asked,
+get past visual-only pages — with NO per-site code. This is capability DEPTH on
+the Phase 14 foundation, never a rewrite of the safety model: one real Chromium,
+the observe→decide→act loop, grounding as the exfiltration bound, signature-based
+approval, structural-over-prompt, LLM-proposes/code-decides. **The honest residual
+limit (all parts):** READ-mode's "non-GET = mutation" stays an HTTP convention
+(RFC 7231), not a proof; within an allowlisted, authenticated origin a compromised
+loop has full user authority; the real controls remain grounding + the approval
+gate + the headed watchable window + CAPTCHAs never auto-solved.
+- **15.1 — Pause-capable multi-commit engine** (`browser_commit.perform` +
+  `browser_session` held-session registry): one `browse_commit` goal may perform
+  up to `max_commits` (new tool param, default 1, code-capped `MAX_COMMITS_CAP=5`)
+  SEQUENTIAL approved submits ("apply to the first 3 jobs"). Inherently sequential
+  — form #2 does not exist until #1 is submitted and the page navigates — so
+  `perform` submits ONE approved form, then (budget remaining) RESUMES the SAME
+  live session (read-only again — the one-shot arm was spent by the submit) to
+  reach the next form, RE-HOLDS it in the commit registry, and returns
+  `next_commit_required`; the planner re-arms the step with the new code-read
+  contract for a FRESH, SEPARATE approval (`_browse_commit_next` +
+  `COMMITS_DONE_PARAM`). Every submit is its own signature, approval, and one-shot
+  `arm_commit` permit — the 14.5 guarantee REPEATED, never batched or replayed.
+  The flat `MAX_BROWSER_ACTIONS` cap became a per-sub-goal budget + progress
+  detection (`_STUCK_LIMIT` generalizes the dedupe signal). The held session is
+  memory-only (a running Chromium page is not serializable) — a restart between
+  discovery and approval drops it and the submit reports "expired", never invents.
+- **15.2 — Autofill profile store** (`AutofillProfile` + migration
+  `a3f5c9e17b42` + `app/core/autofill.py`): the GROUNDED data source for
+  form-filling — a fill value must trace to the user's curated profile OR their
+  own words, NEVER a page, never invented (`browser_grounding.fill_value_is_grounded`,
+  the `_recipient_violation`/`upload_path_is_grounded` shape). Dynamic fills are
+  chosen at RUNTIME, so the real guard lives in the loop's commit-mode `type`
+  action (ungrounded → `fill_required` → the planner PAUSES AWAITING_CHOICE to ask
+  the user, never guesses); the planner `_fill_violation` guards the optional
+  `fields` param. Secrets = password-never-read: the value never enters any LLM
+  prompt or history — the prompt block lists only the KEY + a `{{secret:key}}`
+  placeholder, the loop substitutes the real value in CODE at fill time. `/api/autofill`
+  CRUD (a secret value is NEVER returned) + a Settings `AutofillCard`.
+- **15.3 — Vision fallback** (`app/providers/vision.py` seam + `dom_observe`
+  screenshot/bbox + `browser_loop` stuck-escalation): DOM stays PRIMARY; vision
+  fires ONLY when the loop is stuck (`_decide`→None / element-not-found — the
+  `evidence_resolver` escalation triggers applied to the loop), bounded
+  `MAX_VISION_CALLS=2`. A second, opt-in image model (default Gemini; DeepSeek has
+  no image input) behind `VISION_PROVIDER_FACTORY`, off by default, `.env`
+  credential + `browser_vision.config` toggle, fails clean to DOM-only when
+  unconfigured. A downscaled in-memory screenshot (the Phase 8 screen-OCR
+  no-full-res discipline, never persisted) → the model returns a FRACTION →
+  `resolve_point_to_index` maps it to a real DOM element → the click STILL goes
+  through the index/obs-id staleness contract. Vision LOCATES, DOM ACTS; a point
+  over nothing is an honest stop (a true canvas is a hard limit).
+- **15.4 — Login & CAPTCHA resilience** (human-in-the-loop, never auto-solve):
+  mid-flow `detect_login_wall`/`detect_challenge` (every loop step) → the tool
+  opens a USER-DRIVEN window (`open_login_window`, NO interceptor — how a human
+  completes the POST READ mode aborts) → the planner PAUSES AWAITING_CHOICE
+  (`PlanQuestion.kind` "login"/"signup"/"captcha") → the user signs in / completes
+  the check by hand, says 'continue' → the browse RE-RUNS (carrier = the
+  persistent `~/.jarvis/browser` PROFILE cookie, not a live session — browse READ
+  mode has no held-session registry). **CAPTCHAs are NEVER solved or
+  auto-interacted-with — a hard rule, structural** (the loop returns BEFORE any
+  decision/action: `provider.calls == 0`, nothing acted). Detection is
+  conservative — an in-page challenge probe in `dom_observe._EXTRACT_JS` (a
+  challenge lives in a cross-origin iframe the element list never sees) EXCLUDING
+  the invisible reCAPTCHA-v3 badge so ordinary forms never trip.
+- **15.5 — Capstone: legible flow UX + grounded per-commit summary**. The
+  machinery of 15.1–15.4 existed; 15.5 makes a long approved flow LEGIBLE and the
+  completion HONEST. (1) **Flow-level PlanCard** (`PlanCard.tsx` `commitProgress`):
+  a pending multi-commit `browse_commit` shows "Form N of M in this flow" (derived
+  purely from the step's serialized params — `max_commits` + the `_commits_done`
+  counter the planner stamps as each submit fires), each pause still renders its
+  OWN full contract (method/URL/every field value via `_render_commit_detail`), and
+  the callout spells out that **Cancel stops the WHOLE flow** ("the N remaining
+  forms will not be submitted"). (2) **Stop-the-whole-flow** is the existing plan
+  cancel made complete: `planner.resume(approved=False)` on a plan with a pending
+  `browse_commit` step now also `discard_commit()`s the held session (best-effort,
+  on the browser loop) so no discovered-but-unsubmitted window lingers. (3)
+  **Grounded per-commit summary**: each FIRED submit's server response is recorded
+  onto `PlanStep.browse_commits` (new SERIALIZED field — it ACCUMULATES across the
+  approval pauses, where the step's `result` is cleared each re-arm; excluded from
+  `signature()` by construction), and the completion folds it into
+  `result.output["commit_history"]`; `_fmt_browse_commit` renders ONE grounded
+  block per commit (`_one_commit_block` — quoting each site's OWN fenced response
+  prose, the `_fmt_web_search` untrusted-prose rule) so "applied to 3 jobs" quotes
+  what EACH site actually said, never an ungrounded "all done" and never only the
+  last. A single-commit flow (history length ≤1) stays the ordinary single
+  confirmation (backwards compatible). NO migration, NO new dep. Tests:
+  `test_plan_rendering.py` (multi-commit quotes every response; single-entry stays
+  single), `test_browser_commit.py` (the flow records each server response +
+  folds `commit_history`; cancel releases the held session). **Live acceptance
+  PENDING** (user-driven, the real Selector loop via `npm run dev`): a real
+  job-application-shaped multi-form flow + 14.6's outstanding upload run — each
+  submit user-approved, sent once, auditable in `activity_log`. The hermetic suite
+  is the gate met. Uncommitted (git deferred).
+
+### Rule 22 in code + the browse downgrade guard + media profile-lock (2026-07-19)
+Live failure (screenshot + `~/.jarvis/logs/backend.log`, 18:15): *"Go to
+weworkremotely.com, find the three most recent senior Python backend roles … and
+apply to each"* — **Chrome opened/closed/opened/closed**, opened a job then went
+back to the home page, and FAILED after 2 replans on an HTTP 403. Root-caused from
+the log, three distinct defects:
+- **RC1 — the planner violated its own RULE 22.** It drafted `browse`(find) +
+  `browse_commit`(apply); rule 22 says a "find N and submit to each" goal is ONE
+  `browse_commit(max_commits=N)` and explicitly *"Do NOT split … into a separate
+  search/browse step plus one browse_commit per item."* Two disconnected steps =
+  two disconnected browser SESSIONS → the apply step launched a fresh Chrome on
+  the HOMEPAGE with no idea which jobs to apply to (clicked one element 3× →
+  `browse_commit discovery failed`) → the open/close flicker. Rule 22 was a prompt
+  with **no comparator behind it** — "a rule with nothing to check it is a
+  suggestion" (the `_apply_web_fanout` / `_recipient_violation` lesson). FIX:
+  `planner._collapse_browse_apply` — a post-draft CODE rewrite (mirrors
+  `_apply_web_fanout`, runs in `_generate_steps` BEFORE the reject chain so a
+  folded-in web_search never trips the downgrade guard) folds a same-site
+  browse/web_search/read_webpage find step (and several same-site browse_commit
+  steps) into ONE `browse_commit`: union origins, carry the real start_url,
+  `max_commits` = N parsed from the goal (`_parse_target_count`: "three … roles"
+  → 3, clamped to `_COLLAPSE_MAX_COMMITS`=5). Conservative — a lone browse_commit
+  with no feeder, or a different-site browse, is left untouched. One session, no
+  flicker, the loop finds→opens→fills→pauses per item (15.1).
+- **RC3 — the replan downgraded to `read_webpage`**, which 403s on that
+  bot-protected site and cannot act anyway — strictly worse than the browser it
+  had. FIX: `AgentPlan.is_browse_task` (SERIALIZED, latch-once) seeded at draft
+  from the goal shape (`_looks_like_browse_goal`: a submit/sign-in/checkout verb +
+  a groundable site — never "watch"/"play"/"read") and OR-latched whenever an
+  accepted draft uses browse/browse_commit; `_browse_downgrade_violation` (reject
+  chain) then refuses any read-only web tool (`read_webpage`/`browse_page`/
+  `web_search`) in a browse task, so a browse goal can never quietly fall back to
+  a fetch that 403s or cannot click.
+- **RC4 — profile-lock contention.** `~/.jarvis/browser` is ONE persistent
+  context; a kept-open MEDIA session (a "play on youtube" left running at 18:12)
+  still held the lock when the 18:15 job-search browse launched → `TargetClosedError`.
+  Both launch paths (`browser_agent_tools.BrowseTool`, `browser_commit.perform`)
+  closed the login + result windows first but NOT media. FIX: also
+  `await browser_session.stop_media()` before launch (safe no-op when nothing
+  plays) — profile exclusivity, the correct "one profile = one live context" rule.
+- **Prerequisite (not a code bug):** the `autofill_fields` table was EMPTY, so
+  "use my standard details" had nothing to fill — the flow will pause-and-ask per
+  field (expected 15.2 grounding behavior) until the Settings → Autofill card is
+  populated.
+- Tests: `test_browser_apply_collapse.py` (12 — the WWR split collapses to one
+  browse_commit(max_commits=3); web_search/multi-commit fold; lone commit &
+  different-site left alone; count/goal-shape parsers; the downgrade guard fires
+  only for a browse task). 1997 green; browser suites re-verified with stop_media.
+  **Live acceptance still pending** (friendly public multi-form target first, then
+  weworkremotely). Uncommitted (git deferred).
+
+### Field learning + optional sign-in offer + window-stays-open (2026-07-19)
+Live report (screenshot): *"Go to remote.co … apply to each using my standard
+details"* — Jarvis reached the first apply form, filled two fields, then **Chrome
+closed**; a field it didn't have was asked for but never remembered; the site
+offered sign in/up and Jarvis never asked; and when it asked to approve another
+site it **closed Chrome before asking**. Four fixes, all in code.
+- **① / ④ — the window closed on a pause (both the same root cause).**
+  `browser_commit.discover`'s `finally` closed the session unless `held`, and
+  `held` was set ONLY for a ready-to-submit form or an embedded CAPTCHA. A pause
+  to ask for a MISSING FORM VALUE (`fill_required`) or to APPROVE AN OFF-SITE
+  ORIGIN (`origin_approval`) left `held` False → Chrome shut the instant the
+  question appeared, and the resumed run relaunched and re-did everything. FIX:
+  a NEW generic **held-discovery registry** (`browser_session.hold_discovery/
+  take_discovery/pending_discovery/discard_discovery` — the challenge-registry
+  pattern: one slot, memory-only, `meta.reason` ∈ {fill, origin, auth}, `meta.goal`
+  scopes the re-attach). `discover` HOLDS the live part-filled session across a
+  fill/origin/auth pause and RE-ATTACHES on resume — the window stays open and
+  the loop carries on from where it stopped. The interceptor reads `self.allowlist`
+  live, so an origin the user just approved is unioned into the held session's
+  allowlist and it navigates to the approved URL (reason "origin" navigates;
+  "fill"/"auth" stay on the current page). A cancel / declined origin / sign-in
+  hand-off discards the hold (`_discard_discovery_hold`; a sign-in window needs the
+  single profile lock the held window holds).
+- **② — a missing field was asked for but never remembered (field learning).**
+  `autofill.derive_field_identity(raw_field_name, value)` is a DETERMINISTIC,
+  tested classifier (no LLM, the never-guess rule) turning a framework-mangled
+  field name (`ctl00$ContentPlaceHolder1$txtEmail`, `applicant[first_name]`,
+  `txtLastName`) into a clean `(key, label, kind)` — canonical rules IN ORDER
+  (first_name/last_name before the bare `name`; single-letter `\bf name\b`
+  anchored so "full name" is not a last name), link kinds for linkedin/github/
+  portfolio, a URL-ish answer stored as a link, an unrecognised field kept under
+  a readable slug of its own name (never dropped). `planner._save_fill_answer`
+  (called from `answer()` when `plan.pending_fill_field` is set) SAVES the answer
+  via `autofill.upsert_field` — so the field is filled now AND never asked again;
+  `autofill.answer_is_skip` (exact-match, so an email starting "yes" is not a
+  skip) keeps a bare "continue" from being stored. The fill question now promises
+  the save. Best-effort — a save failure only means "not remembered", the run
+  still grounds the value from the answer.
+- **③ — the site OFFERED sign in/up and Jarvis never asked.** `detect_login_wall`
+  is a HARD-wall detector (password field / auth host / signup route) and rightly
+  did not fire on an OPTIONAL offer. NEW `browser_loop.detect_auth_offer` reads
+  link/button LABELS (structural, never prose) for a sign-in / sign-up affordance
+  on a page the form could still proceed as a guest on; in COMMIT mode only (a
+  read-only browse ignores a header "Sign in"). The loop STOPS and the planner
+  asks **Sign in / Sign up / Apply as guest** (`_auth_offer_question`,
+  `kind="auth_offer"`); `_auth_offer_choice` (default GUEST — fail-safe, an
+  unclear reply never signs the user in) routes it: guest RESUMES the held session
+  as a guest; sign in/up discards the hold and hands off to a user-driven window
+  (Jarvis never enters credentials), then the browse re-runs authenticated. Per
+  the user's setting ("ask every time it sees one") it fires on every DISTINCT
+  page — `plan.auth_resolved_urls` (carried into the loop) records each decided
+  page so "apply as guest" never re-asks the same page forever.
+- **The MAX_QUESTIONS=3 cap would fail an application at the third field.** These
+  are STRUCTURAL browse hand-offs (one per missing field + a sign-in choice per
+  page), not LLM clarifications — a real first application with an EMPTY autofill
+  profile needs many. NEW `_MAX_BROWSE_HANDOFFS = 25` + `plan.browse_handoffs` +
+  `_pause_on_browse_handoff`; the commit-discovery fill/auth/origin/login gates
+  (and the read-browse login/origin gates) count against it, NOT MAX_QUESTIONS.
+  Field-learning then SHRINKS it over time (every answered field is saved).
+- **Prerequisite, still true:** the `autofill_fields` table is EMPTY — "use my
+  standard details" has no data, so the flow pauses-and-asks per field (now
+  learning each) until Settings → Autofill is populated (or the user answers each
+  once). Tests: `test_browser_field_learning.py` (classifier→save, skip, auth-offer
+  choice/handoff, browse-handoff budget), `test_autofill.py` (+derive_field_identity
+  matrix, answer_is_skip), `test_browser_loop.py` (+detect_auth_offer, the loop
+  pauses/skips/read-only-ignores), `test_browser_session.py` (+discovery registry).
+  2023 green; typecheck unaffected (no frontend change — the auth-offer renders as
+  option buttons, the fill question as free text, through the existing PlanCard).
+  **Live acceptance still pending.** Uncommitted (git deferred).
+
+### Bare-named sites ground themselves — nav-cue grounding (2026-07-19)
+Live dead-end (screenshots): *"go to indeed and apply to 3 python developer
+jobs"* → Jarvis asked "Which site?" (options Indeed/LinkedIn/Glassdoor/
+ZipRecruiter), the user clicked **Indeed**, and it answered *"I couldn't turn
+this into a runnable plan — no step was ever executed."* Every re-answer looped.
+- **ROOT CAUSE — grounding could not connect a bare name to its domain.**
+  `browser_grounding._KNOWN_SITES` mapped `linkedin` but NOT `indeed`/`glassdoor`/
+  `ziprecruiter`/most job boards. So: (1) `ground_origins("go to indeed…")`
+  returned `{}` → `_looks_like_browse_goal` False → `is_browse_task` never latched
+  (a `read_webpage` downgrade was even permitted); (2) the LLM drafted
+  `browse_commit(allowed_origins=["indeed.com"])`, but the grounding corpus held
+  only the WORD "indeed", never "indeed.com", and nothing connected them →
+  `_browse_origin_violation` rejected it EVERY round → the plan never became
+  runnable. Answering "Indeed" re-supplied the same ungrounded bare word — the
+  loop the user saw. The clarifying question's own options (bare names) could
+  never ground either; only LinkedIn (mapped) would have worked.
+- **FIX — three coordinated changes, all corpus-only + fail-closed.** (1) Expanded
+  `_KNOWN_SITES` with the common job boards (correct TLDs — a guess can't know
+  wikipedia is .org / twitch is .tv; this also seeds `is_browse_task` for non-nav
+  phrasings). (2) NAV-CUE GROUNDING: `_NAV_CUE_RE` matches navigation VERBS
+  ("go to"/"apply on"/"visit"/"open"/…) and grounds the bare NAME the user aimed
+  one at ("go to **indeed**"), skipping a token that is actually a written domain
+  (`(?!\.)` so "open youtube.com" isn't double-captured) and everyday
+  `_NAV_STOPWORDS` ("go to the store" grounds nothing). A single site-like ANSWER
+  token ("Indeed") grounds too — the "which site?" reply carries no verb. (3)
+  `origin_is_grounded` now accepts a bare-name (no-dot) grounded entry via the
+  candidate's REGISTRABLE label (`labels[-2]`): a bare "indeed" grounds
+  `indeed.com`/`jobs.indeed.com` but NEVER the lookalike `indeed.attacker.com`
+  (registrable label "attacker") — the exact `evil-youtube.com` protection, kept.
+- **WHY THIS IS NOT THE FALSIFIED KEYWORD-LIST SHAPE** (the docstring's own
+  warning, `_WEB_QUESTION_MARKER_RE`): the cue list matches VERBS not site names,
+  it CANNOT classify intent, and it FAILS CLOSED — a name the user never said
+  never grounds, page text never enters the corpus (the exfiltration bound is
+  intact), and it only ever RELAXES acceptance of an origin the planner ALREADY
+  proposed; it never widens where the loop chooses to go on its own. Deliberate
+  philosophy shift from "an unmapped bare name fails closed" → "a bare name the
+  user directed navigation at grounds the domain the planner supplies", because
+  the old conservatism produced a hard dead-end on the user's real use case and
+  the relaxation carries no new authority (the per-submit approval gate + the
+  headed window are unchanged). Tests: `test_browser_grounding.py` (nav-cue
+  grounds a planner-proposed domain; lookalike/`-evil` refused; one-word answer;
+  written-domain not double-captured; stopword grounds nothing; the "site never
+  named" fail-closed case retained). No migration, no frontend change.
+  Verified end-to-end: the incident goal now seeds `is_browse_task`, grounds
+  `indeed.com`, and produces NO origin violation. Uncommitted (git deferred);
+  live acceptance still pending.
+
+### The sign-in window said it opened but didn't — profile single-instance lock (2026-07-19)
+Live report (screenshot + `~/.jarvis/logs/backend.log`, 21:48): on the Indeed
+apply flow Jarvis offered *Sign in / Sign up / Apply as guest*; the user picked
+**Sign in**, the card said *"I've opened a sign-in window — please sign in there
+yourself"*, but **no window appeared** — the user had to open Indeed themselves.
+- **ROOT CAUSE — a single-instance profile-lock race, reported as success.** The
+  log is unambiguous: `browser: launched via chrome` (21:47:41) is the automation
+  browse-discovery session, HELD for the auth-offer pause; when the user picks
+  "Sign in", `_handle_auth_offer_answer` discards that held session and calls
+  `open_login_window`, which launches a PLAIN `chrome.exe --user-data-dir=~/.jarvis/
+  browser` (21:48:03, logged *"opened CLEAN sign-in/verification window"*).
+  `~/.jarvis/browser` is a SINGLE persistent profile — at most one live Chromium
+  may hold its OS single-instance lock — and a Chromium keeps that lock for a
+  moment AFTER its `close()` returns. So the clean Chrome launched into the gap,
+  saw the lock, **handed the URL to the dying automation instance and EXITED with
+  no visible window** — while `subprocess.Popen` still returned a handle, so
+  `_open_clean_login` returned "success", `opened=True`, and the card lied. This
+  is the `_default_clean_launcher` fire-and-forget with no verification (Turnstile
+  clean-window round, 2026-07-19) meeting the profile lock.
+- **FIX — two structural guards in `browser_session.py`, no per-site code.**
+  (1) **Verify the window actually came up.** `_open_clean_login` now polls the
+  launched subprocess's `poll()` for up to `_CLEAN_LOGIN_VERIFY_SECONDS = 2.5`:
+  while the browser process runs `poll()` is None; a return code within the window
+  means it handed off + exited, so it returns None and the caller falls back to
+  the **Playwright** user-driven window (which we launch and control, and which
+  wins the profile now that the automation Chrome has had time to exit). A test
+  fake with no `poll()` cannot be verified and is assumed alive (the injected-
+  launcher tests are unchanged). `opened` now reflects REALITY — the honest
+  degradation ("Open the Jarvis browser window yourself") fires only when even the
+  fallback can't launch. (2) **Settle out the lock after a recent close.** Every
+  real session teardown (`_RealBrowser.close`, the login/clean-window close) stamps
+  a module `_profile_released_monotonic`; `_settle_profile()` waits the remaining
+  `_PROFILE_SETTLE_SECONDS = 1.5` when a close JUST happened and is a NO-OP
+  otherwise (the common path pays nothing, and the hermetic suite — which never
+  runs `_RealBrowser.close` — pays zero). Called before the clean launch, before
+  the Playwright fallback, AND at the top of `BrowserSession.open` so the
+  **re-run-after-sign-in** browse (which closes the sign-in window then relaunches
+  on the same profile) no longer races the dying Chromium — the `TargetClosedError`
+  churn (RC4 of the WWR round) hardened at the same choke point. The mark rides
+  `_RealBrowser.close`, so the settle triggers no matter WHICH path freed the
+  profile, including the UPSTREAM discovery discard that `open_login_window` can't
+  see.
+- **Why marking in `_RealBrowser.close` is the right single choke point:** every
+  profile-holding context — agent browse, held discovery, media, commit-result,
+  challenge — is a `BrowserSession` whose `.close()` funnels through
+  `_RealBrowser.close()`. One stamp there covers them all; the clean subprocess
+  and the Playwright login browser (not `BrowserSession`s) stamp in
+  `_close_login_handles_locked`.
+- **Honest limit (unchanged):** Windows' single-instance signal is a message
+  window, not a lock FILE, so there is no reliable "profile is free" probe to
+  poll — the fix is a bounded settle + a launch-verify, not a proof. If both the
+  clean and Playwright launches lose the race the card degrades honestly to "open
+  it yourself"; it never again claims a window it didn't open. A 2.5s verify on
+  the rare human sign-in hand-off is invisible (the user is about to spend far
+  longer signing in).
+- Tests: `test_browser_session.py` (a handoff-exit clean proc → Playwright
+  fallback still opens a real window; a live clean proc is kept; `_settle_profile`
+  waits after a recent close and is a no-op otherwise). No migration, no frontend
+  change. **Live acceptance still pending** (the real Selector loop via
+  `npm run dev`). Uncommitted (git deferred).

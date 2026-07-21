@@ -6,6 +6,9 @@ session cannot mutate anything. If any test here goes green while the rule it
 names is broken, `browse` is no longer a READ tool and the approval gate has
 been bypassed rather than satisfied — so they are written to fail loudly.
 """
+import asyncio
+import json
+
 import pytest
 
 from app.core import browser_session
@@ -86,6 +89,9 @@ class FakePage:
     async def wait_for_load_state(self, *a, **kw):
         pass
 
+    async def go_back(self, **kwargs):
+        self.went_back = getattr(self, "went_back", 0) + 1
+
 
 class FakeBrowser:
     def __init__(self, page=None):
@@ -155,16 +161,20 @@ async def test_blocked_mutations_are_reported_not_swallowed(fake_browser):
 
 # ----------------------------------------------------------- RULE 2: SSRF
 async def test_private_hosts_are_aborted(fake_browser, monkeypatch):
+    # A private host that is NOT on the allowlist (the SSRF threat: a subresource
+    # / redirect steering somewhere internal) is still fully checked and aborted.
     monkeypatch.setattr(browser_session, "_host_is_blocked", lambda h: h == "localhost")
     browser_session.reset_host_cache()
-    session = await _session(allowlist={"localhost"})
+    session = await _session(allowlist={"example.com"})
     assert await _verdict(session, url="http://localhost:8000/api/tasks") == "abort"
     assert session.stats.blocked_hosts == 1
 
 
 async def test_ssrf_verdicts_are_cached_per_host(fake_browser, monkeypatch):
     """The interceptor sees every image on a page; an uncached getaddrinfo per
-    request would stall the loop and re-resolve one CDN host hundreds of times."""
+    request would stall the loop and re-resolve one CDN host hundreds of times.
+    Uses a THIRD-PARTY host — an allowlisted host now skips the check entirely
+    (see test_ssrf_is_skipped_for_a_get_to_an_allowlisted_host)."""
     calls = []
 
     def _count(host):
@@ -175,8 +185,37 @@ async def test_ssrf_verdicts_are_cached_per_host(fake_browser, monkeypatch):
     browser_session.reset_host_cache()
     session = await _session(allowlist={"example.com"})
     for _ in range(5):
-        await _verdict(session, url="https://cdn.example.com/img.png")
-    assert calls == ["cdn.example.com"]
+        await _verdict(session, url="https://cdn.thirdparty.com/img.png")
+    assert calls == ["cdn.thirdparty.com"]
+
+
+# The 2026-07-19 speed round: a READ (GET/HEAD/OPTIONS) to an ALLOWLISTED host
+# skips the per-request DNS SSRF lookup — first-party read subresources were the
+# dominant per-request tax, goto()/_verify_landing already SSRF-check navigation
+# there, and the third-party + commit paths keep the full check (below).
+async def test_ssrf_is_skipped_for_a_get_to_an_allowlisted_host(fake_browser, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        browser_session, "_host_is_blocked", lambda h: calls.append(h) or False
+    )
+    browser_session.reset_host_cache()
+    session = await _session(allowlist={"example.com"})
+    # A subdomain of the allowlisted origin — first-party — is trusted, no lookup.
+    assert await _verdict(session, url="https://cdn.example.com/img.png") == "continue"
+    assert calls == []                       # DNS was never consulted
+    assert session.stats.ssrf_checks == 0
+
+
+async def test_ssrf_still_guards_a_non_get_even_to_an_allowlisted_host(fake_browser, monkeypatch):
+    """The skip is READ-only: a NON-GET (here the one approved commit) to an
+    allowlisted host is STILL SSRF-checked — approval never buys past Rule 2, and
+    the perf skip never touches the request that leaves the machine."""
+    monkeypatch.setattr(browser_session, "_host_is_blocked", lambda h: h == "example.com")
+    browser_session.reset_host_cache()
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/submit")
+    assert await _verdict(session, url="https://example.com/submit", method="POST") == "abort"
+    assert session.stats.blocked_hosts == 1
 
 
 # ------------------------------------------------------- RULE 3: allowlist
@@ -254,6 +293,86 @@ async def test_browser_internal_schemes_pass(fake_browser):
     assert await _verdict(session, url="data:text/html,<p>x", navigation=True) == "continue"
 
 
+# ------------------------------------ benign route races (2026-07-19 "offline")
+# The false-'no internet': the interceptor's fail-closed `except` used to call
+# route.abort() for ANY exception — including a BENIGN continue_() race on the
+# MAIN document (Playwright's "Route is already handled" / "Target closed"),
+# turning a good page load into a connection error. A benign race must be
+# SWALLOWED (the request already resolved); only a GENUINE error fails closed.
+class _BenignContinueRoute(FakeRoute):
+    async def continue_(self):
+        raise RuntimeError("Route is already handled!")
+
+
+class _HardFailRoute(FakeRoute):
+    async def continue_(self):
+        raise RuntimeError("something genuinely broke")
+
+
+async def test_a_benign_route_race_does_not_re_abort_a_good_request(fake_browser):
+    session = await _session(allowlist={"example.com"})
+    route = _BenignContinueRoute(FakeRequest("https://example.com/page", navigation=True))
+    await session._intercept(route)
+    assert route.verdict is None       # neither re-continued nor aborted
+
+
+async def test_a_genuine_route_error_still_fails_closed(fake_browser):
+    """A NON-benign error is still fail-closed-aborted — an unrendered page beats
+    an unguarded one (the original guarantee, unchanged)."""
+    session = await _session(allowlist={"example.com"})
+    route = _HardFailRoute(FakeRequest("https://example.com/page", navigation=True))
+    await session._intercept(route)
+    assert route.verdict == "abort"
+
+
+# ---------------------------------------------- measurement + adaptive settle
+async def test_interceptor_counts_requests_and_ssrf_checks(fake_browser, monkeypatch):
+    """Layer D: the per-session summary rests on these counters — total requests
+    fielded, and how many actually cost a host lookup (allowlisted reads do not)."""
+    monkeypatch.setattr(browser_session, "_host_is_blocked", lambda h: False)
+    browser_session.reset_host_cache()
+    session = await _session(allowlist={"example.com"})
+    await _verdict(session, url="https://cdn.example.com/a.png")      # allowlisted GET → no lookup
+    await _verdict(session, url="https://cdn.thirdparty.com/b.png")   # third-party GET → lookup
+    d = session.stats.as_dict()
+    assert d["total_requests"] == 2
+    assert d["ssrf_checks"] == 1
+
+
+async def test_settle_stops_early_on_a_stable_page(fake_browser, monkeypatch):
+    """Adaptive settle: it polls the DOM node count and returns as soon as it
+    holds steady, instead of the old flat 2.5s sleep every step."""
+    monkeypatch.setattr(browser_session, "SETTLE_RENDER_POLL_SECONDS", 0.0)
+    session = await _session()
+    page = fake_browser.page
+    page.evaluate_results = [120, 120, 120]     # node count already stable
+    await session.settle()
+    # Stopped once the count held steady for STABLE_SAMPLES samples (not the cap).
+    assert page.evaluate_calls == browser_session.SETTLE_RENDER_STABLE_SAMPLES + 1
+    assert session.stats.settle_seconds >= 0.0
+
+
+async def test_settle_survives_an_evaluate_failure(fake_browser):
+    """A page that navigated / closed mid-poll (evaluate raises) is not an error —
+    settle returns cleanly, never raises."""
+
+    async def _boom(expression, *args):
+        raise RuntimeError("execution context was destroyed")
+
+    session = await _session()
+    fake_browser.page.evaluate = _boom
+    await session.settle()  # must not raise
+
+
+async def test_close_logs_a_summary_without_raising(fake_browser):
+    """Layer D best-effort: the close summary must never get in the way of the
+    teardown, and the browser is still closed."""
+    session = await _session()
+    await _verdict(session, url="https://example.com/x")
+    await session.close()
+    assert fake_browser.closed is True
+
+
 # ---------------------------------------------------------------- navigation
 async def test_goto_refuses_a_url_off_the_allowlist(fake_browser):
     session = await _session(allowlist={"example.com"})
@@ -285,6 +404,115 @@ async def test_goto_returns_the_final_url_on_success(fake_browser):
     session = await _session(allowlist={"example.com"})
     final = await session.goto("https://example.com/page")
     assert final == "https://example.com/page"
+    assert session.last_redirect_offsite is None
+
+
+# ------------------------------------------- redirect landings (2026-07-19)
+# The WWR-ad incident: an in-allowlist click-tracker URL 302'd to an origin the
+# task may not visit. Playwright route handlers never re-fire on redirect hops,
+# so _verify_landing is the ONLY judge — and a refused landing must be backed
+# out (or the loop observes and acts on the off-limits page) and recorded (so
+# the loop can offer the user the same origin-approval pause an off-site link
+# gets — a job application's ATS is approvable, an ad is deniable).
+async def test_a_refused_redirect_landing_is_backed_out_and_recorded(fake_browser):
+    session = await _session(allowlist={"example.com"})
+
+    async def _redirecting_goto(url, **kwargs):
+        fake_browser.page.url = "https://ads.metana.io/opportunities?utm=x"
+
+    fake_browser.page.goto = _redirecting_goto
+    with pytest.raises(BrowserBlocked, match="redirected"):
+        await session.goto("https://example.com/listing_ads/13/click")
+
+    assert fake_browser.page.went_back == 1
+    assert session.last_redirect_offsite == {
+        "host": "ads.metana.io",
+        "url": "https://ads.metana.io/opportunities?utm=x",
+    }
+
+
+async def test_a_redirect_to_a_blocked_host_backs_out_but_offers_no_approval(
+    fake_browser, monkeypatch
+):
+    """An SSRF-blocked landing is never a candidate for user approval — the
+    marker stays empty so the loop cannot offer to allowlist an internal host."""
+    monkeypatch.setattr(browser_session, "_host_is_blocked", lambda h: h == "evil.internal")
+    browser_session.reset_host_cache()
+    session = await _session(allowlist={"example.com"})
+
+    async def _redirecting_goto(url, **kwargs):
+        fake_browser.page.url = "https://evil.internal/admin"
+
+    fake_browser.page.goto = _redirecting_goto
+    with pytest.raises(BrowserBlocked, match="blocked address"):
+        await session.goto("https://example.com/x")
+
+    assert fake_browser.page.went_back == 1
+    assert session.last_redirect_offsite is None
+
+
+async def test_a_failed_back_out_still_raises(fake_browser):
+    """The retreat is best-effort; the refusal is not."""
+    session = await _session(allowlist={"example.com"})
+
+    async def _redirecting_goto(url, **kwargs):
+        fake_browser.page.url = "https://elsewhere.com/x"
+
+    async def _broken_back(**kwargs):
+        raise RuntimeError("history is empty")
+
+    fake_browser.page.goto = _redirecting_goto
+    fake_browser.page.go_back = _broken_back
+    with pytest.raises(BrowserBlocked, match="redirected"):
+        await session.goto("https://example.com/x")
+
+
+# --------------------------------------------- goto timeout retry (2026-07-19)
+async def test_goto_retries_a_navigation_timeout_once(fake_browser):
+    """Three live WWR runs each burned a whole browse (and a replan) on a
+    transient first-load timeout that succeeded on the next attempt."""
+    session = await _session(allowlist={"example.com"})
+    calls = []
+
+    async def _flaky_goto(url, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            raise TimeoutError("Page.goto: Timeout 20000ms exceeded.")
+        fake_browser.page.url = url
+
+    fake_browser.page.goto = _flaky_goto
+    final = await session.goto("https://example.com/slow")
+    assert final == "https://example.com/slow"
+    assert len(calls) == 2
+
+
+async def test_a_double_timeout_still_fails(fake_browser):
+    """Bounded to exactly one retry — a dead site fails in two attempts."""
+    session = await _session(allowlist={"example.com"})
+    calls = []
+
+    async def _dead_goto(url, **kwargs):
+        calls.append(url)
+        raise TimeoutError("Page.goto: Timeout 20000ms exceeded.")
+
+    fake_browser.page.goto = _dead_goto
+    with pytest.raises(TimeoutError):
+        await session.goto("https://example.com/dead")
+    assert len(calls) == 2
+
+
+async def test_a_non_timeout_navigation_error_is_never_retried(fake_browser):
+    session = await _session(allowlist={"example.com"})
+    calls = []
+
+    async def _dns_dead_goto(url, **kwargs):
+        calls.append(url)
+        raise RuntimeError("net::ERR_NAME_NOT_RESOLVED")
+
+    fake_browser.page.goto = _dns_dead_goto
+    with pytest.raises(RuntimeError):
+        await session.goto("https://example.com/x")
+    assert len(calls) == 1
 
 
 async def test_a_failed_open_closes_the_browser(fake_browser, monkeypatch):
@@ -482,6 +710,365 @@ async def test_opening_login_stops_active_media(fake_browser):
     assert browser_session.login_window_open() is True
 
 
+# ----------------------------------------------- clean (non-automation) hand-off
+# 2026-07-19: the sign-in / CAPTCHA window is launched, in production, as a PLAIN
+# Chrome SUBPROCESS — no CDP, no --enable-automation — so Cloudflare Turnstile /
+# Google do not fingerprint it as a bot and the user's manual solve sticks (the
+# clearance cookie lands in the profile the agent re-attaches to). The launcher
+# is an injectable seam (CLEAN_BROWSER_LAUNCHER) so the suite never spawns a real
+# process. These pin: it is PREFERRED over the automation window, is closable,
+# and falls back to Playwright when no system browser is found.
+class _FakeCleanProc:
+    """A stand-in for the subprocess.Popen the real launcher returns. pid=None so
+    _terminate_clean_proc takes the terminate() path (never runs taskkill)."""
+
+    def __init__(self, url):
+        self.url = url
+        self.pid = None
+        self.terminated = False
+
+    def terminate(self):
+        self.terminated = True
+
+
+async def test_open_login_window_prefers_the_clean_subprocess(monkeypatch):
+    """With a clean launcher available the hand-off uses it and NEVER touches the
+    Playwright factory (the hermetic BROWSER_FACTORY refuser would raise if it
+    did) — a genuinely un-automated window is what defeats the Turnstile loop."""
+    await browser_session.close_login_window()
+    launched: list[str] = []
+    monkeypatch.setattr(
+        browser_session, "CLEAN_BROWSER_LAUNCHER",
+        lambda url: launched.append(url) or _FakeCleanProc(url),
+    )
+
+    await browser_session.open_login_window("https://shop.test/")
+
+    assert launched == ["https://shop.test/"]
+    assert browser_session.login_window_open() is True
+    await browser_session.close_login_window()
+
+
+async def test_clean_launcher_none_falls_back_to_playwright(fake_browser, monkeypatch):
+    """No system browser (the launcher returns None) → the Playwright window still
+    opens, so the hand-off is never lost on a box without Chrome/Edge."""
+    await browser_session.close_login_window()
+    monkeypatch.setattr(browser_session, "CLEAN_BROWSER_LAUNCHER", lambda url: None)
+
+    await browser_session.open_login_window("https://accounts.google.com/")
+
+    assert browser_session.login_window_open() is True
+    # The fallback ran: the fake Playwright page navigated to the URL.
+    assert "https://accounts.google.com/" in fake_browser.page.goto_calls
+
+
+async def test_close_login_window_terminates_the_clean_proc(monkeypatch):
+    """close_login_window closes the clean subprocess window (best-effort
+    terminate), reports it, and is idempotent."""
+    await browser_session.close_login_window()
+    proc = _FakeCleanProc("x")
+    monkeypatch.setattr(browser_session, "CLEAN_BROWSER_LAUNCHER", lambda url: proc)
+
+    await browser_session.open_login_window("https://shop.test/")
+    assert browser_session.login_window_open() is True
+
+    assert await browser_session.close_login_window() is True
+    assert proc.terminated is True
+    assert browser_session.login_window_open() is False
+    assert await browser_session.close_login_window() is False  # closing nothing
+
+
+def test_clean_login_enabled_only_in_production():
+    """The clean subprocess is used only when no BROWSER_FACTORY is injected
+    (production) OR a launcher is explicitly injected. Under the hermetic suite
+    BROWSER_FACTORY is a refuser and no launcher is set, so the clean path stays
+    OFF and the suite never spawns a real Chrome."""
+    assert browser_session.CLEAN_BROWSER_LAUNCHER is None
+    assert browser_session.BROWSER_FACTORY is not None      # the hermetic refuser
+    assert browser_session._clean_login_enabled() is False
+
+
+# ------------------------------------ profile single-instance lock (2026-07-19)
+# One profile, one live Chromium: a hand-off window launched right after another
+# session closed can HAND OFF to the still-dying instance and exit with no visible
+# window ("it said it opened a sign-in window but it didn't"). These pin the two
+# guards: the clean subprocess is VERIFIED to stay alive (a fast exit → fall back
+# to the window we control), and _settle_profile waits out the lock after a recent
+# close (and pays nothing otherwise).
+class _ExitedCleanProc:
+    """A clean-window subprocess that handed off and exited immediately — poll()
+    reports a return code straight away (the profile-lock race)."""
+
+    def __init__(self, url):
+        self.url = url
+        self.pid = None
+
+    def poll(self):
+        return 0        # already gone
+
+    def terminate(self):
+        pass
+
+
+class _LiveCleanProc(_FakeCleanProc):
+    """A clean window that stayed up: poll() is None while the browser runs."""
+
+    def poll(self):
+        return None
+
+
+async def test_a_handoff_exit_clean_window_falls_back_to_playwright(
+    fake_browser, monkeypatch
+):
+    """The clean subprocess launched but exited at once (handed the URL to a
+    Chromium already on the profile) — verification catches it and the hand-off
+    falls back to the Playwright window we launch and control, so a real window
+    always appears."""
+    await browser_session.close_login_window()
+    monkeypatch.setattr(browser_session, "_CLEAN_LOGIN_VERIFY_SECONDS", 0.4)
+    monkeypatch.setattr(browser_session, "_PROFILE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(
+        browser_session, "CLEAN_BROWSER_LAUNCHER", lambda url: _ExitedCleanProc(url)
+    )
+
+    await browser_session.open_login_window("https://accounts.google.com/")
+
+    assert browser_session.login_window_open() is True
+    # The Playwright fallback actually ran (the fake page navigated).
+    assert "https://accounts.google.com/" in fake_browser.page.goto_calls
+    await browser_session.close_login_window()
+
+
+async def test_a_live_clean_window_is_kept(monkeypatch):
+    """A clean subprocess that stays alive (poll() None) is used as-is — no
+    fallback, the anti-fingerprint window is preserved."""
+    await browser_session.close_login_window()
+    monkeypatch.setattr(browser_session, "_CLEAN_LOGIN_VERIFY_SECONDS", 0.4)
+    proc = _LiveCleanProc("x")
+    monkeypatch.setattr(browser_session, "CLEAN_BROWSER_LAUNCHER", lambda url: proc)
+
+    await browser_session.open_login_window("https://shop.test/")
+
+    assert browser_session.login_window_open() is True
+    await browser_session.close_login_window()
+
+
+async def test_settle_profile_waits_after_a_recent_close(monkeypatch):
+    import time as _time
+
+    monkeypatch.setattr(browser_session, "_PROFILE_SETTLE_SECONDS", 0.3)
+    browser_session._mark_profile_released()
+    t0 = _time.monotonic()
+    await browser_session._settle_profile()
+    assert _time.monotonic() - t0 >= 0.25
+
+
+async def test_settle_profile_is_a_noop_when_nothing_closed_recently(monkeypatch):
+    import time as _time
+
+    monkeypatch.setattr(browser_session, "_PROFILE_SETTLE_SECONDS", 0.3)
+    monkeypatch.setattr(
+        browser_session, "_profile_released_monotonic", _time.monotonic() - 10
+    )
+    t0 = _time.monotonic()
+    await browser_session._settle_profile()
+    assert _time.monotonic() - t0 < 0.1
+
+
+# -------------------------------- orphaned-profile reclaim + launch (2026-07-20)
+# A Chromium left holding ~/.jarvis/browser by a PRIOR backend (a sign-in window
+# not closed on shutdown, a context leaked by a crash) hangs the next launch on
+# the single-instance lock — the "kept on processing" incident. reclaim_orphaned_
+# profile kills that orphan, and ONLY processes whose command line names that
+# exact profile; the launch is bounded so a locked profile becomes a clean failure
+# that a reclaim-and-retry self-heals, never an endless spinner.
+class _FakeContext:
+    def set_default_navigation_timeout(self, ms):
+        self.nav = ms
+
+    def on(self, event, cb):
+        pass
+
+    async def new_page(self):
+        return FakePage()
+
+    async def close(self):
+        pass
+
+
+class _FakeChromium:
+    """launch_persistent_context replays a scripted outcome per call: 'hang' (never
+    returns → the launch timeout fires), 'fail' (raises → dead channel), or 'ok'
+    (a context)."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls = 0
+
+    async def launch_persistent_context(self, **kw):
+        action = self.script[self.calls]
+        self.calls += 1
+        if action == "hang":
+            await asyncio.sleep(30)     # the wait_for cap will time this out
+        if action == "fail":
+            raise RuntimeError("no browser on this channel")
+        return _FakeContext()
+
+
+class _FakePlaywright:
+    def __init__(self, chromium):
+        self.chromium = chromium
+        self.stopped = False
+
+    async def stop(self):
+        self.stopped = True
+
+
+def test_reaper_output_matches_only_the_jarvis_profile_command_line():
+    """THE safety property: only a browser on the ~/.jarvis/browser profile is
+    ever returned — the user's everyday Chrome (a different --user-data-dir) never
+    is, no matter how many chrome.exe are running."""
+    marker = f"--user-data-dir={browser_session.BROWSER_PROFILE_DIR}"
+    everyday = "--user-data-dir=C:\\Users\\DELL\\AppData\\Local\\Google\\Chrome\\User Data"
+    stdout = "\n".join([
+        f"1111\tchrome.exe {marker} --new-window https://youtube.com",
+        f"2222\tchrome.exe {everyday} --restore-last-session",  # the user's Chrome
+        f"3333\tmsedge.exe {marker} --no-first-run",            # a Jarvis-profile Edge
+        f"badpid\tchrome.exe {marker}",                         # malformed pid → skipped
+    ])
+    assert browser_session._parse_reaper_output(stdout, marker) == [1111, 3333]
+
+
+def test_reaper_blank_marker_matches_nothing():
+    marker = f"--user-data-dir={browser_session.BROWSER_PROFILE_DIR}"
+    assert browser_session._parse_reaper_output(f"1\tchrome.exe {marker}", "") == []
+
+
+def test_reclaim_kills_the_reaped_pids_and_marks_the_profile_released(monkeypatch):
+    killed = []
+    monkeypatch.setattr(browser_session, "_PROFILE_REAPER", lambda m: [7, 8])
+    monkeypatch.setattr(
+        browser_session, "_kill_pid_tree", lambda pid: (killed.append(pid), True)[1]
+    )
+    monkeypatch.setattr(browser_session, "_profile_released_monotonic", 0.0)
+
+    assert browser_session.reclaim_orphaned_profile() == 2
+    assert killed == [7, 8]
+    # a kill frees the lock like a close() — the next launch must settle
+    assert browser_session._profile_released_monotonic > 0.0
+
+
+def test_reclaim_is_a_noop_when_there_is_no_orphan(monkeypatch):
+    def _must_not_kill(pid):
+        raise AssertionError("no orphan → nothing may be killed")
+
+    monkeypatch.setattr(browser_session, "_PROFILE_REAPER", lambda m: [])
+    monkeypatch.setattr(browser_session, "_kill_pid_tree", _must_not_kill)
+    monkeypatch.setattr(browser_session, "_profile_released_monotonic", 0.0)
+
+    assert browser_session.reclaim_orphaned_profile() == 0
+    assert browser_session._profile_released_monotonic == 0.0   # nothing released
+
+
+def test_reclaim_hands_the_reaper_the_exact_profile_marker(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        browser_session, "_PROFILE_REAPER", lambda m: (seen.append(m), [])[1]
+    )
+    browser_session.reclaim_orphaned_profile()
+    assert seen == [f"--user-data-dir={browser_session.BROWSER_PROFILE_DIR}"]
+
+
+async def test_launch_hang_self_heals_by_reclaiming_the_orphan(monkeypatch):
+    """The headline fix: a launch that HANGS on the locked profile is timed out,
+    the orphan is reclaimed, and a retry succeeds — the first browse after a
+    restart heals itself instead of spinning forever."""
+    killed = []
+    monkeypatch.setattr(browser_session, "LAUNCH_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(browser_session, "_PROFILE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(browser_session, "_CHANNELS", (None,))
+    monkeypatch.setattr(browser_session, "_harden_profile", lambda p: None)
+    monkeypatch.setattr(browser_session, "_PROFILE_REAPER", lambda m: [999])
+    monkeypatch.setattr(
+        browser_session, "_kill_pid_tree", lambda pid: (killed.append(pid), True)[1]
+    )
+    chromium = _FakeChromium(["hang", "ok"])
+    pw = _FakePlaywright(chromium)
+
+    async def _fake_start():
+        return pw
+
+    monkeypatch.setattr(browser_session, "_start_playwright", _fake_start)
+
+    result = await browser_session._default_browser_factory()
+
+    assert isinstance(result, browser_session._RealBrowser)
+    assert killed == [999]        # the orphan was reclaimed between the two passes
+    assert chromium.calls == 2    # first launch hung/timed out, the retry succeeded
+    assert pw.stopped is False    # a launched driver is kept, never stopped
+
+
+async def test_launch_total_failure_with_no_orphan_raises_unavailable(monkeypatch):
+    """Every channel fails and there is no orphan to reclaim → a clean
+    BrowserUnavailable (the tool _fails), and the driver is stopped."""
+    monkeypatch.setattr(browser_session, "LAUNCH_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(browser_session, "_PROFILE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(browser_session, "_CHANNELS", (None,))
+    monkeypatch.setattr(browser_session, "_harden_profile", lambda p: None)
+    monkeypatch.setattr(browser_session, "_PROFILE_REAPER", lambda m: [])  # nothing to reclaim
+    chromium = _FakeChromium(["fail"])
+    pw = _FakePlaywright(chromium)
+
+    async def _fake_start():
+        return pw
+
+    monkeypatch.setattr(browser_session, "_start_playwright", _fake_start)
+
+    with pytest.raises(browser_session.BrowserUnavailable):
+        await browser_session._default_browser_factory()
+    assert chromium.calls == 1     # no orphan → no retry
+    assert pw.stopped is True       # the driver is torn down on total failure
+
+
+async def test_shutdown_browser_windows_closes_every_window(monkeypatch):
+    called = []
+
+    def _recorder(name):
+        async def _teardown():
+            called.append(name)
+            return True
+        return _teardown
+
+    monkeypatch.setattr(browser_session, "stop_media", _recorder("media"))
+    monkeypatch.setattr(browser_session, "close_result_window", _recorder("result"))
+    monkeypatch.setattr(browser_session, "close_login_window", _recorder("login"))
+    monkeypatch.setattr(browser_session, "discard_discovery", _recorder("discovery"))
+
+    await browser_session.shutdown_browser_windows()
+    assert set(called) == {"media", "result", "login", "discovery"}
+
+
+async def test_shutdown_browser_windows_survives_one_teardown_failing(monkeypatch):
+    called = []
+
+    async def _boom():
+        raise RuntimeError("half-dead window")
+
+    def _recorder(name):
+        async def _teardown():
+            called.append(name)
+            return True
+        return _teardown
+
+    monkeypatch.setattr(browser_session, "stop_media", _boom)
+    monkeypatch.setattr(browser_session, "close_result_window", _recorder("result"))
+    monkeypatch.setattr(browser_session, "close_login_window", _recorder("login"))
+    monkeypatch.setattr(browser_session, "discard_discovery", _recorder("discovery"))
+
+    await browser_session.shutdown_browser_windows()   # must not raise
+    assert set(called) == {"result", "login", "discovery"}   # the others still ran
+
+
 # --------------------------------------------------------------- COMMIT mode
 # COMMIT (14.5) is the ONE approved way past Rule 1: arm_commit permits a SINGLE
 # matching non-GET (a user-approved form submit), consumed the instant it fires
@@ -605,3 +1192,272 @@ async def test_the_commit_registry_holds_and_hands_off_one_session(fake_browser)
     assert await browser_session.discard_commit() is True
     assert s3._browser.closed is True
     assert await browser_session.discard_commit() is False
+
+
+# ------------------------------------- challenge-vendor carve-out (2026-07-19)
+# While an embedded-challenge hand-off is ARMED, the widget's own verification
+# POSTs (to the frozen vendor endpoints) may pass Rule 1 so the HUMAN's solve
+# can complete in the agent's window — without this our own interceptor aborts
+# the solve (the "solved it, asked again" loop). NOT armed = nothing changes;
+# the TARGET SITE's origin stays aborted either way, armed or not.
+def test_challenge_vendor_rules_match_hosts_and_paths():
+    allows = browser_session._challenge_vendor_allows
+    assert allows("https://www.google.com/recaptcha/api2/userverify")
+    assert allows("https://www.google.com/recaptcha/enterprise/reload")
+    assert allows("https://www.recaptcha.net/recaptcha/api2/userverify")
+    assert allows("https://challenges.cloudflare.com/cdn-cgi/challenge-platform/x")
+    assert allows("https://newassets.hcaptcha.com/captcha/v1/checksiteconfig")
+    # google.com OUTSIDE /recaptcha/ is not a vendor endpoint.
+    assert not allows("https://www.google.com/search?q=x")
+    # the target site never matches, and neither does a lookalike.
+    assert not allows("https://example.com/submit")
+    assert not allows("https://evil-recaptcha.net.attacker.io/recaptcha/x")
+
+
+async def test_vendor_posts_abort_when_not_armed(fake_browser):
+    """The carve-out is a WINDOW, not a standing exemption: with no hand-off in
+    progress a vendor POST aborts exactly like any other mutation."""
+    session = await _session()
+    assert await _verdict(
+        session, url="https://www.google.com/recaptcha/api2/userverify", method="POST"
+    ) == "abort"
+
+
+async def test_armed_handoff_allows_vendor_posts_and_nothing_else(
+    fake_browser, monkeypatch
+):
+    """Armed: vendor verification POSTs pass (and are counted — visible, never
+    silent); the target site's own POST still aborts. Disarm re-locks."""
+    monkeypatch.setattr(browser_session, "_host_is_blocked", lambda h: False)
+    browser_session.reset_host_cache()
+    session = await _session()
+    session.arm_challenge_traffic()
+    assert await _verdict(
+        session, url="https://www.google.com/recaptcha/api2/userverify", method="POST"
+    ) == "continue"
+    assert await _verdict(
+        session, url="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/x",
+        method="POST",
+    ) == "continue"
+    assert session.stats.allowed_challenge_posts == 2
+    # the FORM's own submit — the mutation approval exists to gate — still aborts.
+    assert await _verdict(
+        session, url="https://example.com/submit", method="POST"
+    ) == "abort"
+    # a google URL outside /recaptcha/ is not a vendor endpoint.
+    assert await _verdict(
+        session, url="https://www.google.com/gen_204", method="POST"
+    ) == "abort"
+    session.disarm_challenge_traffic()
+    assert await _verdict(
+        session, url="https://www.google.com/recaptcha/api2/userverify", method="POST"
+    ) == "abort"
+
+
+# --------------------------------------- challenge hold registry (2026-07-19)
+# An embedded widget's token is bound to the page render in the agent's own
+# window — it cannot transfer from a separate hand-off window. The live session
+# (form filled) is held here across the pause; the user ticks the box in that
+# window; the resumed discovery takes the session back.
+async def test_the_challenge_registry_holds_and_hands_off_one_session(fake_browser):
+    meta = {"kind": "reCAPTCHA", "site": "example.com", "goal": "apply"}
+    s1 = BrowserSession(FakeBrowser(), FakePage(), {"example.com"})
+    s1.arm_challenge_traffic()
+    await browser_session.hold_challenge(s1, meta=meta)
+    assert browser_session.pending_challenge() == meta
+
+    taken = await browser_session.take_challenge()
+    assert taken is s1
+    # taking the session back DISARMS the vendor carve-out — the hand-off window
+    # is over, Rule 1 is whole again.
+    assert s1._challenge_traffic_armed is False
+    assert browser_session.pending_challenge() is None
+    assert await browser_session.take_challenge() is None
+
+    # one slot: a new hold closes the previous session; discard closes + clears.
+    s2 = BrowserSession(FakeBrowser(), FakePage(), set())
+    s3 = BrowserSession(FakeBrowser(), FakePage(), set())
+    await browser_session.hold_challenge(s2, meta=meta)
+    await browser_session.hold_challenge(s3, meta=meta)
+    assert s2._browser.closed is True
+    assert await browser_session.discard_challenge() is True
+    assert s3._browser.closed is True
+    assert await browser_session.discard_challenge() is False
+
+
+# ------------------------------------- discovery hold registry (2026-07-19)
+# A commit discovery that pauses to ask the user something (a missing form value,
+# an optional sign-in offer, an off-site origin to approve) HOLDS its live,
+# part-filled session here across the pause — before, the window closed the
+# moment it asked ("filled two fields and then closed the chrome"). The resumed
+# discovery takes it back and carries on from where it stopped.
+async def test_the_discovery_registry_holds_and_hands_off_one_session(fake_browser):
+    meta = {"goal": "apply to the job", "reason": "fill"}
+    s1 = BrowserSession(FakeBrowser(), FakePage(), {"jobs.example.com"})
+    await browser_session.hold_discovery(s1, meta=meta)
+    assert browser_session.pending_discovery() == meta
+
+    taken = await browser_session.take_discovery()
+    assert taken is s1
+    assert browser_session.pending_discovery() is None       # handed off, slot empty
+    assert await browser_session.take_discovery() is None     # cannot be taken twice
+
+    # One slot: a new hold closes the previous session; discard closes + clears.
+    s2 = BrowserSession(FakeBrowser(), FakePage(), set())
+    s3 = BrowserSession(FakeBrowser(), FakePage(), set())
+    await browser_session.hold_discovery(s2, meta=meta)
+    await browser_session.hold_discovery(s3, meta=meta)
+    assert s2._browser.closed is True
+    assert await browser_session.discard_discovery() is True
+    assert s3._browser.closed is True
+    assert await browser_session.discard_discovery() is False
+
+
+# --------------------------------------------------- profile hardening (creds)
+# SESSIONS, NOT CREDENTIALS: the ~/.jarvis/browser profile must never save or
+# auto-fill a password (a saved credential auto-filling read as "the AI logged in
+# itself" — user report 2026-07-18). These pin the hardening without a real
+# browser: Preferences seeding, merge safety, idempotence, and — the load-bearing
+# split — clearing saved credentials while leaving the session Cookies intact.
+def test_harden_profile_disables_password_manager_and_autofill(tmp_path):
+    browser_session._harden_profile(tmp_path)
+    prefs = json.loads((tmp_path / "Default" / "Preferences").read_text(encoding="utf-8"))
+    assert prefs["credentials_enable_service"] is False
+    assert prefs["profile"]["password_manager_enabled"] is False
+    assert prefs["autofill"]["profile_enabled"] is False
+    assert prefs["autofill"]["credit_card_enabled"] is False
+
+
+def test_harden_profile_merges_without_clobbering_existing_prefs(tmp_path):
+    default = tmp_path / "Default"
+    default.mkdir(parents=True)
+    (default / "Preferences").write_text(
+        json.dumps({"profile": {"exit_type": "Normal", "name": "me"}, "keep": 1}),
+        encoding="utf-8",
+    )
+    browser_session._harden_profile(tmp_path)
+    prefs = json.loads((default / "Preferences").read_text(encoding="utf-8"))
+    assert prefs["profile"]["password_manager_enabled"] is False  # our key applied
+    assert prefs["keep"] == 1                                     # unrelated key kept
+    assert prefs["profile"]["exit_type"] == "Normal"              # nested key kept
+    assert prefs["profile"]["name"] == "me"
+
+
+def test_harden_profile_is_idempotent(tmp_path):
+    browser_session._harden_profile(tmp_path)
+    first = (tmp_path / "Default" / "Preferences").read_text(encoding="utf-8")
+    browser_session._harden_profile(tmp_path)
+    second = (tmp_path / "Default" / "Preferences").read_text(encoding="utf-8")
+    assert first == second
+
+
+def test_harden_profile_clears_saved_credentials_but_not_cookies(tmp_path):
+    default = tmp_path / "Default"
+    default.mkdir(parents=True)
+    (default / "Login Data").write_text("saved-password-db", encoding="utf-8")
+    (default / "Login Data For Account").write_text("saved", encoding="utf-8")
+    (default / "Cookies").write_text("session-cookie", encoding="utf-8")
+    browser_session._harden_profile(tmp_path)
+    assert not (default / "Login Data").exists()
+    assert not (default / "Login Data For Account").exists()
+    # The session cookie is the "log in once, stay signed in" property — untouched.
+    assert (default / "Cookies").read_text(encoding="utf-8") == "session-cookie"
+
+
+def test_harden_profile_survives_a_corrupt_prefs_file(tmp_path):
+    default = tmp_path / "Default"
+    default.mkdir(parents=True)
+    (default / "Preferences").write_text("{not valid json", encoding="utf-8")
+    browser_session._harden_profile(tmp_path)  # must not raise
+    prefs = json.loads((default / "Preferences").read_text(encoding="utf-8"))
+    assert prefs["credentials_enable_service"] is False
+
+
+# --------------------------------------------------- popup / new-tab following
+# Many job boards (WeWorkRemotely, live 2026-07-18) open the application — or a
+# CAPTCHA — in a NEW TAB. The loop only observes session.page, so an un-adopted
+# popup is invisible. These pin the follow: a new tab is routed under the SAME
+# interceptor (no new capability) and becomes the page the loop observes.
+class FakeBrowserWithPages(FakeBrowser):
+    """A FakeBrowser that records a context 'page' listener, so we can drive the
+    popup event the real _RealBrowser.on_page would deliver."""
+
+    def __init__(self, page=None):
+        super().__init__(page)
+        self.page_listener = None
+
+    def on_page(self, callback):
+        self.page_listener = callback
+
+
+async def test_open_registers_a_popup_follower(monkeypatch):
+    browser = FakeBrowserWithPages()
+    monkeypatch.setattr(browser_session, "BROWSER_FACTORY", lambda: browser)
+    session = await BrowserSession.open({"example.com"})
+    assert browser.page_listener == session._on_new_page
+
+
+async def test_a_popup_is_adopted_under_the_same_interceptor(fake_browser):
+    """The core follow: the new tab gets THIS session's read-only interceptor and
+    becomes session.page — so the loop, which reads session.page, follows it."""
+    session = await _session()
+    original = session.page
+    popup = FakePage(url="https://example.com/apply")
+    await session._adopt_new_page(popup)
+    assert session.page is popup
+    assert session.page is not original
+    # the SAME guard is installed on the popup (Rule 1/2/3 govern it too). Bound
+    # methods compare by (__func__, __self__) — `is` on them is always False.
+    assert any(
+        getattr(h, "__func__", None) is BrowserSession._intercept and getattr(h, "__self__", None) is session
+        for _, h in popup.routes
+    )
+
+
+async def test_the_context_page_event_schedules_adoption(fake_browser):
+    """The sync context handler schedules the async adopt on the loop."""
+    session = await _session()
+    popup = FakePage(url="https://example.com/apply")
+    session._on_new_page(popup)         # sync — Playwright dispatches it like this
+    await asyncio.sleep(0)              # let the scheduled task run
+    assert session.page is popup
+
+
+async def test_an_adopted_popup_is_still_read_only(fake_browser):
+    """Following a popup grants NO new capability: a non-GET on the new tab is
+    aborted exactly like on the original page."""
+    session = await _session()
+    popup = FakePage(url="https://example.com/apply")
+    await session._adopt_new_page(popup)
+    # a POST routed through the interceptor now installed on the popup is aborted.
+    assert await _verdict(session, url="https://example.com/apply", method="POST") == "abort"
+    assert session.stats.blocked_mutations == 1
+
+
+async def test_main_frame_check_is_scoped_to_the_requests_own_page(fake_browser):
+    """A shared interceptor across adopted tabs must judge a navigation against the
+    REQUEST'S OWN page main frame, not self.page's — else a popup's top-level
+    navigation is mislabelled. (Regression guard for the popup-follow change.)"""
+    session = await _session()  # session.page.main_frame == "main" (a different tab)
+
+    class _Owner:
+        def __init__(self, mf):
+            self.main_frame = mf
+
+    class _Frame:
+        def __init__(self):
+            self.page = None
+
+    # A request whose frame IS its own page's main frame → a main-frame navigation.
+    frame = _Frame()
+    owner = _Owner(frame)
+    frame.page = owner
+    req = FakeRequest(url="https://x.com/", navigation=True, frame=frame)
+    assert session._is_main_frame_navigation(req) is True
+
+    # A SUBFRAME of that same page (frame != page.main_frame) → not main-frame,
+    # even though self.page's crude "main" check is irrelevant here.
+    sub = _Frame()
+    sub.page = owner
+    req2 = FakeRequest(url="https://x.com/", navigation=True, frame=sub)
+    assert session._is_main_frame_navigation(req2) is False
