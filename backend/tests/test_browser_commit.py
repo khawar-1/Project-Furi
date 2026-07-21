@@ -1465,8 +1465,9 @@ async def test_discover_holds_the_session_on_an_embedded_challenge(
     _discover_rig, monkeypatch
 ):
     """The embedded pause: the live session is NOT closed — it is held in the
-    challenge registry with the vendor carve-out ARMED, and the discovery
-    reports mode 'embedded' so the planner sends the user to THIS window."""
+    challenge registry, and the discovery reports mode 'embedded' so the
+    planner sends the user to THIS window. (No traffic arming any more: under
+    the action-level policy the widget's verification XHR flows on its own.)"""
     async def fake_run_browse(session, goal, provider, **kwargs):
         return _challenge_outcome()
 
@@ -1478,7 +1479,6 @@ async def test_discover_holds_the_session_on_an_embedded_challenge(
         assert discovery.challenge_mode == "embedded"
         session = _discover_rig[0]
         assert session.closed is False              # held, never closed
-        assert session.armed is True                # the human's solve can complete
         pending = browser_session.pending_challenge()
         assert pending is not None
         assert pending["goal"] == _CHAL_PARAMS["goal"]
@@ -1492,10 +1492,9 @@ async def test_discover_resumes_on_the_held_session_for_the_same_goal(
     _discover_rig, monkeypatch
 ):
     """The resume: the SAME held session is taken back (no new launch, no
-    navigation — the solved token is bound to the page as it stands), the
-    carve-out is disarmed, and the flow proceeds to the ordinary commit hold."""
+    navigation — the solved token is bound to the page as it stands), and the
+    flow proceeds to the ordinary commit hold."""
     held = _ChalSession()
-    held.armed = True
     await browser_session.hold_challenge(
         held, meta={"kind": "reCAPTCHA", "site": "example.com",
                     "url": "x", "goal": _CHAL_PARAMS["goal"]},
@@ -1516,7 +1515,6 @@ async def test_discover_resumes_on_the_held_session_for_the_same_goal(
         assert discovery.state is not None
         assert _discover_rig == []                  # BrowserSession.open never ran
         assert held.goto_calls == []                # never navigated away
-        assert held.armed is False                  # take_challenge disarmed it
         assert browser_session.pending_challenge() is None
         assert browser_session.pending_commit() is not None   # ordinary hold now
     finally:

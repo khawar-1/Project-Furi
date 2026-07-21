@@ -122,12 +122,22 @@ async def _verdict(session, **request_kwargs):
     return route.verdict
 
 
-# ------------------------------------------------------ RULE 1: non-GET dies
+# ------------------------- RULE 1: unapproved form NAVIGATION dies
+# (Action-level policy, 2026-07-21: the page's own XHR/fetch traffic flows —
+# blanket non-GET aborting broke every SPA. What Rule 1 refuses is the classic
+# form-POST NAVIGATION without an armed commit permit; agent submits are gated
+# by the gesture gate + the one-shot permit.)
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE", "post", "TRACE"])
-async def test_every_mutating_method_is_aborted(fake_browser, method):
-    """THE guarantee. If this fails, browse can submit forms."""
+async def test_every_unapproved_mutating_navigation_is_aborted(fake_browser, method):
+    """The network backstop: a classic form-submit navigation with no armed
+    commit permit dies. If this fails, an unapproved form POST can sail out."""
     session = await _session()
-    assert await _verdict(session, url="https://example.com/api", method=method) == "abort"
+    assert (
+        await _verdict(
+            session, url="https://example.com/api", method=method, navigation=True
+        )
+        == "abort"
+    )
     assert session.stats.blocked_mutations == 1
 
 
@@ -138,22 +148,57 @@ async def test_safe_methods_pass(fake_browser, method):
     assert session.stats.blocked_mutations == 0
 
 
-async def test_a_cross_origin_subresource_post_is_aborted(fake_browser):
-    """The load-bearing case: an SPA submits via a background fetch, not a form
-    POST. A rule that only covered navigations would leave LinkedIn's apply
-    button wide open while looking correct."""
+async def test_the_pages_own_xhr_posts_flow(fake_browser, monkeypatch):
+    """THE capability half of the action-level trade: an SPA's background fetch
+    (search, filters, lazy content, widget verification) is the page being a
+    page — it flows, same-origin and cross-origin alike, still under the SSRF
+    guard. Agent SUBMITS are gated by the gesture gate + commit permit, not by
+    strangling the network."""
+    monkeypatch.setattr(browser_session, "_host_is_blocked", lambda h: False)
+    browser_session.reset_host_cache()
     session = await _session()
-    verdict = await _verdict(
-        session, url="https://api.other.com/v2/apply", method="POST", navigation=False
+    assert (
+        await _verdict(
+            session, url="https://example.com/api/search", method="POST",
+            navigation=False,
+        )
+        == "continue"
     )
-    assert verdict == "abort"
+    assert (
+        await _verdict(
+            session, url="https://api.other.com/v2/telemetry", method="POST",
+            navigation=False,
+        )
+        == "continue"
+    )
+    assert session.stats.blocked_mutations == 0
+
+
+async def test_a_flowing_xhr_post_is_still_ssrf_guarded(fake_browser, monkeypatch):
+    """Opening the network to page traffic never opened it to the private
+    ranges: a POST to a blocked host is aborted by Rule 2 exactly as a GET is."""
+    monkeypatch.setattr(
+        browser_session, "_host_is_blocked", lambda h: h == "internal.local"
+    )
+    browser_session.reset_host_cache()
+    session = await _session()
+    assert (
+        await _verdict(
+            session, url="http://internal.local/admin", method="POST",
+            navigation=False,
+        )
+        == "abort"
+    )
+    assert session.stats.blocked_hosts == 1
 
 
 async def test_blocked_mutations_are_reported_not_swallowed(fake_browser):
-    """An aborted POST is a BREAKAGE, not a mutation — a page that half-works
-    for reasons nobody surfaced is the confusing outcome."""
+    """An aborted form navigation is a BREAKAGE, not a mutation — a page that
+    half-works for reasons nobody surfaced is the confusing outcome."""
     session = await _session()
-    await _verdict(session, url="https://example.com/log", method="POST")
+    await _verdict(
+        session, url="https://example.com/log", method="POST", navigation=True
+    )
     reported = session.stats.as_dict()
     assert reported["blocked_mutations"] == 1
     assert "POST https://example.com/log" in reported["mutation_urls"]
@@ -574,12 +619,22 @@ async def test_playback_handoff_lifts_interception(fake_browser):
 
 async def test_playback_fallback_flag_allows_non_get_when_intercept_still_runs(fake_browser):
     """The FALLBACK path: if unroute failed the interceptor is still installed,
-    but _read_only=False means the same POST that was aborted before now passes —
-    the player API can talk, so the video plays even in the degraded mode."""
+    but _read_only=False means the same form navigation that was aborted before
+    now passes — the player works even in the degraded mode."""
     session = await _session()
-    assert await _verdict(session, url="https://example.com/api", method="POST") == "abort"
+    assert (
+        await _verdict(
+            session, url="https://example.com/api", method="POST", navigation=True
+        )
+        == "abort"
+    )
     await session.enter_playback_mode(reload=False)
-    assert await _verdict(session, url="https://example.com/api", method="POST") == "continue"
+    assert (
+        await _verdict(
+            session, url="https://example.com/api", method="POST", navigation=True
+        )
+        == "continue"
+    )
 
 
 async def test_playback_fallback_still_guards_ssrf_and_allowlist(fake_browser, monkeypatch):
@@ -1099,11 +1154,17 @@ async def test_shutdown_browser_windows_survives_one_close_failing(monkeypatch):
 # (re-lock). These pin the security-critical properties the whole feature rests
 # on — if any goes green while its rule is broken, the approval gate has been
 # bypassed rather than satisfied.
-async def test_an_unapproved_non_get_is_still_aborted_in_commit_capable_session(fake_browser):
-    """With no arm set, the default guarantee is unchanged: a POST dies."""
+async def test_an_unapproved_form_navigation_is_aborted_in_commit_capable_session(fake_browser):
+    """With no arm set, the backstop is unchanged: a form-POST navigation dies
+    and nothing records a fired commit."""
     session = await _session(allowlist={"example.com"})
     assert session._armed_commit is None
-    assert await _verdict(session, url="https://example.com/submit", method="POST") == "abort"
+    assert (
+        await _verdict(
+            session, url="https://example.com/submit", method="POST", navigation=True
+        )
+        == "abort"
+    )
     assert session.commit_fired() is False
 
 
@@ -1112,28 +1173,72 @@ async def test_an_armed_commit_passes_exactly_once_then_relocks(fake_browser):
     consumed in the same breath — a double-submit finds nothing armed."""
     session = await _session(allowlist={"example.com"})
     session.arm_commit("POST", "https://example.com/submit")
-    # The one approved request goes through...
-    assert await _verdict(session, url="https://example.com/submit", method="POST") == "continue"
+    # The one approved request goes through (a classic form navigation)...
+    assert (
+        await _verdict(
+            session, url="https://example.com/submit", method="POST", navigation=True
+        )
+        == "continue"
+    )
     assert session.commit_fired() is True
     assert session.stats.allowed_commits == 1
     assert session._armed_commit is None              # re-locked
-    # ...and a second identical request is aborted like any mutation.
-    assert await _verdict(session, url="https://example.com/submit", method="POST") == "abort"
+    # ...and a second identical submit navigation is aborted — re-locked.
+    assert (
+        await _verdict(
+            session, url="https://example.com/submit", method="POST", navigation=True
+        )
+        == "abort"
+    )
     assert session.stats.allowed_commits == 1         # not two
+
+
+async def test_an_armed_commit_fires_on_the_spa_transport_too(fake_browser, monkeypatch):
+    """An SPA submits via a background fetch to the action URL, not a form
+    navigation. The permit matches on (method, url) whatever the transport, so
+    commit_fired() records the real submission either way."""
+    monkeypatch.setattr(browser_session, "_host_is_blocked", lambda h: False)
+    browser_session.reset_host_cache()
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/submit")
+    assert (
+        await _verdict(
+            session, url="https://example.com/submit", method="POST", navigation=False
+        )
+        == "continue"
+    )
+    assert session.commit_fired() is True
+    assert session._armed_commit is None              # consumed, re-locked
 
 
 async def test_an_armed_commit_matches_only_the_exact_request(fake_browser):
     """The permit is for ONE request, named by method + URL. A different path or
-    method is aborted AND does not consume the permit (fail closed, no leak)."""
+    method is aborted (as a form navigation) AND does not consume the permit
+    (fail closed, no leak)."""
     session = await _session(allowlist={"example.com"})
     session.arm_commit("POST", "https://example.com/submit")
 
-    assert await _verdict(session, url="https://example.com/other", method="POST") == "abort"
+    assert (
+        await _verdict(
+            session, url="https://example.com/other", method="POST", navigation=True
+        )
+        == "abort"
+    )
     assert session._armed_commit is not None          # untouched by a non-match
-    assert await _verdict(session, url="https://example.com/submit", method="PUT") == "abort"
+    assert (
+        await _verdict(
+            session, url="https://example.com/submit", method="PUT", navigation=True
+        )
+        == "abort"
+    )
     assert session._armed_commit is not None
     # The exact approved request still works afterwards.
-    assert await _verdict(session, url="https://example.com/submit", method="POST") == "continue"
+    assert (
+        await _verdict(
+            session, url="https://example.com/submit", method="POST", navigation=True
+        )
+        == "continue"
+    )
 
 
 async def test_commit_url_matching_ignores_fragment_and_trailing_slash(fake_browser):
@@ -1160,17 +1265,28 @@ async def test_an_approved_commit_still_obeys_the_ssrf_guard(fake_browser, monke
 async def test_a_redirect_after_the_submit_is_re_guarded(fake_browser):
     """After the one approved POST, the session is re-locked: a response that
     redirects the top frame off-allowlist is aborted (Rule 3), and any further
-    non-GET is aborted again (Rule 1) — the permit did not linger."""
+    form navigation is aborted again (Rule 1) — the permit did not linger."""
     session = await _session(allowlist={"example.com"})
     session.arm_commit("POST", "https://example.com/submit")
-    assert await _verdict(session, url="https://example.com/submit", method="POST") == "continue"
+    assert (
+        await _verdict(
+            session, url="https://example.com/submit", method="POST", navigation=True
+        )
+        == "continue"
+    )
     # The submit's response redirects to another site — refused.
     assert (
         await _verdict(session, url="https://attacker.com/thanks", navigation=True)
         == "abort"
     )
-    # And a further mutation is aborted again — re-locked, not "commit mode on".
-    assert await _verdict(session, url="https://example.com/again", method="POST") == "abort"
+    # And a further form navigation is aborted again — re-locked, never
+    # "commit mode on".
+    assert (
+        await _verdict(
+            session, url="https://example.com/again", method="POST", navigation=True
+        )
+        == "abort"
+    )
 
 
 def test_normalize_commit_url_canonicalizes_for_matching():
@@ -1218,64 +1334,35 @@ async def test_the_commit_registry_holds_and_hands_off_one_session(fake_browser)
     assert await browser_session.discard_commit() is False
 
 
-# ------------------------------------- challenge-vendor carve-out (2026-07-19)
-# While an embedded-challenge hand-off is ARMED, the widget's own verification
-# POSTs (to the frozen vendor endpoints) may pass Rule 1 so the HUMAN's solve
-# can complete in the agent's window — without this our own interceptor aborts
-# the solve (the "solved it, asked again" loop). NOT armed = nothing changes;
-# the TARGET SITE's origin stays aborted either way, armed or not.
-def test_challenge_vendor_rules_match_hosts_and_paths():
-    allows = browser_session._challenge_vendor_allows
-    assert allows("https://www.google.com/recaptcha/api2/userverify")
-    assert allows("https://www.google.com/recaptcha/enterprise/reload")
-    assert allows("https://www.recaptcha.net/recaptcha/api2/userverify")
-    assert allows("https://challenges.cloudflare.com/cdn-cgi/challenge-platform/x")
-    assert allows("https://newassets.hcaptcha.com/captcha/v1/checksiteconfig")
-    # google.com OUTSIDE /recaptcha/ is not a vendor endpoint.
-    assert not allows("https://www.google.com/search?q=x")
-    # the target site never matches, and neither does a lookalike.
-    assert not allows("https://example.com/submit")
-    assert not allows("https://evil-recaptcha.net.attacker.io/recaptcha/x")
-
-
-async def test_vendor_posts_abort_when_not_armed(fake_browser):
-    """The carve-out is a WINDOW, not a standing exemption: with no hand-off in
-    progress a vendor POST aborts exactly like any other mutation."""
-    session = await _session()
-    assert await _verdict(
-        session, url="https://www.google.com/recaptcha/api2/userverify", method="POST"
-    ) == "abort"
-
-
-async def test_armed_handoff_allows_vendor_posts_and_nothing_else(
+# --------------------------- widget verification traffic (2026-07-21 policy)
+# Under action-level safety a CAPTCHA widget's verification XHR is ordinary
+# page traffic — it flows with no arming window (the old vendor carve-out and
+# its arm/disarm lifecycle are gone). The no-touch guarantees are elsewhere and
+# unchanged: the widget's elements are never stamped/listed, vision maps to
+# nothing in its zone, and the loop refuses to act there.
+async def test_widget_verification_posts_flow_without_any_arming(
     fake_browser, monkeypatch
 ):
-    """Armed: vendor verification POSTs pass (and are counted — visible, never
-    silent); the target site's own POST still aborts. Disarm re-locks."""
     monkeypatch.setattr(browser_session, "_host_is_blocked", lambda h: False)
     browser_session.reset_host_cache()
     session = await _session()
-    session.arm_challenge_traffic()
-    assert await _verdict(
-        session, url="https://www.google.com/recaptcha/api2/userverify", method="POST"
-    ) == "continue"
-    assert await _verdict(
-        session, url="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/x",
-        method="POST",
-    ) == "continue"
-    assert session.stats.allowed_challenge_posts == 2
-    # the FORM's own submit — the mutation approval exists to gate — still aborts.
-    assert await _verdict(
-        session, url="https://example.com/submit", method="POST"
-    ) == "abort"
-    # a google URL outside /recaptcha/ is not a vendor endpoint.
-    assert await _verdict(
-        session, url="https://www.google.com/gen_204", method="POST"
-    ) == "abort"
-    session.disarm_challenge_traffic()
-    assert await _verdict(
-        session, url="https://www.google.com/recaptcha/api2/userverify", method="POST"
-    ) == "abort"
+    assert (
+        await _verdict(
+            session,
+            url="https://www.google.com/recaptcha/api2/userverify",
+            method="POST",
+            navigation=False,
+        )
+        == "continue"
+    )
+    # The form's own submit NAVIGATION — the mutation approval exists to gate —
+    # still aborts unarmed.
+    assert (
+        await _verdict(
+            session, url="https://example.com/submit", method="POST", navigation=True
+        )
+        == "abort"
+    )
 
 
 # --------------------------------------- challenge hold registry (2026-07-19)
@@ -1286,15 +1373,11 @@ async def test_armed_handoff_allows_vendor_posts_and_nothing_else(
 async def test_the_challenge_registry_holds_and_hands_off_one_session(fake_browser):
     meta = {"kind": "reCAPTCHA", "site": "example.com", "goal": "apply"}
     s1 = BrowserSession(FakeBrowser(), FakePage(), {"example.com"})
-    s1.arm_challenge_traffic()
     await browser_session.hold_challenge(s1, meta=meta)
     assert browser_session.pending_challenge() == meta
 
     taken = await browser_session.take_challenge()
     assert taken is s1
-    # taking the session back DISARMS the vendor carve-out — the hand-off window
-    # is over, Rule 1 is whole again.
-    assert s1._challenge_traffic_armed is False
     assert browser_session.pending_challenge() is None
     assert await browser_session.take_challenge() is None
 
@@ -1447,15 +1530,67 @@ async def test_the_context_page_event_schedules_adoption(fake_browser):
     assert session.page is popup
 
 
-async def test_an_adopted_popup_is_still_read_only(fake_browser):
-    """Following a popup grants NO new capability: a non-GET on the new tab is
-    aborted exactly like on the original page."""
+async def test_an_adopted_popup_is_still_guarded(fake_browser):
+    """Following a popup grants NO new capability: an unapproved form-POST
+    navigation on the new tab is aborted exactly like on the original page."""
     session = await _session()
     popup = FakePage(url="https://example.com/apply")
     await session._adopt_new_page(popup)
-    # a POST routed through the interceptor now installed on the popup is aborted.
-    assert await _verdict(session, url="https://example.com/apply", method="POST") == "abort"
+    assert (
+        await _verdict(
+            session, url="https://example.com/apply", method="POST", navigation=True
+        )
+        == "abort"
+    )
     assert session.stats.blocked_mutations == 1
+
+
+async def test_an_unrelated_popup_is_closed_not_adopted(fake_browser):
+    """An ad window (opener is NOT the page we drive) used to unconditionally
+    become self.page — hijacking the loop mid-task. It is now closed."""
+    session = await _session()
+    original = session.page
+
+    class _PopupPage(FakePage):
+        def __init__(self, opener):
+            super().__init__(url="https://ads.example.net/win")
+            self._opener = opener
+            self.closed = False
+
+        async def opener(self):
+            return self._opener
+
+        async def close(self):
+            self.closed = True
+
+    stranger = FakePage(url="https://example.com/other-tab")
+    popup = _PopupPage(opener=stranger)
+    await session._adopt_new_page(popup)
+
+    assert popup.closed is True
+    assert session.page is original          # the loop's page was never hijacked
+
+
+async def test_adopting_a_tab_closes_the_superseded_one(fake_browser):
+    """The loop drives ONE page; the tab it left behind is closed on adoption so
+    tabs no longer accumulate for the life of the session."""
+    session = await _session()
+
+    class _ClosablePage(FakePage):
+        def __init__(self, url):
+            super().__init__(url=url)
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    first = _ClosablePage("https://example.com/listing")
+    session.page = first
+    popup = FakePage(url="https://example.com/apply")   # no opener → our own tab
+    await session._adopt_new_page(popup)
+
+    assert session.page is popup
+    assert first.closed is True
 
 
 async def test_main_frame_check_is_scoped_to_the_requests_own_page(fake_browser):

@@ -85,6 +85,14 @@ class Element:
     # so the element/text budgets are unchanged. Default zero so a fake element
     # in a test (or an old observation shape) is valid.
     rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    # FORM MEMBERSHIP (action-level safety, 2026-07-21): what the gesture gate
+    # in browser_loop._act reads to refuse an unapproved submit gesture in
+    # code. Defaults keep fake elements and old observation shapes valid (no
+    # form info → nothing is ever refused on its account).
+    form_member: bool = False
+    form_submit: bool = False       # this element IS the form's submit control
+    form_method: str = ""           # the form's method, uppercased ("" unknown)
+    form_search: bool = False       # search-shaped form: submitting is reading
 
     def render(self) -> str:
         line = f'[{self.index}] {self.role} "{self.name}"' if self.name else f"[{self.index}] {self.role}"
@@ -92,6 +100,8 @@ class Element:
             line += f" = {self.value!r}"
         if self.href:
             line += f" → {self.href}"
+        if self.form_submit and not self.form_search and (self.form_method or "GET") != "GET":
+            line += " (submits a form)"
         return line
 
 
@@ -381,13 +391,37 @@ _EXTRACT_JS = """
     // The element's on-screen box (CSS px, viewport coords) — for the 15.3
     // vision fallback to map a vision-reported point back to this element.
     const r = el.getBoundingClientRect();
+    // FORM MEMBERSHIP (action-level safety, 2026-07-21): with page traffic
+    // flowing, the SUBMIT GESTURE is what the loop must refuse in code — so
+    // each element carries whether it belongs to a form, whether it IS the
+    // form's submit control, the form's method, and whether the form is
+    // search-shaped (submitting a search is reading; role=search, or a form
+    // with at most one visible text control and no password/email/file).
+    let form = null;
+    try {
+      const f = el.closest ? el.closest('form') : null;
+      if (f) {
+        const t = (el.getAttribute('type') || '').toLowerCase();
+        const isSearch = !!(el.closest('[role=search]')) ||
+          f.getAttribute('role') === 'search' ||
+          (!f.querySelector('input[type=password],input[type=email],input[type=file],textarea,select') &&
+           f.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=image])').length <= 1);
+        form = {
+          method: (f.getAttribute('method') || 'GET').toUpperCase(),
+          submit: (tag === 'button' && (t === 'submit' || t === '')) ||
+                  (tag === 'input' && (t === 'submit' || t === 'image')),
+          search: !!isSearch
+        };
+      }
+    } catch (e) {}
     out.push({
       index: idx,
       role: role,
       name: clip(nameOf(el), 120),
       value: value,
       href: clip(href, 100),
-      rect: { x: r.left, y: r.top, w: r.width, h: r.height }
+      rect: { x: r.left, y: r.top, w: r.width, h: r.height },
+      form: form
     });
   }
 
@@ -420,6 +454,7 @@ async def observe(page: Any) -> Observation:
             value=str(item.get("value") or "")[:_VALUE_MAX],
             href=str(item.get("href") or "")[:_HREF_MAX],
             rect=_rect_of(item.get("rect")),
+            **_form_of(item.get("form")),
         )
         for item in (raw.get("elements") or [])
         if isinstance(item, dict)
@@ -457,6 +492,20 @@ def _rect_of(raw: Any) -> tuple[float, float, float, float]:
         )
     except (TypeError, ValueError):
         return (0.0, 0.0, 0.0, 0.0)
+
+
+def _form_of(raw: Any) -> dict[str, Any]:
+    """The JS form-membership object → Element kwargs, best-effort (a missing
+    or malformed form object simply means 'not in a form' — nothing is ever
+    refused on its account)."""
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        "form_member": True,
+        "form_submit": bool(raw.get("submit")),
+        "form_method": str(raw.get("method") or "").upper(),
+        "form_search": bool(raw.get("search")),
+    }
 
 
 def _viewport_of(raw: Any) -> tuple[float, float]:

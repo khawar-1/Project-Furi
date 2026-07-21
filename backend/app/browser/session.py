@@ -1,8 +1,10 @@
 """
 Jarvis OS — Browser Session (Phase 14, Part 1)
 
-A real Chromium Jarvis can drive, wrapped in the guarantee that makes driving it
-safe: **in READ mode the session is structurally incapable of mutating anything.**
+A real Chromium Jarvis can drive, under ACTION-LEVEL SAFETY (2026-07-21, owner
+decision): **the page may talk to the network freely, but the agent cannot
+commit — every agent-performed submit requires the one-shot, code-read
+commit permit bound to a signature approval.**
 
 Why this module exists at all
 ----------------------------
@@ -13,55 +15,60 @@ This module is the browser half; app/agents/browser_loop.py (Part 2) is the loop
 
 THE SAFETY MODEL, and its honest limits
 ---------------------------------------
-Every request the page makes passes through _intercept(). Three rules, in order:
+The predecessor model aborted EVERY non-GET request ("READ mode cannot
+mutate"). That was a strong-sounding network guarantee with a fatal capability
+cost: modern SPAs do everything over POST/XHR — search, filters, lazy
+content — so most of the web simply did not work, and site-specific hacks
+(navigate-instead-of-click) piled up. The owner chose the Skyvern model
+instead: gate what the AGENT does, not what the page does. Safety now lives in
+three layers: (a) the agent-gesture gate in the loop — an unarmed submit
+gesture (clicking a submit control of a commit-shaped form, submitting a form)
+is refused in code during read-mode browsing; (b) the one-shot COMMIT permit
+(below) — the only sanctioned submit path, behind signature approval on the
+code-read contract; (c) the network rules here as backstop and exfiltration
+bound. Every request still passes _intercept():
 
-1. NON-GET IS ABORTED — everywhere, every origin, subresources included.
-   This is the guarantee, and it bounds the AGENT LOOP. A loop that cannot issue
-   a POST/PUT/PATCH/DELETE cannot submit a form, send a message, or buy anything,
-   no matter what the page's text talks it into. It is what makes `browse` a READ
-   tool that passes registry.execute_tool's gate untouched, and why the whole
-   YouTube case needs ZERO approvals. Subresources are included deliberately and
-   it is load-bearing: an SPA (LinkedIn's included) submits via a background
-   fetch, not a form POST.
+1. UNAPPROVED TOP-LEVEL FORM NAVIGATION IS ABORTED. A non-GET main-frame
+   document navigation (a classic form-POST submit) is refused unless it
+   matches the armed commit permit — the network backstop under the gesture
+   gate. All OTHER page traffic (XHR/fetch POSTs, subframes, widget
+   verification) flows: it is the page being a page, the same traffic every
+   browser the user has ever used sends, and the loop cannot choose its
+   payload.
 
-   All three rules are in force for the ENTIRE autonomous loop. At the keep_open
-   media handoff — enter_playback_mode(), once the loop has reached `done` and the
-   window is the user's own to watch — the interceptor is LIFTED ENTIRELY (unroute)
-   and the window drops to exactly the open_login_window posture: user-driven, no
-   interception. This is not just to let the site's player/API POSTs through (else
-   YouTube reports "you're offline"): keeping the per-request interceptor on a
-   continuously-streaming video made the network unusably slow (user report
-   2026-07-18) — every media segment paid a round-trip to the single
-   browser_runtime loop thread plus a per-host DNS SSRF lookup, a tax a normal
-   Chrome never pays. It is sound because all three rules bound the AGENT LOOP, and
-   once the loop is `done` it never touches this window again — the only actor left
-   is the user watching or the site's own player, exactly as with the sign-in
-   window. As a best-effort FALLBACK, enter_playback_mode also flips _read_only so
-   that if unroute somehow fails the interceptor stays installed but stops aborting
-   non-GET — the player works while Rules 2 & 3 keep guarding: degraded (slow), never
-   unsafe. During the loop itself Rules 2 and 3 are unconditional.
+   ⚠️ BE HONEST ABOUT THE TRADE. This is a WEAKER network bound than the old
+   blanket abort: a click on an authenticated origin can trigger the site's
+   own mutating XHR (an "unsubscribe" button, a "dismiss" call) exactly as a
+   human's click would. What is preserved absolutely: the agent SUBMITS
+   nothing without approval (gesture gate + permit), values it types are
+   grounded in the user's words/profile (never page content), credentials are
+   never entered, CAPTCHAs never touched, and the allowlist still bounds where
+   it can go. Within an allowlisted, authenticated origin a compromised loop
+   has user authority — TRUE UNDER BOTH MODELS — and the headed window remains
+   the last honest control.
 
-   ⚠️ BE HONEST ABOUT WHAT THIS IS. "non-GET = mutation" is an HTTP CONVENTION
-   (RFC 7231 safe methods), not a substring test. It is NOT the structural proof
-   that planner._recipient_violation is — that one compares an address against a
-   corpus and cannot be wrong. This one is a strong bound on the dominant case.
-   Sites violate the convention (GET /logout, GET /delete?id=5) and those get
-   through; the origin allowlist is all that bounds them. Overclaiming this as
-   "the browser recipient lock" is how a future round gets surprised — the same
-   way SUMMARY_PROMPT's "never invent" turned out not to be a guarantee either.
+   At the keep_open media handoff — enter_playback_mode(), once the loop has
+   reached `done` and the window is the user's own to watch — the interceptor
+   is LIFTED ENTIRELY (unroute): per-request interception on a streaming video
+   made the network unusably slow (2026-07-18), and once the loop is `done`
+   the only actor left is the user. Best-effort fallback: if unroute fails,
+   _read_only flips off and Rules 2 & 3 keep guarding.
 
-   COMMIT MODE (14.5) — the ONE approved way past Rule 1, and it stays narrow.
+   COMMIT MODE (14.5) — the sanctioned submit, and it stays narrow.
    arm_commit(method, url) permits a SINGLE non-GET matching exactly (method,
-   normalized-url); the interceptor lets that one request through and clears the
-   permit in the same breath (re-lock), so a double-submit finds nothing armed.
-   It is never a blanket "commit mode on" — no flag stays flipped. The permit is
-   set only in the SUBMIT phase, after the plan has PAUSED for signature approval
-   on the code-read form state (target URL + method + every field value, rendered
-   into the approval card by planner._render_commit_detail — the LLM's prose
-   cannot hide what is sent), and the approved request still passes Rules 2 & 3.
-   This is genuinely a mutation the tool performs, which is why the commit tool is
-   PermissionLevel.DESTRUCTIVE and `browse` stays READ. See app/agents/
-   browser_commit.py for the two-phase discover→approve→submit orchestration.
+   normalized-url) — whatever its transport, a classic form POST or the SPA's
+   background fetch to the action URL — consumed on first match (re-lock), so
+   a double-submit finds nothing armed. The permit is set only in the SUBMIT
+   phase, after the plan PAUSED for signature approval on the code-read form
+   state (URL + method + every field value, rendered into the approval card by
+   planner._render_commit_detail — the LLM's prose cannot hide what is sent),
+   and the approved request still passes Rules 2 & 3. The commit tool is
+   PermissionLevel.DESTRUCTIVE; `browse` stays READ. See app/agents/
+   browser_commit.py for the discover→approve→submit orchestration.
+
+   DOWNLOADS ARE REFUSED wholesale (page.on("download") → cancel): nothing in
+   the stack consumes a downloaded file, and an unprompted download is a
+   classic drive-by.
 
 2. BLOCKED HOSTS ARE ABORTED — reusing browser_tools._host_is_blocked, so the
    SSRF rule that governs read_webpage governs the browser too, and cannot drift
@@ -608,6 +615,13 @@ class _RealBrowser:
     async def new_page(self) -> Any:
         return await self._context.new_page()
 
+    async def route(self, pattern: str, handler: Callable[..., Any]) -> None:
+        """Install the interceptor at CONTEXT level, so a popup / new tab is
+        guarded from its very FIRST request. Page-level routing left a gap: a
+        popup's initial document navigation could fire before _adopt_new_page
+        attached the route to it."""
+        await self._context.route(pattern, handler)
+
     def on_page(self, callback: Callable[[Any], None]) -> None:
         """Wire a listener for every NEW page opened in this context — popups and
         target=_blank tabs included. Lets BrowserSession follow a click that opens
@@ -733,7 +747,7 @@ class InterceptStats:
     blocked_navigations: int = 0
     blocked_hosts: int = 0
     allowed_commits: int = 0
-    allowed_challenge_posts: int = 0
+    blocked_downloads: int = 0
     mutation_urls: list[str] = field(default_factory=list)
     # Performance measurement (2026-07-19 "slow browser" round) — surfaced in the
     # per-session close summary so the interception tax is measured, not guessed.
@@ -747,7 +761,7 @@ class InterceptStats:
             "blocked_navigations": self.blocked_navigations,
             "blocked_hosts": self.blocked_hosts,
             "allowed_commits": self.allowed_commits,
-            "allowed_challenge_posts": self.allowed_challenge_posts,
+            "blocked_downloads": self.blocked_downloads,
             "mutation_urls": self.mutation_urls[:10],
             "total_requests": self.total_requests,
             "ssrf_checks": self.ssrf_checks,
@@ -755,42 +769,11 @@ class InterceptStats:
         }
 
 
-# Challenge-VENDOR verification endpoints (2026-07-19). While a challenge
-# hand-off is armed (arm_challenge_traffic — the embedded-widget pause, where
-# the HUMAN solves the check in this very window), non-GET requests to these
-# hosts are allowed through Rule 1. This is NOT evasion and NOT auto-solving:
-# the agent still cannot touch the widget (its elements are never stamped, the
-# vision point maps to nothing, _act refuses the zone), and these endpoints
-# belong to the verification vendors — a POST here cannot mutate the user's
-# data on the TARGET site, whose origin stays aborted, armed or not. Without
-# this carve-out the widget's own verify request is aborted by our own
-# interceptor and the human's solve can never complete (the 2026-07-19 loop).
-# Frozen and code-owned; path-prefixed for the shared google.com host.
-_CHALLENGE_VENDOR_RULES: tuple[tuple[str, str], ...] = (
-    ("google.com", "/recaptcha/"),
-    ("recaptcha.net", "/recaptcha/"),
-    ("challenges.cloudflare.com", ""),
-    ("hcaptcha.com", ""),
-)
-
-
-def _challenge_vendor_allows(url: str) -> bool:
-    """Is this a verification-vendor endpoint (host suffix + path prefix match
-    against _CHALLENGE_VENDOR_RULES)? Exact host or a subdomain; never the
-    target site."""
-    try:
-        parsed = urlparse(url or "")
-    except Exception:
-        return False
-    host = (parsed.hostname or "").lower().rstrip(".")
-    path = parsed.path or "/"
-    if not host:
-        return False
-    return any(
-        (host == rule_host or host.endswith("." + rule_host))
-        and path.startswith(prefix or "/")
-        for rule_host, prefix in _CHALLENGE_VENDOR_RULES
-    )
+# (The challenge-VENDOR traffic carve-out was REMOVED 2026-07-21: under the
+# action-level network policy a widget's verification XHR is ordinary page
+# traffic and flows on its own — no arming window needed. The no-touch
+# guarantees are untouched: a widget's elements are never stamped, the vision
+# point maps to nothing, and _act refuses the challenge zone.)
 
 
 def _normalize_commit_url(raw: str) -> str:
@@ -851,6 +834,9 @@ class BrowserSession:
         # at the keep_open handoff so the user's own playback window works; Rules
         # 2 & 3 stay on regardless. See the module docstring.
         self._read_only = True
+        # True when the interceptor was installed at CONTEXT level (real path)
+        # — adopted popups then need no per-page route of their own.
+        self._context_routed = False
         # COMMIT mode (14.5): a ONE-SHOT permit for a single non-GET the user
         # explicitly approved (a form submit). arm_commit() sets (method,
         # normalized-url); the interceptor lets EXACTLY that request through once,
@@ -861,14 +847,6 @@ class BrowserSession:
         # one the site never issued. See the module docstring.
         self._armed_commit: Optional[tuple[str, str]] = None
         self._commit_fired = False
-        # CHALLENGE hand-off (2026-07-19): while True, non-GET requests to the
-        # frozen _CHALLENGE_VENDOR_RULES endpoints pass Rule 1 so the HUMAN's
-        # solve of an embedded widget can complete in this window. Armed only
-        # for the duration of the hand-off pause (arm_challenge_traffic /
-        # disarm_challenge_traffic — the one-shot-commit discipline applied to
-        # a window of time instead of a single request). The target site's own
-        # origin is never exempted.
-        self._challenge_traffic_armed = False
         # COMMIT + UPLOAD (14.6): files attached to the form during discovery via
         # set_input_files. Python is the source of truth for the PATH — a browser
         # strips file paths from JS, so _READ_COMMIT_FORM_JS cannot see them. Each
@@ -911,7 +889,18 @@ class BrowserSession:
         try:
             page = await browser.new_page()
             session = cls(browser, page, origins)
-            await page.route("**/*", session._intercept)
+            # CONTEXT-level interception when the handle supports it (the real
+            # path): a popup is then guarded from its very FIRST request —
+            # page-level routing left the popup's initial document navigation
+            # un-intercepted until _adopt_new_page caught up. Page-level stays
+            # the fallback for fakes that only model page.route.
+            ctx_route = getattr(browser, "route", None)
+            if callable(ctx_route):
+                await ctx_route("**/*", session._intercept)
+                session._context_routed = True
+            else:
+                await page.route("**/*", session._intercept)
+            session._refuse_downloads(page)
             # Follow popups / new tabs. Many job boards (WeWorkRemotely, live
             # 2026-07-18) open the application — or a CAPTCHA — in a NEW TAB, and
             # the loop only ever observes session.page, so an un-adopted popup is
@@ -997,18 +986,24 @@ class BrowserSession:
                 await self._safe_route(route.continue_)
                 return
 
-            # RULE 1 — the guarantee. Everywhere, every origin, subresources
-            # included (an SPA submits via a background fetch, not a form POST).
-            # In force for the whole AGENT LOOP; relaxed only after the keep_open
-            # handoff (enter_playback_mode) so the user's playback window can use
-            # the site's own POST API. Rules 2 & 3 below never relax.
+            # RULE 1 — the NAVIGATION guard (action-level safety, 2026-07-21).
+            # The page's own traffic — XHR/fetch POSTs, search, filters, lazy
+            # content, widget verification — flows freely: blanket non-GET
+            # aborting broke every SPA (search boxes that POST, "load more",
+            # in-page apply flows), and the owner chose the Skyvern model —
+            # gate what the AGENT does, not what the page does. What Rule 1
+            # still refuses is an UNAPPROVED top-level document non-GET
+            # navigation (a classic form-POST submit): the network backstop
+            # under the real gates, which are the agent-gesture gate in the
+            # loop (an unarmed submit gesture is refused in code) and the
+            # one-shot commit permit below.
             #
-            # COMMIT (14.5) is the ONE narrow exception: a non-GET that matches an
-            # armed, user-approved commit is let through EXACTLY ONCE. The permit
-            # is consumed here (re-lock) before the request even proceeds, so a
-            # duplicate — a double-submit — finds no permit and is aborted like any
-            # other mutation. The approved request still falls through to Rules 2 &
-            # 3 below (SSRF + allowlist), so approval never buys a way past them.
+            # COMMIT (14.5): a non-GET matching the armed, user-approved commit
+            # is recognized WHATEVER its transport (a classic form POST or the
+            # SPA's background fetch to the same action URL) — the permit is
+            # consumed on first match (re-lock) and _commit_fired records the
+            # real submission for the submit phase. The approved request still
+            # falls through to Rules 2 & 3 — approval never buys past them.
             if method not in _READ_METHODS:
                 if self._commit_allows(method, url):
                     self._armed_commit = None       # one-shot: consume, re-lock
@@ -1020,28 +1015,18 @@ class BrowserSession:
                     )
                     # fall through to Rules 2 & 3 — an approved commit is not
                     # exempt from the SSRF and allowlist guards.
-                elif self._challenge_traffic_armed and _challenge_vendor_allows(url):
-                    # The armed hand-off window: the widget's own verification
-                    # traffic (vendor endpoints ONLY) may pass so the human's
-                    # solve completes. The site origin still aborts below/above.
-                    self.stats.allowed_challenge_posts += 1
-                    logger.info(
-                        f"browser: allowed challenge-vendor {method} {url[:120]} "
-                        "(hand-off armed)"
-                    )
-                    # fall through to Rules 2 & 3.
-                elif self._read_only:
+                elif self._read_only and self._is_main_frame_navigation(request):
                     self.stats.blocked_mutations += 1
                     if len(self.stats.mutation_urls) < 10:
                         self.stats.mutation_urls.append(f"{method} {url[:120]}")
-                    # DEBUG, not INFO (2026-07-19): an ad-heavy page fires
-                    # hundreds of tracker POSTs — they were 70% of the log file
-                    # and buried the lines that matter. The count survives in
-                    # stats.blocked_mutations either way.
-                    logger.debug(f"browser: aborted {method} {url[:120]} — READ mode")
+                    logger.info(
+                        f"browser: aborted unapproved form navigation "
+                        f"{method} {url[:120]}"
+                    )
                     await self._safe_route(route.abort)
                     return
-                # else: not read-only (playback handoff) — non-GET allowed, fall through
+                # else: the page's own non-GET traffic (or the playback
+                # hand-off) — flows; Rules 2 & 3 below still apply.
 
             # RULE 2 — SSRF, same rule read_webpage obeys, shared not copied.
             # SKIPPED for a READ (GET/HEAD/OPTIONS) to an ALLOWLISTED host
@@ -1116,18 +1101,61 @@ class BrowserSession:
             logger.debug(f"popup schedule: {type(exc).__name__}: {exc}")
 
     async def _adopt_new_page(self, page: Any) -> None:
-        """Follow a popup / new tab: install the SAME read-only interceptor on it,
-        then make it the page the loop observes. Following a popup grants NO new
-        capability — the new tab gets Rule 1 (non-GET abort), Rule 2 (SSRF), and
-        Rule 3 (allowlist) before the loop ever drives it; it only lets the loop
-        SEE where its own click led (a job application or a CAPTCHA the site opened
-        in a fresh tab — live 2026-07-18). Best-effort — never raises."""
+        """Follow a popup / new tab the AGENT'S OWN interaction opened, and only
+        that: a tab whose opener is a page we drive. An unrelated popup (an ad
+        window) used to unconditionally become self.page — hijacking the loop's
+        active page mid-task — so anything else is CLOSED, not adopted. The
+        superseded tab is closed too: the loop only ever drives one page, and
+        un-closed old tabs accumulated for the life of the session. Following a
+        popup grants NO new capability — the new tab is under the same
+        interceptor (context-level from birth on the real path), SSRF guard,
+        and allowlist before the loop ever drives it. Best-effort — never
+        raises, and a fake page without opener/close just adopts as before."""
         try:
-            await page.route("**/*", self._intercept)
+            get_opener = getattr(page, "opener", None)
+            if callable(get_opener):
+                opener = await _maybe_await(get_opener())
+                if opener is not None and opener is not self.page:
+                    await _maybe_await(page.close())
+                    logger.info("browser: closed an unrelated popup (not our tab's)")
+                    return
         except Exception as exc:
-            logger.debug(f"adopt popup route: {type(exc).__name__}: {exc}")
+            logger.debug(f"popup opener check: {type(exc).__name__}: {exc}")
+        if not getattr(self, "_context_routed", False):
+            try:
+                await page.route("**/*", self._intercept)
+            except Exception as exc:
+                logger.debug(f"adopt popup route: {type(exc).__name__}: {exc}")
+        self._refuse_downloads(page)
+        superseded = self.page
         self.page = page
         logger.info("browser: following a new tab as the active page")
+        if superseded is not None and superseded is not page:
+            try:
+                await _maybe_await(superseded.close())
+            except Exception as exc:
+                logger.debug(f"close superseded tab: {type(exc).__name__}: {exc}")
+
+    def _refuse_downloads(self, page: Any) -> None:
+        """Downloads are refused wholesale (action-level policy): nothing in the
+        stack consumes a downloaded file, and an unprompted download is a
+        classic drive-by. Best-effort — a fake page without .on just skips."""
+        try:
+            hook = getattr(page, "on", None)
+            if not callable(hook):
+                return
+
+            def _cancel(download: Any) -> None:
+                self.stats.blocked_downloads += 1
+                logger.info("browser: cancelled a page-initiated download")
+                try:
+                    asyncio.ensure_future(_maybe_await(download.cancel()))
+                except Exception:
+                    pass
+
+            hook("download", _cancel)
+        except Exception as exc:
+            logger.debug(f"download hook: {type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------ navigation
     async def goto(self, url: str) -> str:
@@ -1271,18 +1299,6 @@ class BrowserSession:
         so the submit phase can distinguish a real submission from a form the
         site never posted (a JS handler that swallowed it, a validation block)."""
         return self._commit_fired
-
-    def arm_challenge_traffic(self) -> None:
-        """Open the vendor-only carve-out for the duration of an embedded
-        challenge hand-off — the human is about to solve the widget in this
-        window, and the widget's own verify POSTs must not be aborted by our
-        interceptor. Disarmed the moment the resumed discovery takes the
-        session back."""
-        self._challenge_traffic_armed = True
-        logger.info("browser: challenge-vendor traffic armed (hand-off)")
-
-    def disarm_challenge_traffic(self) -> None:
-        self._challenge_traffic_armed = False
 
     async def read_commit_target(
         self, observation: Any, index: int
@@ -1626,13 +1642,8 @@ async def hold_challenge(session: "BrowserSession", *, meta: dict[str, Any]) -> 
 
 async def take_challenge() -> Optional["BrowserSession"]:
     """Remove and return the held challenge session (the resumed discovery owns
-    it now), or None — a restart dropped it and the resume starts fresh. The
-    vendor-traffic carve-out is disarmed on the way out (slot-specific — the
-    resumed discovery must run fully read-only again)."""
-    session = await _CHALLENGE.take()
-    if session is not None:
-        session.disarm_challenge_traffic()
-    return session
+    it now), or None — a restart dropped it and the resume starts fresh."""
+    return await _CHALLENGE.take()
 
 
 async def discard_challenge() -> bool:

@@ -222,8 +222,11 @@ class FakeProvider:
         return LLMResponse(content=content, model="fake", provider="fake")
 
 
-def _el(index, role="link", name="x", value="", href=""):
-    return {"index": index, "role": role, "name": name, "value": value, "href": href}
+def _el(index, role="link", name="x", value="", href="", form=None):
+    item = {"index": index, "role": role, "name": name, "value": value, "href": href}
+    if form is not None:
+        item["form"] = form
+    return item
 
 
 def _page(elements, url="https://site.test/", title="T"):
@@ -1233,6 +1236,84 @@ async def test_act_refuses_an_element_overlapping_a_challenge_zone():
     assert ok is False
     assert "verification widget" in note
     assert page.acted == []             # the click never landed
+
+
+# ------------------------- the submit-gesture gate (action-level safety)
+# With the network open to page traffic, what keeps the agent from submitting
+# is the refusal in _act: a click on a form's submit control, or Enter in its
+# fields, dies in code. Search-shaped and GET forms are exempt (submitting a
+# search IS reading; a GET submit is an allowlist-governed navigation).
+def _form_obs(**form_kwargs):
+    from app.core import dom_observe
+
+    return dom_observe.Observation(
+        observation_id="o", url="https://site.test/job", title="",
+        elements=[dom_observe.Element(
+            index=1, role="button", name="Apply now", **form_kwargs,
+        )],
+        element_total=1, page_text="", text_truncated=False,
+    )
+
+
+async def test_act_refuses_clicking_a_submit_control_in_read_mode():
+    page = ScriptedPage([_page([_el(1, role="button", name="Apply now")])])
+    session = FakeSession(page)
+    obs = _form_obs(form_member=True, form_submit=True, form_method="POST")
+    ok, note = await browser_loop._act(session, obs, {"action": "click", "index": 1})
+    assert ok is False
+    assert "submit" in note and "commit" in note
+    assert page.acted == []             # the click never landed
+
+
+async def test_act_refuses_clicking_a_submit_control_in_commit_mode_too():
+    """In commit mode the ONLY sanctioned submit is submit_commit() after the
+    signature approval armed the permit — a direct click would bypass the
+    approved contract."""
+    page = ScriptedPage([_page([_el(1, role="button", name="Apply now")])])
+    session = FakeSession(page)
+    obs = _form_obs(form_member=True, form_submit=True, form_method="POST")
+    ok, note = await browser_loop._act(
+        session, obs, {"action": "click", "index": 1}, commit=True
+    )
+    assert ok is False
+    assert "approved submit" in note
+    assert page.acted == []
+
+
+async def test_act_refuses_enter_that_would_submit_a_form():
+    page = ScriptedPage([_page([_el(1, role="input", name="Email")])])
+    session = FakeSession(page)
+    obs = _form_obs(form_member=True, form_submit=False, form_method="POST")
+    ok, note = await browser_loop._act(
+        session, obs, {"action": "type", "index": 1, "text": "x", "submit": True}
+    )
+    assert ok is False
+    assert "Enter" in note and "submit" in note
+    assert page.acted == []
+
+
+async def test_act_allows_submitting_a_search_form():
+    """Submitting a search is reading — the exemption that keeps the fast path
+    (fill + Enter on a search box) and ordinary site search working."""
+    page = ScriptedPage([_page([_el(1, role="searchbox", name="Search")])])
+    session = FakeSession(page)
+    obs = _form_obs(
+        form_member=True, form_submit=False, form_method="POST", form_search=True
+    )
+    ok, _ = await browser_loop._act(
+        session, obs, {"action": "type", "index": 1, "text": "jane", "submit": True}
+    )
+    assert ok is True
+
+
+async def test_act_allows_a_get_form_submit():
+    """A GET form submit is a navigation with query params — the allowlist
+    already governs it, so the gate stands down."""
+    page = ScriptedPage([_page([_el(1, role="button", name="Filter")])])
+    session = FakeSession(page)
+    obs = _form_obs(form_member=True, form_submit=True, form_method="GET")
+    ok, _ = await browser_loop._act(session, obs, {"action": "click", "index": 1})
+    assert ok is True
 
 
 async def test_commit_submit_gates_on_an_unsolved_embedded_widget():

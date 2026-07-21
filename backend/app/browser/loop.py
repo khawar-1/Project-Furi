@@ -1071,7 +1071,7 @@ async def _element_href(handle: Any) -> str:
 
 
 async def _act(
-    session: Any, obs: dom_observe.Observation, action: dict
+    session: Any, obs: dom_observe.Observation, action: dict, *, commit: bool = False
 ) -> tuple[bool, str]:
     """Perform one action on the live page. Returns (ok, note). Never raises: a
     failed click is a normal event the loop reacts to (re-observe, try again),
@@ -1115,6 +1115,42 @@ async def _act(
             zones = []
         if zones and dom_observe.rect_intersects_zones(element.rect, zones):
             return False, "that element is part of a human-verification widget — never touched"
+    # THE SUBMIT-GESTURE GATE (action-level safety, 2026-07-21). With the
+    # network open to page traffic, what keeps the agent from submitting is no
+    # longer the interceptor — it is THIS refusal: a click on a form's submit
+    # control, or Enter inside its fields, is refused in code unless the form
+    # is search-shaped (submitting a search IS reading) or a plain GET form (a
+    # GET submit is a navigation the allowlist already governs). This holds in
+    # BOTH modes — in commit mode the ONLY sanctioned submit is submit_commit()
+    # after the signature approval armed the one-shot permit; a direct click
+    # would bypass the contract the user approved.
+    if element is not None:
+        gesture_unsafe = (
+            element.form_member
+            and not element.form_search
+            and element.role != "searchbox"
+            and (element.form_method or "GET") != "GET"
+        )
+        if gesture_unsafe and action["action"] == "click" and element.form_submit:
+            return False, (
+                "that is the form's submit control — submitting only happens "
+                "through the approved submit step, never a direct click"
+                if commit
+                else (
+                    "that is a form submit control — a read-only browse never "
+                    "submits; this goal needs the commit flow"
+                )
+            )
+        if gesture_unsafe and action["action"] == "type" and action.get("submit"):
+            return False, (
+                "pressing Enter there would submit the form — submitting only "
+                "happens through the approved submit step"
+                if commit
+                else (
+                    "pressing Enter there would submit the form — a read-only "
+                    "browse never submits"
+                )
+            )
     try:
         if action["action"] == "type":
             await handle.fill(action.get("text", ""))
@@ -1659,7 +1695,7 @@ async def run_browse(
             session.last_redirect_offsite = None  # stale markers never fire
         except Exception:
             pass
-        ok, note = await _act(session, obs, act_action)
+        ok, note = await _act(session, obs, act_action, commit=commit)
         history.append(_history_line(action, obs, ok, note))
 
         # REDIRECT OFF-SITE HAND-OFF (2026-07-19, the WWR-ad incident): the

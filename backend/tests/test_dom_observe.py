@@ -335,3 +335,37 @@ def test_the_extract_js_skips_elements_inside_challenge_zones():
     assert "inChallengeZone" in js
     walk = js.split("for (const el of document.querySelectorAll(SELECTOR))")[1]
     assert "inChallengeZone(el.getBoundingClientRect())" in walk
+
+
+# ------------------------- form membership (action-level safety, 2026-07-21)
+def test_form_of_parses_the_js_shape():
+    from app.core.dom_observe import _form_of
+
+    assert _form_of(None) == {}
+    assert _form_of("junk") == {}
+    assert _form_of({"method": "post", "submit": True, "search": False}) == {
+        "form_member": True,
+        "form_submit": True,
+        "form_method": "POST",
+        "form_search": False,
+    }
+
+
+def test_render_marks_a_posting_submit_control_but_not_a_search_one():
+    from app.core.dom_observe import Element
+
+    apply_btn = Element(
+        index=1, role="button", name="Apply",
+        form_member=True, form_submit=True, form_method="POST",
+    )
+    assert "(submits a form)" in apply_btn.render()
+    search_btn = Element(
+        index=2, role="button", name="Go",
+        form_member=True, form_submit=True, form_method="POST", form_search=True,
+    )
+    assert "(submits a form)" not in search_btn.render()
+    get_btn = Element(
+        index=3, role="button", name="Filter",
+        form_member=True, form_submit=True, form_method="GET",
+    )
+    assert "(submits a form)" not in get_btn.render()

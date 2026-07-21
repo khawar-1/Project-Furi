@@ -171,7 +171,6 @@ async def _hold_for_handoff(session: Any, goal: str, payload: HandoffPayload) ->
         return True
     if reason is Handoff.CHALLENGE and payload.challenge_mode == "embedded":
         kind = payload.challenge_kind or "CAPTCHA"
-        session.arm_challenge_traffic()
         try:
             session.browse_history.append(
                 f"- paused for the user to complete the {kind} "
