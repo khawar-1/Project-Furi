@@ -124,6 +124,7 @@ from app.agents import (
 )
 from app.agents.cancellation import apply_cancellation, log_cancellation
 from app.agents.narration import narrate_step
+from app.browser import state as browse_state
 from app.agents.schemas import (
     AgentPlan,
     PlanDraft,
@@ -1168,8 +1169,6 @@ def _collapse_browse_apply(steps: list[PlanStep]) -> list[PlanStep]:
     browse_commit plus a SAME-SITE find step, or several same-site browse_commit
     steps), folds them into the FIRST involved position, and leaves every
     unrelated step untouched. Returns the (possibly shortened) step list."""
-    from app.agents.browser_commit import COMMIT_PARAM, COMMITS_DONE_PARAM
-
     commit_idxs = [i for i, s in enumerate(steps) if s.tool == _BROWSE_COMMIT_TOOL]
     if not commit_idxs:
         return steps
@@ -1231,8 +1230,7 @@ def _collapse_browse_apply(steps: list[PlanStep]) -> list[PlanStep]:
     )
 
     params = dict(primary.parameters)
-    params.pop(COMMIT_PARAM, None)        # never carry a stale discovery contract
-    params.pop(COMMITS_DONE_PARAM, None)
+    browse_state.clear_commit_params(params)  # never carry a stale discovery contract
     if start_url:
         params["start_url"] = start_url
     if merged_origins:
@@ -1582,7 +1580,12 @@ def _stamp_approved_start_url(plan: AgentPlan, origin: str, url: str) -> bool:
             return False
         for step in plan.pending_steps():
             if step.tool in ("browse", "browse_commit"):
-                step.parameters["start_url"] = candidate
+                # stamp_start_url REFUSES a step already carrying a commit
+                # contract — that step is approval-bound, and re-pointing it
+                # would change what the user approved without a fresh approval
+                # (the invariant used to be a comment; now it's enforced).
+                if not browse_state.stamp_start_url(step.parameters, candidate):
+                    continue
                 logger.info(
                     f"origin approved — resuming the browse at {candidate[:120]}"
                 )
@@ -2734,7 +2737,7 @@ class AgentPlanner:
                     await narrate_step(plan, step, idx)
                     pause = "failed_step"
                     break
-                step.parameters[browser_commit.COMMIT_PARAM] = discovery.state
+                browse_state.stamp_commit_contract(step.parameters, discovery.state)
                 step.action_detail = _render_commit_detail(discovery.state)
                 # The parameters changed, so the signature changed — a form
                 # discovered this turn was never in the approved set.
@@ -2858,9 +2861,10 @@ class AgentPlanner:
                     # onto the flow history BEFORE clearing the result to re-arm,
                     # so the grounded completion can quote every commit (15.5).
                     _record_browse_commit(step, result)
-                    step.parameters[browser_commit.COMMIT_PARAM] = next_state
-                    step.parameters[browser_commit.COMMITS_DONE_PARAM] = int(
-                        (result.output or {}).get("commits_done") or 0
+                    browse_state.stamp_commit_contract(
+                        step.parameters,
+                        next_state,
+                        done=int((result.output or {}).get("commits_done") or 0),
                     )
                     step.action_detail = _render_commit_detail(next_state)
                     step.status = StepStatus.PENDING  # not done — one more approval
@@ -2869,7 +2873,7 @@ class AgentPlanner:
                     pause = "approval"
                     logger.info(
                         "browse_commit: submit "
-                        f"{step.parameters[browser_commit.COMMITS_DONE_PARAM]} fired, "
+                        f"{browse_state.commits_done(step.parameters)} fired, "
                         f"next form ready ({len(next_state.get('fields', []))} field(s)) "
                         "→ pausing for a fresh approval"
                     )

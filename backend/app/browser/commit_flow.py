@@ -55,19 +55,10 @@ from typing import Any, Optional
 
 from loguru import logger
 
-# The step-parameter key the planner writes the code-read form contract into
-# after DISCOVER. Its presence flips a browse_commit step from "discover" to
-# "submit", and because it lives in `parameters` it is part of signature() — so
-# the approval binds to the exact values the card showed. Underscore-prefixed so
-# it never collides with a tool-schema field the LLM fills.
-COMMIT_PARAM = "_commit"
-
-# MULTI-COMMIT (15.1): how many approved submits have already fired for this
-# browse goal. The planner stamps it alongside COMMIT_PARAM each time it re-arms
-# the step for the NEXT form, so each submit's signature is distinct (a fresh,
-# separate approval — never the same one replayed). Display/signature only;
-# perform() reads the authoritative count off the live held session, not this.
-COMMITS_DONE_PARAM = "_commits_done"
+# The approval-binding step-parameter keys and their write discipline live in
+# app.browser.state (the ONE owner of the stamps); re-exported here because
+# every existing caller/test reads them as browser_commit.COMMIT_PARAM.
+from app.browser.state import COMMIT_PARAM, COMMITS_DONE_PARAM  # noqa: F401
 
 
 @dataclass
