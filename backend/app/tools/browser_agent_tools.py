@@ -73,22 +73,14 @@ from app.core.browser_runtime import BROWSE_HARD_TIMEOUT
 
 
 async def _load_browser_vision_config():
-    """Read the 15.3 browser-vision toggle on its own DB session (the
-    default_profile precedent — the caller may be on any loop; a fresh session
-    binds cleanly). Best-effort: any failure yields the default (disabled), so a
-    config hiccup never breaks a browse — it just stays DOM-only."""
-    from app.core.app_settings import (
-        default_browser_vision_config,
-        get_browser_vision_config,
-    )
-    from app.db.database import AsyncSessionLocal
+    """Read the 15.3 browser-vision toggle. ONE implementation, in
+    app.browser.commit_flow — this used to be a verbatim duplicate kept only
+    because agents/ could not import tools/ without a cycle, which the
+    app.browser package removed. Imported at call time for the same cycle
+    reason browser_session is (see the note above)."""
+    from app.browser.commit_flow import _load_vision_config
 
-    try:
-        async with AsyncSessionLocal() as db:
-            return await get_browser_vision_config(db)
-    except Exception as exc:
-        logger.debug(f"browser vision config read failed: {type(exc).__name__}: {exc}")
-        return default_browser_vision_config()
+    return await _load_vision_config()
 
 
 @register_tool
