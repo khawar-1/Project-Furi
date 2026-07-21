@@ -369,3 +369,57 @@ def test_render_marks_a_posting_submit_control_but_not_a_search_one():
         form_member=True, form_submit=True, form_method="GET",
     )
     assert "(submits a form)" not in get_btn.render()
+
+
+# ----------------------- set-of-marks capture (vision-first hybrid)
+async def test_capture_marked_overlays_captures_and_removes():
+    """The mark overlay is injected from the SAME rects the element list
+    carries, the viewport is captured, and the overlay is removed even when the
+    capture path raises — the page is never left wearing badges."""
+    from app.core.dom_observe import Element, Observation, capture_marked
+
+    calls = []
+
+    class _Page:
+        async def evaluate(self, js, arg=None):
+            calls.append((js[:40], arg))
+            return None
+
+        async def screenshot(self, **kwargs):
+            return b"\xff\xd8\xff\xe0-jpeg"
+
+    obs = Observation(
+        observation_id="o", url="u", title="", element_total=2,
+        elements=[
+            Element(index=1, role="button", name="Go", rect=(10, 10, 100, 30)),
+            Element(index=2, role="link", name="Zero", rect=(0, 0, 0, 0)),  # no box
+        ],
+        page_text="", text_truncated=False,
+    )
+    image = await capture_marked(_Page(), obs)
+
+    assert image == b"\xff\xd8\xff\xe0-jpeg"
+    assert len(calls) == 2                      # mark + unmark
+    mark_items = calls[0][1]
+    assert [it["i"] for it in mark_items] == [1]   # zero-size boxes never marked
+    assert calls[1][1] is None                  # the unmark pass
+
+
+async def test_capture_marked_survives_a_failing_overlay():
+    """A page whose evaluate raises still yields a plain screenshot — the marks
+    are a quality upgrade, never a new failure mode."""
+    from app.core.dom_observe import Element, Observation, capture_marked
+
+    class _Page:
+        async def evaluate(self, js, arg=None):
+            raise RuntimeError("CSP blocked the overlay")
+
+        async def screenshot(self, **kwargs):
+            return b"\xff\xd8\xff\xe0-plain"
+
+    obs = Observation(
+        observation_id="o", url="u", title="", element_total=1,
+        elements=[Element(index=1, role="button", name="Go", rect=(1, 1, 5, 5))],
+        page_text="", text_truncated=False,
+    )
+    assert await capture_marked(_Page(), obs) == b"\xff\xd8\xff\xe0-plain"

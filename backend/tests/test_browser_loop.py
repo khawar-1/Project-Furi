@@ -126,6 +126,12 @@ class FakeHandle:
     async def press(self, key):
         self.page.record(self.index, "press", key)
 
+    async def select_option(self, label=None, value=None):
+        self.page.record(self.index, "select", label or value)
+
+    async def hover(self):
+        self.page.record(self.index, "hover", None)
+
     async def get_attribute(self, name):
         if name == "href":
             for e in self.page._current().get("elements", []):
@@ -147,7 +153,9 @@ class ScriptedPage:
     def _current(self):
         return self.payloads[min(self.i, len(self.payloads) - 1)]
 
-    async def evaluate(self, js, obs_id):
+    async def evaluate(self, js, arg=None):
+        # One shape for every evaluate the stack issues (observe, marks,
+        # scroll): return the current scripted payload; nothing advances.
         payload = dict(self._current())
         payload.setdefault("url", self.url)
         self.url = payload["url"]
@@ -515,8 +523,18 @@ async def test_navigate_drives_a_get_url_within_the_allowlist():
 def test_parse_action_rejects_garbage_and_unknown_verbs():
     assert _parse_action("") is None
     assert _parse_action("nonsense") is None
-    assert _parse_action('{"action":"scroll","index":1}') is None
+    assert _parse_action('{"action":"drag","index":1}') is None   # unknown verb
     assert _parse_action('{"action":"click"}') is None  # no index
+    # press_key is whitelisted keys ONLY — Enter is a submit gesture, refused.
+    assert _parse_action('{"action":"press_key","key":"Enter"}') is None
+    assert _parse_action('{"action":"press_key","key":"Escape"}') == {
+        "action": "press_key", "key": "Escape"
+    }
+    # select_option needs a value; scroll normalizes its direction.
+    assert _parse_action('{"action":"select_option","index":2}') is None
+    assert _parse_action('{"action":"scroll","direction":"sideways"}') == {
+        "action": "scroll", "direction": "down"
+    }
     # tolerates a code fence and surrounding prose
     assert _parse_action('```json\n{"action":"done","reason":"y"}\n```') == {"action": "done", "reason": "y"}
 
@@ -1487,9 +1505,9 @@ async def test_a_secret_is_filled_by_code_and_never_seen_by_the_model():
     assert any("{{secret:api_key}}" in p for p in provider.prompts[1:])
 
 
-# ----------------------------------------------------- vision fallback (15.3)
+# ------------------------------ vision-first hybrid (2026-07-21, was 15.3)
 class VisionPage(ScriptedPage):
-    """A ScriptedPage the loop can also SCREENSHOT — the vision fallback needs a
+    """A ScriptedPage the loop can also SCREENSHOT — the hybrid decision needs a
     JPEG. Its scripted payloads carry element rects + a viewport, so a fractional
     point the vision model returns maps back to a real element."""
 
@@ -1498,9 +1516,8 @@ class VisionPage(ScriptedPage):
 
 
 class FakeVision:
-    """A scripted image-in / text-out model. Records how many times it was asked —
-    the 'DOM-sufficient page never calls vision' claim is a call-count assertion,
-    the evidence_resolver thesis applied to the vision fallback."""
+    """A scripted image-in / text-out model. Records how many times it was asked
+    — the cost/degradation claims below are call-count assertions."""
 
     def __init__(self, replies):
         self.replies = list(replies)
@@ -1530,48 +1547,49 @@ def _vpage(elements, url="https://site.test/", viewport=(1000, 1000)):
     }
 
 
-async def test_a_dom_sufficient_page_never_calls_vision():
-    """DOM stays primary: when the DOM decision yields a valid action, the vision
-    fallback is NEVER consulted (assert zero calls), even though a vision provider
-    is available. Vision is a stuck-only escalation, not a per-step cost."""
+async def test_vision_is_the_primary_decision_channel():
+    """The hybrid (owner decision, 2026-07-21): with a vision provider
+    configured, EVERY decision step goes to it with the marked screenshot —
+    the text provider is the fallback, not the first call. Here vision answers
+    'done' and the text provider's scripted reply is never consumed."""
     session = FakeSession(VisionPage([_vpage([_vel(1, (0, 0, 100, 40), name="Go")])]))
-    provider = FakeProvider(['{"action":"done","reason":"ok"}'])
-    vision = FakeVision(['{"action":"click","x":0.5,"y":0.5}'])
+    provider = FakeProvider(['{"action":"click","index":1}'])   # must stay unread
+    vision = FakeVision(['{"action":"done","reason":"ok"}'])
 
     outcome = await run_browse(session, "just look", provider, vision=vision)
 
     assert outcome.success is True
-    assert vision.calls == 0
-    assert outcome.vision_calls == 0
+    assert vision.calls == 1
+    assert outcome.vision_calls == 1
+    assert provider.calls == 0             # text provider never consulted
 
 
-async def test_a_stuck_decision_falls_back_to_vision_and_maps_a_point_to_an_element():
-    """The core 15.3 behavior. The DOM decide is STUCK (it names an off-page index,
-    which `_decide` refuses → None) on an icon-only button with no accessible name.
-    The vision fallback locates the target by a fractional POINT, which code maps
-    back to the REAL element index; the click then runs through the ordinary index
-    contract (resolve → the fake handle), NOT a coordinate click. Exactly ONE
-    vision call — vision LOCATES, DOM ACTS."""
+async def test_a_vision_point_maps_to_an_element_through_the_index_contract():
+    """Vision LOCATES, DOM ACTS — unchanged under the hybrid. The vision reply
+    names a fractional POINT over an icon-only button; code maps it to the REAL
+    element index and the click runs through the ordinary index contract
+    (resolve → the fake handle), never a coordinate click."""
     icon = _vpage([_vel(1, (400, 400, 200, 200), name="")], url="https://site.test/app")
     nextp = _vpage([_vel(1, (0, 0, 100, 40), name="Done marker")], url="https://site.test/next")
     session = FakeSession(VisionPage([icon, nextp]))
-    # DOM decide: an off-page index → _decide returns None (stuck); then 'done'.
-    provider = FakeProvider(['{"action":"click","index":99}', '{"action":"done","reason":"ok"}'])
-    vision = FakeVision(['{"action":"click","x":0.5,"y":0.5}'])  # (500,500) ∈ (400..600)
+    provider = FakeProvider([])            # never needed — vision answers both steps
+    vision = FakeVision([
+        '{"action":"click","x":0.5,"y":0.5}',    # (500,500) ∈ (400..600)
+        '{"action":"done","reason":"ok"}',
+    ])
 
     outcome = await run_browse(session, "click the icon", provider, vision=vision)
 
     assert outcome.success is True
-    assert vision.calls == 1
-    assert outcome.vision_calls == 1
+    assert vision.calls == 2
     # The vision-located click hit element 1 THROUGH the index contract (the fake
     # handle records a click with the real index — a point never clicks directly).
     assert any(k == "click" and idx == 1 for (_i, idx, k, v) in session.page.acted)
 
 
 async def test_vision_off_stays_dom_only_and_stops():
-    """Unconfigured (vision=None) → a stuck decide stops honestly, no crash, zero
-    vision anything — exactly the pre-15.3 fail-clean behavior."""
+    """Unconfigured (vision=None) → the text-only loop, zero screenshot work; a
+    stuck decide stops honestly, no crash, zero vision anything."""
     session = FakeSession(VisionPage([_vpage([_vel(1, (400, 400, 200, 200), name="")])]))
     provider = FakeProvider(['{"action":"click","index":99}'])
 
@@ -1582,27 +1600,26 @@ async def test_vision_off_stays_dom_only_and_stops():
     assert outcome.vision_calls == 0
 
 
-async def test_vision_is_bounded_by_max_vision_calls(monkeypatch):
-    """Vision fires only while its budget lasts. A page the DOM can never read
-    (decide always None) with a vision that keeps locating the same element: the
-    loop escalates at most MAX_VISION_CALLS times, then stops rather than sending a
-    screenshot every step forever."""
-    monkeypatch.setattr(browser_loop, "MAX_VISION_CALLS", 2)
-    session = FakeSession(VisionPage([_vpage([_vel(1, (400, 400, 200, 200), name="")])]))
-    provider = FakeProvider(["not json"] * 10)  # DOM decide always None
-    vision = FakeVision(['{"action":"click","x":0.5,"y":0.5}'] * 10)
+async def test_a_vision_failure_falls_back_to_the_text_provider_in_the_same_step():
+    """Degradation is PER STEP, never per run: a junk vision reply hands the
+    SAME decision to the text provider, which completes the goal — one flaky
+    vision call costs one fallback, not the browse."""
+    session = FakeSession(VisionPage([_vpage([_vel(1, (0, 0, 100, 40), name="Go")])]))
+    provider = FakeProvider(['{"action":"done","reason":"ok"}'])
+    vision = FakeVision(["not json at all"])
 
-    outcome = await run_browse(session, "stuck", provider, vision=vision)
+    outcome = await run_browse(session, "just look", provider, vision=vision)
 
-    assert outcome.success is False
-    assert vision.calls == 2
-    assert outcome.vision_calls == 2
+    assert outcome.success is True
+    assert vision.calls == 1               # tried first...
+    assert outcome.vision_calls == 1
+    assert provider.calls == 1             # ...text provider decided the step
 
 
-async def test_a_vision_point_over_no_element_stops_without_a_fabricated_click():
-    """A canvas point over nothing clickable maps to NO element → the loop stops
-    honestly rather than clicking whatever is nearby. Nothing is acted on — the
-    'vision that maps to no live element is an honest stop' guarantee."""
+async def test_a_vision_point_over_no_element_never_fabricates_a_click():
+    """A point over nothing clickable maps to NO element → the vision decision
+    is unusable and the step falls to the text provider; with that also junk,
+    the loop stops honestly. Nothing is ever acted on."""
     session = FakeSession(VisionPage([_vpage([_vel(1, (400, 400, 100, 100), name="")])]))
     provider = FakeProvider(["not json"])
     vision = FakeVision(['{"action":"click","x":0.9,"y":0.9}'])  # (900,900) — outside the box
@@ -1611,5 +1628,26 @@ async def test_a_vision_point_over_no_element_stops_without_a_fabricated_click()
 
     assert outcome.success is False
     assert vision.calls == 1
-    assert outcome.vision_calls == 1
     assert session.page.acted == []  # no fabricated click
+
+
+async def test_new_motion_and_element_actions_execute():
+    """The richer action space (Phase 5): scroll/select_option parse and
+    execute — select through the element handle (the index contract), scroll as
+    read-only page motion exempt from the repeat dedupe."""
+    page = VisionPage([
+        _vpage([_vel(1, (0, 0, 100, 40), role="combobox", name="Country")]),
+    ])
+    session = FakeSession(page)
+    provider = FakeProvider([
+        '{"action":"scroll","direction":"down"}',
+        '{"action":"scroll","direction":"down"}',
+        '{"action":"scroll","direction":"down"}',   # repeats never trip the dedupe
+        '{"action":"select_option","index":1,"value":"Pakistan"}',
+        '{"action":"done","reason":"ok"}',
+    ])
+
+    outcome = await run_browse(session, "pick the country", provider)
+
+    assert outcome.success is True
+    assert any(k == "select" for (_i, _idx, k, _v) in session.page.acted)

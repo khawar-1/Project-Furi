@@ -617,6 +617,72 @@ _SCREENSHOT_MAX_DIM = 1280        # px — the longer viewport edge, after downs
 _SCREENSHOT_JPEG_QUALITY = 60
 
 
+# SET-OF-MARKS overlay (vision-first hybrid, 2026-07-21): a numbered badge +
+# outline over every rendered element, drawn IN-PAGE from the SAME rects the
+# element list carries — so the numbers the vision model sees in the picture
+# ARE the indices it may answer with, and they can never disagree with the
+# text list. pointer-events:none throughout: the overlay can intercept nothing.
+_MARK_JS = """(items) => {
+  const old = document.getElementById('jarvis-marks');
+  if (old) old.remove();
+  const holder = document.createElement('div');
+  holder.id = 'jarvis-marks';
+  holder.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;' +
+    'z-index:2147483647;pointer-events:none;';
+  for (const it of items) {
+    const box = document.createElement('div');
+    box.style.cssText = 'position:fixed;left:' + it.x + 'px;top:' + it.y +
+      'px;width:' + it.w + 'px;height:' + it.h + 'px;' +
+      'outline:2px solid rgba(225,29,72,0.85);pointer-events:none;';
+    holder.appendChild(box);
+    const badge = document.createElement('div');
+    badge.textContent = String(it.i);
+    badge.style.cssText = 'position:fixed;left:' + Math.max(0, it.x - 2) +
+      'px;top:' + Math.max(0, it.y - 14) + 'px;' +
+      'background:#e11d48;color:#fff;font:bold 11px/14px monospace;' +
+      'padding:0 3px;border-radius:2px;pointer-events:none;';
+    holder.appendChild(badge);
+  }
+  document.documentElement.appendChild(holder);
+}"""
+
+_UNMARK_JS = """() => {
+  const h = document.getElementById('jarvis-marks');
+  if (h) h.remove();
+}"""
+
+
+async def capture_marked(
+    page: Any, observation: "Observation", skip_elements: int = 0
+) -> Optional[bytes]:
+    """A set-of-marks screenshot: overlay numbered badges + outlines for the
+    elements in the rendered window, capture the viewport, remove the overlay.
+    Best-effort at every stage — a mark failure degrades to the plain
+    screenshot, a capture failure to None (the caller falls back to the
+    text-only decision path)."""
+    lo, hi = visible_span(observation, skip_elements)
+    items = [
+        {"i": e.index, "x": e.rect[0], "y": e.rect[1], "w": e.rect[2], "h": e.rect[3]}
+        for e in observation.elements[lo:hi]
+        if e.rect[2] > 0 and e.rect[3] > 0
+    ]
+    marked = False
+    if items:
+        try:
+            await page.evaluate(_MARK_JS, items)
+            marked = True
+        except Exception as exc:
+            logger.debug(f"set-of-marks overlay: {type(exc).__name__}: {exc}")
+    try:
+        return await capture_screenshot(page)
+    finally:
+        if marked:
+            try:
+                await page.evaluate(_UNMARK_JS)
+            except Exception:
+                pass
+
+
 async def capture_screenshot(
     page: Any, *, max_dim: int = _SCREENSHOT_MAX_DIM
 ) -> Optional[bytes]:

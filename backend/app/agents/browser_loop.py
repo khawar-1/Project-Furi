@@ -2,8 +2,8 @@
 
 sys.modules self-replacement: this module PATH resolves to the implementation
 module itself, so existing imports and test monkeypatches (run_browse,
-MAX_VISION_CALLS, BROWSE_DECISION_TIMEOUT_SECONDS, ...) keep working
-unchanged. Deleted in the refactor's final importer-migration phase.
+BROWSE_DECISION_TIMEOUT_SECONDS, ...) keep working unchanged. Deleted in the
+refactor's final importer-migration phase.
 """
 import sys
 
