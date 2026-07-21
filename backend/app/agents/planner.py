@@ -2711,6 +2711,18 @@ class AgentPlanner:
                     )
                     return {"plan": plan, "pause_reason": None}
                 if discovery.error or not discovery.state:
+                    if (
+                        discovery.fill_required
+                        or discovery.auth_offer_required
+                        or discovery.origin_approval_required
+                    ):
+                        # The hand-off budget is exhausted (the pause guards
+                        # above stood down), so this pause became a failure —
+                        # but discover() already HELD the live session for the
+                        # pause that will now never happen. Close it, or a
+                        # part-filled Chromium window leaks until the next
+                        # discovery replaces it (live-bug class 2026-07-19).
+                        await self._discard_discovery_hold()
                     step.status = StepStatus.FAILED
                     step.result = ToolResult(
                         success=False,

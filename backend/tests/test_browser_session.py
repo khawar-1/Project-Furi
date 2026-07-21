@@ -1030,43 +1030,67 @@ async def test_launch_total_failure_with_no_orphan_raises_unavailable(monkeypatc
     assert pw.stopped is True       # the driver is torn down on total failure
 
 
-async def test_shutdown_browser_windows_closes_every_window(monkeypatch):
-    called = []
+class _HeldFake:
+    """A held session that records its close — shutdown must close EVERY slot."""
 
-    def _recorder(name):
-        async def _teardown():
-            called.append(name)
-            return True
-        return _teardown
+    def __init__(self):
+        self.closed = False
 
-    monkeypatch.setattr(browser_session, "stop_media", _recorder("media"))
-    monkeypatch.setattr(browser_session, "close_result_window", _recorder("result"))
-    monkeypatch.setattr(browser_session, "close_login_window", _recorder("login"))
-    monkeypatch.setattr(browser_session, "discard_discovery", _recorder("discovery"))
+    async def close(self):
+        self.closed = True
+
+
+async def test_shutdown_browser_windows_closes_every_held_slot(monkeypatch):
+    """Every registry slot — INCLUDING commit and challenge, which the old
+    hand-listed shutdown forgot (a backend stopping mid-approval leaked the
+    profile-lock orphan its docstring promised to prevent) — plus the sign-in
+    window. This test iterates the registry TABLE, so a newly added slot that
+    shutdown misses fails here by construction."""
+    from app.browser import registry as browser_registry
+
+    held = {}
+    for slot, reg in browser_registry.REGISTRIES.items():
+        fake = _HeldFake()
+        held[slot] = fake
+        await reg.hold(fake, {"slot": slot})
+    login_closed = []
+
+    async def _fake_close_login():
+        login_closed.append(True)
+        return True
+
+    monkeypatch.setattr(browser_session, "close_login_window", _fake_close_login)
 
     await browser_session.shutdown_browser_windows()
-    assert set(called) == {"media", "result", "login", "discovery"}
+
+    for slot, fake in held.items():
+        assert fake.closed, f"slot {slot!r} was not closed at shutdown"
+        assert browser_registry.REGISTRIES[slot].peek() is None
+    assert login_closed
 
 
-async def test_shutdown_browser_windows_survives_one_teardown_failing(monkeypatch):
-    called = []
+async def test_shutdown_browser_windows_survives_one_close_failing(monkeypatch):
+    from app.browser import registry as browser_registry
 
-    async def _boom():
-        raise RuntimeError("half-dead window")
+    class _Boom:
+        async def close(self):
+            raise RuntimeError("half-dead window")
 
-    def _recorder(name):
-        async def _teardown():
-            called.append(name)
-            return True
-        return _teardown
+    await browser_registry.REGISTRIES["media"].hold(_Boom(), {})
+    survivor = _HeldFake()
+    await browser_registry.REGISTRIES["challenge"].hold(survivor, {})
+    login_closed = []
 
-    monkeypatch.setattr(browser_session, "stop_media", _boom)
-    monkeypatch.setattr(browser_session, "close_result_window", _recorder("result"))
-    monkeypatch.setattr(browser_session, "close_login_window", _recorder("login"))
-    monkeypatch.setattr(browser_session, "discard_discovery", _recorder("discovery"))
+    async def _fake_close_login():
+        login_closed.append(True)
+        return True
+
+    monkeypatch.setattr(browser_session, "close_login_window", _fake_close_login)
 
     await browser_session.shutdown_browser_windows()   # must not raise
-    assert set(called) == {"result", "login", "discovery"}   # the others still ran
+
+    assert survivor.closed          # one failing close never blocks the rest
+    assert login_closed
 
 
 # --------------------------------------------------------------- COMMIT mode

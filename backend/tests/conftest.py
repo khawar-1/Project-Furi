@@ -201,6 +201,7 @@ def _hermetic_browser_session():
     vision through the tool path gets a caught refusal → None (DOM-only), never a
     real client. Vision-loop tests pass their own fake `vision` straight to
     run_browse and never touch this seam."""
+    from app.browser import registry as browser_registry
     from app.core import browser_session
     from app.providers import vision
 
@@ -224,14 +225,12 @@ def _hermetic_browser_session():
     # never touches a real process. A test exercising reclaim injects its own.
     browser_session._PROFILE_REAPER = lambda _marker: []
     browser_session.reset_host_cache()
-    # The media/commit registries hold a live session across tool calls (Phase
-    # 14.2 / 14.5). A fake session left in either would leak into the next test,
-    # so clear them too — inert here (tests only ever register fakes), the
-    # reset_host_cache hygiene.
-    browser_session._active_media = None
-    browser_session._active_media_meta = {}
-    browser_session._commit_session = None
-    browser_session._commit_meta = {}
+    # The held-session registries keep a live session across tool calls (media,
+    # result window, commit, challenge, discovery). A fake session left in any
+    # slot would leak into the next test, so drop them all — inert here (tests
+    # only ever register fakes), the reset_host_cache hygiene. One call covers
+    # every slot by construction.
+    browser_registry.reset_for_tests()
     browser_session._login_browser = None
     browser_session._clean_login_proc = None
     yield
@@ -240,10 +239,7 @@ def _hermetic_browser_session():
     browser_session.CLEAN_BROWSER_LAUNCHER = None
     browser_session._PROFILE_REAPER = None
     browser_session.reset_host_cache()
-    browser_session._active_media = None
-    browser_session._active_media_meta = {}
-    browser_session._commit_session = None
-    browser_session._commit_meta = {}
+    browser_registry.reset_for_tests()
     browser_session._login_browser = None
     browser_session._clean_login_proc = None
 

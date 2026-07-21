@@ -112,6 +112,7 @@ import asyncio
 import json
 import os
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -120,6 +121,7 @@ from urllib.parse import urlparse
 
 from loguru import logger
 
+from app.browser import registry as _held
 from app.tools.browser_tools import _host_is_blocked, _validate_url
 
 # --------------------------------------------------------------------- limits
@@ -168,12 +170,17 @@ SETTLE_RENDER_STABLE_SAMPLES = 2   # consecutive unchanged samples ⇒ settled
 _PROFILE_SETTLE_SECONDS = 1.5
 _CLEAN_LOGIN_VERIFY_SECONDS = 2.5
 _profile_released_monotonic: float = 0.0
+# The stamp is written from the browser loop AND from reclaim_orphaned_profile's
+# asyncio.to_thread worker — a cross-thread float write with no ordering. A
+# threading.Lock (never held across an await) makes both sides well-defined.
+_profile_stamp_lock = threading.Lock()
 
 
 def _mark_profile_released() -> None:
     """Record (monotonic) that a Chromium on the shared profile was just closed."""
     global _profile_released_monotonic
-    _profile_released_monotonic = time.monotonic()
+    with _profile_stamp_lock:
+        _profile_released_monotonic = time.monotonic()
 
 
 async def _settle_profile() -> None:
@@ -181,7 +188,9 @@ async def _settle_profile() -> None:
     was closed within the last _PROFILE_SETTLE_SECONDS — otherwise a hand-off
     window launched immediately hands off to the dying instance and never appears.
     A no-op when nothing was closed recently (so the common path pays nothing)."""
-    remaining = _PROFILE_SETTLE_SECONDS - (time.monotonic() - _profile_released_monotonic)
+    with _profile_stamp_lock:
+        stamp = _profile_released_monotonic
+    remaining = _PROFILE_SETTLE_SECONDS - (time.monotonic() - stamp)
     if remaining > 0:
         await asyncio.sleep(remaining)
 
@@ -1469,53 +1478,37 @@ class BrowserSession:
 # already names. The lock serializes start-vs-stop so the two can never both act
 # on a half-closed session (the API stop route and a play loop share one loop but
 # interleave at awaits).
-_active_media: Optional["BrowserSession"] = None
-_active_media_meta: dict[str, str] = {}
-_media_lock = asyncio.Lock()
+# The slot itself lives in app.browser.registry (ONE generic implementation
+# for all five held-session slots); these wrappers keep the domain-named API
+# every caller and test uses.
+_MEDIA = _held.REGISTRIES["media"]
 
 
 async def register_media(session: "BrowserSession", *, title: str, url: str) -> None:
     """Adopt a live session as THE current media session, closing any previous
     one. After this the caller must NOT close the session — the registry owns its
     lifetime until stop_media()."""
-    global _active_media, _active_media_meta
-    async with _media_lock:
-        previous = _active_media
-        _active_media = session
-        _active_media_meta = {"title": title or "", "url": url or ""}
-    if previous is not None and previous is not session:
-        await previous.close()
+    await _MEDIA.hold(session, {"title": title or "", "url": url or ""})
 
 
 async def stop_media() -> bool:
     """Close the current media session and clear the registry. True when a
     session was actually closed. Idempotent — stopping nothing is not an error."""
-    global _active_media, _active_media_meta
-    async with _media_lock:
-        session = _active_media
-        _active_media = None
-        _active_media_meta = {}
-    if session is None:
-        return False
-    await session.close()
-    return True
+    return await _MEDIA.discard()
 
 
 def active_media() -> Optional[dict[str, str]]:
     """{title, url} for the current media session, or None. Cheap, no I/O — the
     StatusBar polls this freely (the context_status precedent)."""
-    if _active_media is None:
-        return None
-    return dict(_active_media_meta)
+    return _MEDIA.peek()
 
 
 async def reset_media() -> None:
-    """Test/shutdown hook — close and clear, without pretending it is a feature.
-    Mirrors reset_host_cache: the registry is live state, never persisted."""
-    await stop_media()
-    await discard_commit()
-    await discard_challenge()
-    await close_result_window()
+    """Test/shutdown hook — close and clear EVERY held session slot plus the
+    sign-in window. Delegates to registry.close_all_held(), so every slot is
+    covered BY CONSTRUCTION — the old hand-listed version silently missed the
+    discovery slot, the exact bug class the registry table exists to end."""
+    await _held.close_all_held()
     await close_login_window()
 
 
@@ -1543,9 +1536,7 @@ async def reset_media() -> None:
 # closes this first (BrowseTool, browser_commit.discover, and open_login_window
 # call close_result_window() before launching). Memory-only — a restart just
 # closes it, like every browser registry.
-_result_window: Optional["BrowserSession"] = None
-_result_meta: dict[str, str] = {}
-_result_lock = asyncio.Lock()
+_RESULT = _held.REGISTRIES["result_window"]
 
 
 async def register_result_window(
@@ -1554,35 +1545,19 @@ async def register_result_window(
     """Adopt a just-submitted session as THE open result window, closing any
     previous one. After this the caller must NOT close the session — the registry
     owns its lifetime until close_result_window()."""
-    global _result_window, _result_meta
-    async with _result_lock:
-        previous = _result_window
-        _result_window = session
-        _result_meta = {"title": title or "", "url": url or ""}
-    if previous is not None and previous is not session:
-        await previous.close()
+    await _RESULT.hold(session, {"title": title or "", "url": url or ""})
 
 
 async def close_result_window() -> bool:
     """Close the open result window and clear the registry. True when a window was
     actually closed. Idempotent — closing nothing is not an error."""
-    global _result_window, _result_meta
-    async with _result_lock:
-        session = _result_window
-        _result_window = None
-        _result_meta = {}
-    if session is None:
-        return False
-    await session.close()
-    return True
+    return await _RESULT.discard()
 
 
 def active_result_window() -> Optional[dict[str, str]]:
     """{title, url} for the open result window, or None. Cheap, no I/O — the
     StatusBar polls it (the active_media precedent)."""
-    if _result_window is None:
-        return None
-    return dict(_result_meta)
+    return _RESULT.peek()
 
 
 # ---------------------------------------------------------- commit sessions
@@ -1598,52 +1573,33 @@ def active_result_window() -> Optional[dict[str, str]]:
 # ONE pending commit at a time, one-slot like media: a new discovery closes the
 # previous held session. take_commit() removes AND returns it (the submit phase
 # owns it thereafter), so a taken commit can never be taken twice.
-_commit_session: Optional["BrowserSession"] = None
-_commit_meta: dict[str, Any] = {}
-_commit_lock = asyncio.Lock()
+_COMMIT = _held.REGISTRIES["commit"]
 
 
 async def hold_commit(session: "BrowserSession", *, state: dict[str, Any]) -> None:
     """Hold a discovered-but-unsubmitted session across the approval pause,
     closing any previously held one. After this the caller must NOT close the
     session — the registry owns it until take_commit()/discard_commit()."""
-    global _commit_session, _commit_meta
-    async with _commit_lock:
-        previous = _commit_session
-        _commit_session = session
-        _commit_meta = dict(state or {})
-    if previous is not None and previous is not session:
-        await previous.close()
+    await _COMMIT.hold(session, state or {})
 
 
 async def take_commit() -> Optional["BrowserSession"]:
     """Remove and return the held commit session (the submit phase owns it now),
     or None when there is none — a restart/timeout dropped it, and the submit
     must report that rather than invent a submission."""
-    global _commit_session, _commit_meta
-    async with _commit_lock:
-        session = _commit_session
-        _commit_session = None
-        _commit_meta = {}
-    return session
+    return await _COMMIT.take()
 
 
 async def discard_commit() -> bool:
     """Close and clear a held commit session without submitting (cancel /
     shutdown / a superseding discovery). True when one was actually closed."""
-    session = await take_commit()
-    if session is None:
-        return False
-    await session.close()
-    return True
+    return await _COMMIT.discard()
 
 
 def pending_commit() -> Optional[dict[str, Any]]:
     """The approved-form state of the held commit session, or None. Cheap, no
     I/O (the active_media precedent)."""
-    if _commit_session is None:
-        return None
-    return dict(_commit_meta)
+    return _COMMIT.peek()
 
 
 # ------------------------------------------------------- challenge sessions
@@ -1658,32 +1614,22 @@ def pending_commit() -> Optional[dict[str, Any]]:
 # on to the approval pause. One slot, memory-only, exactly the commit-session
 # rules: a restart drops it and the resume reports it honestly; a new discovery
 # or a plan cancel discards it.
-_challenge_session: Optional["BrowserSession"] = None
-_challenge_meta: dict[str, Any] = {}
-_challenge_lock = asyncio.Lock()
+_CHALLENGE = _held.REGISTRIES["challenge"]
 
 
 async def hold_challenge(session: "BrowserSession", *, meta: dict[str, Any]) -> None:
     """Hold a mid-flow session across an embedded-challenge hand-off, closing
     any previously held one. The registry owns the session until
     take_challenge()/discard_challenge()."""
-    global _challenge_session, _challenge_meta
-    async with _challenge_lock:
-        previous = _challenge_session
-        _challenge_session = session
-        _challenge_meta = dict(meta or {})
-    if previous is not None and previous is not session:
-        await previous.close()
+    await _CHALLENGE.hold(session, meta or {})
 
 
 async def take_challenge() -> Optional["BrowserSession"]:
     """Remove and return the held challenge session (the resumed discovery owns
-    it now), or None — a restart dropped it and the resume starts fresh."""
-    global _challenge_session, _challenge_meta
-    async with _challenge_lock:
-        session = _challenge_session
-        _challenge_session = None
-        _challenge_meta = {}
+    it now), or None — a restart dropped it and the resume starts fresh. The
+    vendor-traffic carve-out is disarmed on the way out (slot-specific — the
+    resumed discovery must run fully read-only again)."""
+    session = await _CHALLENGE.take()
     if session is not None:
         session.disarm_challenge_traffic()
     return session
@@ -1701,9 +1647,7 @@ async def discard_challenge() -> bool:
 
 def pending_challenge() -> Optional[dict[str, Any]]:
     """{kind, site, url} for the held challenge session, or None. Cheap, no I/O."""
-    if _challenge_session is None:
-        return None
-    return dict(_challenge_meta)
+    return _CHALLENGE.peek()
 
 
 # ------------------------------------------------------- discovery sessions
@@ -1722,51 +1666,32 @@ def pending_challenge() -> Optional[dict[str, Any]]:
 # (one profile = one live context). `meta.reason` is "fill" | "origin" | "auth"
 # and `meta.goal` scopes the re-attach to THIS goal (a stale hold from an
 # abandoned flow is discarded, never resumed onto the wrong page).
-_discovery_session: Optional["BrowserSession"] = None
-_discovery_meta: dict[str, Any] = {}
-_discovery_lock = asyncio.Lock()
+_DISCOVERY = _held.REGISTRIES["discovery"]
 
 
 async def hold_discovery(session: "BrowserSession", *, meta: dict[str, Any]) -> None:
     """Hold a commit-discovery session across a fill/origin/auth pause, closing
     any previously held one. The registry owns the session until
     take_discovery()/discard_discovery() — the caller must NOT close it."""
-    global _discovery_session, _discovery_meta
-    async with _discovery_lock:
-        previous = _discovery_session
-        _discovery_session = session
-        _discovery_meta = dict(meta or {})
-    if previous is not None and previous is not session:
-        await previous.close()
+    await _DISCOVERY.hold(session, meta or {})
 
 
 async def take_discovery() -> Optional["BrowserSession"]:
     """Remove and return the held discovery session (the resumed discovery owns
     it now), or None — a restart dropped it and the resume starts fresh."""
-    global _discovery_session, _discovery_meta
-    async with _discovery_lock:
-        session = _discovery_session
-        _discovery_session = None
-        _discovery_meta = {}
-    return session
+    return await _DISCOVERY.take()
 
 
 async def discard_discovery() -> bool:
     """Close and clear a held discovery session (cancel / shutdown / a
     superseding discovery / a sign-in hand-off that needs the profile lock).
     True when one was actually closed."""
-    session = await take_discovery()
-    if session is None:
-        return False
-    await session.close()
-    return True
+    return await _DISCOVERY.discard()
 
 
 def pending_discovery() -> Optional[dict[str, Any]]:
     """{goal, reason} for the held discovery session, or None. Cheap, no I/O."""
-    if _discovery_session is None:
-        return None
-    return dict(_discovery_meta)
+    return _DISCOVERY.peek()
 
 
 # ----------------------------------------------------------- login window
@@ -2051,20 +1976,22 @@ def login_window_open() -> bool:
 
 
 async def shutdown_browser_windows() -> None:
-    """Close every browser window Jarvis has open — media, the commit-result
-    window, the sign-in/verification window, and any held discovery session — so a
-    clean backend shutdown leaves NO Chromium holding the ~/.jarvis/browser profile
-    lock (the orphan that hangs the next run's launch). Composes the existing
-    best-effort teardowns; each is independent, so one failing never blocks the
-    rest. Marshaled onto the browser loop from main.py (these touch Playwright
-    objects bound to that loop). Best-effort — never raises."""
-    for name, teardown in (
-        ("media", stop_media),
-        ("result window", close_result_window),
-        ("login window", close_login_window),
-        ("held discovery", discard_discovery),
-    ):
-        try:
-            await teardown()
-        except Exception as exc:
-            logger.debug(f"shutdown close {name}: {type(exc).__name__}: {exc}")
+    """Close every browser window Jarvis has open — EVERY held-session slot
+    (media, result window, pending commit, challenge, discovery) AND the
+    sign-in/verification window — so a clean backend shutdown leaves NO
+    Chromium holding the ~/.jarvis/browser profile lock (the orphan that hangs
+    the next run's launch). Completeness is BY CONSTRUCTION: close_all_held()
+    iterates the registry table, so a new slot cannot be forgotten here — the
+    old hand-listed version shipped without the commit and challenge slots,
+    leaking exactly the orphan its own docstring promised to prevent whenever
+    the backend stopped mid-approval or mid-challenge. Marshaled onto the
+    browser loop from main.py (these touch Playwright objects bound to that
+    loop). Best-effort — never raises."""
+    try:
+        await _held.close_all_held()
+    except Exception as exc:
+        logger.debug(f"shutdown close held sessions: {type(exc).__name__}: {exc}")
+    try:
+        await close_login_window()
+    except Exception as exc:
+        logger.debug(f"shutdown close login window: {type(exc).__name__}: {exc}")

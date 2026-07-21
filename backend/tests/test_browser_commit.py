@@ -114,6 +114,49 @@ async def test_a_form_value_not_in_the_profile_pauses_to_ask(db_session, monkeyp
     assert calls == []  # nothing submitted while a value is unknown
 
 
+async def test_a_fill_pause_at_the_handoff_budget_discards_the_held_window(
+    db_session, monkeypatch
+):
+    """When the hand-off budget is exhausted, the fill pause becomes a step
+    failure — but discover() already HELD the live part-filled session for the
+    pause that never happens. The failure path must discard that hold, or a
+    real Chromium window leaks until the next discovery replaces it."""
+
+    class _Held:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    held = _Held()
+
+    async def fake_discover(params, session_id=None, **kwargs):
+        await browser_session.hold_discovery(
+            held, meta={"reason": "fill", "goal": "post a comment"}
+        )
+        return browser_commit.CommitDiscovery(
+            fill_required=True, fill_field="Phone number", error="need a phone number"
+        )
+
+    calls: list = []
+    monkeypatch.setattr(browser_commit, "discover", fake_discover)
+    monkeypatch.setattr(planner_mod, "execute_tool", _record_exec(calls))
+    monkeypatch.setattr(planner_mod, "_MAX_BROWSE_HANDOFFS", 0)
+
+    provider = FakeProvider(
+        [plan_json([_commit_step()]), plan_json([_commit_step()]), plan_json([_commit_step()])]
+    )
+    plan = await AgentPlanner(db_session, provider, session_id="s-fill-cap").start(
+        "post 'hello world' as a comment on example.com"
+    )
+
+    assert plan.status == PlanStatus.FAILED
+    assert held.closed, "the held discovery session leaked on the budget-exhausted failure"
+    assert browser_session.pending_discovery() is None
+    assert calls == []
+
+
 async def test_approving_the_form_runs_exactly_one_submit(db_session, monkeypatch):
     """On approval the same step re-enters — discovery is NOT repeated — and runs
     the one submit, approved, carrying the exact approved field values."""
