@@ -136,6 +136,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # garbage-collected mid-flight, silently cancelling the warmup.
     app.state.embedder_warmup = asyncio.create_task(_prewarm_embedder())
 
+    # Pre-warm the browser stack's heavy imports. Measured live 2026-07-21: the
+    # FIRST browse paid ~56s importing google.generativeai (the vision provider's
+    # grpc/protobuf tree, cold) plus the Playwright import INSIDE its own browse
+    # time budget — enough, on a loaded machine, to blow the whole budget before
+    # Chrome ever opened. Imports are process-wide and cached, so paying them
+    # here (a worker thread — module import is mostly disk I/O, which releases
+    # the GIL) makes the first browse start as fast as every later one.
+    # Best-effort; gated so a box without the deps or without a vision key pays
+    # nothing.
+    async def _prewarm_browser_stack():
+        def _import_heavy():
+            try:
+                import playwright.async_api  # noqa: F401
+            except Exception:
+                pass
+            if settings.VISION_API_KEY or settings.GEMINI_API_KEY:
+                try:
+                    import google.generativeai  # noqa: F401
+                except Exception:
+                    pass
+        try:
+            await asyncio.to_thread(_import_heavy)
+            logger.info("✅ browser stack imports pre-warmed")
+        except Exception as e:
+            logger.warning(f"⚠️  browser stack pre-warm failed (non-critical): {e}")
+
+    app.state.browser_prewarm = asyncio.create_task(_prewarm_browser_stack())
+
     # Pre-warm the LLM — ONLY on Ollama. A local model cold-loads into VRAM on
     # the first request (many seconds on a laptop GPU), so without this the
     # first real chat/classify call absorbs that latency. Gated on provider so

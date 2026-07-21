@@ -1085,6 +1085,63 @@ async def test_launch_total_failure_with_no_orphan_raises_unavailable(monkeypatc
     assert pw.stopped is True       # the driver is torn down on total failure
 
 
+async def test_launch_chain_stops_when_its_shared_budget_is_spent(monkeypatch):
+    """2026-07-21: the chain's worst case (channels x attempts x per-attempt
+    timeout) exceeded the OUTER browse belt, so the belt killed the browse with
+    zero diagnostics. The chain now owns a shared budget: once it is spent, no
+    further channel is attempted and the failure is an honest BrowserUnavailable
+    naming the budget — never a silent outer-belt cancellation."""
+    monkeypatch.setattr(browser_session, "LAUNCH_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(browser_session, "LAUNCH_CHAIN_BUDGET_SECONDS", 0.15)
+    monkeypatch.setattr(browser_session, "_PROFILE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(browser_session, "_CHANNELS", (None, "chrome"))
+    monkeypatch.setattr(browser_session, "_harden_profile", lambda p: None)
+    monkeypatch.setattr(browser_session, "_PROFILE_REAPER", lambda m: [])
+    chromium = _FakeChromium(["hang", "hang", "hang", "hang"])
+    pw = _FakePlaywright(chromium)
+
+    async def _fake_start():
+        return pw
+
+    monkeypatch.setattr(browser_session, "_start_playwright", _fake_start)
+
+    with pytest.raises(browser_session.BrowserUnavailable, match="launch budget"):
+        await browser_session._default_browser_factory()
+    # the first attempt consumed the whole budget — the second channel was never
+    # tried, so the chain can never outrun the outer belt again
+    assert chromium.calls == 1
+    assert pw.stopped is True
+
+
+async def test_a_cancelled_launch_tears_down_the_driver(monkeypatch):
+    """The outer browse belt firing MID-LAUNCH must not leak the Node driver (or
+    a half-spawned profile-holding Chrome): a cancelled chain schedules a
+    detached cleanup that stops the driver and reclaims the profile."""
+    reaped = []
+    monkeypatch.setattr(browser_session, "LAUNCH_TIMEOUT_SECONDS", 30.0)
+    monkeypatch.setattr(browser_session, "_CHANNELS", (None,))
+    monkeypatch.setattr(browser_session, "_harden_profile", lambda p: None)
+    monkeypatch.setattr(
+        browser_session, "_PROFILE_REAPER", lambda m: (reaped.append(m), [])[1]
+    )
+    chromium = _FakeChromium(["hang"])
+    pw = _FakePlaywright(chromium)
+
+    async def _fake_start():
+        return pw
+
+    monkeypatch.setattr(browser_session, "_start_playwright", _fake_start)
+
+    task = asyncio.ensure_future(browser_session._default_browser_factory())
+    await asyncio.sleep(0.05)          # let it reach the hanging launch
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.1)           # the detached cleanup task runs
+    assert pw.stopped is True          # the driver did not leak
+    assert reaped                       # and the profile was reclaimed
+
+
 class _HeldFake:
     """A held session that records its close — shutdown must close EVERY slot."""
 

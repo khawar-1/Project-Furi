@@ -120,6 +120,31 @@ async def test_a_coro_within_the_timeout_returns_normally():
     assert await browser_runtime.run_browser(_quick(), timeout=5.0) == 7
 
 
+# ------------------------------------------------- the budget must add up
+def test_browse_hard_timeout_covers_the_worst_case_pipeline():
+    """THE 2026-07-21 incident, pinned: the outer belt was 180s while the launch
+    chain's own worst case plus the loop's deadline exceeded it — so a first
+    browse on a loaded machine spent the whole belt on imports + launch attempts
+    and Chrome never opened. The belt must cover every bounded stage it wraps
+    (launch chain + loop deadline + one step's overrun past the deadline + two
+    navigations) with margin, so moving any ONE constant without the others fails
+    HERE instead of strangling live browses again."""
+    from app.browser import loop as browser_loop
+    from app.browser import session as browser_session
+
+    worst_case = (
+        browser_session.LAUNCH_CHAIN_BUDGET_SECONDS
+        + browser_loop.BROWSE_DEADLINE_SECONDS
+        + browser_loop.BROWSE_DECISION_TIMEOUT_SECONDS
+        + 2 * browser_session.NAV_TIMEOUT_MS / 1000
+    )
+    assert browser_runtime.BROWSE_HARD_TIMEOUT >= worst_case + 20, (
+        f"BROWSE_HARD_TIMEOUT={browser_runtime.BROWSE_HARD_TIMEOUT} cannot cover "
+        f"the pipeline's worst case ({worst_case:.0f}s + margin) — a legitimate "
+        f"browse would be killed by the belt"
+    )
+
+
 # ------------------------------------------------------ the is_running guard
 async def test_is_running_reflects_loop_lifecycle():
     # A fresh runtime (the _shutdown_runtime teardown reset _loop) is not running…

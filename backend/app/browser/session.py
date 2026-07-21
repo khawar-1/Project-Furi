@@ -143,6 +143,16 @@ NAV_TIMEOUT_MS = 20_000
 # logged). Bound the launch so a locked profile becomes a clean failure that the
 # reclaim-and-retry (below) can self-heal, never an endless spinner.
 LAUNCH_TIMEOUT_SECONDS = 45.0
+# The CHAIN of channel attempts gets a SHARED budget on top of the per-attempt
+# cap (live incident 2026-07-21: a browse burned its whole 180s outer belt inside
+# the launch chain — worst case was 3 channels x 2 attempts x 45s = 270s, more
+# than the belt itself, so the browse timed out before Chrome ever opened AND
+# before the chain could even report which channel failed). An attempt started
+# with little budget left runs with the remainder; remainder spent = an honest
+# BrowserUnavailable naming every attempt, never a silent outer-belt kill. The
+# outer BROWSE_HARD_TIMEOUT is sized against THIS number (pinned test in
+# test_browser_runtime.py).
+LAUNCH_CHAIN_BUDGET_SECONDS = 120.0
 # networkidle is a BEST-EFFORT quiet signal, not a correctness gate — a busy
 # analytics/ad page never truly goes idle, so waiting the old 5s on it just
 # burned time every step. 2.5s is enough for a normal page to settle; a busy one
@@ -649,7 +659,12 @@ class _RealBrowser:
 async def _start_playwright() -> Any:
     """Import Playwright lazily and start its driver — the one place the optional
     dependency is touched, so a base install without it fails clean (the seam a
-    test overrides to drive the launch/retry path without a real Chromium)."""
+    test overrides to drive the launch/retry path without a real Chromium).
+
+    Bounded: the driver is a Node subprocess spawn, which has no native cap — on
+    a machine thrashing under startup load it can stall silently (the 2026-07-21
+    incident's launch phase produced ZERO log lines before the outer belt fired).
+    A stall becomes a named, retryable failure instead."""
     try:
         from playwright.async_api import async_playwright
     except ImportError as exc:
@@ -657,7 +672,13 @@ async def _start_playwright() -> Any:
             "Browser control needs Playwright, which is not installed. "
             "Install it with: pip install playwright"
         ) from exc
-    return await async_playwright().start()
+    try:
+        return await asyncio.wait_for(async_playwright().start(), timeout=30)
+    except asyncio.TimeoutError:
+        raise BrowserUnavailable(
+            "The Playwright browser driver did not start within 30s (machine "
+            "under heavy load?). Try the task again."
+        )
 
 
 async def _default_browser_factory() -> Any:
@@ -670,11 +691,14 @@ async def _default_browser_factory() -> Any:
     # both the agent session and open_login_window — every window reaches here.
     _harden_profile(BROWSER_PROFILE_DIR)
 
-    async def _launch_channel(channel: Optional[str]) -> Any:
-        """Launch one channel, bounded by LAUNCH_TIMEOUT_SECONDS. A launch that
-        HANGS on a locked profile (rather than erroring) becomes a timeout — a
-        working browser launches in ~2-3s (per the live logs), so a timeout is a
-        strong lock signature, distinct from an install error."""
+    chain_deadline = time.monotonic() + LAUNCH_CHAIN_BUDGET_SECONDS
+
+    async def _launch_channel(channel: Optional[str], remaining: float) -> Any:
+        """Launch one channel, bounded by LAUNCH_TIMEOUT_SECONDS AND the chain's
+        remaining shared budget. A launch that HANGS on a locked profile (rather
+        than erroring) becomes a timeout — a working browser launches in ~2-3s
+        (per the live logs), so a timeout is a strong lock signature, distinct
+        from an install error."""
         return await asyncio.wait_for(
             playwright.chromium.launch_persistent_context(
                 user_data_dir=str(BROWSER_PROFILE_DIR),
@@ -683,49 +707,102 @@ async def _default_browser_factory() -> Any:
                 args=list(_LAUNCH_ARGS),
                 **({"channel": channel} if channel else {}),
             ),
-            timeout=LAUNCH_TIMEOUT_SECONDS,
+            timeout=min(LAUNCH_TIMEOUT_SECONDS, remaining),
         )
 
+    # Every attempt outcome LOGS IMMEDIATELY (2026-07-21: the whole chain died
+    # inside the outer browse belt with zero log lines, because failures only
+    # accumulated into this list for the terminal raise that never ran — the
+    # incident could not be root-caused from data).
     errors: list[str] = []
-    reclaimed_once = False
-    for channel in _CHANNELS:
-        # Two attempts per channel: the original, and one retry AFTER reclaiming an
-        # orphan — but the reclaim is spent at most once across the whole chain.
-        for _attempt in range(2):
-            try:
-                context = await _launch_channel(channel)
-            except asyncio.TimeoutError:
-                errors.append(
-                    f"{channel or 'bundled chromium'}: launch timed out after "
-                    f"{LAUNCH_TIMEOUT_SECONDS:.0f}s (profile likely locked)"
-                )
-                # A timeout is the lock signature. The classic cause is an orphaned
-                # Jarvis-profile Chrome holding the single-instance lock (a sign-in
-                # window from a prior run, a leaked context after a crash). Kill it
-                # ONCE and retry THIS channel on the freed profile, so the first
-                # browse after a restart self-heals instead of spinning. Off-loop
-                # (it shells out) so the browser loop is never blocked.
-                if not reclaimed_once:
-                    reclaimed_once = True
-                    if await asyncio.to_thread(reclaim_orphaned_profile):
+    try:
+        for channel in _CHANNELS:
+            name = channel or "bundled chromium"
+            # Two attempts per channel: the original, and one retry after a
+            # reclaim actually freed the profile.
+            for _attempt in range(2):
+                remaining = chain_deadline - time.monotonic()
+                if remaining <= 0:
+                    errors.append(
+                        f"launch budget ({LAUNCH_CHAIN_BUDGET_SECONDS:.0f}s) "
+                        f"spent before trying {name}"
+                    )
+                    logger.warning(f"browser: {errors[-1]}")
+                    raise _launch_failure(errors)
+                logger.info(f"browser: launching via {name}…")
+                try:
+                    context = await _launch_channel(channel, remaining)
+                except asyncio.TimeoutError:
+                    errors.append(f"{name}: launch timed out (profile likely locked)")
+                    logger.warning(f"browser: {errors[-1]}")
+                    # A timeout is the lock signature — an orphaned Jarvis-profile
+                    # Chrome from a prior run, OR the half-spawned Chrome this very
+                    # cancelled launch may have left behind (a wait_for cancel does
+                    # not un-spawn the process). Reclaim after EVERY timeout so a
+                    # self-inflicted orphan can't poison the rest of the chain;
+                    # retry this channel iff the reclaim actually freed something.
+                    # Off-loop (it shells out) so the browser loop is never blocked.
+                    if await asyncio.to_thread(reclaim_orphaned_profile) and _attempt == 0:
                         await _settle_profile()  # let the killed process let go
                         continue  # retry this same channel
-                break  # nothing to reclaim (or already tried) → next channel
-            except Exception as exc:
-                # An install/config error (channel not present) — the reclaim would
-                # not help; fall through to the next channel.
-                errors.append(f"{channel or 'bundled chromium'}: {str(exc)[:120]}")
-                break
-            context.set_default_navigation_timeout(NAV_TIMEOUT_MS)
-            logger.info(f"browser: launched via {channel or 'bundled chromium'}")
-            return _RealBrowser(playwright, context)
+                    break  # nothing freed (or already retried) → next channel
+                except Exception as exc:
+                    # An install/config error (channel not present) — the reclaim
+                    # would not help; fall through to the next channel.
+                    errors.append(f"{name}: {str(exc)[:120]}")
+                    logger.warning(f"browser: launch failed — {errors[-1]}")
+                    break
+                context.set_default_navigation_timeout(NAV_TIMEOUT_MS)
+                logger.info(f"browser: launched via {name}")
+                return _RealBrowser(playwright, context)
 
-    await playwright.stop()
-    raise BrowserUnavailable(
+        raise _launch_failure(errors)
+    except BrowserUnavailable:
+        await playwright.stop()
+        raise
+    except asyncio.CancelledError:
+        # The OUTER browse belt fired mid-launch. This coroutine cannot reliably
+        # await its own cleanup while being cancelled, so tear the driver (and any
+        # half-spawned profile-holding Chrome) down in a detached task — leaving
+        # them alive is how one timed-out browse poisons every later one.
+        _schedule_launch_cleanup(playwright)
+        raise
+
+
+def _launch_failure(errors: list[str]) -> BrowserUnavailable:
+    return BrowserUnavailable(
         "Could not launch a browser. Install one of Playwright's Chromium, "
         "Microsoft Edge, or Google Chrome — the simplest is: "
         "playwright install chromium\n" + "\n".join(errors)
     )
+
+
+# References to detached cleanup tasks — an unreferenced asyncio task can be
+# garbage-collected mid-flight, silently skipping the cleanup.
+_CLEANUP_TASKS: set = set()
+
+
+def _schedule_launch_cleanup(playwright: Any) -> None:
+    """Best-effort teardown of an ABANDONED launch (the outer browse belt
+    cancelled us mid-chain): stop the Node driver, then reclaim any half-spawned
+    Chrome already holding the profile lock. Detached because a cancelled
+    coroutine's own finally cannot await without re-raising CancelledError."""
+    async def _cleanup() -> None:
+        try:
+            await playwright.stop()
+        except Exception as exc:
+            logger.debug(f"abandoned-launch driver stop: {type(exc).__name__}: {exc}")
+        try:
+            await asyncio.to_thread(reclaim_orphaned_profile)
+        except Exception as exc:
+            logger.debug(f"abandoned-launch reclaim: {type(exc).__name__}: {exc}")
+
+    try:
+        task = asyncio.get_running_loop().create_task(_cleanup())
+        _CLEANUP_TASKS.add(task)
+        task.add_done_callback(_CLEANUP_TASKS.discard)
+    except Exception as exc:
+        logger.debug(f"abandoned-launch cleanup not scheduled: {type(exc).__name__}: {exc}")
 
 
 async def _launch() -> Any:

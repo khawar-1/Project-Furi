@@ -55,10 +55,22 @@ _start_lock = threading.Lock()
 # The OUTERMOST browse timeout (2026-07-20), owned here at the one marshaling
 # boundary every browse tool crosses. No single browse may wedge a chat turn
 # forever, whatever hangs inside (a locked-profile launch, a stuck LLM call, a
-# non-terminating loop). A continuous browse is bounded by the loop's own
-# MAX_BROWSER_ACTIONS and every pausing flow RETURNS promptly, so a generous cap
-# is only ever reached by a genuine hang. Callers pass it to run_browser(timeout=).
-BROWSE_HARD_TIMEOUT = 180.0
+# non-terminating loop). Callers pass it to run_browser(timeout=).
+#
+# SIZED AGAINST THE PIPELINE IT WRAPS, not a hunch (live incident 2026-07-21:
+# 180s was smaller than the launch chain's own worst case plus the loop's
+# deadline, so a first browse on a loaded machine burned the whole belt in
+# imports + launch attempts and Chrome never even opened). The belt must cover:
+#   session.LAUNCH_CHAIN_BUDGET_SECONDS   (the whole channel chain)
+# + loop.BROWSE_DEADLINE_SECONDS          (the loop's own wall-clock cap)
+# + loop.BROWSE_DECISION_TIMEOUT_SECONDS  (one step's overrun past the deadline)
+# + 2 × NAV_TIMEOUT                       (initial goto + one redirect)
+# with margin. A pinned test (test_browser_runtime.py) enforces the inequality
+# so a constant moved in one module fails loudly instead of quietly strangling
+# browses again. Every INNER stage is individually bounded, so this belt is only
+# ever reached by a genuine hang — a generous value costs nothing in the normal
+# case.
+BROWSE_HARD_TIMEOUT = 600.0
 
 
 def _new_loop() -> asyncio.AbstractEventLoop:

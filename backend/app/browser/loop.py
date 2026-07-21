@@ -92,9 +92,13 @@ from app.agents import browser_grounding
 from app.core import dom_observe
 from app.providers.base import LLMMessage, LLMProvider
 
-# The loop's hard ceiling. Sized for "search → open a result → confirm playing"
-# with slack for a consent dialog and a mis-click, not for deep navigation.
-MAX_BROWSER_ACTIONS = 15
+# The loop's hard ceiling, PER SUB-GOAL (each multi-commit resume gets a fresh
+# budget). Sized for a real flow — "search → scroll a listing → open an item →
+# apply → fill the first page of the form" is easily 15+ actions before the
+# commit pause (the 2026-07-21 weworkremotely goal), so the old play-a-video cap
+# of 15 starved legitimate work. Runaways are stopped far earlier by _MAX_REPEAT
+# and _STUCK_LIMIT; this cap only bounds a run that keeps making real progress.
+MAX_BROWSER_ACTIONS = 25
 
 # TIME BOUNDS — the action cap alone does not bound wall-clock, and that gap is
 # how a browse becomes a multi-minute freeze (live report 2026-07-17: "processed
@@ -106,13 +110,17 @@ MAX_BROWSER_ACTIONS = 15
 #    seconds — a call that runs past this is a stalled provider, not a slow one,
 #    and 300s of it per step is the exact 5-minute symptom. A timeout reads as
 #    "no usable action" (the loop stops honestly), never a crash.
-#  - BROWSE_DEADLINE_SECONDS caps the WHOLE run in wall-clock, so ~15 slow-but-
-#    succeeding steps (≈15 × 20s) can never grind to 5 minutes either. Sized well
-#    above observed success runs (46–80s for "play a video") and decisively below
-#    the runaway. The evidence_resolver "bounded, terminal, non-spinning"
-#    discipline, extended from action count to elapsed time.
+#  - BROWSE_DEADLINE_SECONDS caps the WHOLE run in wall-clock. Sized for the
+#    action cap doing REAL work with vision in the loop (25 steps × settle +
+#    observe + a vision/text decision ≈ 5-10s each on this machine), well above
+#    observed success runs (46–80s for "play a video") and still finite for a
+#    pathological page. The evidence_resolver "bounded, terminal, non-spinning"
+#    discipline, extended from action count to elapsed time. The outer
+#    BROWSE_HARD_TIMEOUT is sized against this (pinned test in
+#    test_browser_runtime.py) — raising this without raising the belt would make
+#    the belt kill legitimate runs, the 2026-07-21 incident shape.
 BROWSE_DECISION_TIMEOUT_SECONDS = 60
-BROWSE_DEADLINE_SECONDS = 120
+BROWSE_DEADLINE_SECONDS = 300
 
 # Same action against the same element this many times → stop. The ended-stream
 # loop re-clicks one button forever; a legitimate retry (a click that missed once)
