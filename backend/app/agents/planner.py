@@ -1498,10 +1498,15 @@ def _challenge_wall_question(info: dict) -> PlanQuestion:
     else:
         opened = info.get("challenge_window_opened", True)
         lead = "I've opened the page" if opened else "Open the Jarvis browser window"
+        # The clean window often passes the check INVISIBLY (the vendor challenges
+        # the automated browser, not a human one) — live 2026-07-21: the page
+        # loaded normally, the user saw nothing to complete, and read the pause as
+        # "it didn't do anything". Say what a normal-looking page means.
         text = (
             f"{site} is asking for a {kind} check, and I never solve these. {lead} — "
-            "please complete the verification there yourself (I never touch it), then "
-            "say 'continue' (or click below)."
+            "please complete the verification there yourself (I never touch it). "
+            "If the page loads normally with no check visible, it already passed — "
+            "either way, say 'continue' (or click below) and I'll carry on."
         )
     return PlanQuestion(
         text=text, options=["I've completed it — continue"], kind="captcha"

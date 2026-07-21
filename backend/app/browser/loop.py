@@ -979,12 +979,27 @@ async def _decide(
             read_rule="" if commit else _READ_ONLY_RULE,
         )
 
-    if vision is not None and session is not None:
+    if (
+        vision is not None
+        and session is not None
+        and not (counters or {}).get("vision_dead")
+    ):
         action = await _decide_with_vision(
             _prompt(True), vision, session, obs, skip_elements, counters
         )
         if action is not None:
+            if counters is not None:
+                counters["vision_fail_streak"] = 0
             return action
+        if counters is not None:
+            streak = counters.get("vision_fail_streak", 0) + 1
+            counters["vision_fail_streak"] = streak
+            if streak >= _VISION_FAILURE_LIMIT:
+                counters["vision_dead"] = True
+                logger.warning(
+                    f"browse: vision unusable {streak} steps in a row (dead key / "
+                    "quota exhausted?) — text-only for the rest of this run"
+                )
         logger.info("browse: vision decision unusable — text-only fallback this step")
 
     prompt = _prompt(False)
@@ -1030,6 +1045,14 @@ _INDEXED_ACTIONS = ("type", "click", "hover", "select_option", "submit", "upload
 # a long listing takes several scrolls), so exempt from the per-element dedupe
 # and the wandering detector. Bounded by the action budget + deadline alone.
 _MOTION_ACTIONS = ("scroll", "wait", "back", "press_key")
+
+# Vision circuit breaker (live 2026-07-21): an out-of-quota Gemini key 429s on
+# EVERY step, and the per-step fallback dutifully retried it each time — ~5s of
+# screenshot + doomed API call per step, for the whole run. After this many
+# CONSECUTIVE unusable vision decisions the run goes text-only for its remainder
+# (a success resets the streak, so a one-off hiccup never trips it). Per run —
+# the next browse tries vision fresh.
+_VISION_FAILURE_LIMIT = 3
 
 
 async def _decide_with_vision(

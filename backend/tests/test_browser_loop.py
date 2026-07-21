@@ -1616,6 +1616,31 @@ async def test_a_vision_failure_falls_back_to_the_text_provider_in_the_same_step
     assert provider.calls == 1             # ...text provider decided the step
 
 
+async def test_vision_circuit_breaker_stops_retrying_a_dead_provider():
+    """Live 2026-07-21: an out-of-quota Gemini key 429'd on EVERY step, and the
+    per-step fallback dutifully retried it each time — a screenshot plus a
+    doomed API call per step, for the whole run. After _VISION_FAILURE_LIMIT
+    consecutive unusable vision decisions the run goes text-only for its
+    remainder; the text provider still carries every step."""
+    page = VisionPage([_vpage([_vel(1, (0, 0, 100, 40), name="Go")])])
+    session = FakeSession(page)
+    provider = FakeProvider([
+        '{"action":"scroll","direction":"down"}',
+        '{"action":"scroll","direction":"down"}',
+        '{"action":"scroll","direction":"down"}',
+        '{"action":"scroll","direction":"down"}',
+        '{"action":"done","reason":"ok"}',
+    ])
+    vision = FakeVision(["junk"] * 10)      # a dead key never returns an action
+
+    outcome = await run_browse(session, "look around", provider, vision=vision)
+
+    assert outcome.success is True
+    # tripped after the limit — the later steps never paid the doomed call
+    assert vision.calls == browser_loop._VISION_FAILURE_LIMIT
+    assert provider.calls == 5              # the text provider decided every step
+
+
 async def test_a_vision_point_over_no_element_never_fabricates_a_click():
     """A point over nothing clickable maps to NO element → the vision decision
     is unusable and the step falls to the text provider; with that also junk,
