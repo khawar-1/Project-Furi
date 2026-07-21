@@ -58,7 +58,13 @@ from loguru import logger
 # The approval-binding step-parameter keys and their write discipline live in
 # app.browser.state (the ONE owner of the stamps); re-exported here because
 # every existing caller/test reads them as browser_commit.COMMIT_PARAM.
-from app.browser.state import COMMIT_PARAM, COMMITS_DONE_PARAM  # noqa: F401
+from app.browser.state import (  # noqa: F401
+    COMMIT_PARAM,
+    COMMITS_DONE_PARAM,
+    Handoff,
+    HandoffPayload,
+    handoff_from_outcome,
+)
 
 
 @dataclass
@@ -137,6 +143,116 @@ async def _load_vision_config():
     except Exception as exc:
         logger.debug(f"commit vision config read failed: {type(exc).__name__}: {exc}")
         return default_browser_vision_config()
+
+
+# Which hand-offs park the live session in the DISCOVERY registry (the window
+# stays open across the pause and the resumed discovery re-attaches).
+_DISCOVERY_HOLD_REASONS = {
+    Handoff.FILL_FIELD: "fill",
+    Handoff.AUTH_OFFER: "auth",
+    Handoff.ORIGIN_APPROVAL: "origin",
+}
+
+
+async def _hold_for_handoff(session: Any, goal: str, payload: HandoffPayload) -> bool:
+    """Park the live session for the pauses that resume IN-WINDOW. Returns True
+    when a registry now owns the session (the finally must not close it):
+    fill/auth/origin → the discovery hold; an EMBEDDED challenge → the challenge
+    hold with the vendor carve-out armed so the human's solve can complete.
+    A hard login wall and an interstitial challenge return False — those resume
+    in a separate user-driven window, so this session closes normally."""
+    from app.core import browser_session
+
+    reason = payload.reason
+    if reason in _DISCOVERY_HOLD_REASONS:
+        await browser_session.hold_discovery(
+            session, meta={"goal": goal, "reason": _DISCOVERY_HOLD_REASONS[reason]}
+        )
+        return True
+    if reason is Handoff.CHALLENGE and payload.challenge_mode == "embedded":
+        kind = payload.challenge_kind or "CAPTCHA"
+        session.arm_challenge_traffic()
+        try:
+            session.browse_history.append(
+                f"- paused for the user to complete the {kind} "
+                "verification in this window"
+            )
+        except Exception:
+            pass
+        await browser_session.hold_challenge(
+            session,
+            meta={
+                "kind": kind,
+                "site": payload.site or "the site",
+                "url": payload.url,
+                "goal": goal,
+            },
+        )
+        return True
+    return False
+
+
+def _discovery_from_handoff(
+    payload: HandoffPayload, outcome_error: str = ""
+) -> CommitDiscovery:
+    """Payload → the CommitDiscovery flag struct the planner consumes, with the
+    code-authored per-reason error text. One mapping — the five hand-off
+    branches used to hand-build these field-by-field."""
+    reason = payload.reason
+    if reason is Handoff.FILL_FIELD:
+        return CommitDiscovery(
+            fill_required=True,
+            fill_field=payload.field or "a form field",
+            error=outcome_error or "I need a value for a form field.",
+        )
+    if reason is Handoff.AUTH_OFFER:
+        return CommitDiscovery(
+            auth_offer_required=True,
+            auth_offer_signin=payload.auth_signin,
+            auth_offer_signup=payload.auth_signup,
+            auth_offer_site=payload.site or "the site",
+            auth_offer_url=payload.url or "",
+            error=outcome_error or "the site offers sign in / sign up",
+        )
+    if reason in (Handoff.LOGIN, Handoff.SIGNUP):
+        site = payload.site or "the site"
+        kind = "signup" if reason is Handoff.SIGNUP else "login"
+        error = (
+            f"account sign-up required at {site} — I can't create an "
+            "account for you; please sign up yourself first."
+            if kind == "signup"
+            else (
+                f"sign-in required at {site} — I can't submit a login "
+                "form; the account has to be signed in first."
+            )
+        )
+        return CommitDiscovery(
+            login_required=True, login_site=site, wall_kind=kind, error=error
+        )
+    if reason is Handoff.CHALLENGE:
+        kind = payload.challenge_kind or "CAPTCHA"
+        site = payload.site or "the site"
+        mode = payload.challenge_mode or "interstitial"
+        where = " in the open browser window" if mode == "embedded" else ""
+        return CommitDiscovery(
+            challenge_required=True,
+            challenge_kind=kind,
+            challenge_site=site,
+            challenge_mode=mode,
+            error=(
+                f"a {kind} verification at {site} must be completed{where} "
+                "first — I never solve these."
+            ),
+        )
+    if reason is Handoff.ORIGIN_APPROVAL:
+        host = payload.origin or "another site"
+        return CommitDiscovery(
+            origin_approval_required=True,
+            origin_candidate=host,
+            origin_url=payload.url or "",
+            error=f"needs your approval to visit {host}",
+        )
+    return CommitDiscovery(error=outcome_error or "unexpected browse hand-off")
 
 
 def _allowlist(params: dict) -> set[str]:
@@ -264,131 +380,19 @@ async def discover(
                 auth_resolved=set(auth_resolved or set()),
             )
 
-            if outcome.fill_required:
-                # A form value could not be grounded in the profile or the user's
-                # words (15.2). Not an error to replan — the planner pauses the
-                # plan on a clarifying question naming the field, and the answer
-                # grounds it on the resumed discovery. HOLD the live, part-filled
-                # session across the pause (2026-07-19) so the window stays open
-                # and the resumed discovery re-attaches and carries on — before,
-                # it closed the window the moment it asked ("filled two fields
-                # and then closed the chrome").
-                await browser_session.hold_discovery(
-                    session, meta={"goal": goal, "reason": "fill"}
-                )
-                held = True
-                return CommitDiscovery(
-                    fill_required=True,
-                    fill_field=outcome.fill_field or "a form field",
-                    error=outcome.error or "I need a value for a form field.",
-                )
-            if outcome.auth_offer_required:
-                # The page OFFERS an account while the form could proceed as a
-                # guest (2026-07-19). Not an error to replan — the planner asks
-                # the user which they want. HOLD the session across the pause so
-                # "apply as guest" resumes right here; a sign-in/up choice
-                # discards this hold in the planner (the sign-in window needs the
-                # profile lock) and re-runs fresh, authenticated.
-                await browser_session.hold_discovery(
-                    session, meta={"goal": goal, "reason": "auth"}
-                )
-                held = True
-                return CommitDiscovery(
-                    auth_offer_required=True,
-                    auth_offer_signin=outcome.auth_offer_signin,
-                    auth_offer_signup=outcome.auth_offer_signup,
-                    auth_offer_site=outcome.auth_offer_site or "the site",
-                    auth_offer_url=outcome.auth_offer_url or "",
-                    error=outcome.error or "the site offers sign in / sign up",
-                )
-            if outcome.login_required:
-                kind = outcome.wall_kind or "login"
-                site = outcome.login_site or "the site"
-                error = (
-                    f"account sign-up required at {site} — I can't create an "
-                    "account for you; please sign up yourself first."
-                    if kind == "signup"
-                    else (
-                        f"sign-in required at {site} — I can't submit a login "
-                        "form; the account has to be signed in first."
-                    )
-                )
-                return CommitDiscovery(
-                    login_required=True,
-                    login_site=site,
-                    wall_kind=kind,
-                    error=error,
-                )
-            if outcome.challenge_required:
-                # A human-verification challenge (15.4, mode-split 2026-07-19).
-                # Jarvis never solves one, either way.
-                kind = outcome.challenge_kind or "CAPTCHA"
-                site = outcome.challenge_site or "the site"
-                if outcome.challenge_mode == "embedded":
-                    # The widget sits ON the form; its token cannot leave this
-                    # window. HOLD the live session (form intact), arm the
-                    # vendor-only carve-out so the human's solve can complete,
-                    # and leave a history note so the resumed loop knows why it
-                    # stopped. The planner pauses; the user ticks the box in
-                    # THIS window and says continue.
-                    session.arm_challenge_traffic()
-                    try:
-                        session.browse_history.append(
-                            f"- paused for the user to complete the {kind} "
-                            "verification in this window"
-                        )
-                    except Exception:
-                        pass
-                    await browser_session.hold_challenge(
-                        session,
-                        meta={
-                            "kind": kind, "site": site,
-                            "url": outcome.challenge_url, "goal": goal,
-                        },
-                    )
-                    held = True  # the registry owns the session now
-                    return CommitDiscovery(
-                        challenge_required=True,
-                        challenge_kind=kind,
-                        challenge_site=site,
-                        challenge_mode="embedded",
-                        error=(
-                            f"a {kind} verification at {site} must be completed "
-                            "in the open browser window first — I never solve these."
-                        ),
-                    )
-                return CommitDiscovery(
-                    challenge_required=True,
-                    challenge_kind=kind,
-                    challenge_site=site,
-                    challenge_mode=outcome.challenge_mode or "interstitial",
-                    error=(
-                        f"a {kind} verification at {site} must be completed first — "
-                        "I never solve these."
-                    ),
-                )
-            if outcome.origin_approval_required:
-                # The way to the form leaves the sites the user named for a
-                # page-derived origin (an external ATS, 2026-07-18). Not an error
-                # to replan — the planner asks the user to approve THIS origin and
-                # the resumed discovery reaches the off-site form. Jarvis never
-                # follows a page-derived site on its own.
-                host = outcome.origin_candidate or "another site"
-                # HOLD the live session across the approval pause (2026-07-19) so
-                # the window stays open — before, it CLOSED the moment it asked
-                # ("it closed chrome before asking my permission"). On "yes" the
-                # resumed discovery re-attaches, unions the newly-approved origin
-                # into the live allowlist, and navigates to the approved URL.
-                await browser_session.hold_discovery(
-                    session, meta={"goal": goal, "reason": "origin"}
-                )
-                held = True
-                return CommitDiscovery(
-                    origin_approval_required=True,
-                    origin_candidate=host,
-                    origin_url=outcome.origin_url or "",
-                    error=f"needs your approval to visit {host}",
-                )
+            # Every non-commit stop is a HAND-OFF: derive its payload once and
+            # let the two shared helpers do the rest — _hold_for_handoff parks
+            # the live session for the pauses that resume in-window (fill/auth/
+            # origin → the discovery hold with the window left open; an embedded
+            # challenge → the challenge hold, vendor traffic armed, so the user
+            # ticks the box in THIS window), and _discovery_from_handoff builds
+            # the flag struct + code-authored error the planner consumes. A hard
+            # login wall / interstitial challenge holds nothing — those resume
+            # in a separate user-driven window, so this session closes normally.
+            payload = handoff_from_outcome(outcome)
+            if payload is not None and payload.reason is not Handoff.COMMIT:
+                held = await _hold_for_handoff(session, goal, payload)
+                return _discovery_from_handoff(payload, outcome.error)
             if not outcome.commit_required or not outcome.commit_state.get("url"):
                 return CommitDiscovery(
                     error=(

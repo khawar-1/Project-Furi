@@ -254,6 +254,86 @@ async def test_a_sign_in_wall_during_discovery_pauses_for_manual_login(
     assert "sign in" in plan.question.text.lower()
 
 
+async def test_a_challenge_pause_spends_the_handoff_budget_not_the_question_budget(
+    db_session, monkeypatch
+):
+    """Unified budget (refactor): a CAPTCHA hand-off is a structural browse
+    hand-off like fill/login/origin — it counts against browse_handoffs and
+    leaves the scarce MAX_QUESTIONS clarification budget untouched. It used to
+    burn questions_asked (and ignore the hand-off cap entirely), so a couple of
+    challenges could rob a plan of its ability to ask anything else."""
+
+    async def fake_discover(params, session_id=None, **kwargs):
+        return browser_commit.CommitDiscovery(
+            challenge_required=True,
+            challenge_kind="reCAPTCHA",
+            challenge_site="example.com",
+            challenge_mode="interstitial",
+            error="a reCAPTCHA verification at example.com must be completed first",
+        )
+
+    async def fake_open(site):
+        return True
+
+    monkeypatch.setattr(browser_commit, "discover", fake_discover)
+    monkeypatch.setattr(
+        planner_mod.AgentPlanner, "_open_commit_login", staticmethod(fake_open)
+    )
+
+    provider = FakeProvider([plan_json([_commit_step()])])
+    plan = await AgentPlanner(db_session, provider, session_id="s-chal-budget").start(
+        "post 'hello world' as a comment on example.com"
+    )
+    assert plan.status == PlanStatus.AWAITING_CHOICE
+    assert plan.question.kind == "captcha"
+    assert plan.browse_handoffs == 1
+    assert plan.questions_asked == 0
+
+
+async def test_an_embedded_challenge_at_the_handoff_cap_discards_the_held_window(
+    db_session, monkeypatch
+):
+    """A challenge arriving with the hand-off budget spent fails honestly — and
+    must release the embedded-challenge hold, or the filled form's window leaks
+    (the same leak class as the fill-at-cap case)."""
+
+    class _Held:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+        def disarm_challenge_traffic(self):
+            pass
+
+    held = _Held()
+
+    async def fake_discover(params, session_id=None, **kwargs):
+        await browser_session.hold_challenge(
+            held,
+            meta={"kind": "Cloudflare", "site": "example.com", "url": "", "goal": "g"},
+        )
+        return browser_commit.CommitDiscovery(
+            challenge_required=True,
+            challenge_kind="Cloudflare",
+            challenge_site="example.com",
+            challenge_mode="embedded",
+            error="a Cloudflare verification at example.com must be completed",
+        )
+
+    monkeypatch.setattr(browser_commit, "discover", fake_discover)
+    monkeypatch.setattr(planner_mod, "_MAX_BROWSE_HANDOFFS", 0)
+
+    provider = FakeProvider([plan_json([_commit_step()])])
+    plan = await AgentPlanner(db_session, provider, session_id="s-chal-cap").start(
+        "post 'hello world' as a comment on example.com"
+    )
+    assert plan.status == PlanStatus.FAILED
+    assert held.closed, "the held challenge session leaked on the at-cap give-up"
+    assert browser_session.pending_challenge() is None
+
+
 async def test_a_signup_wall_during_discovery_pauses_for_manual_signup(
     db_session, monkeypatch
 ):

@@ -2254,6 +2254,122 @@ class AgentPlanner:
             f"({plan.browse_handoffs}/{_MAX_BROWSE_HANDOFFS}): '{question.text[:80]}'"
         )
 
+    async def _handle_browse_handoff(
+        self,
+        plan: AgentPlan,
+        step: PlanStep,
+        payload: browse_state.HandoffPayload,
+        *,
+        opened: Optional[bool] = None,
+    ) -> bool:
+        """THE one dispatch for every browse hand-off, whichever surface raised
+        it (a browse_commit discovery or a read-browse tool result) — the pause
+        taxonomy used to be re-encoded as parallel if-chains at both call sites,
+        and they drifted: challenges burned the scarce MAX_QUESTIONS budget and
+        ignored the hand-off cap entirely.
+
+        Returns True when the plan is now paused (or honestly FAILED, for a
+        challenge that keeps re-issuing); False when no pause is possible —
+        the hand-off budget is spent — and the caller must treat the hand-off
+        as a failure AND discard any session the flow held for the pause.
+
+        `opened` is whether a user-driven window is already open for a
+        login/challenge hand-off (the read-browse tool opens it itself); None
+        means this dispatcher opens one where the reason calls for it. Every
+        hand-off counts against the SAME _MAX_BROWSE_HANDOFFS budget;
+        challenges keep their additional _MAX_CHALLENGE_PAUSES cap because a
+        re-issuing challenge loops long before 25 hand-offs."""
+        reason = payload.reason
+
+        if reason is browse_state.Handoff.CHALLENGE:
+            plan.challenge_attempts += 1
+            embedded = payload.challenge_mode == "embedded"
+            if (
+                plan.challenge_attempts > _MAX_CHALLENGE_PAUSES
+                or plan.browse_handoffs >= _MAX_BROWSE_HANDOFFS
+            ):
+                step.status = StepStatus.FAILED
+                plan.status = PlanStatus.FAILED
+                plan.message = _challenge_giveup_message(
+                    {
+                        "challenge_site": payload.site,
+                        "challenge_kind": payload.challenge_kind,
+                    }
+                )
+                logger.info(
+                    f"browse: challenge at {payload.site} re-issued after "
+                    f"{plan.challenge_attempts - 1} hand-off(s) — stopping "
+                    "honestly instead of looping"
+                )
+                if embedded:
+                    # The give-up leaves a held session behind — close it
+                    # (best-effort; the plan is over, nothing resumes it).
+                    await self._discard_challenge_hold()
+                return True
+            if opened is None:
+                # EMBEDDED: the widget is on the form in the agent's own held
+                # window — the user solves it THERE; a separate window would be
+                # the useless hand-off that mode replaced.
+                opened = (
+                    True if embedded else await self._open_commit_login(payload.site)
+                )
+            step.status = StepStatus.PENDING
+            step.result = None
+            self._pause_on_browse_handoff(
+                plan,
+                _challenge_wall_question(
+                    {
+                        "challenge_site": payload.site,
+                        "challenge_kind": payload.challenge_kind,
+                        "challenge_mode": payload.challenge_mode,
+                        "challenge_window_opened": opened,
+                    }
+                ),
+            )
+            return True
+
+        if plan.browse_handoffs >= _MAX_BROWSE_HANDOFFS:
+            return False
+
+        if reason is browse_state.Handoff.FILL_FIELD:
+            plan.pending_fill_field = payload.field or ""
+            question = _fill_wall_question(payload.field)
+        elif reason is browse_state.Handoff.AUTH_OFFER:
+            plan.pending_auth_offer = payload.site or "the site"
+            plan.pending_auth_url = payload.url or ""
+            question = _auth_offer_question(
+                {
+                    "auth_offer_site": payload.site,
+                    "auth_offer_signin": payload.auth_signin,
+                    "auth_offer_signup": payload.auth_signup,
+                }
+            )
+        elif reason in (browse_state.Handoff.LOGIN, browse_state.Handoff.SIGNUP):
+            if opened is None:
+                opened = await self._open_commit_login(payload.site)
+            question = _login_wall_question(
+                {
+                    "login_site": payload.site,
+                    "login_window_opened": opened,
+                    "wall_kind": (
+                        "signup" if reason is browse_state.Handoff.SIGNUP else "login"
+                    ),
+                }
+            )
+        elif reason is browse_state.Handoff.ORIGIN_APPROVAL:
+            plan.pending_origin_approval = payload.origin or ""
+            plan.pending_origin_url = payload.url or ""
+            question = _origin_approval_question(payload.origin)
+        else:
+            # COMMIT/NEXT_COMMIT ride the approval gate, WINDOW_EXPIRED is a
+            # discovery-side note — none of them pauses here.
+            return False
+
+        step.status = StepStatus.PENDING
+        step.result = None
+        self._pause_on_browse_handoff(plan, question)
+        return True
+
     @staticmethod
     async def _open_commit_login(site: str) -> bool:
         """A commit discovery hit a sign-in wall: open the user-driven sign-in
@@ -2586,146 +2702,25 @@ class AgentPlanner:
                     fill_grounding=_fill_grounding(plan, self.conversation),
                     auth_resolved=set(plan.auth_resolved_urls),
                 )
-                # A form value the loop could not ground in the profile or the
-                # user's words (15.2): PAUSE and ask the user for it rather than
-                # fail or guess. The answer joins the grounding AND is saved to
-                # the autofill profile (field-learning, 2026-07-19) — so the
-                # resumed discovery fills the field and it is never asked again.
-                # Same AWAITING_CHOICE path a login wall uses; the step stays
-                # PENDING (no _commit) to re-discover, and the live part-filled
-                # session is HELD (discover held it) so the window stays open.
+                # Every non-commit discovery outcome is a HAND-OFF — a fill
+                # value to ask for, an optional sign-in offer, a hard wall, a
+                # challenge, an off-site origin — dispatched through the ONE
+                # pause path (the taxonomy used to be an if-chain here and a
+                # second, drifted copy on the read-browse branch below).
+                payload = browse_state.handoff_from_discovery(discovery)
                 if (
-                    discovery.fill_required
-                    and plan.browse_handoffs < _MAX_BROWSE_HANDOFFS
+                    payload is not None
+                    and payload.reason is not browse_state.Handoff.COMMIT
                 ):
-                    plan.pending_fill_field = discovery.fill_field or ""
-                    self._pause_on_browse_handoff(
-                        plan, _fill_wall_question(discovery.fill_field)
-                    )
-                    return {"plan": plan, "pause_reason": None}
-                # An OPTIONAL sign-in offer (2026-07-19): the page offers an
-                # account while the form could proceed as a guest. PAUSE and ask
-                # the user which they want (sign in / sign up / apply as guest);
-                # the page URL is recorded so the same page never re-asks. The
-                # live session is HELD by discover so "apply as guest" resumes
-                # right where it stopped.
-                if (
-                    discovery.auth_offer_required
-                    and plan.browse_handoffs < _MAX_BROWSE_HANDOFFS
-                ):
-                    plan.pending_auth_offer = discovery.auth_offer_site or "the site"
-                    plan.pending_auth_url = discovery.auth_offer_url or ""
-                    self._pause_on_browse_handoff(
-                        plan,
-                        _auth_offer_question(
-                            {
-                                "auth_offer_site": discovery.auth_offer_site,
-                                "auth_offer_signin": discovery.auth_offer_signin,
-                                "auth_offer_signup": discovery.auth_offer_signup,
-                            }
-                        ),
-                    )
-                    return {"plan": plan, "pause_reason": None}
-                if (
-                    discovery.login_required
-                    and plan.browse_handoffs < _MAX_BROWSE_HANDOFFS
-                ):
-                    opened = await self._open_commit_login(discovery.login_site)
-                    self._pause_on_browse_handoff(
-                        plan,
-                        _login_wall_question(
-                            {
-                                "login_site": discovery.login_site,
-                                "login_window_opened": opened,
-                                "wall_kind": discovery.wall_kind,
-                            }
-                        ),
-                    )
-                    return {"plan": plan, "pause_reason": None}
-                # A CAPTCHA on the way to the form (15.4): open the user-driven
-                # window and PAUSE for the user to complete the check — never
-                # solved. Same AWAITING_CHOICE path; the step stays PENDING (no
-                # _commit) so the resumed discovery re-runs.
-                if discovery.challenge_required:
-                    plan.challenge_attempts += 1
-                    embedded = discovery.challenge_mode == "embedded"
-                    # Honest loop detection (2026-07-19): stop pausing once a
-                    # re-issuing challenge (Cloudflare Turnstile) has been handed
-                    # off too many times — it will not pass however often the user
-                    # solves it, and looping traps them (live report).
-                    if (
-                        plan.challenge_attempts > _MAX_CHALLENGE_PAUSES
-                        or plan.questions_asked >= MAX_QUESTIONS
-                    ):
-                        step.status = StepStatus.FAILED
-                        plan.status = PlanStatus.FAILED
-                        plan.message = _challenge_giveup_message(
-                            {
-                                "challenge_site": discovery.challenge_site,
-                                "challenge_kind": discovery.challenge_kind,
-                            }
-                        )
-                        logger.info(
-                            f"browse_commit: challenge at {discovery.challenge_site} "
-                            f"re-issued after {plan.challenge_attempts - 1} hand-off(s) "
-                            "— stopping honestly instead of looping"
-                        )
-                        if embedded:
-                            # The give-up leaves a held session behind — close it
-                            # (best-effort; the plan is over, nothing resumes it).
-                            await self._discard_challenge_hold()
+                    if await self._handle_browse_handoff(plan, step, payload):
                         return {"plan": plan, "pause_reason": None}
-                    # EMBEDDED (2026-07-19): the widget is on the form in the
-                    # agent's own window, which discover HELD open with the form
-                    # filled — the user solves it THERE. Opening a separate
-                    # window would be the useless hand-off this mode replaces.
-                    opened = (
-                        True if embedded
-                        else await self._open_commit_login(discovery.challenge_site)
-                    )
-                    self._pause_on_question(
-                        plan,
-                        _challenge_wall_question(
-                            {
-                                "challenge_site": discovery.challenge_site,
-                                "challenge_kind": discovery.challenge_kind,
-                                "challenge_mode": discovery.challenge_mode,
-                                "challenge_window_opened": opened,
-                            }
-                        ),
-                    )
-                    return {"plan": plan, "pause_reason": None}
-                # DISCOVER would leave the sites the user named for a page-derived
-                # origin (an external ATS, 2026-07-18): PAUSE to ask the user to
-                # approve it. A "yes" adds it (answer() → plan.approved_origins)
-                # and the resumed discovery reaches the off-site form; the step
-                # stays PENDING (no _commit) so it re-discovers. Jarvis never
-                # follows a page-derived site on its own.
-                if (
-                    discovery.origin_approval_required
-                    and plan.browse_handoffs < _MAX_BROWSE_HANDOFFS
-                ):
-                    plan.pending_origin_approval = discovery.origin_candidate or ""
-                    plan.pending_origin_url = (
-                        getattr(discovery, "origin_url", "") or ""
-                    )
-                    self._pause_on_browse_handoff(
-                        plan, _origin_approval_question(discovery.origin_candidate)
-                    )
-                    return {"plan": plan, "pause_reason": None}
+                    # The hand-off budget is exhausted, so the pause became a
+                    # failure — but discover() HELD the live session for the
+                    # pause that will now never happen. Close it, or a
+                    # part-filled Chromium window leaks until the next
+                    # discovery replaces it (live-bug class 2026-07-19).
+                    await self._discard_discovery_hold()
                 if discovery.error or not discovery.state:
-                    if (
-                        discovery.fill_required
-                        or discovery.auth_offer_required
-                        or discovery.origin_approval_required
-                    ):
-                        # The hand-off budget is exhausted (the pause guards
-                        # above stood down), so this pause became a failure —
-                        # but discover() already HELD the live session for the
-                        # pause that will now never happen. Close it, or a
-                        # part-filled Chromium window leaks until the next
-                        # discovery replaces it (live-bug class 2026-07-19).
-                        await self._discard_discovery_hold()
                     step.status = StepStatus.FAILED
                     step.result = ToolResult(
                         success=False,
@@ -2778,70 +2773,31 @@ class AgentPlanner:
             # (only the browse tool's explicit flag; page text is never read
             # here). Leave the step PENDING with no result so the resume replans
             # it fresh — the same path a clarifying question already uses.
-            login = _browse_login_signal(step, result)
-            if login is not None and plan.browse_handoffs < _MAX_BROWSE_HANDOFFS:
-                step.status = StepStatus.PENDING
-                step.result = None
-                self._pause_on_browse_handoff(plan, _login_wall_question(login))
-                return {"plan": plan, "pause_reason": None}
-
-            # A browse step that hit a CAPTCHA / verification challenge (15.4):
-            # PAUSE the plan (AWAITING_CHOICE) for the user to complete the check
-            # by hand instead of failing/replanning a wall Jarvis must never solve.
-            # The tool already opened the user-driven window; answering 'continue'
-            # re-runs the browse (the profile kept the clearance cookie). Same
-            # code-owned + conservative discipline as the login signal — only the
-            # browse tool's explicit flag; page text is never read here.
-            #
-            # HONEST LOOP DETECTION (2026-07-19): some challenges (Cloudflare
-            # Turnstile) fingerprint the automated browser and re-issue no matter
-            # how many times a human solves the checkbox, so pausing again just
-            # traps the user in an unwinnable loop (live report). Count the
-            # hand-offs on the plan (serialized — survives each resume); past
-            # _MAX_CHALLENGE_PAUSES, or the question budget, STOP honestly instead
-            # of pausing forever.
-            challenge = _browse_challenge_signal(step, result)
-            if challenge is not None:
-                plan.challenge_attempts += 1
-                if (
-                    plan.challenge_attempts > _MAX_CHALLENGE_PAUSES
-                    or plan.questions_asked >= MAX_QUESTIONS
+            # The same three hand-offs a read browse can raise (login wall,
+            # challenge, off-site origin), through the SAME dispatcher the
+            # commit-discovery branch uses. The tool already opened any
+            # user-driven window (its signal dict says whether that worked), so
+            # `opened` is passed through rather than re-opened here. A False
+            # return (budget spent) falls through to the ordinary failed-step
+            # path — the structured-pause ToolResult is unsuccessful by design.
+            for signal in (
+                _browse_login_signal(step, result),
+                _browse_challenge_signal(step, result),
+                _browse_origin_approval_signal(step, result),
+            ):
+                if signal is None:
+                    continue
+                payload = browse_state.handoff_from_flags(signal)
+                if payload is None:
+                    continue
+                opened = signal.get(
+                    "challenge_window_opened", signal.get("login_window_opened")
+                )
+                if await self._handle_browse_handoff(
+                    plan, step, payload, opened=bool(opened)
                 ):
-                    step.status = StepStatus.FAILED
-                    plan.status = PlanStatus.FAILED
-                    plan.message = _challenge_giveup_message(challenge)
-                    logger.info(
-                        f"browse: challenge at {challenge.get('challenge_site')} "
-                        f"re-issued after {plan.challenge_attempts - 1} hand-off(s) "
-                        "— stopping honestly instead of looping"
-                    )
                     return {"plan": plan, "pause_reason": None}
-                step.status = StepStatus.PENDING
-                step.result = None
-                self._pause_on_question(plan, _challenge_wall_question(challenge))
-                return {"plan": plan, "pause_reason": None}
-
-            # A browse step whose next move would leave the sites the user named
-            # for a page-derived origin (2026-07-18): PAUSE to ask the user to
-            # approve it, instead of failing a navigation the loop must not take
-            # on its own. A "yes" adds the origin (answer() → plan.approved_origins)
-            # and the resumed browse may reach it. Same code-owned + conservative
-            # discipline as the login/challenge signals — only the browse tool's
-            # explicit flag; page text is never read here. Leave the step PENDING
-            # (result cleared) so the resume replans it fresh with the origin now
-            # grounded and injected.
-            origin_req = _browse_origin_approval_signal(step, result)
-            if origin_req is not None and plan.browse_handoffs < _MAX_BROWSE_HANDOFFS:
-                step.status = StepStatus.PENDING
-                step.result = None
-                plan.pending_origin_approval = str(
-                    origin_req.get("origin_candidate") or ""
-                )
-                plan.pending_origin_url = str(origin_req.get("origin_url") or "")
-                self._pause_on_browse_handoff(
-                    plan, _origin_approval_question(plan.pending_origin_approval)
-                )
-                return {"plan": plan, "pause_reason": None}
+                break
 
             if result.success:
                 # MULTI-COMMIT browse (15.1): a browse_commit submit that reached

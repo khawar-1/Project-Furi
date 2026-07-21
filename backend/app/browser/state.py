@@ -176,6 +176,16 @@ def handoff_from_discovery(discovery: Any) -> Optional[HandoffPayload]:
     return handoff_from_outcome(discovery)
 
 
+def handoff_from_flags(mapping: Any) -> Optional[HandoffPayload]:
+    """A browse ToolResult's structured output dict (its keys mirror the
+    BrowseOutcome field names) → payload. Non-dict input is simply no handoff."""
+    if not isinstance(mapping, dict):
+        return None
+    import types
+
+    return handoff_from_outcome(types.SimpleNamespace(**mapping))
+
+
 # ------------------------------------------------------------- commit params
 def commit_contract(parameters: dict) -> Optional[dict]:
     """The stamped code-read form contract, or None (step still in discovery)."""
