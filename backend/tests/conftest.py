@@ -224,6 +224,14 @@ def _hermetic_browser_session():
     # a no-op that finds NOTHING, so a browse/startup/shutdown path that reclaims
     # never touches a real process. A test exercising reclaim injects its own.
     browser_session._PROFILE_REAPER = lambda _marker: []
+    # The shared Playwright driver (started once, reused across browses) must never
+    # spawn a real Node driver in the suite, and a driver cached in one test must
+    # not leak into the next. Refuse the starter seam and clear the singleton (the
+    # BROWSER_FACTORY refuser + reset_host_cache hygiene).
+    async def _refuse_driver():
+        raise RuntimeError("test tried to start a real Playwright driver")
+    browser_session._PLAYWRIGHT_STARTER = _refuse_driver
+    browser_session._shared_playwright = None
     browser_session.reset_host_cache()
     # The held-session registries keep a live session across tool calls (media,
     # result window, commit, challenge, discovery). A fake session left in any
@@ -238,6 +246,8 @@ def _hermetic_browser_session():
     vision.VISION_PROVIDER_FACTORY = None
     browser_session.CLEAN_BROWSER_LAUNCHER = None
     browser_session._PROFILE_REAPER = None
+    browser_session._PLAYWRIGHT_STARTER = None
+    browser_session._shared_playwright = None
     browser_session.reset_host_cache()
     browser_registry.reset_for_tests()
     browser_session._login_browser = None

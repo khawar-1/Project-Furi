@@ -493,6 +493,42 @@ def test_browse_commit_completion_without_response_text_is_still_honest():
     assert "https://example.com/contact" in text
 
 
+# ------------------------- 2026-07-22: the clean-window media hand-off framing
+def test_browse_clean_window_handoff_is_honest_about_the_play_button():
+    """A watch/play goal handed off to a normal ad-blocked window says it opened it
+    there AND that a custom player may need one click — the honest CDP trade-off."""
+    text = completed_results_text(completed_plan(done_step(
+        "browse",
+        {
+            "playing": True,
+            "handoff": "clean_window",
+            "url": "https://anikoto.cz/watch/123",
+            "title": "Ep 12",
+            "rendered": "",
+        },
+    )))
+    assert "ad-free" in text
+    assert "anikoto.cz/watch/123" in text
+    assert "press play" in text
+
+
+def test_browse_media_handoff_that_could_not_open_tells_the_user_to_open_it():
+    """The clean window couldn't open (no system browser) — the summary is honest:
+    it found the video but the user must open the link themselves."""
+    text = completed_results_text(completed_plan(done_step(
+        "browse",
+        {
+            "playing": False,
+            "handoff": "none",
+            "url": "https://anikoto.cz/watch/123",
+            "title": "Ep 12",
+            "rendered": "",
+        },
+    )))
+    assert "couldn't open" in text
+    assert "anikoto.cz/watch/123" in text
+
+
 # ---------------------------- 15.5: a multi-commit flow quotes EACH response
 def test_multi_commit_completion_quotes_every_server_response():
     """A flow that submitted several forms ("apply to 3 jobs") renders ONE grounded
@@ -545,3 +581,42 @@ def test_single_entry_commit_history_renders_the_single_form_path():
     assert "Submitted the form" in text          # single-form wording, not "Submitted N forms"
     assert "Submitted 1 forms" not in text
     assert "Thanks!" in text
+
+
+# ------------------- a FAILED plan keeps its completed evidence (2026-07-21)
+
+def test_failed_plan_text_carries_the_completed_steps_results():
+    """The live incident: a browse plan's last step failed, and the failure text
+    listed only step DESCRIPTIONS — the price sitting in a completed step's
+    output was thrown away, so 'what was the price?' was unanswerable one turn
+    later. The FAILED branch now renders the completed results too."""
+    plan = AgentPlan(
+        goal="read the book price then go back",
+        status=PlanStatus.FAILED,
+        message="the back step could not run",
+        steps=[
+            done_step("browse", {
+                "url": "https://books.toscrape.com/catalogue/its-only-the-himalayas_981/",
+                "title": "It's Only the Himalayas",
+                "page_excerpt": "It's Only the Himalayas £45.17 In stock",
+                "done_reason": "the details and price are displayed",
+                "rendered": "It's Only the Himalayas £45.17 In stock (19 available)",
+                "goal_reached": True,
+            }, description="Open the top travel book"),
+            done_step("browse", None, description="Go back to the category list",
+                      status=StepStatus.FAILED),
+        ],
+    )
+    text = deterministic_plan_text(plan)
+    assert "I couldn't finish that." in text
+    assert "Open the top travel book" in text            # the description line
+    assert "£45.17" in text                              # the EVIDENCE survives
+
+
+def test_failed_plan_with_no_completed_steps_is_unchanged():
+    plan = AgentPlan(
+        goal="g", status=PlanStatus.FAILED, message="nothing ran",
+        steps=[done_step("browse", None, status=StepStatus.FAILED)],
+    )
+    text = deterministic_plan_text(plan)
+    assert text == "I couldn't do that. nothing ran"

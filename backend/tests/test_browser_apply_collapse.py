@@ -180,3 +180,106 @@ def test_has_browse_action():
     assert P._has_browse_action([_commit(goal="g")])
     assert P._has_browse_action([_find("browse")])
     assert not P._has_browse_action([_find("read_webpage")])
+
+
+# ------------------------------- journey collapse (2026-07-21, read-only)
+# The books.toscrape incident: one continuous navigation drafted as THREE browse
+# steps, each launching its own Chrome — step 2 re-did step 1's navigation and
+# step 3's `back` had no history. Consecutive same-site browse steps are ONE
+# journey in ONE session.
+
+def _browse_step(goal, desc=None, **params):
+    params.setdefault("start_url", "https://books.toscrape.com")
+    params.setdefault("allowed_origins", ["books.toscrape.com"])
+    return PlanStep(
+        description=desc or goal,
+        tool="browse",
+        parameters={"goal": goal, **params},
+        permission_level=PermissionLevel.READ,
+        requires_approval=False,
+    )
+
+
+def test_the_book_plan_collapses_to_one_journey():
+    """The incident shape frozen: 3 same-site browse steps → ONE browse whose
+    goal is the joined journey, origins/start_url carried."""
+    steps = [
+        _browse_step("Navigate to the homepage and click the Travel category"),
+        _browse_step("Click the top book listed to view its details and price"),
+        _browse_step("Use the back button to return to the category list"),
+    ]
+    out = P._collapse_browse_journey(steps)
+    assert len(out) == 1
+    assert out[0].tool == "browse"
+    goal = out[0].parameters["goal"]
+    assert "Travel category" in goal and "top book" in goal and "back button" in goal
+    assert goal.count(", then ") == 2                       # order preserved
+    assert out[0].parameters["start_url"] == "https://books.toscrape.com"
+    assert out[0].parameters["allowed_origins"] == ["books.toscrape.com"]
+
+
+def test_different_site_browse_steps_do_not_fold():
+    steps = [
+        _browse_step("read A", start_url="https://a.com", allowed_origins=["a.com"]),
+        _browse_step("read B", start_url="https://b.com", allowed_origins=["b.com"]),
+    ]
+    out = P._collapse_browse_journey(steps)
+    assert len(out) == 2
+
+
+def test_non_adjacent_browse_steps_do_not_fold():
+    """A non-browse step between two browse steps is a real dependency boundary
+    — nothing folds across it."""
+    steps = [
+        _browse_step("read the travel page"),
+        _find("read_file", path="C:/notes.txt"),
+        _browse_step("read the mystery page"),
+    ]
+    out = P._collapse_browse_journey(steps)
+    assert [s.tool for s in out] == ["browse", "read_file", "browse"]
+
+
+def test_a_single_browse_step_is_untouched():
+    steps = [_browse_step("open the page")]
+    out = P._collapse_browse_journey(steps)
+    assert out[0] is steps[0]
+
+
+def test_journey_collapse_ors_keep_open():
+    """A journey ending in playback keeps the media hand-off."""
+    steps = [
+        _browse_step("search for jane", start_url="https://youtube.com",
+                     allowed_origins=["youtube.com"]),
+        _browse_step("play the top result", start_url="https://youtube.com",
+                     allowed_origins=["youtube.com"], keep_open=True),
+    ]
+    out = P._collapse_browse_journey(steps)
+    assert len(out) == 1
+    assert out[0].parameters["keep_open"] is True
+
+
+def test_journey_collapse_unions_subdomain_origins():
+    """m.site.com and site.com are the same site (the dot-aware rule) — folded,
+    with both origins carried."""
+    steps = [
+        _browse_step("search", start_url="https://www.linkedin.com",
+                     allowed_origins=["linkedin.com"]),
+        _browse_step("open the profile", start_url="https://m.linkedin.com",
+                     allowed_origins=["m.linkedin.com"]),
+    ]
+    out = P._collapse_browse_journey(steps)
+    assert len(out) == 1
+    assert "linkedin.com" in out[0].parameters["allowed_origins"]
+    assert "m.linkedin.com" in out[0].parameters["allowed_origins"]
+
+
+def test_pending_origin_browse_steps_do_not_fold():
+    """A step whose sites are still PENDING placeholders is unknowable — left
+    exactly as drafted."""
+    steps = [
+        _browse_step("read the page"),
+        _browse_step("open the found site", start_url="PENDING: the url step 1 finds",
+                     allowed_origins=[]),
+    ]
+    out = P._collapse_browse_journey(steps)
+    assert len(out) == 2

@@ -85,7 +85,18 @@ _SYSTEM_VOICE_RE = re.compile(
     # Conditional capability offers ("I can search…", "just say the word")
     # stay untouched.
     r"|i(?:'ve| have) (?:started|begun|initiated|kicked off) (?:a|the|my) search"
-    r"|i(?:'ll| will) let you know what i find)",
+    r"|i(?:'ll| will) let you know what i find"
+    # Hand-off-to-the-backend fabrication (live bug 2026-07-21): on a routing
+    # miss the chat LLM told the user to re-say the request "as one direct
+    # instruction … that will route it to the right system", then on the retry
+    # streamed "That instruction has been passed to the system. Give me a moment,
+    # sir." — chat cannot pass anything to any system, so a past-tense
+    # passed/handed/routed/forwarded/sent "to the system/backend/planner" claim
+    # is always a fabrication. A conditional offer ("I can pass this to …") is
+    # not past-tense and is spared.
+    r"|(?:has been|have been|been|it(?:'s| is)|that(?:'s| is)|i(?:'ve| have))\s+"
+    r"(?:passed|handed|routed|forwarded|sent)\b[^\n]{0,40}?\bto (?:the )?"
+    r"(?:right |correct )?(?:system|backend|planner|agent))",
     re.IGNORECASE,
 )
 

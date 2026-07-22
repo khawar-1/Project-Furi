@@ -115,6 +115,36 @@ kokoro-onnx==0.5.0
 # rapidocr-onnxruntime precedent — an optional capability fails clean, never at
 # startup).
 playwright==1.48.0
+#
+# OPTIONAL — unpacked browser extensions (e.g. uBlock Origin), 2026-07-22.
+# Drop each extension into its own subdirectory of:
+#
+#   ~/.jarvis/browser_extensions/<name>/     (with manifest.json directly inside)
+#
+# Off by default (an empty dir adds nothing). Use uBlock Origin LITE (Manifest V3):
+# current Chrome disables MV2 extensions, so classic uBlock may load-but-disable.
+# Get the unpacked build from its GitHub releases and unzip into the folder above.
+#
+# IMPORTANT — WHERE IT ACTUALLY LOADS (proven live 2026-07-22): the extension
+# loads ONLY in the NORMAL (non-automation) windows Jarvis opens — the clean
+# sign-in / hand-off windows AND the watch/play media window
+# (_default_clean_launcher / _default_clean_media_launcher, both via
+# _extension_load_args). It does NOT load in the AGENT-LOOP window: that window is
+# driven over the DevTools protocol (CDP), and current Chrome REFUSES to load an
+# unpacked extension in any CDP-controlled browser as a security measure
+# (chrome://extensions shows zero, no extension service worker registers, a known
+# ad script still loads — all four verified). This is Chrome policy, not a Jarvis
+# limitation, and there is no clean bypass (Extensions.loadUnpacked is unavailable,
+# --disable-features and the CDP tricks were ineffective).
+#
+# So there are TWO ad-blocking layers for the two phases of a browse:
+#   FINDING  (agent loop, interceptor ON): browser_session.py Rule 0 / _AD_HOSTS
+#            aborts known ad/tracker hosts before they load, so the agent never
+#            sees or misclicks a fake "Play" ad on a streaming site.
+#   WATCHING (clean media window, interceptor absent by design — streaming
+#            throughput): uBlock in the normal window blocks the rotating pop-under
+#            ad domains a static host list never keeps up with. A "play/watch" goal
+#            hands the found video URL off to this window (open_media_window).
 
 # Google integration (Phase 5 Part 1 — OAuth loopback flow + Gmail/Calendar clients)
 google-auth==2.35.0

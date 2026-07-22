@@ -36,20 +36,30 @@ code, none a prompt:
     ended-stream signature. After _MAX_REPEAT tries it stops honestly rather
     than burning the whole budget on one dead button.
 
-THE FAST PATH — nothing to decide, only to do (placeholder_resolver's principle)
---------------------------------------------------------------------------------
-"search X on site Y" with exactly one search box needs no model call to know the
-first move: fill the box, press Enter. So the first action is taken in CODE when
-the goal yields a search term and the page offers a single search input — zero
-LLM cost, asserted by test as an unchanged provider call count. Everything after
-(which result to open) is the model's job.
+THE FAST PATH — reach the results page in one reliable, code-only move
+----------------------------------------------------------------------
+"search/play X on site Y" with exactly one search box needs no model call for the
+first move: fill the box with the TITLE and press Enter. It is taken in CODE when
+the goal yields a title and the page offers a single search input — zero LLM cost,
+and (the load-bearing part) the model can never mis-click a hostile homepage's ad
+instead of searching.
 
-The search-term extraction is deterministic and CONSERVATIVE. It is NOT the
-forbidden intent-classifier keyword-list shape (falsified three times in the web
-router): it does not decide whether to browse — the planner already did — it only
-pulls the object out of an already-chosen browse goal, and on any doubt returns
-None and the model handles the search itself. A wrong guess costs one recoverable
-read-only action, never a wrong answer.
+Two live incidents shaped it, one day apart:
+  - 2026-07-22a: the extractor typed the WHOLE descriptor ("episode 1 of season 2
+    of The Dangers…") into the box. The title is the search term; the
+    season/episode is in-site navigation the model does next. So the extractor
+    now strips media qualifiers down to the bare title (see _extract_search_term).
+  - 2026-07-22b: with the fast path removed ENTIRELY, the model's free-form first
+    move on anikoto.cz's ad-heavy homepage CLICKED the search box → an ad redirect
+    (luugy.com) → error pages → the alphabetical index, never once searching. The
+    reliable typed search is exactly what avoids that minefield — so the fast path
+    stays; it just types the RIGHT term now.
+
+The extraction is deterministic and CONSERVATIVE. It is NOT the forbidden
+intent-classifier keyword-list shape: it does not decide WHETHER to browse (the
+planner already did), only pulls the title out of an already-chosen browse goal,
+and on any doubt returns None so the model handles the search itself. A wrong
+guess costs one recoverable read-only action, never a wrong answer.
 
 SIGN-IN & SIGN-UP WALLS — stop, never type a credential (14.4)
 --------------------------------------------------------------
@@ -57,8 +67,8 @@ When the loop lands on a login page (detect_login_wall: a visible password field
 or a dedicated auth host) OR an account-creation form (a signup route, or an
 account-creation submit label + an email field — _looks_like_signup), it STOPS
 cleanly and returns login_required with wall_kind "login" or "signup". It never
-types into a password field — by construction, not by prompt: the fast path only
-targets search roles and the DOM extractor never even reads a password value. The
+types into a password field — by construction, not by prompt: the DOM extractor
+never even reads a password value, so the model cannot be handed one to type. The
 tool then opens a user-driven window (browser_session.open_login_window) and the
 planner PAUSES the plan on a clarifying question (AWAITING_CHOICE); the user signs
 in / creates the account by hand, answers 'continue', and the browse re-runs
@@ -154,6 +164,93 @@ _ALLOWED_KEYS = {
 # Roles a fill+Enter search can target. A page's real search box is almost always
 # one of these; anything else needs the model's judgement.
 _SEARCH_ROLES = {"searchbox", "combobox"}
+
+# ACTION-GESTURE SAFETY (2026-07-22). A READ browse must never perform a gesture
+# that ACTS on the world — send/post/submit/upload/like/follow/delete/buy — even
+# though the interceptor now lets a page's own XHR/fetch traffic flow (the
+# action-level model). The two PRIMARY signals are structural and require no
+# label at all: pressing Enter to submit a non-search field, and clicking a
+# form's own submit control. This LABEL matcher is the SECONDARY net for the
+# JS-driven controls that carry no <form> (a contenteditable messenger's Send
+# button, an SPA "Post"): a control whose accessible name is an unambiguous
+# action verb. Deliberately conservative — navigation/reading verbs (search,
+# more, next, filter, sort, view, open, expand, accept-cookies, apply-filters)
+# are EXCLUDED so ordinary browsing never pauses; the cost of a miss here is
+# only that the structural signals (below) still catch a real <form> submit, and
+# the cost of over-matching is one needless approval prompt, never a wrong send.
+_ACTION_LABEL_RE = re.compile(
+    r"\b("
+    r"send|post|publish|submit|upload|share|tweet|retweet|"
+    r"comment|reply|"
+    r"like|unlike|follow|unfollow|following|connect|subscribe|unsubscribe|"
+    r"upvote|downvote|"
+    r"buy|purchase|checkout|check\s*out|pay|order\s+now|place\s+order|"
+    r"add\s+to\s+(?:cart|bag|basket)|"
+    r"delete|remove|confirm|book|reserve"
+    r")\b",
+    re.I,
+)
+
+
+def _is_search_target(element: Any) -> bool:
+    """True when a submit gesture on this element is a SEARCH — which is reading,
+    and therefore allowed in READ mode. Positive detection only (the 2026-07-22
+    lesson): a form is 'search' by a real signal (form_search, a search role, or
+    a combobox whose label says search), NEVER by the mere ABSENCE of other
+    inputs — that heuristic misread LinkedIn's contenteditable message form as a
+    search box and stood the gate down on a message SEND."""
+    if element is None:
+        return False
+    if getattr(element, "form_search", False):
+        return True
+    role = (getattr(element, "role", "") or "").lower()
+    # _SEARCH_ROLES (searchbox, combobox) is the loop's own definition of "a
+    # fill+Enter search can target this" — the fast path uses it, so the gate
+    # MUST agree or it would block the fast path's own search submit (a bare
+    # combobox, live 2026-07-22). A combobox is an autocomplete/select widget;
+    # its Enter selects/filters (reading). A real SEND is a button or a
+    # contenteditable textbox — never one of these roles — so LinkedIn's message
+    # send stays gated.
+    if role in _SEARCH_ROLES or role == "search":
+        return True
+    return False
+
+
+def _is_action_gesture(action: dict, element: Any) -> bool:
+    """True when this gesture would ACT on the world (send/post/submit/upload/
+    like/delete/buy…) rather than read or navigate. A genuine search submit is
+    NOT an action. Used both by the READ-mode STOP-and-ask hand-off in run_browse
+    and by the backstop refusal in _act."""
+    if element is None:
+        return False
+    if _is_search_target(element):
+        return False
+    kind = action.get("action")
+    if kind == "type" and action.get("submit"):
+        return True  # Enter inside a non-search field IS the submit gesture
+    if kind == "click":
+        if getattr(element, "form_submit", False):
+            return True  # the form's own submit control
+        if _ACTION_LABEL_RE.search(getattr(element, "name", "") or ""):
+            return True  # a JS control labelled with an action verb
+    return False
+
+
+def _describe_action(action: dict, element: Any, goal: str) -> str:
+    """A short, human phrase for what the loop is about to do — shown to the user
+    in the approval question. Grounded in the gesture + the element's own label,
+    never invented."""
+    name = (getattr(element, "name", "") or "").strip()
+    if action.get("action") == "type" and action.get("submit"):
+        text = (action.get("text") or "").strip()
+        if text:
+            clipped = text if len(text) <= 160 else text[:160] + "…"
+            return f'send "{clipped}"'
+        return "submit this form"
+    if name:
+        clipped = name if len(name) <= 80 else name[:80] + "…"
+        return f'select "{clipped}"'
+    return "submit this form"
 
 _DECISION_PROMPT = """You are operating a real web browser to accomplish a goal. You see the current page as a numbered list of its interactive elements and its text. Choose the ONE next action.
 
@@ -367,6 +464,16 @@ class BrowseOutcome:
     origin_approval_required: bool = False
     origin_candidate: str = ""
     origin_url: str = ""
+    # A READ browse's chosen gesture would ACT on the world — press a form's
+    # submit, click a send/post/upload/like/delete/buy control, or Enter-submit a
+    # non-search field (2026-07-22). An action on a live site is never performed
+    # without the user's yes, so the loop STOPS here; the planner pauses on an
+    # action-approval question and, on "yes", resumes with action_approved lifting
+    # the gate for that one run (the user is watching the headed window). Not a
+    # failure to replan — a HAND-OFF, exactly like an off-site origin.
+    action_approval_required: bool = False
+    action_description: str = ""
+    action_site: str = ""
     # The loop reached a form it is ready to submit (COMMIT mode, 14.5). It has
     # NOT submitted — the interceptor still aborts every non-GET. commit_state is
     # the code-read {url, method, fields} the user must approve; the tool holds
@@ -407,8 +514,14 @@ _QUOTED_RE = re.compile(r"[\"'“”‘’]([^\"'“”‘’]{2,})[\"'“”‘
 _TRAIL_ACTION_RE = re.compile(
     r"\s+and\s+(then\s+)?(play|watch|open|start|listen(\s+to)?)\b.*$", re.IGNORECASE
 )
+# A trailing "on <site>" / "from <site>". The site is a SINGLE token (youtube,
+# anikoto.cz) — the char class must NOT allow spaces, or "in" matches mid-title
+# and eats the rest: "the dangers IN my heart season 2 on anikoto.cz" stripped to
+# "the dangers", and "The Dangers IN My Heart" to "The Dangers" (both live
+# 2026-07-22). A two-word platform ("on prime video") simply isn't stripped —
+# harmless in a search box, where mangling a title is not.
 _TRAIL_SITE_RE = re.compile(
-    r"\s+(on|in|via|using|from|through)\s+[\w.\- ]+$", re.IGNORECASE
+    r"\s+(on|in|via|using|from|through)\s+[\w.\-]+$", re.IGNORECASE
 )
 _LEAD_VERB_RE = re.compile(
     r"^\s*(please\s+)?(can\s+you\s+|could\s+you\s+)?"
@@ -417,30 +530,93 @@ _LEAD_VERB_RE = re.compile(
     r"put\s+on|pull\s+up)\s+",
     re.IGNORECASE,
 )
+# A goal that TYPES/WRITES content somewhere is NOT a search — a quoted span in
+# it is content for a specific field, never a search term. Live 2026-07-21: the
+# goal "…open the messages area and type 'hi' but do not send it" fast-pathed
+# 'hi' into LinkedIn's GLOBAL search box and submitted it. Deterministic refusal.
+_COMPOSE_RE = re.compile(
+    r"\b(type|typing|write|writing|compose|draft)\b"
+    r"|do\s+not\s+send|don'?t\s+send|without\s+sending",
+    re.IGNORECASE,
+)
+# A confident extraction is a single short phrase. A clause boundary ("…, then
+# open…") or relative clause ("the anas WHO IS in my connections") is the goal's
+# INSTRUCTIONS, not a search term — refusal costs one model call.
+_CLAUSE_RE = re.compile(r",|\b(then|who|whose|which|that)\b", re.IGNORECASE)
+_TERM_MAX_CHARS = 60
+
+# MEDIA QUALIFIERS (2026-07-22): "ep 4", "episode 1", "season 2", "part 2",
+# "chapter 3", "vol 1", "s2e4" name a POSITION within a title, not the title —
+# so "play ep 4 of the dangers in my heart season 2" must SEARCH "the dangers in
+# my heart" and let the model navigate to the season/episode. A qualifier+number
+# is stripped ONLY in a LEADING chain ("ep 4 of season 2 of …") or a TRAILING
+# chain ("… season 2 episode 4"), and only when a NUMBER follows the qualifier
+# word — so "Blink 182" (number, no qualifier word), "Lord of the Rings" (no
+# number), and a bare "Part 1" title (no surrounding title) are all left intact.
+# The connective "of" is consumed only INSIDE the leading chain, never on its own.
+_QUALIFIER_NUM = (
+    r"\b(?:episodes?|eps|epi|ep|seasons?|parts?|chapters?|volumes?|vol|ova)"
+    r"\.?\s*\d+"
+)
+_LEAD_QUALIFIER_RE = re.compile(rf"^\s*(?:{_QUALIFIER_NUM}\s+(?:of\s+)?)+", re.IGNORECASE)
+_TRAIL_QUALIFIER_RE = re.compile(rf"(?:\s+{_QUALIFIER_NUM})+\s*$", re.IGNORECASE)
+# WORDED ordinal qualifiers (2026-07-22): "the last episode of", "latest episode
+# of", "most recent episode of" name a POSITION with a WORD, not a number, so the
+# numeric rule above never touched them — live the goal "play the last episode of
+# The Dangers in My Heart" searched that ENTIRE phrase verbatim instead of the
+# title. Stripped ONLY as a LEADING chain and ONLY when an episode/season/part
+# word IMMEDIATELY follows the ordinal — so a title is safe: "The Last of Us"
+# ("last"+"of", no such word), "The Last Airbender", "The First Slam Dunk" are
+# all left intact. The trailing "of" is consumed as the connective to the title.
+_LEAD_ORDINAL_RE = re.compile(
+    r"^\s*(?:the\s+)?"
+    r"(?:last|latest|newest|final|first|next|previous|prev|most\s+recent)\s+"
+    r"(?:episodes?|eps?|epi|seasons?|parts?|chapters?|volumes?|vol|ova)\b"
+    r"\s*(?:of\s+)?",
+    re.IGNORECASE,
+)
+# The "s2e4" shorthand, plus a trailing "of" it may connect to ("s2e1 of X").
+_SXEX_RE = re.compile(r"\bs\d+\s*e\d+\b(?:\s+of)?", re.IGNORECASE)
 
 
 def _extract_search_term(goal: str) -> Optional[str]:
-    """The thing to search for, pulled out of a browse goal deterministically, or
-    None when it cannot be told confidently. A quoted span wins outright; else
-    trailing "and play it" / "on youtube" and a leading verb are stripped."""
+    """The TITLE to search for, pulled out of a browse goal deterministically, or
+    None when it cannot be told confidently. A quoted span wins — but only in a
+    goal that LEADS with a search-ish verb and types nothing; else trailing "and
+    play it" / "on youtube", a leading verb, and media qualifiers ("ep 4 … season
+    2") are stripped, and the result must look like a term (short, single-clause),
+    not instructions."""
     text = (goal or "").strip()
     if not text:
         return None
+    if _COMPOSE_RE.search(text):
+        return None
     quoted = _QUOTED_RE.search(text)
     if quoted:
+        if not _LEAD_VERB_RE.match(text):
+            return None
         return quoted.group(1).strip()
     text = _TRAIL_ACTION_RE.sub("", text)
     text = _TRAIL_SITE_RE.sub("", text)
     text = _LEAD_VERB_RE.sub("", text)
+    # Reduce a media descriptor to its title: the s2e4 shorthand first (so it is
+    # not half-eaten by the qualifier regexes), then the leading and trailing
+    # qualifier chains.
+    text = _SXEX_RE.sub(" ", text)
+    text = _LEAD_QUALIFIER_RE.sub("", text)
+    text = _LEAD_ORDINAL_RE.sub("", text)
+    text = _TRAIL_QUALIFIER_RE.sub("", text)
     term = text.strip(" .\t\"'")
-    return term or None
+    if not term or len(term) > _TERM_MAX_CHARS or _CLAUSE_RE.search(term):
+        return None
+    return term
 
 
 def _fast_path_action(goal: str, obs: dom_observe.Observation) -> Optional[dict]:
-    """The first move when it needs no thinking: a search term from the goal + a
-    single search box on the page → fill and submit. None otherwise (the model
-    decides). Deliberately strict — several search-ish inputs is ambiguous, so it
-    defers rather than guess which one."""
+    """The first move when it needs no thinking: a title from the goal + a single
+    search box on the page → fill and submit. None otherwise (the model decides).
+    Deliberately strict — several search-ish inputs is ambiguous, so it defers
+    rather than guess which one."""
     term = _extract_search_term(goal)
     if not term:
         return None
@@ -449,9 +625,24 @@ def _fast_path_action(goal: str, obs: dom_observe.Observation) -> Optional[dict]
         for e in obs.elements
         if e.role in _SEARCH_ROLES or "search" in (e.name or "").lower()
     ]
-    if len(candidates) != 1:
+    target = None
+    if len(candidates) == 1:
+        target = candidates[0]
+    elif len(candidates) > 1:
+        # Several search-ish inputs — but if EXACTLY ONE is a GENUINE search
+        # target (a real search role / form_search — never a message/compose
+        # field, per _is_search_target's positive rule), take it. A "Search"
+        # LINK or button whose NAME merely contains the word, and any second
+        # combobox filter, are exactly the noise that used to force a defer to
+        # the model, which then fumbled across the ad-heavy homepage with extra
+        # searches (the user's "searched 'find', then something, then the anime"
+        # report, 2026-07-22). Still defers when the real targets are ambiguous.
+        real = [e for e in candidates if _is_search_target(e)]
+        if len(real) == 1:
+            target = real[0]
+    if target is None:
         return None
-    return {"action": "type", "index": candidates[0].index, "text": term, "submit": True}
+    return {"action": "type", "index": target.index, "text": term, "submit": True}
 
 
 # --------------------------------------------------------- login-wall guard
@@ -543,9 +734,9 @@ def detect_login_wall(
     Deliberately narrow: a false wall aborts a working task, so every signal is
     kept tight (see _looks_like_signup — it must not fire on job-application /
     contact / search forms). The loop NEVER types into a password field by
-    construction — the fast path targets searchbox/combobox roles and the
-    extractor never reads a password value — so stopping here handles no
-    credentials, it only declines to continue and hands off to the user."""
+    construction — the extractor never reads a password value, so the model is
+    never handed one to type — so stopping here handles no credentials, it only
+    declines to continue and hands off to the user."""
     host = (urlparse(obs.url).hostname or "").lower().rstrip(".")
     signup = _looks_like_signup(obs)
     if _is_auth_host(host):
@@ -581,27 +772,60 @@ _AUTH_OFFER_SIGNUP_RE = re.compile(
 _AUTH_OFFER_ROLES = frozenset({"link", "button"})
 
 
+def _registrable(host: str) -> str:
+    """The registrable domain, approximated as the last two labels — the same
+    second-to-last-label rule grounding.origin_is_grounded uses. 'www.linkedin.com'
+    and 'jobs.linkedin.com' both → 'linkedin.com'; 'accounts.google.com' →
+    'google.com'. Good enough to tell THIS site's affordance from a third party's."""
+    labels = [l for l in (host or "").split(".") if l]
+    return ".".join(labels[-2:]) if len(labels) >= 2 else (labels[0] if labels else "")
+
+
 def detect_auth_offer(obs: dom_observe.Observation) -> Optional[tuple[bool, bool, str]]:
     """Returns ``(has_signin, has_signup, site)`` when the page OFFERS an account
-    (a sign-in and/or sign-up link/button) without requiring one, else None.
+    (a sign-in and/or sign-up link/button) FOR THE SITE WE'RE ON, without
+    requiring one, else None.
 
     Conservative-by-construction: only link/button element LABELS are read (never
     prose), and the caller checks detect_login_wall FIRST — a hard wall handles
-    itself, so this only fires on an OPTIONAL offer. Best-effort — never raises."""
+    itself, so this only fires on an OPTIONAL offer. Best-effort — never raises.
+
+    SAME-SITE ONLY (2026-07-21, by user report — "there was a signup request that
+    wasn't for the site we were on, but Jarvis still asked me to sign up / continue
+    as guest"). An account offer counts only when it belongs to the site we're
+    operating on: a "Sign in with Google", a third-party "Sign up" widget, or a
+    newsletter/marketing link whose href points to ANOTHER registrable domain is
+    not THIS site's wall, so it never interrupts the task to ask about someone
+    else's account. A same-page affordance with no href (the site's own JS
+    sign-in button) still counts; only a cross-domain href is filtered — the least
+    change that removes the third-party ask without missing a real same-site one."""
     try:
+        page_host = (urlparse(obs.url).hostname or "").lower().rstrip(".")
+        page_reg = _registrable(page_host)
         signin = signup = False
         for e in obs.elements:
             if (e.role or "").lower() not in _AUTH_OFFER_ROLES:
                 continue
             name = e.name or ""
-            if _AUTH_OFFER_SIGNUP_RE.search(name):
+            is_signup = bool(_AUTH_OFFER_SIGNUP_RE.search(name))
+            is_signin = (not is_signup) and bool(_AUTH_OFFER_SIGNIN_RE.search(name))
+            if not (is_signup or is_signin):
+                continue
+            href = (e.href or "").strip()
+            if href:
+                # A link — count it only when it stays on this site. urljoin
+                # resolves a relative "/signup" against the page (same host).
+                target = urljoin(obs.url, href)
+                target_host = (urlparse(target).hostname or "").lower().rstrip(".")
+                if not target_host or _registrable(target_host) != page_reg:
+                    continue  # third-party account offer — not this site's wall
+            if is_signup:
                 signup = True
-            elif _AUTH_OFFER_SIGNIN_RE.search(name):
+            else:
                 signin = True
         if not (signin or signup):
             return None
-        host = (urlparse(obs.url).hostname or "").lower().rstrip(".") or "this site"
-        return (signin, signup, host)
+        return (signin, signup, page_host or "this site")
     except Exception:  # pragma: no cover - defensive
         return None
 
@@ -1139,7 +1363,12 @@ async def _element_href(handle: Any) -> str:
 
 
 async def _act(
-    session: Any, obs: dom_observe.Observation, action: dict, *, commit: bool = False
+    session: Any,
+    obs: dom_observe.Observation,
+    action: dict,
+    *,
+    commit: bool = False,
+    action_approved: bool = False,
 ) -> tuple[bool, str]:
     """Perform one action on the live page. Returns (ok, note). Never raises: a
     failed click is a normal event the loop reacts to (re-observe, try again),
@@ -1175,9 +1404,23 @@ async def _act(
     if action["action"] == "back":
         try:
             await session.page.go_back(timeout=10_000)
-            return True, ""
         except Exception as e:
             return False, f"could not go back ({type(e).__name__})"
+        # A fresh session's history starts at about:blank, so `back` on it
+        # "succeeds" onto a blank page — live 2026-07-21 the loop then thrashed
+        # navigate→back→blank until the stuck detector failed the step. Undo the
+        # blank landing and tell the model the truth instead.
+        try:
+            landed = str(session.page.url or "")
+        except Exception:
+            landed = ""
+        if not landed or landed.startswith("about:blank"):
+            try:
+                await session.page.go_forward(timeout=10_000)
+            except Exception:
+                pass
+            return False, "there is no earlier page in this session's history"
+        return True, ""
     if action["action"] == "scroll":
         delta = -600 if action.get("direction") == "up" else 600
         try:
@@ -1215,42 +1458,30 @@ async def _act(
             zones = []
         if zones and dom_observe.rect_intersects_zones(element.rect, zones):
             return False, "that element is part of a human-verification widget — never touched"
-    # THE SUBMIT-GESTURE GATE (action-level safety, 2026-07-21). With the
-    # network open to page traffic, what keeps the agent from submitting is no
-    # longer the interceptor — it is THIS refusal: a click on a form's submit
-    # control, or Enter inside its fields, is refused in code unless the form
-    # is search-shaped (submitting a search IS reading) or a plain GET form (a
-    # GET submit is a navigation the allowlist already governs). This holds in
-    # BOTH modes — in commit mode the ONLY sanctioned submit is submit_commit()
-    # after the signature approval armed the one-shot permit; a direct click
-    # would bypass the contract the user approved.
-    if element is not None:
-        gesture_unsafe = (
-            element.form_member
-            and not element.form_search
-            and element.role != "searchbox"
-            and (element.form_method or "GET") != "GET"
+    # THE SUBMIT-GESTURE GATE (action-level safety, rewritten 2026-07-22). With
+    # the network open to page traffic, what keeps the agent from acting is THIS
+    # refusal, not the interceptor. A gesture that ACTS on the world — a form's
+    # own submit control, a send/post/upload/like/delete/buy control, or Enter
+    # inside a non-search field — is refused UNLESS the user approved this run's
+    # action (action_approved: the post-approval resume, where the loop may
+    # complete the one action the user just said yes to, in the headed window
+    # they are watching). A genuine SEARCH submit is reading and always allowed.
+    # The old test trusted method=GET as "safe navigation" and a leaky
+    # search-shape — both let LinkedIn's JS message SEND through; positive action
+    # detection (_is_action_gesture) closes that. In READ mode run_browse has
+    # already STOPPED at this gesture to ask (unless approved), so here it is a
+    # backstop; in commit mode it is the live gate — the ONLY sanctioned submit
+    # is submit_commit() after signature approval, never a raw action click.
+    if not action_approved and _is_action_gesture(action, element):
+        return False, (
+            "that would submit the form — in a commit flow the submit happens "
+            "only through the approved submit step, never a direct gesture"
+            if commit
+            else (
+                "that would send, post, or otherwise act on the page — a "
+                "read-only browse never acts without your approval"
+            )
         )
-        if gesture_unsafe and action["action"] == "click" and element.form_submit:
-            return False, (
-                "that is the form's submit control — submitting only happens "
-                "through the approved submit step, never a direct click"
-                if commit
-                else (
-                    "that is a form submit control — a read-only browse never "
-                    "submits; this goal needs the commit flow"
-                )
-            )
-        if gesture_unsafe and action["action"] == "type" and action.get("submit"):
-            return False, (
-                "pressing Enter there would submit the form — submitting only "
-                "happens through the approved submit step"
-                if commit
-                else (
-                    "pressing Enter there would submit the form — a read-only "
-                    "browse never submits"
-                )
-            )
     try:
         if action["action"] == "type":
             await handle.fill(action.get("text", ""))
@@ -1312,10 +1543,17 @@ def _outcome(
     llm_calls: int = 0,
     vision_calls: int = 0,
 ) -> BrowseOutcome:
+    final = dom_observe.summarize(obs) if obs is not None else {}
+    if obs is not None:
+        # The final page's PROSE, separate from `rendered` (elements + prose):
+        # the browse tool clips it into `page_excerpt` so facts read off the
+        # last page survive the audit row's 1000-char clip (2026-07-21, the
+        # unanswerable "what was the price of the book?").
+        final["page_text"] = obs.page_text
     return BrowseOutcome(
         success=success,
         actions_taken=actions,
-        final=dom_observe.summarize(obs) if obs is not None else {},
+        final=final,
         done_reason=done_reason,
         error=error,
         llm_calls=llm_calls, vision_calls=vision_calls,
@@ -1336,6 +1574,7 @@ async def run_browse(
     fields: Optional[dict] = None,
     vision: Any = None,
     auth_resolved: Optional[set[str]] = None,
+    action_approved: bool = False,
 ) -> BrowseOutcome:
     """Drive `session` toward `goal`, observing and acting until the model says
     done, the action budget is spent, or a dead-loop is detected. Read-only by
@@ -1486,7 +1725,7 @@ async def run_browse(
         # this to "ask every time it sees one", so STOP and let the planner ask
         # which they want — but only once per distinct page (auth_seen carries
         # the pages already decided, so "apply as guest" doesn't re-ask the same
-        # page forever). Checked before the fast path / decide so the choice is
+        # page forever). Checked before the decision so the choice is
         # made before the loop fills anything.
         if commit and obs.url not in auth_seen:
             offer = detect_auth_offer(obs)
@@ -1508,13 +1747,16 @@ async def run_browse(
                 out.auth_offer_url = obs.url
                 return out
 
-        # The fast path fills a single search box — a search, not a form
-        # submission — so it is disabled in commit mode (the model must fill the
-        # real form's fields and choose "submit" for approval).
+        # The fast path fills a single search box with the goal's TITLE — a
+        # search, not a form submission — so it is disabled in commit mode (the
+        # model must fill the real form's fields and choose "submit"). Taking the
+        # first search in CODE is what keeps the model off a hostile homepage's ad
+        # links: free-form, it clicked an ad on anikoto.cz instead of searching
+        # (2026-07-22b). Everything after step 0 is the model's job.
         action = _fast_path_action(goal, obs) if (step == 0 and not commit) else None
         if action is not None:
             logger.info("browse: took the fast path (single search box) — no LLM call")
-        else:
+        if action is None:
             action = await _decide(
                 goal, obs, history, provider, allowed,
                 commit=commit, upload=can_upload, profile=profile, fields=fields,
@@ -1708,6 +1950,38 @@ async def run_browse(
             out.origin_url = target_url
             return out
 
+        # ACTION-APPROVAL HAND-OFF (2026-07-22): a READ browse never SENDS,
+        # POSTS, SUBMITS, UPLOADS, LIKES, DELETES, or BUYS on a live site without
+        # the user's yes. When the model's chosen gesture would ACT on the world
+        # (positive detection — a form's submit control, a send/post/upload/like/
+        # delete/buy control, or Enter in a non-search field), STOP here and hand
+        # off: the planner pauses on an approval question naming the action, and
+        # on "yes" the browse resumes with action_approved lifting the gate for
+        # this one run (the user watching the headed window). Skipped in commit
+        # mode (its submit rides the approved submit path) and on the approved
+        # resume (action_approved) so the action can then fire. A genuine SEARCH
+        # submit is reading and is never caught here.
+        if (
+            not commit
+            and not action_approved
+            and action["action"] in ("type", "click")
+        ):
+            act_element = obs.index_map().get(action.get("index"))
+            if _is_action_gesture(action, act_element):
+                logger.info(
+                    f"browse: the next gesture would act on the page (step {step}) "
+                    "— pausing for the user's approval"
+                )
+                out = _outcome(
+                    False, step, obs, session,
+                    error="needs your approval to act on this page",
+                    llm_calls=llm_calls, vision_calls=vision_calls,
+                )
+                out.action_approval_required = True
+                out.action_description = _describe_action(action, act_element, goal)
+                out.action_site = urlparse(obs.url).hostname or "this site"
+                return out
+
         # Progress detection (15.1): interacting only with elements already
         # touched, several steps in a row, is a wandering loop the per-element
         # dedupe misses (it cycles among a handful rather than repeating one) —
@@ -1809,7 +2083,9 @@ async def run_browse(
             session.last_redirect_offsite = None  # stale markers never fire
         except Exception:
             pass
-        ok, note = await _act(session, obs, act_action, commit=commit)
+        ok, note = await _act(
+            session, obs, act_action, commit=commit, action_approved=action_approved
+        )
         history.append(_history_line(action, obs, ok, note))
 
         # REDIRECT OFF-SITE HAND-OFF (2026-07-19, the WWR-ad incident): the

@@ -402,10 +402,28 @@ _EXTRACT_JS = """
       const f = el.closest ? el.closest('form') : null;
       if (f) {
         const t = (el.getAttribute('type') || '').toLowerCase();
+        // SEARCH-SHAPED by a POSITIVE signal only (2026-07-22). The old test
+        // called a form 'search' whenever it had no other inputs — which is
+        // true of a contenteditable messenger (LinkedIn's message SEND form has
+        // zero <input>s), so a send was misread as a harmless search and the
+        // submit-gesture gate stood down. Now: an explicit search role/type, or
+        // exactly one visible text control whose name/placeholder/label actually
+        // says 'search'/'find'/'query'. A JS action form is never 'search'.
+        const searchLabel = (
+          (el.getAttribute('name') || '') + ' ' +
+          (el.getAttribute('placeholder') || '') + ' ' +
+          (el.getAttribute('aria-label') || '') + ' ' +
+          (f.getAttribute('aria-label') || '')
+        ).toLowerCase();
+        const textControls = f.querySelectorAll(
+          'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=image]):not([type=checkbox]):not([type=radio]):not([type=file]),textarea'
+        ).length;
+        const searchTokened = /(^|[^a-z])search([^a-z]|$)|\\bfind\\b|(^|[^a-z])query([^a-z]|$)/.test(searchLabel);
         const isSearch = !!(el.closest('[role=search]')) ||
           f.getAttribute('role') === 'search' ||
-          (!f.querySelector('input[type=password],input[type=email],input[type=file],textarea,select') &&
-           f.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=image])').length <= 1);
+          t === 'search' ||
+          (el.getAttribute('role') || '') === 'searchbox' ||
+          (textControls === 1 && searchTokened);
         form = {
           method: (f.getAttribute('method') || 'GET').toUpperCase(),
           submit: (tag === 'button' && (t === 'submit' || t === '')) ||

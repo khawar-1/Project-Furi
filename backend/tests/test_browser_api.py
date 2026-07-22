@@ -168,3 +168,33 @@ async def test_vision_put_round_trips(client, monkeypatch):
     # And back off.
     off = await client.put("/api/browser/vision", json={"enabled": False})
     assert off.json()["enabled"] is False
+
+
+async def test_media_status_reports_the_persistent_browse_window(client):
+    """The held agent browse window (2026-07-21) surfaces through the SAME
+    window fields the StatusBar already renders, and POST /close-window closes
+    it too."""
+
+    class _FakeWindow:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    window = _FakeWindow()
+    await browser_session.hold_browse_window(
+        window, title="It's Only the Himalayas", url="https://books.toscrape.com/x"
+    )
+    try:
+        status = (await client.get("/api/browser/media")).json()
+        assert status["window_open"] is True
+        assert status["window_title"] == "It's Only the Himalayas"
+        assert status["window_url"] == "https://books.toscrape.com/x"
+
+        closed = (await client.post("/api/browser/close-window")).json()
+        assert closed == {"closed": True}
+        assert window.closed is True
+        assert browser_session.active_browse_window() is None
+    finally:
+        await browser_session.close_browse_window()

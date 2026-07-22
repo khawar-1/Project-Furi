@@ -168,6 +168,21 @@ class AgentPlan(BaseModel):
     # start_url so the resumed run opens the page the user just approved.
     # SERIALIZED beside pending_origin_approval; defaulted for old payloads.
     pending_origin_url: Optional[str] = None
+    # A world-acting gesture (send / post / submit / upload / like / follow /
+    # delete / buy…) a READ browse loop reached and STOPPED at (2026-07-22): an
+    # action on a live site is NEVER performed without the user's yes. Holds the
+    # human-readable description the pause asks about ("send the message 'hi'…"),
+    # set when the plan pauses on the action-approval question and cleared when it
+    # is answered. SERIALIZED beside the other pending_* markers; defaulted for
+    # old payloads.
+    pending_action_approval: Optional[str] = None
+    # Set True by an affirmative answer to the action-approval question, and
+    # injected into the resumed browse step's parameters (_inject_action_approved)
+    # so the loop may perform the approved action THIS run. The READ-mode
+    # gesture gate is lifted ONLY for the resumed run the user just approved; a
+    # later replan re-drafts the step and this clears. SERIALIZED; defaulted for
+    # old payloads.
+    action_approved: bool = False
     # How many times this plan has handed a browse CAPTCHA / verification
     # challenge off to the user (2026-07-19). Some challenges (Cloudflare
     # Turnstile) fingerprint the automated browser and RE-ISSUE no matter how
@@ -297,11 +312,27 @@ class PlanDraft(BaseModel):
     steps: list[PlannedStepDraft] = Field(default_factory=list)
     unachievable_reason: Optional[str] = None
     question: Optional[QuestionDraft] = None
+    # Empty-revision disambiguation (2026-07-21): an empty `steps` on a FAILURE
+    # replan means one of TWO opposite things — "the executed results already
+    # accomplish the goal, nothing more is needed" or "the rest is impossible" —
+    # and prose in `unachievable_reason` cannot be told apart in code (the live
+    # incident: a plan FAILED carrying the message "The goal has been fully
+    # accomplished"). This flag is the structural comparator: True = the empty
+    # revision is a COMPLETION, not a surrender. Backstopped in the planner —
+    # it is only honored when at least one step actually completed.
+    goal_accomplished: bool = False
 
     @field_validator("steps", mode="before")
     @classmethod
     def _steps(cls, v: Any) -> list:
         return v if isinstance(v, list) else []
+
+    @field_validator("goal_accomplished", mode="before")
+    @classmethod
+    def _accomplished(cls, v: Any) -> bool:
+        if isinstance(v, bool):
+            return v
+        return str(v or "").strip().lower() == "true"
 
     @field_validator("unachievable_reason", mode="before")
     @classmethod

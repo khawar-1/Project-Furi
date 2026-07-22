@@ -159,6 +159,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             await asyncio.to_thread(_import_heavy)
             logger.info("✅ browser stack imports pre-warmed")
+            # Actually START Playwright's Node driver ONCE, on the dedicated
+            # browser loop, so the cold subprocess spawn (and any stall) happens
+            # HERE in the background — never inside a user's first browse chat turn
+            # (the 2026-07-22 "processing forever" incident). ensure_playwright_driver
+            # is bounded + logs its own timing; every later launch reuses this driver.
+            from app.core import browser_runtime, browser_session
+            await browser_runtime.run_browser(
+                browser_session.ensure_playwright_driver()
+            )
+            logger.info("✅ browser driver pre-warmed")
         except Exception as e:
             logger.warning(f"⚠️  browser stack pre-warm failed (non-critical): {e}")
 
@@ -298,6 +308,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if browser_runtime.is_running():
             await browser_runtime.run_browser(
                 browser_session.shutdown_browser_windows(), timeout=30.0
+            )
+            # Stop the SHARED Playwright driver (warmed once at startup) on the
+            # browser loop before the loop is torn down — it is loop-bound.
+            await browser_runtime.run_browser(
+                browser_session.stop_playwright_driver(), timeout=15.0
             )
     except Exception as e:
         logger.debug(f"browser window close (shutdown): {e}")

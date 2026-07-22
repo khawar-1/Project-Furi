@@ -59,6 +59,23 @@ def test_fill_beats_every_other_flag():
     assert payload.suggested_value == "123"
 
 
+def test_action_approval_derives_and_round_trips():
+    """A world-acting gesture hand-off (2026-07-22) derives ACTION_APPROVAL and
+    survives the JSON round trip a parked plan needs (action_desc + site)."""
+    payload = state.handoff_from_outcome(
+        _outcome(
+            action_approval_required=True,
+            action_description='send "hi anas"',
+            action_site="linkedin.com",
+        )
+    )
+    assert payload.reason is Handoff.ACTION_APPROVAL
+    assert payload.action_desc == 'send "hi anas"'
+    assert payload.site == "linkedin.com"
+    revived = HandoffPayload.from_dict(payload.to_dict())
+    assert revived == payload
+
+
 def test_auth_offer_derives_with_capabilities():
     payload = state.handoff_from_outcome(
         _outcome(

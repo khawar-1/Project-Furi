@@ -243,6 +243,12 @@ class BrowseTool(BaseTool):
         allowlist = {o for o in raw_origins if str(o).strip()}
         allowlist.add(_normalize_origin(start_url))
         keep_open = bool(kwargs.get("keep_open"))
+        # Set by the planner on the resumed step after the user approved a
+        # world-acting gesture (2026-07-22): lifts the READ-mode gesture gate for
+        # THIS run so the loop completes the one action the user said yes to. Only
+        # ever True on a resume the user just approved — a fresh draft never
+        # carries it, and a later replan re-drafts the step without it.
+        action_approved = bool(kwargs.get("action_approved"))
 
         async def _drive_browser() -> dict:
             # Runs on the dedicated browser loop (browser_runtime): Playwright
@@ -258,31 +264,91 @@ class BrowseTool(BaseTool):
             session = None
             handed_off = False
             try:
-                # One profile = one live persistent context. A sign-in window, a
-                # kept-open commit result window, OR a kept-open media session
-                # (a "play on youtube" left running) on ~/.jarvis/browser all hold
-                # the profile lock, so close every one first (the login/browse
-                # coordination rule) or the launch below races the lock — the
-                # TargetClosedError / Chrome-flicker seen live 2026-07-19 when a
-                # job-search browse launched while a YouTube tab was still playing.
-                await browser_session.close_login_window()
-                await browser_session.close_result_window()
-                await browser_session.stop_media()
-                session = await BrowserSession.open(allowlist)
-                await session.goto(start_url)
+                # SESSION CONTINUITY (2026-07-21): reuse the persistent agent
+                # window when one is held. Live testing showed every browse step
+                # of a plan launching its OWN Chrome and closing it when the step
+                # ended — step 2 relaunched at start_url and RE-DID step 1's
+                # navigation (the books.toscrape "opened the book twice" report),
+                # and the open/close cycle was the screen flicker. A reused
+                # window continues exactly where the last run left off: same
+                # page, real history (`back` works), no relaunch.
+                session = await browser_session.take_browse_window()
+                if session is not None:
+                    try:
+                        # Liveness probe — the user may have closed the window by
+                        # hand; a dead session must fall through to a fresh
+                        # launch, never fail the browse.
+                        await session.page.evaluate("1")
+                        # The interceptor reads session.allowlist LIVE (the
+                        # origin-approval-union precedent), so re-scoping the
+                        # window to THIS task's grounded origins is one write.
+                        # Same normalization BrowserSession.open applies.
+                        session.allowlist = {
+                            o for o in (_normalize_origin(a) for a in allowlist) if o
+                        }
+                        # Continuity is the PAGE, not the transcript: each browse
+                        # run gets a fresh action history/budget (stale history
+                        # from an earlier task would only confuse the model).
+                        session.browse_history = []
+                        session.last_redirect_offsite = None
+                        logger.info(
+                            "browse: reusing the held agent window "
+                            f"(at {str(session.page.url)[:120]})"
+                        )
+                    except Exception as exc:
+                        logger.info(
+                            f"browse: held window unusable ({type(exc).__name__}) "
+                            "— launching fresh"
+                        )
+                        try:
+                            await session.close()
+                        except Exception:
+                            pass
+                        session = None
+                if session is not None:
+                    # Stay put when the page is already on an allowed site — the
+                    # whole point of continuity ("click the top book" continues
+                    # from the Travel page, not the homepage). Off-site/blank →
+                    # start_url as before.
+                    current = _normalize_origin(str(session.page.url or ""))
+                    if not current or not session.origin_allowed(current):
+                        await session.goto(start_url)
+                else:
+                    # One profile = one live persistent context. A sign-in window,
+                    # a kept-open commit result window, OR a kept-open media
+                    # session (a "play on youtube" left running) on
+                    # ~/.jarvis/browser all hold the profile lock, so close every
+                    # one first (the login/browse coordination rule) or the launch
+                    # below races the lock — the TargetClosedError/Chrome-flicker
+                    # seen live 2026-07-19 when a job-search browse launched while
+                    # a YouTube tab was still playing.
+                    await browser_session.close_login_window()
+                    await browser_session.close_result_window()
+                    await browser_session.stop_media()
+                    session = await BrowserSession.open(allowlist)
+                    await session.goto(start_url)
                 outcome = await browser_loop.run_browse(
-                    session, goal, provider, vision=vision
+                    session, goal, provider, vision=vision,
+                    action_approved=action_approved,
                 )
 
                 output = {
                     "url": outcome.url,
                     "title": outcome.title,
+                    # Early in the dict ON PURPOSE: the ActivityLog audit row
+                    # keeps only the first ~1000 chars of this JSON, and facts
+                    # read off the final page (a price, a name) must survive that
+                    # clip so recall_actions can answer from the record — live
+                    # 2026-07-21: "what was the price of the book?" found nothing
+                    # because `rendered` was clipped away.
+                    "page_excerpt": str(outcome.final.get("page_text") or "")[:600],
+                    "done_reason": outcome.done_reason,
                     "rendered": str(outcome.final.get("rendered") or ""),
                     "goal_reached": outcome.success,
-                    "done_reason": outcome.done_reason,
                     "actions_taken": outcome.actions_taken,
                     "blocked": outcome.blocked,
                     "playing": False,
+                    "window_open": False,
                     "error": outcome.error,
                 }
 
@@ -362,28 +428,77 @@ class BrowseTool(BaseTool):
                     output["origin_url"] = outcome.origin_url
                     return output
 
-                # A play/watch goal: leave the window OPEN and playing. Hand off
-                # FIRST (enter_playback_mode): the loop is done, so it LIFTS request
-                # interception entirely — the window becomes user-driven at native
-                # network speed (keeping the interceptor on a streaming video taxed
-                # every segment and made the net crawl — user report 2026-07-18) and
-                # the site's player POSTs work (else the video shows "you're
-                # offline", live 2026-07-17). The reload inside makes the stuck
-                # player retry those POSTs. Then ensure_playing() presses "play" — an
-                # automation window opens media paused (no user gesture), so a
-                # video/song otherwise sits there (user report 2026-07-17). Generic
-                # native-media control, not an ad-skipper: an ad plays then the
-                # content follows on its own. Then the media registry takes
-                # ownership; the finally below must not close it (that would stop the
-                # music the instant we succeed).
+                # A world-acting gesture the user must approve (2026-07-22): the
+                # READ loop STOPPED before a send / post / submit / upload / like /
+                # delete / buy. Close the session (free the single-profile lock,
+                # like the origin/login hand-offs) and return the structured
+                # signal; the planner pauses on an approval question naming the
+                # action, and on "yes" the resumed browse runs with
+                # action_approved lifting the gate so the one approved action can
+                # fire. Jarvis never acts on a live site without this yes.
+                if outcome.action_approval_required:
+                    await session.close()
+                    session = None  # the finally must not double-close it
+                    output["action_approval_required"] = True
+                    output["action_description"] = outcome.action_description
+                    output["action_site"] = outcome.action_site
+                    return output
+
+                # A play/watch goal: the FINDING is done — now leave a window OPEN
+                # and playing. TWO paths (2026-07-22):
+                #
+                # (A) CLEAN NORMAL WINDOW (production). The agent found the video in
+                # its automation window (interceptor on, Rule 0 blocking ads); now
+                # hand the final URL to a plain, user-driven Chrome/Edge on the SAME
+                # profile — signed in, uBlock loaded (an unpacked extension loads in
+                # a NON-CDP window; the agent window cannot), autoplay on. uBlock's
+                # filter lists cover the rotating pop-under ad domains the static
+                # Rule 0 list never can, so WATCHING is ad-free. Close the automation
+                # session FIRST to free the single-profile lock, then launch clean.
+                # The one honest cost: a non-CDP window can't be told to press play,
+                # so a standard player (YouTube) autoplays but a custom streaming
+                # player may need ONE user click.
+                #
+                # (B) IN-PLACE (tests / no system browser found). enter_playback_mode
+                # LIFTS interception (streaming throughput; the site's player POSTs
+                # work — else "you're offline", live 2026-07-17) and ensure_playing()
+                # presses play in the automation window. The media registry then owns
+                # the session; the finally must not close it.
                 if outcome.success and keep_open:
-                    await session.enter_playback_mode()
-                    await session.ensure_playing()
-                    await browser_session.register_media(
-                        session, title=output["title"], url=output["url"]
+                    if browser_session.clean_media_enabled():
+                        final_url = output["url"]
+                        await session.close()  # free the single-profile lock
+                        session = None
+                        handed_off = True  # the finally must not double-close it
+                        opened = await browser_session.open_media_window(
+                            final_url, title=output["title"]
+                        )
+                        output["playing"] = opened
+                        output["handoff"] = "clean_window" if opened else "none"
+                    else:
+                        await session.enter_playback_mode()
+                        await session.ensure_playing()
+                        await browser_session.register_media(
+                            session, title=output["title"], url=output["url"]
+                        )
+                        handed_off = True
+                        output["playing"] = True
+                        output["handoff"] = "in_place"
+                elif session is not None:
+                    # PERSISTENT WINDOW (owner decision 2026-07-21): success or a
+                    # clean loop failure both leave the window OPEN — the user
+                    # sees the result (the LinkedIn compose report: "it closed
+                    # Chrome so I couldn't see if it opened anas or not"), and
+                    # the next browse run reuses it. Interception stays ON (it is
+                    # still the agent's window); holds are memory-only, so a
+                    # restart closes it — the honest outcome. Exceptions and
+                    # timeouts still close via the finally (a half-broken window
+                    # is not worth keeping).
+                    await browser_session.hold_browse_window(
+                        session, title=output["title"], url=output["url"], goal=goal
                     )
                     handed_off = True
-                    output["playing"] = True
+                    output["window_open"] = True
                 return output
             finally:
                 if session is not None and not handed_off:
@@ -397,6 +512,16 @@ class BrowseTool(BaseTool):
                         await vision.aclose()
                     except Exception:
                         pass
+
+        # A progress signal so a slow-but-working launch reads as progress, not a
+        # hang (the warm driver makes launch fast; this covers the first browse
+        # right after startup while warm-up may still be in flight). Fires on the
+        # MAIN loop here, before marshaling onto the browser loop. Best-effort.
+        try:
+            from app.core.push import push
+            await push("browse_progress", {"text": "Opening the browser…"})
+        except Exception:
+            pass
 
         try:
             output = await browser_runtime.run_browser(
@@ -506,11 +631,30 @@ class BrowseTool(BaseTool):
                 permission_level=self.permission_level,
             )
 
+        # Light up the StatusBar "window open" indicator immediately (it also
+        # polls /api/browser/media to recover on reload). push() touches
+        # main-loop WebSocket objects, so it fires here — after the browser-loop
+        # work returned. Before the goal_reached check: a stuck run holds the
+        # window too (the user asked to SEE where it got stuck).
+        if output.get("window_open"):
+            from app.core.push import push
+
+            await push(
+                "browser_window",
+                {"open": True, "title": output.get("title", ""), "url": output.get("url", "")},
+            )
+
         if not output.get("goal_reached"):
             # The loop reached its bound without finishing. Report what it saw
             # (the final page) so the summary has something real, not silence.
             detail = output.get("error") or "the browser task did not complete"
-            return _fail(self, f"{detail}. Last page: {output.get('url') or 'unknown'}")
+            where = output.get("url") or "unknown"
+            open_note = (
+                " (the browser window is still open on it)"
+                if output.get("window_open")
+                else ""
+            )
+            return _fail(self, f"{detail}. Last page: {where}{open_note}")
 
         # Best-effort: light up the StatusBar indicator immediately (the StatusBar
         # also polls /api/browser/media to recover on reload). push() touches

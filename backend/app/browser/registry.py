@@ -109,7 +109,7 @@ class HeldSessionRegistry:
 # slot here is the whole registration step, and every aggregate covers it.
 REGISTRIES: dict[str, HeldSessionRegistry] = {
     slot: HeldSessionRegistry(slot)
-    for slot in ("media", "result_window", "commit", "challenge", "discovery")
+    for slot in ("media", "result_window", "commit", "challenge", "discovery", "browse")
 }
 
 

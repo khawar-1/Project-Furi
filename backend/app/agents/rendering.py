@@ -555,8 +555,25 @@ def _fmt_browse(output: dict) -> str:
     title = str(output.get("title") or "").strip()
     url = str(output.get("url") or "")
     where = f"**{title}** — {url}" if title else url
-    if output.get("playing"):
+    handoff = str(output.get("handoff") or "")
+    if output.get("playing") and handoff == "clean_window":
+        # Handed off to a normal, ad-blocked (uBlock) window (2026-07-22). Honest
+        # about the one trade-off: a non-automation window can't be told to press
+        # play, so a custom player may need one click.
+        head = (
+            f"Opened it in a normal ad-free browser window: {where}. "
+            "It should start on its own — if the player doesn't, just press play "
+            "once (the window has an ad-blocker, so no pop-ups)."
+        )
+    elif output.get("playing"):
         head = f"Now playing in the browser: {where}"
+    elif handoff == "none":
+        # A watch/play goal that found the video but could not open the clean
+        # window (no system browser found, or a profile-lock handoff exit).
+        head = (
+            f"I found it — {where} — but couldn't open a browser window to play "
+            "it. Open that link yourself to watch."
+        )
     else:
         reason = str(output.get("done_reason") or "").strip()
         head = f"Browsed to {where}" + (f" — {reason}" if reason else "")
@@ -783,10 +800,17 @@ def deterministic_plan_text(plan: AgentPlan) -> str:
         completed = plan.completed_steps()
         if completed:
             done = "; ".join(s.description for s in completed[:5])
-            return (
+            # A failed plan must not throw away what its completed steps FOUND
+            # (2026-07-21: the book's price sat in a completed browse step's
+            # output and the failure text dropped it — "what was the price?"
+            # was unanswerable one turn later). Same renderer the completion
+            # path uses; already capped and item-clipped.
+            results = completed_results_text(plan)
+            text = (
                 f"I couldn't finish that. {base}\n\n"
                 f"Steps that did complete before the failure: {done}."
             )
+            return f"{text}\n\n{results}" if results else text
         return f"I couldn't do that. {base}"
     if plan.status == PlanStatus.CANCELLED:
         return plan.message or "Cancelled by the user — nothing further was executed."

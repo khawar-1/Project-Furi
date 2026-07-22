@@ -204,6 +204,70 @@ async def test_blocked_mutations_are_reported_not_swallowed(fake_browser):
     assert "POST https://example.com/log" in reported["mutation_urls"]
 
 
+# ----------------------------------------------------- RULE 0: ad / tracker block
+# The agent window cannot run uBlock (Chrome refuses --load-extension under CDP),
+# so ad/tracker network blocking lives in the interceptor. It must ABORT known ad
+# hosts (so a fake-play ad iframe never loads and can't be misclicked) and must
+# NEVER touch content hosts.
+@pytest.mark.parametrize(
+    "host",
+    [
+        "googletagservices.com",
+        "www.googletagservices.com",
+        "pagead2.googlesyndication.com",
+        "doubleclick.net",
+        "exoclick.com",
+        "cdn.exoclick.com",
+        "popads.net",
+        "taboola.com",
+    ],
+)
+def test_is_ad_host_matches_ad_and_tracker_domains(host):
+    assert browser_session._is_ad_host(host) is True
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["youtube.com", "example.com", "anilist.co", "notexoclick.com", "", None],
+)
+def test_is_ad_host_never_flags_content_hosts(host):
+    assert browser_session._is_ad_host(host) is False
+
+
+async def test_ad_requests_are_aborted_by_the_interceptor(fake_browser):
+    """A request to a known ad host dies at Rule 0 — regardless of method — so
+    the ad iframe/script never loads. This is what stops the loop misclicking a
+    fake 'Play' button on an ad-heavy streaming site."""
+    session = await _session()
+    assert (
+        await _verdict(session, url="https://cdn.exoclick.com/ad.js", method="GET")
+        == "abort"
+    )
+    assert session.stats.blocked_ads == 1
+    # counted separately from a real navigation/host block
+    assert session.stats.blocked_navigations == 0
+    assert session.stats.blocked_hosts == 0
+
+
+async def test_ad_block_does_not_touch_content_requests(fake_browser, monkeypatch):
+    """A first-party content GET on the allowlist still passes — the ad list must
+    never starve a legitimate page."""
+    monkeypatch.setattr(browser_session, "_host_is_blocked", lambda h: False)
+    browser_session.reset_host_cache()
+    session = await _session(allowlist={"example.com"})
+    assert (
+        await _verdict(session, url="https://example.com/player.js", method="GET")
+        == "continue"
+    )
+    assert session.stats.blocked_ads == 0
+
+
+async def test_blocked_ads_are_surfaced_in_stats(fake_browser):
+    session = await _session()
+    await _verdict(session, url="https://taboola.com/widget.js")
+    assert session.stats.as_dict()["blocked_ads"] == 1
+
+
 # ----------------------------------------------------------- RULE 2: SSRF
 async def test_private_hosts_are_aborted(fake_browser, monkeypatch):
     # A private host that is NOT on the allowlist (the SSRF threat: a subresource
@@ -930,6 +994,155 @@ async def test_settle_profile_is_a_noop_when_nothing_closed_recently(monkeypatch
     assert _time.monotonic() - t0 < 0.1
 
 
+# --------------------------------- clean-window media hand-off (2026-07-22)
+# A watch/play goal hands the found video off to a NORMAL, user-driven window on
+# the same profile (uBlock loaded, autoplay on) instead of playing in the
+# automation window — so streaming/piracy-site ads are blocked by uBlock, which
+# the code-side Rule 0 (off during playback) never could. The launcher is the
+# injectable CLEAN_MEDIA_LAUNCHER seam so the suite never spawns a real Chrome, and
+# under the hermetic fixture the whole hand-off is OFF (clean_media_enabled False)
+# so the in-place playback path is what tests exercise unless one opts in.
+async def test_clean_media_enabled_only_in_production():
+    """Off under the hermetic suite (BROWSER_FACTORY is the refuser, no launcher
+    injected) — so the media hand-off never spawns a real Chrome; ON when a
+    launcher is injected or in production."""
+    assert browser_session.CLEAN_MEDIA_LAUNCHER is None
+    assert browser_session.BROWSER_FACTORY is not None
+    assert browser_session.clean_media_enabled() is False
+
+
+async def test_open_media_window_launches_clean_window(monkeypatch):
+    """A live clean subprocess is adopted as THE media window: open returns True,
+    and active_media()/active_media_window() report it (so the StatusBar lights up
+    and stop_media covers it)."""
+    await browser_session.stop_media_window()
+    monkeypatch.setattr(browser_session, "_PROFILE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(browser_session, "_CLEAN_LOGIN_VERIFY_SECONDS", 0.3)
+    launched: list[str] = []
+    monkeypatch.setattr(
+        browser_session, "CLEAN_MEDIA_LAUNCHER",
+        lambda url: launched.append(url) or _LiveCleanProc(url),
+    )
+
+    opened = await browser_session.open_media_window(
+        "https://anikoto.cz/watch/123", title="Ep 12"
+    )
+
+    assert opened is True
+    assert launched == ["https://anikoto.cz/watch/123"]
+    assert browser_session.active_media_window() == {
+        "title": "Ep 12",
+        "url": "https://anikoto.cz/watch/123",
+    }
+    # active_media() unifies both surfaces — the StatusBar/API see the clean window.
+    assert browser_session.active_media() == {
+        "title": "Ep 12",
+        "url": "https://anikoto.cz/watch/123",
+    }
+    await browser_session.stop_media_window()
+
+
+async def test_stop_media_closes_the_clean_media_window(monkeypatch):
+    """stop_media() (the ONE stop entry) terminates the clean media window and is
+    idempotent — every 'free the profile lock' site relies on this."""
+    await browser_session.stop_media_window()
+    monkeypatch.setattr(browser_session, "_PROFILE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(browser_session, "_CLEAN_LOGIN_VERIFY_SECONDS", 0.3)
+    proc = _LiveCleanProc("x")
+    monkeypatch.setattr(browser_session, "CLEAN_MEDIA_LAUNCHER", lambda url: proc)
+
+    assert await browser_session.open_media_window("https://youtube.com/watch") is True
+    assert await browser_session.stop_media() is True
+    assert proc.terminated is True
+    assert browser_session.active_media() is None
+    assert await browser_session.stop_media() is False  # stopping nothing
+
+
+async def test_open_media_window_reports_false_when_no_browser(monkeypatch):
+    """No system browser (the launcher returns None) → open returns False and
+    nothing is registered, so the caller reports 'couldn't open a window' honestly
+    rather than a phantom playing state."""
+    await browser_session.stop_media_window()
+    monkeypatch.setattr(browser_session, "_PROFILE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(browser_session, "CLEAN_MEDIA_LAUNCHER", lambda url: None)
+
+    assert await browser_session.open_media_window("https://x.test/") is False
+    assert browser_session.active_media() is None
+
+
+async def test_a_handoff_exit_media_window_reports_not_playing(monkeypatch):
+    """The clean media subprocess exited at once (handed the URL to a Chromium
+    already on the profile) — verification catches it and open returns False, so we
+    never claim it is playing when no window came up."""
+    await browser_session.stop_media_window()
+    monkeypatch.setattr(browser_session, "_PROFILE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(browser_session, "_CLEAN_LOGIN_VERIFY_SECONDS", 0.4)
+    monkeypatch.setattr(
+        browser_session, "CLEAN_MEDIA_LAUNCHER", lambda url: _ExitedCleanProc(url)
+    )
+
+    assert await browser_session.open_media_window("https://x.test/") is False
+    assert browser_session.active_media() is None
+
+
+async def test_active_media_window_none_after_user_closes(monkeypatch):
+    """If the user closes the clean window themselves, poll() reports it exited and
+    active_media_window() returns None — the StatusBar drops the indicator without a
+    stop call."""
+    await browser_session.stop_media_window()
+    monkeypatch.setattr(browser_session, "_PROFILE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(browser_session, "_CLEAN_LOGIN_VERIFY_SECONDS", 0.3)
+    proc = _LiveCleanProc("x")
+    monkeypatch.setattr(browser_session, "CLEAN_MEDIA_LAUNCHER", lambda url: proc)
+    assert await browser_session.open_media_window("https://youtube.com/watch") is True
+    assert browser_session.active_media_window() is not None
+
+    proc.poll = lambda: 0  # the user closed the window
+    assert browser_session.active_media_window() is None
+    await browser_session.stop_media_window()
+
+
+async def test_open_media_window_closes_a_prior_in_place_media_session(monkeypatch):
+    """One profile = one live context: handing off to a clean window first closes a
+    prior in-place BrowserSession media session (else two Chromiums fight the
+    single-instance lock)."""
+    await browser_session.stop_media_window()
+    monkeypatch.setattr(browser_session, "_PROFILE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(browser_session, "_CLEAN_LOGIN_VERIFY_SECONDS", 0.3)
+    media_browser = FakeBrowser()
+    session = BrowserSession(media_browser, media_browser.page, {"youtube.com"})
+    await browser_session.register_media(session, title="song", url="https://youtube.com/watch")
+    monkeypatch.setattr(browser_session, "CLEAN_MEDIA_LAUNCHER", lambda url: _LiveCleanProc(url))
+
+    assert await browser_session.open_media_window("https://anikoto.cz/watch") is True
+    assert media_browser.closed is True  # the in-place session was closed
+    await browser_session.stop_media_window()
+
+
+def test_default_media_launcher_adds_the_autoplay_flag(monkeypatch):
+    """The media launcher passes --autoplay-policy=no-user-gesture-required so a
+    standard player starts on its own in the non-CDP window (which cannot be told to
+    press play). The sign-in launcher does NOT get that flag."""
+    import subprocess as _sp
+
+    captured: dict[str, list] = {}
+
+    class _FakePopen:
+        def __init__(self, args, **kw):
+            captured["args"] = args
+
+    monkeypatch.setattr(browser_session, "_find_system_browser", lambda: "chrome.exe")
+    monkeypatch.setattr(browser_session, "_harden_profile", lambda p: None)
+    monkeypatch.setattr(_sp, "Popen", _FakePopen)
+
+    browser_session._default_clean_media_launcher("https://youtube.com/watch")
+    assert "--autoplay-policy=no-user-gesture-required" in captured["args"]
+    assert captured["args"][-1] == "https://youtube.com/watch"
+
+    browser_session._default_clean_launcher("https://accounts.google.com/")
+    assert "--autoplay-policy=no-user-gesture-required" not in captured["args"]
+
+
 # -------------------------------- orphaned-profile reclaim + launch (2026-07-20)
 # A Chromium left holding ~/.jarvis/browser by a PRIOR backend (a sign-in window
 # not closed on shutdown, a context leaked by a crash) hangs the next launch on
@@ -1053,7 +1266,8 @@ async def test_launch_hang_self_heals_by_reclaiming_the_orphan(monkeypatch):
     async def _fake_start():
         return pw
 
-    monkeypatch.setattr(browser_session, "_start_playwright", _fake_start)
+    monkeypatch.setattr(browser_session, "_PLAYWRIGHT_STARTER", _fake_start)
+    browser_session.reset_playwright_driver()  # a fresh ensure per test
 
     result = await browser_session._default_browser_factory()
 
@@ -1065,7 +1279,8 @@ async def test_launch_hang_self_heals_by_reclaiming_the_orphan(monkeypatch):
 
 async def test_launch_total_failure_with_no_orphan_raises_unavailable(monkeypatch):
     """Every channel fails and there is no orphan to reclaim → a clean
-    BrowserUnavailable (the tool _fails), and the driver is stopped."""
+    BrowserUnavailable (the tool _fails). The SHARED driver is never stopped by a
+    launch; its reference is dropped so the NEXT browse re-warms a fresh one."""
     monkeypatch.setattr(browser_session, "LAUNCH_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr(browser_session, "_PROFILE_SETTLE_SECONDS", 0.0)
     monkeypatch.setattr(browser_session, "_CHANNELS", (None,))
@@ -1077,12 +1292,14 @@ async def test_launch_total_failure_with_no_orphan_raises_unavailable(monkeypatc
     async def _fake_start():
         return pw
 
-    monkeypatch.setattr(browser_session, "_start_playwright", _fake_start)
+    monkeypatch.setattr(browser_session, "_PLAYWRIGHT_STARTER", _fake_start)
+    browser_session.reset_playwright_driver()  # a fresh ensure per test
 
     with pytest.raises(browser_session.BrowserUnavailable):
         await browser_session._default_browser_factory()
     assert chromium.calls == 1     # no orphan → no retry
-    assert pw.stopped is True       # the driver is torn down on total failure
+    assert pw.stopped is False      # the shared driver is never stopped by a launch
+    assert browser_session._shared_playwright is None  # dropped → next browse re-warms
 
 
 async def test_launch_chain_stops_when_its_shared_budget_is_spent(monkeypatch):
@@ -1103,20 +1320,23 @@ async def test_launch_chain_stops_when_its_shared_budget_is_spent(monkeypatch):
     async def _fake_start():
         return pw
 
-    monkeypatch.setattr(browser_session, "_start_playwright", _fake_start)
+    monkeypatch.setattr(browser_session, "_PLAYWRIGHT_STARTER", _fake_start)
+    browser_session.reset_playwright_driver()  # a fresh ensure per test
 
     with pytest.raises(browser_session.BrowserUnavailable, match="launch budget"):
         await browser_session._default_browser_factory()
     # the first attempt consumed the whole budget — the second channel was never
     # tried, so the chain can never outrun the outer belt again
     assert chromium.calls == 1
-    assert pw.stopped is True
+    assert pw.stopped is False      # the shared driver is never stopped by a launch
+    assert browser_session._shared_playwright is None
 
 
-async def test_a_cancelled_launch_tears_down_the_driver(monkeypatch):
-    """The outer browse belt firing MID-LAUNCH must not leak the Node driver (or
-    a half-spawned profile-holding Chrome): a cancelled chain schedules a
-    detached cleanup that stops the driver and reclaims the profile."""
+async def test_a_cancelled_launch_reclaims_the_profile_but_keeps_the_shared_driver(monkeypatch):
+    """The outer browse belt firing MID-LAUNCH must not leak a half-spawned
+    profile-holding Chrome: a cancelled chain schedules a detached cleanup that
+    reclaims the profile. The SHARED Node driver is deliberately NOT stopped — it
+    is reused by the next browse, not owned by this launch."""
     reaped = []
     monkeypatch.setattr(browser_session, "LAUNCH_TIMEOUT_SECONDS", 30.0)
     monkeypatch.setattr(browser_session, "_CHANNELS", (None,))
@@ -1130,7 +1350,8 @@ async def test_a_cancelled_launch_tears_down_the_driver(monkeypatch):
     async def _fake_start():
         return pw
 
-    monkeypatch.setattr(browser_session, "_start_playwright", _fake_start)
+    monkeypatch.setattr(browser_session, "_PLAYWRIGHT_STARTER", _fake_start)
+    browser_session.reset_playwright_driver()  # a fresh ensure per test
 
     task = asyncio.ensure_future(browser_session._default_browser_factory())
     await asyncio.sleep(0.05)          # let it reach the hanging launch
@@ -1138,7 +1359,7 @@ async def test_a_cancelled_launch_tears_down_the_driver(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await task
     await asyncio.sleep(0.1)           # the detached cleanup task runs
-    assert pw.stopped is True          # the driver did not leak
+    assert pw.stopped is False         # the SHARED driver survives a cancelled launch
     assert reaped                       # and the profile was reclaimed
 
 
@@ -1677,3 +1898,87 @@ async def test_main_frame_check_is_scoped_to_the_requests_own_page(fake_browser)
     sub.page = owner
     req2 = FakeRequest(url="https://x.com/", navigation=True, frame=sub)
     assert session._is_main_frame_navigation(req2) is False
+
+
+# ------------------------------------------------- opt-in unpacked extensions
+def test_no_extensions_dir_adds_no_flags(monkeypatch, tmp_path):
+    """The default extension-free posture: an empty/absent BROWSER_EXTENSIONS_DIR
+    adds ZERO launch flags, so the launch args are unchanged until the user drops
+    an extension in — and the hermetic suite is never affected."""
+    monkeypatch.setattr(browser_session, "BROWSER_EXTENSIONS_DIR", tmp_path / "browser_extensions")
+    assert browser_session._extension_load_args() == []
+
+
+def test_a_manifest_subdir_is_loaded(monkeypatch, tmp_path):
+    ext_root = tmp_path / "browser_extensions"
+    ublock = ext_root / "ublock-origin-lite"
+    ublock.mkdir(parents=True)
+    (ublock / "manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(browser_session, "BROWSER_EXTENSIONS_DIR", ext_root)
+
+    args = browser_session._extension_load_args()
+    resolved = str(ublock.resolve())
+    # --load-extension ONLY — --disable-extensions-except would disable the
+    # profile's own installed uBlock and block Web-Store installs (2026-07-22 fix).
+    assert args == [f"--load-extension={resolved}"]
+    assert not any(a.startswith("--disable-extensions-except") for a in args)
+
+
+def test_a_subdir_without_a_manifest_is_ignored(monkeypatch, tmp_path):
+    ext_root = tmp_path / "browser_extensions"
+    (ext_root / "not-an-extension").mkdir(parents=True)  # no manifest.json
+    (ext_root / "README.txt").parent.mkdir(exist_ok=True)  # a stray file, not a dir
+    (ext_root / "README.txt").write_text("hi", encoding="utf-8")
+    monkeypatch.setattr(browser_session, "BROWSER_EXTENSIONS_DIR", ext_root)
+    assert browser_session._extension_load_args() == []
+
+
+def test_two_extensions_are_comma_joined(monkeypatch, tmp_path):
+    ext_root = tmp_path / "browser_extensions"
+    a = ext_root / "a-ext"
+    b = ext_root / "b-ext"
+    for d in (a, b):
+        d.mkdir(parents=True)
+        (d / "manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(browser_session, "BROWSER_EXTENSIONS_DIR", ext_root)
+
+    args = browser_session._extension_load_args()
+    csv = f"{a.resolve()},{b.resolve()}"  # sorted() → 'a-ext' before 'b-ext'
+    assert args == [f"--load-extension={csv}"]
+
+
+def test_load_extension_switch_is_re_enabled_on_modern_chrome():
+    """Chrome 137+ disabled --load-extension; without turning
+    DisableLoadExtensionCommandLineSwitch off, a dropped-in uBlock never loads
+    (the 2026-07-22 root cause). The shared disable-features set — reached by BOTH
+    the agent window (_LAUNCH_ARGS) and the clean/media window — must carry it, and
+    Chrome honors only ONE --disable-features so it must be a single string."""
+    assert "DisableLoadExtensionCommandLineSwitch" in browser_session._DISABLE_FEATURES
+    feature_flags = [a for a in browser_session._LAUNCH_ARGS if a.startswith("--disable-features=")]
+    assert feature_flags == [f"--disable-features={browser_session._DISABLE_FEATURES}"]
+
+
+def test_no_extension_flag_ever_disables_the_profiles_own_extensions(monkeypatch, tmp_path):
+    """--disable-extensions-except is NEVER emitted — it disabled the profile's
+    Web-Store uBlock and blocked new installs from taking effect (the double-symptom
+    of the 2026-07-22 report)."""
+    ext_root = tmp_path / "browser_extensions"
+    ublock = ext_root / "ublock-origin-lite"
+    ublock.mkdir(parents=True)
+    (ublock / "manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(browser_session, "BROWSER_EXTENSIONS_DIR", ext_root)
+    assert not any(
+        a.startswith("--disable-extensions-except")
+        for a in browser_session._extension_load_args()
+    )
+
+
+def test_extension_discovery_never_raises(monkeypatch):
+    """A scan failure yields [] (the browser launches extension-free), never an
+    exception that would break a launch — the _harden_profile discipline."""
+    class _Boom:
+        def mkdir(self, *a, **k):
+            raise OSError("nope")
+
+    monkeypatch.setattr(browser_session, "BROWSER_EXTENSIONS_DIR", _Boom())
+    assert browser_session._extension_load_args() == []

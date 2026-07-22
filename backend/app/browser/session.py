@@ -133,6 +133,14 @@ from app.tools.browser_tools import _host_is_blocked, _validate_url
 
 # --------------------------------------------------------------------- limits
 BROWSER_PROFILE_DIR = Path.home() / ".jarvis" / "browser"
+# OPT-IN unpacked extensions (2026-07-22). The ~/.jarvis/browser profile is a
+# Playwright automation browser, so the Chrome Web Store refuses installs; the
+# only way an extension reaches this profile is loaded at LAUNCH from an unpacked
+# folder (--load-extension). Every immediate subdirectory of this dir that holds
+# a manifest.json is loaded, into EVERY window (agent loop + hand-off windows).
+# OFF BY DEFAULT: an empty/absent dir adds no flags, so the extension-free posture
+# is unchanged until the user drops a folder in. See _extension_load_args().
+BROWSER_EXTENSIONS_DIR = Path.home() / ".jarvis" / "browser_extensions"
 NAV_TIMEOUT_MS = 20_000
 # A launch on the SHARED single-instance profile can HANG indefinitely (not fail)
 # when an orphaned Chromium still holds the OS profile lock — Chromium the process
@@ -394,6 +402,22 @@ _CHANNELS: tuple[Optional[str], ...] = ("chrome", None, "msedge")
 # autoplay — and the explicit .play() ensure_playing() issues at the handoff —
 # start. It only affects MEDIA autoplay permission; it touches none of the
 # READ-mode guarantees (Rule 1 still aborts every non-GET during the agent loop).
+# Chrome reads only the LAST --disable-features on a command line, so every
+# feature we want off MUST live in ONE string shared by every window (agent +
+# clean hand-off) — a second --disable-features anywhere silently drops the rest.
+#   - Autofill/Translate/OptimizationHints: chatter trims (the belt for the
+#     no-credentials posture; the real mechanism is _harden_profile's prefs).
+#   - DisableLoadExtensionCommandLineSwitch: Chrome 137+ (mid-2025) turned OFF the
+#     --load-extension switch by default; on Chrome 150 our unpacked-extension flag
+#     was silently ignored and a dropped-in uBlock never loaded (live report
+#     2026-07-22). Disabling this feature re-enables the switch where Chrome still
+#     honors it. (A profile's OWN Web-Store-installed extensions load without any
+#     of this — see _extension_load_args.)
+_DISABLE_FEATURES = (
+    "AutofillServerCommunication,Translate,OptimizationHints,"
+    "DisableLoadExtensionCommandLineSwitch"
+)
+
 _LAUNCH_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--autoplay-policy=no-user-gesture-required",
@@ -402,11 +426,7 @@ _LAUNCH_ARGS = [
     "--disable-component-update",
     "--disable-domain-reliability",
     "--no-default-browser-check",
-    # Jarvis's browser keeps SESSIONS, never CREDENTIALS: stop autofill's server
-    # chatter as a belt (the real mechanism is the Preferences seeding in
-    # _harden_profile — a flag name can churn, the prefs keys do not). Translate /
-    # OptimizationHints are folded in here so the whole set is one switch.
-    "--disable-features=AutofillServerCommunication,Translate,OptimizationHints",
+    f"--disable-features={_DISABLE_FEATURES}",
 ]
 
 # Preferences keys that turn Chrome's password manager + autofill OFF in the
@@ -478,6 +498,45 @@ def _harden_profile(profile_dir: Path) -> None:
                 target.unlink()
         except Exception as exc:
             logger.debug(f"profile harden clear {name}: {type(exc).__name__}: {exc}")
+
+def _extension_load_args() -> list[str]:
+    """The --load-extension flag for every unpacked extension the user dropped into
+    BROWSER_EXTENSIONS_DIR (an immediate subdir with a manifest.json), or [] when
+    there are none — so the default extension-free posture adds NOTHING. Best-effort
+    and NEVER raises (the _harden_profile discipline: a launch must never fail
+    because extension discovery did); a scan/mkdir failure yields [] and the browser
+    launches without extensions.
+
+    --load-extension ONLY — NEVER --disable-extensions-except (live report
+    2026-07-22, the double-symptom this fixes): that switch disables every OTHER
+    extension in the profile, including a uBlock the user installed from the Web
+    Store, AND makes a fresh Web-Store install fail to take effect (a new extension
+    is not in the "except" list). --load-extension is additive, so the profile's own
+    installed extensions keep loading alongside any unpacked one. The switch itself
+    is only honored because DisableLoadExtensionCommandLineSwitch is off (see
+    _DISABLE_FEATURES) — where Chrome has removed even that escape hatch, a profile's
+    Web-Store-installed extension is the reliable path in and needs none of this.
+
+    Applied to the Playwright context AND the clean hand-off subprocess. NOTE the
+    CDP agent window refuses --load-extension regardless (see the RULE 0 note in the
+    tests) — the extension that matters is the ad blocker in the clean MEDIA/watch
+    window, where the interceptor is off during playback."""
+    try:
+        BROWSER_EXTENSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        paths = [
+            str(child.resolve())
+            for child in sorted(BROWSER_EXTENSIONS_DIR.iterdir())
+            if child.is_dir() and (child / "manifest.json").is_file()
+        ]
+    except Exception as exc:
+        logger.debug(f"extension discovery: {type(exc).__name__}: {exc}")
+        return []
+    if not paths:
+        return []
+    csv = ",".join(paths)
+    logger.info(f"browser: loading {len(paths)} unpacked extension(s) from {BROWSER_EXTENSIONS_DIR}")
+    return [f"--load-extension={csv}"]
+
 
 # Native HTML5 media control, run at the playback handoff. GENERIC across every
 # site that uses <video>/<audio> (YouTube, Spotify web, Netflix, ...) — this is
@@ -600,6 +659,59 @@ def reset_host_cache() -> None:
     _host_block_cache.clear()
 
 
+# ------------------------------------------------------- ad / tracker block
+# WHY THIS LIVES IN CODE, NOT IN AN EXTENSION (2026-07-22). The agent-loop
+# window is driven over CDP, and current Chrome REFUSES to load an unpacked
+# extension (uBlock) in a CDP-controlled browser — proven live: chrome://
+# extensions shows zero, no extension service worker registers, a known ad
+# script still loads. So ad/tracker network blocking lives HERE, in the
+# interceptor we already own for READ-mode. It only ever ABORTS requests to
+# known ad/tracker hosts, so it STRENGTHENS the READ-mode guarantee — it never
+# lets anything through. The payoff is two-fold and exactly what the user asked
+# for: an ad's iframe/script that never loads is a fake "Play" button the loop
+# can never SEE or MISCLICK, and far fewer requests means a faster, cleaner
+# browse on ad-heavy streaming sites. Content hosts are NEVER on this list, so
+# no legitimate goal is affected. uBlock still covers the normal hand-off
+# window (a real, non-automation Chrome, where it does load).
+#
+# A compact, high-value list — the big trackers plus the ad networks that
+# blanket pirate/streaming/anime sites with pop-unders and fake players. This
+# is not a full EasyList; it targets the hosts that actually produce
+# misclickable ads. Matched subdomain-aware (host == d or endswith '.'+d).
+_AD_HOSTS: frozenset[str] = frozenset({
+    # Google ad/analytics stack
+    "doubleclick.net", "googlesyndication.com", "googletagservices.com",
+    "googleadservices.com", "google-analytics.com", "googletagmanager.com",
+    "adservice.google.com", "pagead2.googlesyndication.com",
+    # Big programmatic exchanges / trackers
+    "amazon-adsystem.com", "adnxs.com", "rubiconproject.com", "pubmatic.com",
+    "criteo.com", "criteo.net", "casalemedia.com", "openx.net", "3lift.com",
+    "moatads.com", "scorecardresearch.com", "quantserve.com", "taboola.com",
+    "outbrain.com", "revcontent.com", "mgid.com", "bidswitch.net",
+    "sharethrough.com", "smartadserver.com", "yieldmo.com", "adform.net",
+    # Pop-under / redirect ad networks that plague streaming & anime sites
+    "popads.net", "popcash.net", "propellerads.com", "propellerclick.com",
+    "propu.sh", "exoclick.com", "exosrv.com", "juicyads.com", "hilltopads.net",
+    "adsterra.com", "adsterranetwork.com", "poweredby.jads.co", "clickadu.com",
+    "trafficjunky.net", "trafficjunky.com", "admaven.com", "onclickalgo.com",
+    "onclickmax.com", "clickmoi.com", "adcash.com", "coinzilla.com",
+    "a-ads.com", "monetag.com", "pushncode.com", "highperformanceformat.com",
+    "bebi.com", "histats.com", "luckyorange.com", "hotjar.com",
+})
+
+
+def _is_ad_host(host: Optional[str]) -> bool:
+    """True when a request host is a known ad/tracker (subdomain-aware). Cheap,
+    no I/O, no DNS — a pure suffix check, so it can front every request."""
+    if not host:
+        return False
+    h = host.strip().lower().rstrip(".")
+    for d in _AD_HOSTS:
+        if h == d or h.endswith("." + d):
+            return True
+    return False
+
+
 def _normalize_origin(raw: str) -> str:
     """'https://www.YouTube.com/results?q=x' or 'YouTube.com' → 'youtube.com'.
     Accepts a bare host or a full URL so callers never have to care."""
@@ -643,11 +755,14 @@ class _RealBrowser:
             logger.debug(f"context page listener: {type(exc).__name__}: {exc}")
 
     async def close(self) -> None:
-        for shutdown in (self._context.close, self._playwright.stop):
-            try:
-                await shutdown()
-            except Exception as exc:  # a half-dead browser must not raise here
-                logger.debug(f"browser teardown: {type(exc).__name__}: {exc}")
+        # Close only the persistent CONTEXT — the Playwright driver is SHARED
+        # (started once, reused across browses; see ensure_playwright_driver) and
+        # is stopped only at shutdown via stop_playwright_driver. Stopping it per
+        # browse is exactly the per-turn cold-spawn this design removes.
+        try:
+            await self._context.close()
+        except Exception as exc:  # a half-dead context must not raise here
+            logger.debug(f"browser teardown: {type(exc).__name__}: {exc}")
         # A Chromium on ~/.jarvis/browser can still hold the single-instance
         # profile lock for a moment after close() returns; record when we let go
         # so a hand-off window launched right after settles first (see
@@ -656,15 +771,41 @@ class _RealBrowser:
         _mark_profile_released()
 
 
-async def _start_playwright() -> Any:
-    """Import Playwright lazily and start its driver — the one place the optional
-    dependency is touched, so a base install without it fails clean (the seam a
-    test overrides to drive the launch/retry path without a real Chromium).
+# ------------------------------------------------- shared Playwright driver
+# The Playwright Node driver (async_playwright().start()) is spawned ONCE and
+# reused for every launch — NOT per session. WHY (live incident 2026-07-22, the
+# "processing forever" hang): the driver is a Node subprocess spawn that can
+# STALL COLD on the first browse — 98s of dead silence, no log, no timeout,
+# hung at async_playwright().start() BEFORE any launch attempt logged. Three
+# faults compounded: (1) the spawn had no log on either side (invisible); (2)
+# its asyncio.wait_for(..., 30) did not bound it — wait_for cancels the inner
+# coroutine then AWAITS that cancellation, and a Windows subprocess spawn that
+# ignores cancellation hangs wait_for past its own timeout (proven: the 30s
+# mark passed with zero events); (3) every _RealBrowser.close() stopped its own
+# driver, so a cold spawn happened inside the chat turn on EVERY browse.
+#
+# The fix: start the driver once at backend startup on the dedicated browser
+# loop (main._prewarm_browser_stack → ensure_playwright_driver), keep it as a
+# module singleton, and reuse it — so a cold spawn (and any stall) happens in
+# the background at startup, never in a user's chat turn, and every later
+# launch is just a launch_persistent_context.
+#
+# _PLAYWRIGHT_STARTER is the injectable seam (the BROWSER_FACTORY / _PROFILE_REAPER
+# precedent) so the hermetic suite drives start / stall / restart without ever
+# spawning a real Node driver.
+DRIVER_START_TIMEOUT_SECONDS = 30.0
+_shared_playwright: Optional[Any] = None
+_driver_lock: Optional[asyncio.Lock] = None
+_driver_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+# A start we abandoned (timed out) may still complete later; hold a reference so
+# it is not GC'd mid-flight, and stop the stray driver when it lands.
+_DETACHED_STARTS: set = set()
+_PLAYWRIGHT_STARTER: Optional[Callable[[], Any]] = None
 
-    Bounded: the driver is a Node subprocess spawn, which has no native cap — on
-    a machine thrashing under startup load it can stall silently (the 2026-07-21
-    incident's launch phase produced ZERO log lines before the outer belt fired).
-    A stall becomes a named, retryable failure instead."""
+
+async def _default_playwright_starter() -> Any:
+    """Import Playwright lazily and start its Node driver — the one place the
+    optional dependency is touched, so a base install without it fails clean."""
     try:
         from playwright.async_api import async_playwright
     except ImportError as exc:
@@ -672,17 +813,117 @@ async def _start_playwright() -> Any:
             "Browser control needs Playwright, which is not installed. "
             "Install it with: pip install playwright"
         ) from exc
+    return await async_playwright().start()
+
+
+def _get_driver_lock() -> asyncio.Lock:
+    """Serialize driver start, rebinding the lock per running loop (the
+    HeldSessionRegistry._get_lock rule) — the hermetic suite drives this from a
+    fresh loop per test, and an asyncio.Lock binds to the first loop that awaits
+    it. On the long-lived browser loop the rebind branch never fires after the
+    first call."""
+    global _driver_lock, _driver_lock_loop
+    loop = asyncio.get_running_loop()
+    if _driver_lock is None or _driver_lock_loop is not loop:
+        _driver_lock = asyncio.Lock()
+        _driver_lock_loop = loop
+    return _driver_lock
+
+
+def _stop_stray_driver(task: "asyncio.Future") -> None:
+    """A driver start we ABANDONED (timed out) may still complete later; stop the
+    stray driver so a slow spawn does not leak a Node process. Best-effort."""
+    if task.cancelled() or task.exception() is not None:
+        return
+    driver = task.result()
+
+    async def _stop() -> None:
+        try:
+            await driver.stop()
+        except Exception:
+            pass
+
     try:
-        return await asyncio.wait_for(async_playwright().start(), timeout=30)
-    except asyncio.TimeoutError:
-        raise BrowserUnavailable(
-            "The Playwright browser driver did not start within 30s (machine "
-            "under heavy load?). Try the task again."
+        asyncio.get_running_loop().create_task(_stop())
+    except Exception:
+        pass
+
+
+async def ensure_playwright_driver() -> Any:
+    """Return the live shared Playwright driver, starting it if absent. Idempotent
+    and serialized. GENUINELY BOUNDED: a stalled spawn (which ignores cancellation,
+    so asyncio.wait_for would itself hang awaiting the cancel — the 2026-07-22
+    incident) is ABANDONED in a detached task and turned into a named, retryable
+    BrowserUnavailable within DRIVER_START_TIMEOUT_SECONDS, never an endless
+    spinner. Logs the spawn on both sides so the step is never invisible again.
+    Runs on the dedicated browser loop (Playwright objects are loop-bound)."""
+    global _shared_playwright
+    if _shared_playwright is not None:
+        return _shared_playwright
+    async with _get_driver_lock():
+        if _shared_playwright is not None:  # settled while we waited for the lock
+            return _shared_playwright
+        starter = _PLAYWRIGHT_STARTER or _default_playwright_starter
+        logger.info("browser: starting Playwright driver…")
+        started = time.monotonic()
+        task = asyncio.ensure_future(starter())
+        try:
+            done, _pending = await asyncio.wait(
+                {task}, timeout=DRIVER_START_TIMEOUT_SECONDS
+            )
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        if task not in done:
+            # Stalled. Do NOT await its cancellation (awaiting an uncancellable
+            # subprocess spawn is the hang itself). Detach it so a late driver is
+            # stopped rather than leaked, and fail clean + retryable.
+            _DETACHED_STARTS.add(task)
+            task.add_done_callback(_DETACHED_STARTS.discard)
+            task.add_done_callback(_stop_stray_driver)
+            logger.warning(
+                "browser: Playwright driver did not start within "
+                f"{DRIVER_START_TIMEOUT_SECONDS:.0f}s — abandoning; will retry"
+            )
+            raise BrowserUnavailable(
+                "The browser driver did not start in time — try again in a moment."
+            )
+        driver = task.result()  # re-raises a real start error (ImportError → BrowserUnavailable)
+        _shared_playwright = driver
+        logger.info(
+            f"browser: Playwright driver ready in {time.monotonic() - started:.1f}s"
         )
+        return driver
+
+
+def reset_playwright_driver() -> None:
+    """Drop the shared driver reference so the NEXT ensure_playwright_driver()
+    re-warms a fresh one (restart-on-death). Does NOT await a stop — used after a
+    launch that failed because the driver was gone, and a dead driver has nothing
+    to stop."""
+    global _shared_playwright
+    _shared_playwright = None
+
+
+async def stop_playwright_driver() -> None:
+    """Stop the shared Playwright driver — called once at shutdown. Best-effort and
+    idempotent. Must run on the browser loop (the driver is loop-bound)."""
+    global _shared_playwright
+    driver = _shared_playwright
+    _shared_playwright = None
+    if driver is None:
+        return
+    try:
+        await driver.stop()
+    except Exception as exc:
+        logger.debug(f"stop playwright driver: {type(exc).__name__}: {exc}")
 
 
 async def _default_browser_factory() -> Any:
-    playwright = await _start_playwright()
+    # The SHARED driver, warmed once at startup (see ensure_playwright_driver) —
+    # so this factory is just a launch_persistent_context, never a cold Node
+    # subprocess spawn inside the chat turn.
+    playwright = await ensure_playwright_driver()
 
     BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     # SESSIONS, NOT CREDENTIALS: turn off the profile's password manager/autofill
@@ -704,7 +945,7 @@ async def _default_browser_factory() -> Any:
                 user_data_dir=str(BROWSER_PROFILE_DIR),
                 headless=False,           # the user watches — see the docstring
                 service_workers="block",  # rule 1 is void without this
-                args=list(_LAUNCH_ARGS),
+                args=list(_LAUNCH_ARGS) + _extension_load_args(),
                 **({"channel": channel} if channel else {}),
             ),
             timeout=min(LAUNCH_TIMEOUT_SECONDS, remaining),
@@ -758,14 +999,17 @@ async def _default_browser_factory() -> Any:
 
         raise _launch_failure(errors)
     except BrowserUnavailable:
-        await playwright.stop()
+        # A total launch failure may mean the SHARED driver wedged (vs. just a
+        # locked profile); drop it so the NEXT browse re-warms a fresh one. Never
+        # stop it here — it is shared, and re-warming is cheap and logged.
+        reset_playwright_driver()
         raise
     except asyncio.CancelledError:
-        # The OUTER browse belt fired mid-launch. This coroutine cannot reliably
-        # await its own cleanup while being cancelled, so tear the driver (and any
-        # half-spawned profile-holding Chrome) down in a detached task — leaving
-        # them alive is how one timed-out browse poisons every later one.
-        _schedule_launch_cleanup(playwright)
+        # The OUTER browse belt fired mid-launch. Reclaim any half-spawned
+        # profile-holding Chrome in a detached task (a cancelled coroutine's own
+        # finally cannot await without re-raising). The SHARED driver is left
+        # running — it is reused by the next browse, not owned by this launch.
+        _schedule_launch_cleanup()
         raise
 
 
@@ -782,16 +1026,13 @@ def _launch_failure(errors: list[str]) -> BrowserUnavailable:
 _CLEANUP_TASKS: set = set()
 
 
-def _schedule_launch_cleanup(playwright: Any) -> None:
-    """Best-effort teardown of an ABANDONED launch (the outer browse belt
-    cancelled us mid-chain): stop the Node driver, then reclaim any half-spawned
-    Chrome already holding the profile lock. Detached because a cancelled
-    coroutine's own finally cannot await without re-raising CancelledError."""
+def _schedule_launch_cleanup() -> None:
+    """Best-effort reclaim after an ABANDONED launch (the outer browse belt
+    cancelled us mid-chain): kill any half-spawned Chrome already holding the
+    profile lock. Detached because a cancelled coroutine's own finally cannot
+    await without re-raising CancelledError. The SHARED Playwright driver is NOT
+    stopped here — it outlives any single launch (see ensure_playwright_driver)."""
     async def _cleanup() -> None:
-        try:
-            await playwright.stop()
-        except Exception as exc:
-            logger.debug(f"abandoned-launch driver stop: {type(exc).__name__}: {exc}")
         try:
             await asyncio.to_thread(reclaim_orphaned_profile)
         except Exception as exc:
@@ -823,6 +1064,7 @@ class InterceptStats:
     blocked_mutations: int = 0
     blocked_navigations: int = 0
     blocked_hosts: int = 0
+    blocked_ads: int = 0
     allowed_commits: int = 0
     blocked_downloads: int = 0
     mutation_urls: list[str] = field(default_factory=list)
@@ -837,6 +1079,7 @@ class InterceptStats:
             "blocked_mutations": self.blocked_mutations,
             "blocked_navigations": self.blocked_navigations,
             "blocked_hosts": self.blocked_hosts,
+            "blocked_ads": self.blocked_ads,
             "allowed_commits": self.allowed_commits,
             "blocked_downloads": self.blocked_downloads,
             "mutation_urls": self.mutation_urls[:10],
@@ -1004,7 +1247,7 @@ class BrowserSession:
                 f"requests={s.total_requests} ssrf_checks={s.ssrf_checks} "
                 f"settle={s.settle_seconds:.1f}s blocked_mut={s.blocked_mutations} "
                 f"blocked_host={s.blocked_hosts} blocked_nav={s.blocked_navigations} "
-                f"commits={s.allowed_commits}"
+                f"blocked_ads={s.blocked_ads} commits={s.allowed_commits}"
             )
         except Exception:
             pass
@@ -1061,6 +1304,18 @@ class BrowserSession:
             # Browser-internal, not a request to anywhere.
             if parsed.scheme in _LOCAL_SCHEMES:
                 await self._safe_route(route.continue_)
+                return
+
+            # RULE 0 — AD / TRACKER BLOCK (2026-07-22). Fronts every request
+            # because it is the cheapest check (a pure suffix test, no DNS) and
+            # the highest value on ad-heavy sites: an ad iframe/script that never
+            # loads is a fake "Play" button the loop can never SEE or misclick.
+            # It only ABORTS known ad/tracker hosts, so it can never weaken the
+            # READ-mode guarantee — it is uBlock's network filtering, done in the
+            # interceptor because Chrome refuses the real extension under CDP.
+            if _is_ad_host(parsed.hostname):
+                self.stats.blocked_ads += 1
+                await self._safe_route(route.abort)
                 return
 
             # RULE 1 — the NAVIGATION guard (action-level safety, 2026-07-21).
@@ -1585,24 +1840,35 @@ async def register_media(session: "BrowserSession", *, title: str, url: str) -> 
 
 
 async def stop_media() -> bool:
-    """Close the current media session and clear the registry. True when a
-    session was actually closed. Idempotent — stopping nothing is not an error."""
-    return await _MEDIA.discard()
+    """Close the current media — the in-place BrowserSession media session AND the
+    clean normal-window hand-off (2026-07-22) — and clear both. True when
+    something was actually closed. Idempotent — stopping nothing is not an error.
+    This is the ONE stop entry every caller uses (the stop_media tool, the API,
+    and every 'free the profile lock before launching' site), so it must cover
+    both media surfaces."""
+    closed_session = await _MEDIA.discard()
+    closed_window = await stop_media_window()
+    return closed_session or closed_window
 
 
 def active_media() -> Optional[dict[str, str]]:
-    """{title, url} for the current media session, or None. Cheap, no I/O — the
-    StatusBar polls this freely (the context_status precedent)."""
-    return _MEDIA.peek()
+    """{title, url} for the current media — the in-place session OR the clean
+    normal-window hand-off (2026-07-22). Cheap, no I/O — the StatusBar polls this
+    freely (the context_status precedent). Only one is ever active (one profile,
+    one live context)."""
+    return _MEDIA.peek() or active_media_window()
 
 
 async def reset_media() -> None:
     """Test/shutdown hook — close and clear EVERY held session slot plus the
     sign-in window. Delegates to registry.close_all_held(), so every slot is
     covered BY CONSTRUCTION — the old hand-listed version silently missed the
-    discovery slot, the exact bug class the registry table exists to end."""
+    discovery slot, the exact bug class the registry table exists to end. The clean
+    media window (2026-07-22) is a subprocess, not a held BrowserSession, so it is
+    closed explicitly."""
     await _held.close_all_held()
     await close_login_window()
+    await stop_media_window()
 
 
 # ------------------------------------------------ committed-form result window
@@ -1651,6 +1917,59 @@ def active_result_window() -> Optional[dict[str, str]]:
     """{title, url} for the open result window, or None. Cheap, no I/O — the
     StatusBar polls it (the active_media precedent)."""
     return _RESULT.peek()
+
+
+# ------------------------------------------------- persistent browse window
+# Session continuity (2026-07-21). Live testing showed every `browse` step of a
+# plan launching its OWN Chrome and closing it when the step ended: step 2
+# relaunched at the start URL and RE-DID step 1's navigation (the books.toscrape
+# "opened the Himalaya book twice" report), a fresh session's `back` had no
+# history to go back through, and the window closed the instant a task finished
+# so the user never saw the result (the LinkedIn compose report). The agent's
+# window is held HERE between browse runs instead: the next browse TAKES it and
+# continues exactly where the last one left off (no relaunch, no flicker, real
+# history), and after the last run it simply stays open until the user closes it
+# or another browser task needs the profile.
+#
+# SECURITY — same argument as the result window, stated once there: the held
+# session keeps its interceptor (it is still the AGENT's window and may be
+# resumed — a viewer between runs, never a free-driving window), there is no
+# armed commit permit, and holds are memory-only, so a restart closes the window
+# with the process (the honest outcome). A user-driven form submit in this
+# window is still gated — the Close button (StatusBar) is the exit to a normal
+# browser.
+_BROWSE = _held.REGISTRIES["browse"]
+
+
+async def hold_browse_window(
+    session: "BrowserSession", *, title: str, url: str, goal: str = ""
+) -> None:
+    """Adopt a finished browse run's live session as THE persistent agent
+    window, closing any previous one. After this the caller must NOT close the
+    session — the registry owns it until take_browse_window()/
+    close_browse_window()."""
+    await _BROWSE.hold(
+        session, {"title": title or "", "url": url or "", "goal": goal or ""}
+    )
+
+
+async def take_browse_window() -> Optional["BrowserSession"]:
+    """Remove and return the held agent window for REUSE by the next browse run
+    (the caller owns it now), or None — nothing held, or a restart dropped it,
+    and the caller launches fresh."""
+    return await _BROWSE.take()
+
+
+async def close_browse_window() -> bool:
+    """Close the persistent agent window and clear the slot. True when one was
+    actually closed. Idempotent — closing nothing is not an error."""
+    return await _BROWSE.discard()
+
+
+def active_browse_window() -> Optional[dict[str, str]]:
+    """{title, url, goal} for the held agent window, or None. Cheap, no I/O —
+    the StatusBar/API poll it (the active_media precedent)."""
+    return _BROWSE.peek()
 
 
 # ---------------------------------------------------------- commit sessions
@@ -1864,17 +2183,18 @@ def _find_system_browser() -> Optional[str]:
     return None
 
 
-def _default_clean_launcher(url: str) -> Optional[Any]:
+def _spawn_clean_browser(url: str, *, extra_args: tuple[str, ...] = ()) -> Optional[Any]:
     """Launch a plain system Chrome/Edge on the ~/.jarvis/browser profile as a
     normal, user-driven window — no CDP, no --enable-automation, no
     remote-debugging port (the whole point: a browser Turnstile/Google do not
-    read as a bot). Returns the Popen handle, or None when no browser is found."""
+    read as a bot). `extra_args` adds per-purpose flags (e.g. the media window's
+    autoplay policy). Returns the Popen handle, or None when no browser is found."""
     exe = _find_system_browser()
     if not exe:
         return None
     # The no-saved-password / no-autofill posture holds in the clean window too;
-    # done HERE (not in _open_clean_login) so an injected test launcher never
-    # touches the real ~/.jarvis/browser profile on disk.
+    # done HERE (not in the callers) so an injected test launcher never touches the
+    # real ~/.jarvis/browser profile on disk.
     BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     _harden_profile(BROWSER_PROFILE_DIR)
     args = [
@@ -1882,6 +2202,13 @@ def _default_clean_launcher(url: str) -> Optional[Any]:
         f"--user-data-dir={BROWSER_PROFILE_DIR}",
         "--no-first-run",
         "--no-default-browser-check",
+        # The profile's OWN installed extensions (e.g. a Web-Store uBlock) load
+        # here automatically — this window is a normal, non-CDP Chrome. The
+        # disable-features set is what lets any *unpacked* --load-extension below be
+        # honored on Chrome 137+ (and folds in the autofill/chatter trims).
+        f"--disable-features={_DISABLE_FEATURES}",
+        *_extension_load_args(),
+        *extra_args,
         "--new-window",
         url,
     ]
@@ -1889,6 +2216,13 @@ def _default_clean_launcher(url: str) -> Optional[Any]:
     # the backend, and so taskkill /T can reach Chrome's child tree.
     creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
     return subprocess.Popen(args, creationflags=creationflags)
+
+
+def _default_clean_launcher(url: str) -> Optional[Any]:
+    """The sign-in / verification hand-off window: a plain user-driven Chrome/Edge
+    on the shared profile. Returns the Popen handle, or None when no browser is
+    found."""
+    return _spawn_clean_browser(url)
 
 
 def _clean_login_enabled() -> bool:
@@ -1923,6 +2257,25 @@ def _terminate_clean_proc(proc: Any) -> None:
         logger.debug(f"clean login terminate: {type(exc).__name__}: {exc}")
 
 
+async def _verify_clean_proc(proc: Any) -> Optional[Any]:
+    """Return `proc` if it stayed alive past the profile-handoff verify window,
+    else None. A real subprocess.Popen exposes poll(): while the browser process
+    runs it returns None; if the process EXITED within a couple of seconds it
+    handed the URL to another Chromium on the same profile and closed with no
+    visible window (the 2026-07-19 reported bug). A test fake with no poll() cannot
+    be verified and is assumed alive (unchanged)."""
+    if proc is None:
+        return None
+    poll = getattr(proc, "poll", None)
+    if callable(poll):
+        deadline = time.monotonic() + _CLEAN_LOGIN_VERIFY_SECONDS
+        while time.monotonic() < deadline:
+            if poll() is not None:
+                return None
+            await asyncio.sleep(0.2)
+    return proc
+
+
 async def _open_clean_login(url: str) -> Optional[Any]:
     """Launch the clean, non-automation hand-off window and return its handle, or
     None on any failure (no browser found, spawn error, or a hand-off exit) so the
@@ -1938,27 +2291,14 @@ async def _open_clean_login(url: str) -> Optional[Any]:
             f"window: {type(exc).__name__}: {exc}"
         )
         return None
-    if proc is None:
-        return None
-    # VERIFY the window actually came up. A real subprocess.Popen exposes poll():
-    # while the browser process runs it returns None; if the process EXITED within
-    # a couple of seconds it handed the URL to another Chromium on the same profile
-    # and closed with no visible window (the reported bug). Treat that as a launch
-    # failure so the caller falls back to the Playwright window we control. A test
-    # fake with no poll() cannot be verified and is assumed alive (unchanged).
-    poll = getattr(proc, "poll", None)
-    if callable(poll):
-        deadline = time.monotonic() + _CLEAN_LOGIN_VERIFY_SECONDS
-        while time.monotonic() < deadline:
-            if poll() is not None:
-                logger.info(
-                    "browser: the clean sign-in window handed off to an existing "
-                    "Chrome on the profile and exited — falling back to the "
-                    "automation window"
-                )
-                return None
-            await asyncio.sleep(0.2)
-    return proc
+    verified = await _verify_clean_proc(proc)
+    if verified is None and proc is not None:
+        logger.info(
+            "browser: the clean sign-in window handed off to an existing "
+            "Chrome on the profile and exited — falling back to the "
+            "automation window"
+        )
+    return verified
 
 
 async def _close_login_handles_locked() -> bool:
@@ -1994,6 +2334,7 @@ async def open_login_window(url: str = DEFAULT_LOGIN_URL) -> None:
     global _login_browser, _clean_login_proc
     await stop_media()
     await close_result_window()  # one live persistent context (the profile lock)
+    await close_browse_window()  # the held agent window holds it too
     async with _login_lock:
         # Clean, non-automation window (2026-07-19) — strongly preferred so
         # Cloudflare Turnstile / Google don't fingerprint it and the user's
@@ -2063,6 +2404,142 @@ def login_window_open() -> bool:
     return _login_browser is not None or _clean_login_proc is not None
 
 
+# --------------------------------------------------- clean-window media hand-off
+# WATCH/PLAY in a NORMAL window (2026-07-22, user request). A "play this on
+# anikoto/youtube" goal used to play IN the automation window: the agent found the
+# video, then enter_playback_mode() lifted the interceptor and it played in place.
+# That works for YouTube but is miserable on ad-heavy streaming/piracy sites — the
+# interceptor is fully OFF during playback (streaming throughput), so the code-side
+# ad block (Rule 0) cannot cover watching, and the user hit pop-under ads and a
+# dead page clicking around.
+#
+# The fix: the agent still does the FINDING in the automation window (interceptor
+# on, Rule 0 blocking ads), then hands the final video URL to a plain, user-driven
+# Chrome/Edge window on the SAME ~/.jarvis/browser profile — signed in, and with
+# uBlock loaded (an unpacked extension loads in a NON-CDP window; the agent window
+# cannot load it). uBlock's filter lists cover the rotating pop-under domains the
+# static Rule 0 host list never can, so WATCHING is ad-free.
+#
+# THE ONE HONEST TRADE-OFF: a non-automation window has no CDP, so Jarvis cannot
+# press play in it. --autoplay-policy=no-user-gesture-required starts standard
+# players (YouTube) on their own; a custom anime/streaming player may need ONE user
+# click — and uBlock then blocks the ad-popup that click usually triggers.
+#
+# One profile = one live context: the clean media window holds the profile lock, so
+# a new browse/login/commit closes it first via stop_media() (which now covers this
+# window too). The handle is a subprocess.Popen — NOT a BrowserSession — so it
+# cannot live in the _held registry table (that closes .close() on Playwright
+# pages); it is tracked here beside the sign-in window, whose machinery it reuses.
+_MEDIA_AUTOPLAY_ARGS = ("--autoplay-policy=no-user-gesture-required",)
+
+# The injectable seam (the CLEAN_BROWSER_LAUNCHER precedent): tests point it at a
+# fake so the suite never spawns a real Chrome; production leaves it None and uses
+# the default launcher below.
+CLEAN_MEDIA_LAUNCHER: Optional[Callable[[str], Any]] = None
+
+_clean_media_proc: Optional[Any] = None
+_clean_media_meta: Optional[dict[str, str]] = None
+_media_window_lock = asyncio.Lock()
+
+
+def _default_clean_media_launcher(url: str) -> Optional[Any]:
+    """The watch/play hand-off window: a plain user-driven Chrome/Edge on the
+    shared profile with autoplay enabled so standard players start on their own.
+    Returns the Popen handle, or None when no browser is found."""
+    return _spawn_clean_browser(url, extra_args=_MEDIA_AUTOPLAY_ARGS)
+
+
+def clean_media_enabled() -> bool:
+    """Whether to hand a watch/play goal off to a clean normal window. In
+    production (no injected BROWSER_FACTORY) yes; under an injected factory (tests)
+    only when a clean media launcher is also injected — so the hermetic suite never
+    spawns a real Chrome and stays on the in-place-playback fallback unless a test
+    opts in explicitly (the _clean_login_enabled precedent)."""
+    if CLEAN_MEDIA_LAUNCHER is not None:
+        return True
+    return BROWSER_FACTORY is None
+
+
+async def _open_clean_media(url: str) -> Optional[Any]:
+    """Launch the clean, non-automation media window and return its handle, or None
+    on any failure (no browser found, spawn error, or a profile-handoff exit). The
+    default launcher hardens the profile; an injected test launcher touches no real
+    FS. Best-effort — never raises."""
+    launcher = CLEAN_MEDIA_LAUNCHER or _default_clean_media_launcher
+    try:
+        proc = await _maybe_await(launcher(url))
+    except Exception as exc:
+        logger.warning(
+            f"clean media window launch failed: {type(exc).__name__}: {exc}"
+        )
+        return None
+    verified = await _verify_clean_proc(proc)
+    if verified is None and proc is not None:
+        logger.info(
+            "browser: the clean media window handed off to an existing Chrome on "
+            "the profile and exited — nothing is playing"
+        )
+    return verified
+
+
+async def _close_media_window_locked() -> bool:
+    """Terminate the clean media window WITHOUT taking _media_window_lock (the
+    caller holds it). True when one was actually closed. Best-effort."""
+    global _clean_media_proc, _clean_media_meta
+    proc, _clean_media_proc = _clean_media_proc, None
+    _clean_media_meta = None
+    if proc is not None:
+        _terminate_clean_proc(proc)
+        _mark_profile_released()  # a browse re-run must wait out the profile lock
+        return True
+    return False
+
+
+async def open_media_window(url: str, *, title: str = "") -> bool:
+    """Open the shared profile as a NORMAL, user-driven window playing `url`
+    (uBlock loaded, autoplay on). Closes every other live context on the profile
+    first (one profile, one window), waits out the single-instance lock, then
+    launches. Returns True when the window came up, False otherwise (no system
+    browser, or a profile-handoff exit) — the caller reports 'not playing'
+    honestly. Best-effort — never raises."""
+    global _clean_media_proc, _clean_media_meta
+    # Free the single-profile lock: close the sign-in / result / held-browse
+    # windows and any prior media (session OR clean window) before launching.
+    await close_login_window()
+    await close_result_window()
+    await close_browse_window()
+    await _MEDIA.discard()  # a prior in-place BrowserSession media session
+    async with _media_window_lock:
+        await _close_media_window_locked()  # a prior clean media window
+        await _settle_profile()
+        proc = await _open_clean_media(url)
+        if proc is None:
+            return False
+        _clean_media_proc = proc
+        _clean_media_meta = {"title": title or "", "url": url or ""}
+        logger.info("browser: handed the video off to a clean normal window (uBlock, autoplay)")
+        return True
+
+
+async def stop_media_window() -> bool:
+    """Close the clean media window if open. True when one was actually closed.
+    Idempotent."""
+    async with _media_window_lock:
+        return await _close_media_window_locked()
+
+
+def active_media_window() -> Optional[dict[str, str]]:
+    """{title, url} for the clean media window, or None (also None once the user
+    has closed it themselves — poll() then reports it exited). Cheap, no I/O — the
+    StatusBar polls it via active_media() (the active_media precedent)."""
+    if _clean_media_proc is None or not _clean_media_meta:
+        return None
+    poll = getattr(_clean_media_proc, "poll", None)
+    if callable(poll) and poll() is not None:
+        return None  # the user closed the window
+    return dict(_clean_media_meta)
+
+
 async def shutdown_browser_windows() -> None:
     """Close every browser window Jarvis has open — EVERY held-session slot
     (media, result window, pending commit, challenge, discovery) AND the
@@ -2083,3 +2560,7 @@ async def shutdown_browser_windows() -> None:
         await close_login_window()
     except Exception as exc:
         logger.debug(f"shutdown close login window: {type(exc).__name__}: {exc}")
+    try:
+        await stop_media_window()  # the clean media window is a subprocess, not held
+    except Exception as exc:
+        logger.debug(f"shutdown close media window: {type(exc).__name__}: {exc}")

@@ -149,9 +149,11 @@ async def test_reset_for_tests_clears_every_slot_without_closing():
 
 
 def test_the_expected_slots_exist():
-    """The five held-session situations the stack currently has. A rename or
+    """The six held-session situations the stack currently has. A rename or
     removal here must be deliberate — session.py's domain wrappers and the
-    API/StatusBar surfaces key on these names."""
+    API/StatusBar surfaces key on these names. `browse` (2026-07-21) holds the
+    persistent agent window between browse runs, so a journey's steps reuse one
+    session and the window stays open for the user to see the result."""
     assert set(registry.REGISTRIES) == {
-        "media", "result_window", "commit", "challenge", "discovery",
+        "media", "result_window", "commit", "challenge", "discovery", "browse",
     }

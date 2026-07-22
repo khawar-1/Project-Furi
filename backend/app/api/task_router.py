@@ -70,6 +70,7 @@ from app.agents import (
 )
 from app.agents.summary import stream_completed_summary
 from app.api.agent import _plan_response
+from app.browser.grounding import ground_origins
 from app.db.persist import persist_message_best_effort
 from app.db.schemas import ChatRequest, StreamChunk
 from app.providers.base import LLMMessage, LLMProvider
@@ -124,6 +125,11 @@ _STRONG_DOMAIN_RE = re.compile(
     # X on ___" about — a small, stable vocabulary.
     r"\byoutube\b|\byou\s?tube\b|\bspotify\b|\bnetflix\b|\bvimeo\b|"
     r"\bsoundcloud\b|\btwitch\b|\bgithub\b|\bgitlab\b|"
+    # NOTE: naming individual sites here is a dead end — the browser stack is
+    # Skyvern-class ("act on ANY site, no per-site code", BROWSER_REFACTOR.md).
+    # A general navigation-intent signal (`_is_browse_intent` below, reusing
+    # grounding.ground_origins) fires for a site the user names WHETHER OR NOT it
+    # is in any list; do not extend this vocabulary — extend that.
     # Sign in to / operate a web app the user names (Phase 14 BROWSE, the github
     # sign-in incident 2026-07-18: "sign in to github and open my oldest repo"
     # named no domain noun, missed the gate, fell to plain chat — which then
@@ -329,6 +335,33 @@ def is_external_question(text: str) -> bool:
         return False
     return not _DEICTIC_SUBJECT_RE.match(subject.lstrip())
 
+
+def _is_browse_intent(text: str) -> bool:
+    """Does the user name a website to go to / act on? GENERAL, not a site list —
+    the browser stack is Skyvern-class (act on ANY site, no per-site code,
+    BROWSER_REFACTOR.md). `ground_origins` is the canonical "the user's OWN words
+    name a web origin" function the grounding layer already uses: a literal domain
+    ("open nytimes.com"), or a bare name directed at a navigation verb ("open
+    linkedin", "go to workday") — WHETHER OR NOT the site is in any map. Reusing it
+    means routing and grounding agree by construction: if the words ground a site,
+    the gate sends the turn to the planner, and the planner's grounding accepts
+    that same site. A false fire (a bare name that is not really a site) costs one
+    temp-0 classifier call answering CHAT — the recall-first trade.
+
+    Live bug 2026-07-21: "open linkedin and go to the networks tab and open profile
+    of anas mubashar" named no strong noun and no "sign in" verb, so the gate
+    missed and it fell to plain chat — which offered a "magic word" rephrase and,
+    on the retry, fabricated "that instruction has been passed to the system."
+    Adding `linkedin` to the strong-noun list was the WRONG fix (per-site code the
+    refactor forbids; it would miss the next site named); this general signal is
+    the right one. NB an EARLIER "go to linkedin and SEARCH anas…" only worked by
+    the accident of containing "search" (a strong verb), not by any site logic."""
+    try:
+        return bool(ground_origins(text))
+    except Exception:  # grounding is best-effort; a gate miss is never a crash
+        return False
+
+
 def looks_like_task(text: str) -> bool:
     """Deterministic pre-filter, tuned for RECALL: a strong computer-domain
     noun fires alone (any verb, any phrasing); an external question fires
@@ -346,6 +379,9 @@ def looks_like_task(text: str) -> bool:
     if _OWN_ACTION_AUX_RE.search(t) and _ACTION_VERB_RE.search(t):
         return True
     if is_external_question(text):
+        return True
+    # A named website to navigate to / operate — general, no per-site list.
+    if _is_browse_intent(text):
         return True
     return bool(_ACTION_VERB_RE.search(t)) and bool(_WEAK_DOMAIN_RE.search(t))
 
@@ -374,6 +410,54 @@ def is_action_followup(goal: str, conversation: str) -> bool:
     if not _ACTION_VERB_RE.search(goal.lower()):
         return False
     return bool(_STRONG_DOMAIN_RE.search(conversation.lower()))
+
+
+# A live agent browser window is the ground truth that the user is mid-session
+# on a site. After Jarvis opens a page, a short next message that steers the
+# browser ("message him 'hi'", "click the first result", "scroll down") names
+# no site and no strong noun, so neither looks_like_task nor is_action_followup
+# (which keys on a STRONG-domain conversation noun, and a site NAME like
+# "linkedin" is not one) can fire on it. Live bug 2026-07-21: after Jarvis
+# opened Anas's LinkedIn profile, "message him 'hi'" fell to plain chat, which
+# offered a magic-word rephrase instead of continuing from the open profile.
+# The open window lets the recall-first rule reach the classifier without a
+# per-site list — the browse tool then REUSES that window and continues from the
+# page it is already on. A false fire costs one temp-0 call answering CHAT.
+_BROWSE_FOLLOWUP_VERB_RE = re.compile(
+    r"\b(message|messages|messaging|messaged|text|texts|texting|texted|dm|dms|"
+    r"post|posts|posting|posted|comment|comments|commented|reply|replies|replied|"
+    r"like|likes|follow|follows|connect|connects|"
+    r"click|clicks|clicking|clicked|scroll|scrolls|scrolling|scrolled|"
+    r"type|types|typing|typed|write|writes|writing|fill|fills|filling|"
+    r"send|sends|sending|open|opens|opening|search|searches|searching|go|goes)\b",
+    re.I,
+)
+
+
+def _browse_window_active() -> bool:
+    """True when a live agent browser window is held open (the user is mid-
+    session on a site). Cheap and lock-free; import-light (the registry pulls no
+    Playwright); best-effort — a probe failure is never a crash."""
+    try:
+        from app.browser.registry import REGISTRIES
+
+        return REGISTRIES["browse"].peek() is not None
+    except Exception:
+        return False
+
+
+def is_browse_followup(goal: str) -> bool:
+    """Deterministic: a short message steering an OPEN agent browser window. The
+    live window is the domain signal, so — unlike is_action_followup — this needs
+    no conversation keyword, only a browser-ish action verb in a short message.
+    The classifier then judges it BROWSE (or CHAT) with the conversation.
+    General, no per-site code."""
+    words = goal.split()
+    if not words or len(words) > _FOLLOWUP_MAX_WORDS:
+        return False
+    if not _BROWSE_FOLLOWUP_VERB_RE.search(goal):
+        return False
+    return _browse_window_active()
 
 
 # ======================================================== LLM confirmation
@@ -572,7 +656,11 @@ async def maybe_handle_task(
     # The gate fires on the message's own words; a short follow-up steering an
     # action under discussion ("send it") borrows its object from the
     # conversation instead. Either way the classifier makes the real call.
-    if not looks_like_task(goal) and not is_action_followup(goal, conversation):
+    if (
+        not looks_like_task(goal)
+        and not is_action_followup(goal, conversation)
+        and not is_browse_followup(goal)
+    ):
         return None
 
     # Never hijack a reply to a parked question ("which jamil?" / "add daud?").

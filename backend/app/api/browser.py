@@ -27,28 +27,36 @@ router = APIRouter()
 @router.get("/media", summary="What the browser is currently playing or showing")
 async def get_media() -> dict:
     """{playing, title, url} for a media window PLUS {window_open, window_title,
-    window_url} for a kept-open commit result window. Cheap and I/O-free — the
-    StatusBar polls it to recover both indicators after a reload (the
-    context_status precedent)."""
+    window_url} for a kept-open window — a commit result window or the
+    persistent agent browse window (2026-07-21; the result window wins when both
+    somehow exist). Cheap and I/O-free — the StatusBar polls it to recover both
+    indicators after a reload (the context_status precedent)."""
     active = browser_session.active_media()
-    result = browser_session.active_result_window()
+    window = (
+        browser_session.active_result_window()
+        or browser_session.active_browse_window()
+    )
     return {
         "playing": active is not None,
         "title": active.get("title", "") if active else "",
         "url": active.get("url", "") if active else "",
-        "window_open": result is not None,
-        "window_title": result.get("title", "") if result else "",
-        "window_url": result.get("url", "") if result else "",
+        "window_open": window is not None,
+        "window_title": window.get("title", "") if window else "",
+        "window_url": window.get("url", "") if window else "",
     }
 
 
-@router.post("/close-window", summary="Close a kept-open commit result window")
+@router.post("/close-window", summary="Close a kept-open browser window")
 async def close_window() -> dict:
-    """Close the browser window left open after a form submit/upload so the user
-    could see the response. Idempotent — closing nothing is fine. Pushes a cleared
-    state so any open StatusBar drops the indicator live."""
-    # The result window lives on the dedicated browser loop — close it there.
+    """Close the browser window left open for the user — a commit result page or
+    the persistent agent browse window. Idempotent — closing nothing is fine.
+    Pushes a cleared state so any open StatusBar drops the indicator live."""
+    # Both windows live on the dedicated browser loop — close them there.
     closed = await browser_runtime.run_browser(browser_session.close_result_window())
+    closed_browse = await browser_runtime.run_browser(
+        browser_session.close_browse_window()
+    )
+    closed = closed or closed_browse
     if closed:
         await push("browser_window", {"open": False})
     return {"closed": closed}

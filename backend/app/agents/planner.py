@@ -440,10 +440,14 @@ def _build_revise_prompt(
         "TASK: Return the corrected list of remaining steps ONLY (never repeat the "
         "already-executed steps). Replace every \"PENDING: ...\" placeholder with "
         "concrete values taken from the executed results. Return an empty steps "
-        "array ONLY when the executed results above already fully accomplish the "
-        "USER GOAL — every piece of information or change the goal asks for must "
-        "be covered — or when the rest is impossible; explain which in "
-        "unachievable_reason (e.g. \"no matching files were found\").",
+        "array ONLY in two cases, and say WHICH with the goal_accomplished flag: "
+        "(a) the executed results above already fully accomplish the USER GOAL — "
+        "every piece of information or change the goal asks for is covered — then "
+        "return {\"steps\": [], \"goal_accomplished\": true, "
+        "\"unachievable_reason\": \"<what was accomplished>\"}; "
+        "(b) the rest is impossible — then return {\"steps\": [], "
+        "\"goal_accomplished\": false, \"unachievable_reason\": \"<why>\"} "
+        "(e.g. \"no matching files were found\").",
         _OUTPUT_SHAPE,
         _PLAN_RULES,
     ])
@@ -1263,6 +1267,116 @@ def _collapse_browse_apply(steps: list[PlanStep]) -> list[PlanStep]:
     return out
 
 
+def _collapse_browse_journey(steps: list[PlanStep]) -> list[PlanStep]:
+    """CONSECUTIVE same-site `browse` steps fold into ONE browse whose goal is
+    the joined journey — the read-only sibling of _collapse_browse_apply.
+
+    Why (live 2026-07-21, books.toscrape.com): the model drafted one continuous
+    navigation ("open the homepage → click Travel → open the top book → go
+    back") as THREE browse steps. Each step ran in its own browser session, so
+    step 2 relaunched Chrome at the homepage and RE-DID step 1's navigation
+    (the user watched the book being opened twice), and step 3's `back` had no
+    history to go back through — a fresh session starts at about:blank. One
+    journey = one loop run = one session: real continuity, no redone work, no
+    open/close flicker between steps.
+
+    Conservative, the _collapse_browse_apply rules: only ADJACENT browse steps
+    (a non-browse step between them is a real dependency boundary), only when
+    every step in the run grounds to the same site (origin_is_grounded, the
+    dot-aware rule), and a step whose origins are still PENDING never folds
+    (unknowable yet). keep_open is OR'd so a journey ending in playback keeps
+    the media hand-off. Best-effort: anything else is left exactly as drafted."""
+
+    def _norm_origins(step: PlanStep) -> set[str]:
+        out: set[str] = set()
+        for o in browser_grounding._step_origins(step.parameters):
+            norm = browser_grounding._normalize_origin(o)
+            if norm:
+                out.add(norm)
+        return out
+
+    def _same_site(a: set[str], b: set[str]) -> bool:
+        if not a or not b:
+            return False
+        return any(
+            browser_grounding.origin_is_grounded(o, b) for o in a
+        ) or any(browser_grounding.origin_is_grounded(o, a) for o in b)
+
+    out: list[PlanStep] = []
+    i = 0
+    while i < len(steps):
+        step = steps[i]
+        if step.tool != _BROWSE_TOOL:
+            out.append(step)
+            i += 1
+            continue
+        run = [step]
+        run_origins = _norm_origins(step)
+        j = i + 1
+        while (
+            j < len(steps)
+            and steps[j].tool == _BROWSE_TOOL
+            and _same_site(run_origins, _norm_origins(steps[j]))
+        ):
+            run.append(steps[j])
+            run_origins |= _norm_origins(steps[j])
+            j += 1
+        if len(run) < 2:
+            out.append(step)
+            i += 1
+            continue
+
+        goals = [
+            str(s.parameters.get("goal") or "").strip() or s.description
+            for s in run
+        ]
+        joined_goal = ", then ".join(g for g in goals if g)
+
+        # Union of the run's sites, deduped on the NORMALIZED origin (a step's
+        # start_url and its allowed_origins name the same site in two forms).
+        seen_origins: set[str] = set()
+        merged_origins: list[str] = []
+        for s in run:
+            for o in browser_grounding._step_origins(s.parameters):
+                norm = browser_grounding._normalize_origin(o)
+                if norm and norm not in seen_origins:
+                    seen_origins.add(norm)
+                    merged_origins.append(o)
+
+        start_url = ""
+        for s in run:
+            cand = str(s.parameters.get("start_url") or "").strip()
+            if cand and not cand.upper().startswith("PENDING:"):
+                start_url = cand
+                break
+
+        params = dict(run[0].parameters)
+        params["goal"] = joined_goal
+        if start_url:
+            params["start_url"] = start_url
+        if merged_origins:
+            params["allowed_origins"] = merged_origins
+        if any(bool(s.parameters.get("keep_open")) for s in run):
+            params["keep_open"] = True
+
+        out.append(
+            PlanStep(
+                description="; then ".join(s.description for s in run),
+                tool=_BROWSE_TOOL,
+                parameters=params,
+                permission_level=run[0].permission_level,
+                requires_approval=run[0].requires_approval,
+                action_detail=_step_action_detail(_BROWSE_TOOL, params),
+            )
+        )
+        logger.info(
+            f"Collapsed {len(run)} consecutive same-site browse steps into ONE "
+            "browse journey — session continuity in code"
+        )
+        i = j
+    return out
+
+
 def _upload_grounding(plan: AgentPlan, conversation: str) -> str:
     """The user's own words a browse_commit upload_path must trace to — goal +
     conversation + their answers. Page content is excluded by construction (never
@@ -1372,6 +1486,21 @@ def _browse_origin_approval_signal(step: PlanStep, result: ToolResult) -> Option
         return None
     out = result.output if result is not None else None
     if isinstance(out, dict) and out.get("origin_approval_required"):
+        return out
+    return None
+
+
+def _browse_action_approval_signal(step: PlanStep, result: ToolResult) -> Optional[dict]:
+    """The structured 'a world-acting gesture needs the user's yes' signal a
+    READ browse step returns (2026-07-22): the loop reached a send/post/submit/
+    upload/like/delete/buy and STOPPED, so the plan should PAUSE and ask before
+    anything acts. Code-owned and narrow — only the browse tool, only its
+    explicit action_approval_required flag; page text never reaches this
+    decision. None = no action hand-off."""
+    if step.tool != _BROWSE_TOOL:
+        return None
+    out = result.output if result is not None else None
+    if isinstance(out, dict) and out.get("action_approval_required"):
         return out
     return None
 
@@ -1572,6 +1701,28 @@ def _origin_approval_question(candidate: str) -> PlanQuestion:
         text=text,
         options=[f"Yes — continue to {host}", "No — stay on the original site"],
         kind="origin_approval",
+    )
+
+
+def _action_approval_question(desc: str, site: str) -> PlanQuestion:
+    """Code-derived pause text asking the user to approve a WORLD-ACTING gesture
+    (2026-07-22): the READ loop reached a send / post / submit / upload / like /
+    delete / buy on a live site and STOPPED — Jarvis never acts on your behalf
+    without your yes. `desc` is the loop's grounded phrase for the gesture ("send
+    'hi anas…'"), `site` the host. Answering 'yes' sets plan.action_approved and
+    the resumed browse performs the one approved action in the headed window;
+    anything else, or Cancel, stops without acting. `kind` tags the UI."""
+    action = (desc or "act on the page").strip() or "act on the page"
+    host = (site or "this site").strip() or "this site"
+    text = (
+        f"I'm about to {action} on {host}. I don't send, post, submit, upload, "
+        f"or delete anything on a live site without your go-ahead — so I've "
+        f"paused. Say 'yes' to let me do it now, or Cancel and I'll leave it."
+    )
+    return PlanQuestion(
+        text=text,
+        options=[f"Yes — {action}", "No — don't"],
+        kind="action_approval",
     )
 
 
@@ -2133,6 +2284,42 @@ class AgentPlanner:
                 logger.info(f"user declined leaving the named site for {pending_origin}")
                 return plan
 
+        # Action-approval hand-off (2026-07-22): a READ browse STOPPED before a
+        # world-acting gesture (send / post / submit / upload / like / delete /
+        # buy). Decide HERE, in code — FAIL-CLOSED like the origin approval. Only
+        # a clear "yes" lifts the gate, by stamping action_approved onto the
+        # paused browse step so the resumed run performs the one approved action
+        # (in the headed window the user is watching); anything else, or Cancel,
+        # stops the plan without ever acting.
+        pending_action = getattr(plan, "pending_action_approval", None)
+        if pending_action:
+            plan.pending_action_approval = None
+            if _is_affirmative(answer):
+                plan.action_approved = True
+                stamped = False
+                for step in plan.pending_steps():
+                    if step.tool == _BROWSE_TOOL:
+                        step.parameters["action_approved"] = True
+                        stamped = True
+                logger.info(f"user approved the browser action: {pending_action}")
+                self._note_expired_window(plan)
+                if stamped:
+                    plan.status = PlanStatus.EXECUTING
+                    state = await self._graph.ainvoke(
+                        self._initial_state(plan, set())
+                    )
+                    return state["plan"]
+            else:
+                for step in plan.pending_steps():
+                    step.status = StepStatus.SKIPPED
+                plan.status = PlanStatus.CANCELLED
+                plan.message = (
+                    "Understood — I won't do that on the site. I've stopped; "
+                    "nothing was sent, posted, submitted, or changed."
+                )
+                logger.info(f"user declined the browser action: {pending_action}")
+                return plan
+
         plan.status = PlanStatus.EXECUTING
         state = await self._graph.ainvoke(
             self._initial_state(plan, set(), entry="revise")
@@ -2421,6 +2608,9 @@ class AgentPlanner:
             plan.pending_origin_approval = payload.origin or ""
             plan.pending_origin_url = payload.url or ""
             question = _origin_approval_question(payload.origin)
+        elif reason is browse_state.Handoff.ACTION_APPROVAL:
+            plan.pending_action_approval = payload.action_desc or "act on the page"
+            question = _action_approval_question(payload.action_desc, payload.site)
         else:
             # COMMIT/NEXT_COMMIT ride the approval gate, WINDOW_EXPIRED is a
             # discovery-side note — none of them pauses here.
@@ -2553,7 +2743,7 @@ class AgentPlanner:
     async def _plan_node(self, state: AgentState) -> dict:
         plan = state["plan"]
         _t0 = time.perf_counter()
-        steps, reason, question, error = await self._generate_steps(
+        steps, reason, question, error, _ = await self._generate_steps(
             _build_plan_prompt(plan.goal, self.conversation, self.memory, self._folders),
             allow_empty=False,
             goal=plan.goal,
@@ -2602,7 +2792,7 @@ class AgentPlanner:
             )
             return {"plan": plan}
         _t0 = time.perf_counter()
-        steps, reason, question, error = await self._generate_steps(
+        steps, reason, question, error, _ = await self._generate_steps(
             _build_reflect_prompt(plan, self.conversation, self.memory, self._folders),
             allow_empty=False,
             goal=plan.goal,
@@ -2850,6 +3040,7 @@ class AgentPlanner:
                 _browse_login_signal(step, result),
                 _browse_challenge_signal(step, result),
                 _browse_origin_approval_signal(step, result),
+                _browse_action_approval_signal(step, result),
             ):
                 if signal is None:
                     continue
@@ -3087,7 +3278,7 @@ class AgentPlanner:
             if s.status == StepStatus.FAILED and s.result is not None
         }
         _t0 = time.perf_counter()
-        steps, reason, question, error = await self._generate_steps(
+        steps, reason, question, error, accomplished = await self._generate_steps(
             _build_revise_prompt(plan, failed_step, self.conversation, self.memory, self._folders),
             # An empty revision means "the executed results already accomplish
             # the goal" — only possible when something actually produced
@@ -3173,10 +3364,15 @@ class AgentPlanner:
                 "replan_count": replan_count, "pause_reason": None,
             }
 
-        if not steps and reason and is_failure:
+        if not steps and reason and is_failure and not accomplished:
             # Replanner declared the rest of the goal impossible. For a
             # not-found target that surrender is premature — ask the user
             # where it is instead (ask-not-fail, same rule as the replan cap).
+            # `accomplished` is the OTHER meaning of an empty revision — "the
+            # executed results already accomplish the goal" — and falls through
+            # to the tail-replacement below, which completes the plan with the
+            # explanation as its message (live 2026-07-21: a plan FAILED
+            # carrying "The goal has been fully accomplished").
             question = await self._fallback_question(plan, failed_step)
             if question is not None:
                 self._pause_on_question(plan, question)
@@ -3264,7 +3460,7 @@ class AgentPlanner:
                 logger.warning(f"Planner LLM call failed (attempt {attempt}): {e}")
                 error = f"LLM call failed: {e}"
                 if attempt == 2:
-                    return None, None, None, error
+                    return None, None, None, error, False
                 continue
 
             draft, error = self._parse_draft(response.content)
@@ -3283,15 +3479,30 @@ class AgentPlanner:
                         else:
                             if resolution.action == "answer":
                                 question.options = resolution.options
-                            return [], None, question, None
+                            return [], None, question, None, False
                     # else: rejected — the question was answerable by a search
                     # (or every option was invented); the retry feedback below
                     # pushes the model to plan with real paths instead.
+                elif not draft.steps and draft.goal_accomplished:
+                    # Empty-revision disambiguation (2026-07-21): the flag is the
+                    # structural signal that this empty revision is a COMPLETION
+                    # ("the executed results already accomplish the goal"), not a
+                    # surrender — live incident: a plan FAILED carrying the
+                    # message "The goal has been fully accomplished". Only
+                    # honored when something actually completed (allow_empty);
+                    # a lying flag on a plan with zero results is invalid output.
+                    if allow_empty:
+                        return [], draft.unachievable_reason, None, None, True
+                    error = (
+                        "goal_accomplished=true with no steps, but nothing has "
+                        "produced results yet — an empty plan cannot have "
+                        "accomplished the goal. Return the steps that do the work"
+                    )
                 elif draft.unachievable_reason and not draft.steps:
-                    return [], draft.unachievable_reason, None, None
+                    return [], draft.unachievable_reason, None, None, False
                 elif not draft.steps:
                     if allow_empty:
-                        return [], None, None, None
+                        return [], None, None, None, False
                     error = (
                         "the plan contains no steps and no unachievable_reason "
                         "— nothing has produced results yet, so an empty plan "
@@ -3307,6 +3518,11 @@ class AgentPlanner:
                         # downgrade guard below and every later check sees the
                         # real (single-session) shape.
                         steps = _collapse_browse_apply(steps)
+                        # Then its read-only sibling: consecutive same-site
+                        # browse steps are ONE journey in ONE session (2026-07-21
+                        # — three browse steps re-launched Chrome and re-did each
+                        # other's navigation).
+                        steps = _collapse_browse_journey(steps)
                         reject = (
                             _repeated_failure(steps, failed_signatures or {})
                             or _scope_violation(steps, goal, grounding)
@@ -3334,7 +3550,7 @@ class AgentPlanner:
                                 # draft about to be thrown away must never cost
                                 # an enumeration call.
                                 await self._apply_web_fanout(steps, goal, plan)
-                                return steps, None, None, None
+                                return steps, None, None, None, False
                         error = reject  # structural reject → retry feedback
 
             if attempt == 1:
@@ -3348,7 +3564,7 @@ class AgentPlanner:
                         ),
                     ),
                 ]
-        return None, None, None, error
+        return None, None, None, error, False
 
     @staticmethod
     def _validated_question(

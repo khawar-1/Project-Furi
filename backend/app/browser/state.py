@@ -50,6 +50,7 @@ class Handoff(str, Enum):
     AUTH_OFFER = "auth_offer"            # optional sign-in/up; guest possible
     FILL_FIELD = "fill_field"            # a form value nothing grounds
     ORIGIN_APPROVAL = "origin_approval"  # page-derived off-site origin
+    ACTION_APPROVAL = "action_approval"  # a world-acting gesture in READ mode
     CHALLENGE = "challenge"              # CAPTCHA — never solved by Jarvis
     COMMIT = "commit"                    # form contract awaiting approval
     NEXT_COMMIT = "next_commit"          # multi-commit: next form ready
@@ -67,6 +68,7 @@ class HandoffPayload:
     field: str = ""               # FILL_FIELD: the form field's name
     suggested_value: str = ""     # FILL_FIELD: page-derived value, for correction
     origin: str = ""              # ORIGIN_APPROVAL: the normalized candidate
+    action_desc: str = ""         # ACTION_APPROVAL: what the loop is about to do
     challenge_kind: str = ""      # CHALLENGE: reCAPTCHA / Cloudflare / hCaptcha
     challenge_mode: str = ""      # CHALLENGE: "interstitial" | "embedded"
     auth_signin: bool = False     # AUTH_OFFER: the page offers sign-in
@@ -85,6 +87,7 @@ class HandoffPayload:
             "field": self.field,
             "suggested_value": self.suggested_value,
             "origin": self.origin,
+            "action_desc": self.action_desc,
             "challenge_kind": self.challenge_kind,
             "challenge_mode": self.challenge_mode,
             "auth_signin": self.auth_signin,
@@ -108,6 +111,7 @@ class HandoffPayload:
             field=str(data.get("field") or ""),
             suggested_value=str(data.get("suggested_value") or ""),
             origin=str(data.get("origin") or ""),
+            action_desc=str(data.get("action_desc") or ""),
             challenge_kind=str(data.get("challenge_kind") or ""),
             challenge_mode=str(data.get("challenge_mode") or ""),
             auth_signin=bool(data.get("auth_signin")),
@@ -124,8 +128,9 @@ def _wall_reason(wall_kind: str) -> Handoff:
 def handoff_from_outcome(outcome: Any) -> Optional[HandoffPayload]:
     """Derive the payload a BrowseOutcome's flags encode, or None when the run
     simply ended. Precedence mirrors the planner's dispatch order (fill →
-    auth offer → wall → challenge → origin → commit) so flag-probing call
-    sites and payload consumers can never disagree about which pause wins."""
+    auth offer → wall → challenge → origin → action → commit) so flag-probing
+    call sites and payload consumers can never disagree about which pause
+    wins."""
     if getattr(outcome, "fill_required", False):
         return HandoffPayload(
             reason=Handoff.FILL_FIELD,
@@ -160,6 +165,13 @@ def handoff_from_outcome(outcome: Any) -> Optional[HandoffPayload]:
             reason=Handoff.ORIGIN_APPROVAL,
             origin=str(getattr(outcome, "origin_candidate", "") or ""),
             url=str(getattr(outcome, "origin_url", "") or ""),
+        )
+    if getattr(outcome, "action_approval_required", False):
+        return HandoffPayload(
+            reason=Handoff.ACTION_APPROVAL,
+            action_desc=str(getattr(outcome, "action_description", "") or ""),
+            site=str(getattr(outcome, "action_site", "") or ""),
+            url=str(getattr(outcome, "url", "") or ""),
         )
     if getattr(outcome, "commit_required", False):
         return HandoffPayload(

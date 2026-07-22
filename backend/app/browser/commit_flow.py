@@ -363,6 +363,7 @@ async def discover(
                 await browser_session.close_login_window()
                 await browser_session.close_result_window()
                 await browser_session.stop_media()
+                await browser_session.close_browse_window()
                 session = await BrowserSession.open(allowlist)
                 await session.goto(start_url)
             # The pages whose sign-in offers the user already decided ride ON

@@ -3,8 +3,9 @@ Phase 14 Part 2 — the browse loop: bounded, terminal, non-spinning, and cheap.
 
 These pin the properties that make an LLM-driven browser safe to run in the
 background: it stops (action cap), it does not spin on a dead button (dedupe —
-the ended-stream bug), the fast path costs no model call, a hallucinated index
-cannot be acted on, and the media registry keeps exactly one window playing.
+the ended-stream bug), the fast path searches the title with no model call, a
+hallucinated index cannot be acted on, and the media registry keeps exactly one
+window playing.
 """
 import asyncio
 import re
@@ -25,9 +26,12 @@ from app.providers.base import LLMResponse
 
 
 def _auth_obs(url, *elements):
+    # Each element is (role, name) or (role, name, href).
     els = [
-        browser_loop.dom_observe.Element(index=i + 1, role=r, name=n)
-        for i, (r, n) in enumerate(elements)
+        browser_loop.dom_observe.Element(
+            index=i + 1, role=e[0], name=e[1], href=(e[2] if len(e) > 2 else "")
+        )
+        for i, e in enumerate(elements)
     ]
     return browser_loop.dom_observe.Observation(
         observation_id="o", url=url, title="", element_total=len(els),
@@ -60,6 +64,44 @@ def test_detect_auth_offer_ignores_non_links_and_plain_pages():
     assert detect_auth_offer(
         _auth_obs("https://x.test/apply", ("textbox", "Email"), ("button", "Submit"))
     ) is None
+
+
+def test_detect_auth_offer_ignores_third_party_account_links():
+    """SAME-SITE ONLY (2026-07-21): an auth affordance whose href points to
+    ANOTHER registrable domain is a third-party account offer ("Sign in with
+    Google", a newsletter "Sign up"), not this site's wall — never interrupt."""
+    # "Sign in with Google" pointing at accounts.google.com — third party.
+    assert detect_auth_offer(
+        _auth_obs(
+            "https://jobs.test/apply",
+            ("link", "Sign in with Google", "https://accounts.google.com/o/oauth2/x"),
+        )
+    ) is None
+    # A third-party "Sign up" (marketing/newsletter) on a subdomain of another site.
+    assert detect_auth_offer(
+        _auth_obs(
+            "https://www.linkedin.com/in/anas",
+            ("link", "Sign up", "https://mailer.thirdparty.io/register"),
+        )
+    ) is None
+
+
+def test_detect_auth_offer_counts_same_site_links():
+    """A same-registrable-domain href (relative or on a sibling subdomain) IS
+    this site's own offer and still counts."""
+    # Relative href — resolves to the same host.
+    signin, signup, site = detect_auth_offer(
+        _auth_obs("https://jobs.test/apply", ("link", "Sign in", "/login"))
+    )
+    assert signin and not signup and site == "jobs.test"
+    # Sibling subdomain of the same registrable domain.
+    _, signup, _ = detect_auth_offer(
+        _auth_obs(
+            "https://www.linkedin.com/in/anas",
+            ("link", "Join now", "https://secure.linkedin.com/signup"),
+        )
+    )
+    assert signup
 
 
 async def test_commit_loop_pauses_on_an_optional_signin_offer():
@@ -247,6 +289,51 @@ def test_extract_search_term():
     assert _extract_search_term("search jane by the long faces on youtube") == "jane by the long faces"
     assert _extract_search_term("play lofi hip hop on youtube") == "lofi hip hop"
     assert _extract_search_term("") is None
+    # A number that is not a media qualifier is part of the title.
+    assert _extract_search_term("play blink 182 on youtube") == "blink 182"
+
+
+def test_fast_path_types_the_title_not_the_media_descriptor():
+    """The two 2026-07-22 incidents (anikoto): a media goal must SEARCH the title,
+    not the "ep 4 … season 2" descriptor. Leading and trailing qualifier chains
+    (and the s2e4 shorthand) are stripped to the bare title; the model navigates
+    to the right season/episode from the results page."""
+    assert _extract_search_term(
+        "play ep 4 of the dangers in my heart season 2 on anikoto.cz"
+    ) == "the dangers in my heart"
+    assert _extract_search_term(
+        "Play episode 1 of season 2 of The Dangers in My Heart"
+    ) == "The Dangers in My Heart"
+    assert _extract_search_term("watch s2e1 of demon slayer") == "demon slayer"
+    assert _extract_search_term("play attack on titan season 4 episode 2") == "attack on titan"
+    # A qualifier WORD with no number, or a bare "Part 1" title, is left alone.
+    assert _extract_search_term("play part of me by katy perry") == "part of me by katy perry"
+    assert _extract_search_term("watch lord of the rings") == "lord of the rings"
+
+
+def test_fast_path_strips_worded_ordinal_episode_qualifiers():
+    """The 2026-07-22 anikoto incident: "play the last episode of The Dangers in
+    My Heart" searched that ENTIRE phrase because the numeric qualifier rule saw
+    no number to strip. A WORDED ordinal ("last/latest/most recent … episode of")
+    is stripped to the bare title so the model navigates from the results page."""
+    assert _extract_search_term(
+        "play the last episode of the dangers in my heart season 2 on anikoto.cz"
+    ) == "the dangers in my heart"
+    assert _extract_search_term(
+        "play the last episode of The Dangers in My Heart"
+    ) == "The Dangers in My Heart"
+    assert _extract_search_term("play latest episode of one piece") == "one piece"
+    assert _extract_search_term(
+        "watch the most recent episode of frieren on crunchyroll"
+    ) == "frieren"
+    # TITLE SAFETY — an ordinal word NOT immediately followed by an episode/season
+    # word is part of the title and must never be eaten.
+    assert _extract_search_term("play The Last of Us") == "The Last of Us"
+    assert _extract_search_term("watch The Last Airbender") == "The Last Airbender"
+    assert _extract_search_term("play The First Slam Dunk") == "The First Slam Dunk"
+    assert _extract_search_term(
+        "play attack on titan the final season"
+    ) == "attack on titan the final season"
 
 
 def test_fast_path_fires_only_with_a_single_search_box():
@@ -257,6 +344,11 @@ def test_fast_path_fires_only_with_a_single_search_box():
     )
     action = _fast_path_action("play lofi on youtube", obs_one)
     assert action == {"action": "type", "index": 1, "text": "lofi", "submit": True}
+
+    # A media goal still fast-paths — but with the TITLE as the query.
+    assert _fast_path_action(
+        "play ep 4 of the dangers in my heart season 2 on anikoto.cz", obs_one
+    ) == {"action": "type", "index": 1, "text": "the dangers in my heart", "submit": True}
 
     # Two search-ish inputs is ambiguous — defer to the model.
     obs_two = browser_loop.dom_observe.Observation(
@@ -270,11 +362,43 @@ def test_fast_path_fires_only_with_a_single_search_box():
     assert _fast_path_action("play lofi on youtube", obs_two) is None
 
 
+def test_fast_path_prefers_the_one_genuine_search_target_among_noise():
+    """A homepage with a real search box PLUS a 'Search' link/button (its name
+    contains the word, but it is not a fillable search target) used to defer to
+    the model — which then fumbled across the ad-heavy page with extra searches.
+    Now it fires on the one genuine target (2026-07-22)."""
+    obs = browser_loop.dom_observe.Observation(
+        observation_id="o", url="u", title="", element_total=3,
+        elements=[
+            browser_loop.dom_observe.Element(index=1, role="link", name="Search"),
+            browser_loop.dom_observe.Element(index=2, role="searchbox", name="Find anime"),
+            browser_loop.dom_observe.Element(index=3, role="button", name="Search"),
+        ],
+        page_text="", text_truncated=False,
+    )
+    assert _fast_path_action("play the dangers in my heart on anikoto.cz", obs) == {
+        "action": "type", "index": 2, "text": "the dangers in my heart", "submit": True,
+    }
+
+
+def test_fast_path_still_defers_when_two_real_search_targets():
+    """Two genuine search boxes remain ambiguous — the model must choose."""
+    obs = browser_loop.dom_observe.Observation(
+        observation_id="o", url="u", title="", element_total=2,
+        elements=[
+            browser_loop.dom_observe.Element(index=1, role="searchbox", name="Search"),
+            browser_loop.dom_observe.Element(index=2, role="combobox", name="Filter"),
+        ],
+        page_text="", text_truncated=False,
+    )
+    assert _fast_path_action("play lofi on youtube", obs) is None
+
+
 async def test_the_fast_path_search_costs_no_llm_call():
-    """THE THESIS, the evidence_resolver call-count test restated: search-and-go
-    with one search box does the search in CODE. Home page + results page + ONE
-    'done' response ⇒ exactly ONE provider call. Without the fast path the search
-    itself would have cost a second call."""
+    """The fast path does the first search in CODE: home page → (fast-path fill +
+    submit) → results page → ONE 'done' response = exactly ONE provider call. The
+    reliable typed search is also what keeps the model off a hostile homepage's
+    ad links instead of searching (2026-07-22b)."""
     home = _page([_el(1, role="searchbox", name="Search")], url="https://youtube.com/")
     results = _page([_el(1, role="link", name="lofi hip hop", href="/watch?v=a")],
                     url="https://youtube.com/results")
@@ -285,10 +409,74 @@ async def test_the_fast_path_search_costs_no_llm_call():
 
     assert outcome.success is True
     assert provider.calls == 1  # the search was free; only the 'done' cost a call
-    # The fast path actually filled and submitted the box.
     kinds = [(a[2], a[3]) for a in session.page.acted]
     assert ("fill", "lofi") in kinds
     assert ("press", "Enter") in kinds
+
+
+# ------------------------------------- fast-path hardening (2026-07-21)
+def test_a_typing_goal_never_fast_paths_its_quoted_content():
+    """"…open messages and type 'hi' but do not send it" must not fast-path 'hi'
+    into a global search box (the LinkedIn incident). A typing/composing goal is
+    not a search — refuse, the model decides."""
+    goal = (
+        "Open the profile of the Anas who is a 1st connection, then open the "
+        "messages area and type 'hi' but do not send it"
+    )
+    assert _extract_search_term(goal) is None
+    assert _extract_search_term("compose a 'hello there' message") is None
+    assert _extract_search_term("write 'thanks' in the comment box") is None
+    assert _extract_search_term("draft 'hi' but don't send") is None
+
+
+def test_an_unquoted_multi_clause_goal_is_not_a_search_term():
+    """The extraction must yield a TERM (short, single-clause), never the goal's
+    remaining instructions."""
+    assert _extract_search_term(
+        "Open the books.toscrape.com homepage, then click the Travel category"
+    ) is None
+    assert _extract_search_term(
+        "open the profile of anas who is in my first connections and say hello"
+    ) is None
+    assert _extract_search_term("play lofi hip hop on youtube") == "lofi hip hop"
+
+
+# ------------------------------------------ the back guard (2026-07-21)
+class _BackPage:
+    """A page whose go_back lands where the script says — about:blank models a
+    fresh session with no history."""
+
+    def __init__(self, lands_on):
+        self.url = "https://site.test/somewhere"
+        self.lands_on = lands_on
+        self.went_forward = 0
+
+    async def go_back(self, **kwargs):
+        self.url = self.lands_on
+
+    async def go_forward(self, **kwargs):
+        self.went_forward += 1
+        self.url = "https://site.test/somewhere"
+
+
+async def test_back_onto_about_blank_is_an_honest_failure():
+    """A fresh session's `back` lands on about:blank — live 2026-07-21 the loop
+    thrashed navigate→back→blank until the stuck detector failed the step. The
+    guard undoes the blank landing and tells the model there is no history."""
+    page = _BackPage(lands_on="about:blank")
+    session = FakeSession(page)
+    ok, note = await browser_loop._act(session, None, {"action": "back"})
+    assert ok is False
+    assert "no earlier page" in note
+    assert page.went_forward == 1        # the blank landing was undone
+
+
+async def test_back_with_real_history_still_works():
+    page = _BackPage(lands_on="https://site.test/previous")
+    session = FakeSession(page)
+    ok, note = await browser_loop._act(session, None, {"action": "back"})
+    assert ok is True and note == ""
+    assert page.went_forward == 0
 
 
 # ---------------------------------------------------------------- termination
@@ -1257,10 +1445,12 @@ async def test_act_refuses_an_element_overlapping_a_challenge_zone():
 
 
 # ------------------------- the submit-gesture gate (action-level safety)
-# With the network open to page traffic, what keeps the agent from submitting
-# is the refusal in _act: a click on a form's submit control, or Enter in its
-# fields, dies in code. Search-shaped and GET forms are exempt (submitting a
-# search IS reading; a GET submit is an allowlist-governed navigation).
+# With the network open to page traffic, what keeps the agent from acting is the
+# refusal in _act: a click on a form's submit control, a send/post/upload/like/
+# delete/buy control, or Enter in a non-search field, dies in code. A genuine
+# SEARCH submit is exempt (submitting a search IS reading). The old method=GET
+# exemption was REMOVED (2026-07-22): a JS/contenteditable send has no <form
+# method> and read as GET, so trusting GET let LinkedIn's message send through.
 def _form_obs(**form_kwargs):
     from app.core import dom_observe
 
@@ -1279,7 +1469,7 @@ async def test_act_refuses_clicking_a_submit_control_in_read_mode():
     obs = _form_obs(form_member=True, form_submit=True, form_method="POST")
     ok, note = await browser_loop._act(session, obs, {"action": "click", "index": 1})
     assert ok is False
-    assert "submit" in note and "commit" in note
+    assert "never acts without your approval" in note
     assert page.acted == []             # the click never landed
 
 
@@ -1306,13 +1496,13 @@ async def test_act_refuses_enter_that_would_submit_a_form():
         session, obs, {"action": "type", "index": 1, "text": "x", "submit": True}
     )
     assert ok is False
-    assert "Enter" in note and "submit" in note
+    assert "never acts without your approval" in note
     assert page.acted == []
 
 
 async def test_act_allows_submitting_a_search_form():
-    """Submitting a search is reading — the exemption that keeps the fast path
-    (fill + Enter on a search box) and ordinary site search working."""
+    """Submitting a search is reading — the exemption that keeps ordinary site
+    search (the model filling a search box and pressing Enter) working."""
     page = ScriptedPage([_page([_el(1, role="searchbox", name="Search")])])
     session = FakeSession(page)
     obs = _form_obs(
@@ -1324,14 +1514,142 @@ async def test_act_allows_submitting_a_search_form():
     assert ok is True
 
 
-async def test_act_allows_a_get_form_submit():
-    """A GET form submit is a navigation with query params — the allowlist
-    already governs it, so the gate stands down."""
-    page = ScriptedPage([_page([_el(1, role="button", name="Filter")])])
+async def test_act_gates_a_non_search_get_form_submit():
+    """The method=GET loophole is CLOSED (2026-07-22). A non-search form's submit
+    is refused whatever its method — a JS/contenteditable send carries no <form
+    method> and read as GET, so trusting GET was the LinkedIn message-send hole.
+    A real GET *search* stays exempt via form_search / a search role, not method."""
+    page = ScriptedPage([_page([_el(1, role="button", name="Send")])])
     session = FakeSession(page)
     obs = _form_obs(form_member=True, form_submit=True, form_method="GET")
-    ok, _ = await browser_loop._act(session, obs, {"action": "click", "index": 1})
+    ok, note = await browser_loop._act(session, obs, {"action": "click", "index": 1})
+    assert ok is False
+    assert "never acts without your approval" in note
+
+
+async def test_act_allows_the_approved_action_on_resume():
+    """After the user's yes, the resumed browse carries action_approved=True and
+    the gate stands down so the one approved gesture can fire (the READ backstop
+    lets it through; the run_browse hand-off that stopped it is skipped upstream)."""
+    page = ScriptedPage([_page([_el(1, role="button", name="Send")])])
+    session = FakeSession(page)
+    obs = _form_obs(form_member=True, form_submit=True, form_method="POST")
+    ok, _ = await browser_loop._act(
+        session, obs, {"action": "click", "index": 1}, action_approved=True
+    )
     assert ok is True
+
+
+async def test_act_gates_a_js_send_button_by_label():
+    """A JS send control with NO <form> membership (a contenteditable messenger's
+    Send) is still caught — by its action-verb label, the secondary net for the
+    structural form_submit signal."""
+    from app.core import dom_observe
+
+    page = ScriptedPage([_page([_el(1, role="button", name="Send")])])
+    session = FakeSession(page)
+    # No form_* → not a form member; the action-verb label is what fires.
+    obs = dom_observe.Observation(
+        observation_id="o", url="https://site.test/", title="",
+        elements=[dom_observe.Element(index=1, role="button", name="Send")],
+        element_total=1, page_text="", text_truncated=False,
+    )
+    ok, note = await browser_loop._act(session, obs, {"action": "click", "index": 1})
+    assert ok is False
+    assert "never acts without your approval" in note
+
+
+def test_is_action_gesture_matrix():
+    """The positive action-gesture detector (the guarantee): a form's submit
+    control, Enter in a non-search field, and JS action-verb controls are
+    actions; a genuine search submit and plain navigation are not."""
+    from app.core import dom_observe
+
+    E = dom_observe.Element
+    send_btn = E(index=1, role="button", name="Send", form_member=True, form_submit=True)
+    assert browser_loop._is_action_gesture({"action": "click"}, send_btn) is True
+
+    msg = E(index=2, role="textbox", name="Write a message", form_member=True)
+    assert browser_loop._is_action_gesture(
+        {"action": "type", "submit": True}, msg
+    ) is True
+    # a plain (non-submit) type into the same box is not an action — drafting is fine
+    assert browser_loop._is_action_gesture(
+        {"action": "type", "submit": False}, msg
+    ) is False
+
+    box = E(index=3, role="searchbox", name="Search")
+    assert browser_loop._is_search_target(box) is True
+    assert browser_loop._is_action_gesture(
+        {"action": "type", "submit": True}, box
+    ) is False
+
+    # form_search (positively detected in the JS) → submitting a search is reading
+    sform = E(index=4, role="textbox", name="q", form_member=True, form_search=True)
+    assert browser_loop._is_action_gesture(
+        {"action": "type", "submit": True}, sform
+    ) is False
+
+    # a JS control with no <form> is caught by its action-verb label…
+    assert browser_loop._is_action_gesture(
+        {"action": "click"}, E(index=5, role="button", name="Post")
+    ) is True
+    assert browser_loop._is_action_gesture(
+        {"action": "click"}, E(index=6, role="button", name="Like")
+    ) is True
+    # …but a plain navigation/reading label is not an action
+    assert browser_loop._is_action_gesture(
+        {"action": "click"}, E(index=7, role="button", name="Show more")
+    ) is False
+    assert browser_loop._is_action_gesture(
+        {"action": "click"}, E(index=8, role="button", name="Next page")
+    ) is False
+
+
+async def test_run_browse_pauses_for_approval_before_a_send():
+    """The READ loop STOPS at a world-acting gesture and returns the
+    action-approval hand-off — nothing is typed or sent (the LinkedIn incident:
+    a message send in a READ browse, now caught structurally)."""
+    page = ScriptedPage([
+        _page(
+            [_el(1, role="textbox", name="Write a message",
+                 form={"submit": False, "method": "POST", "search": False})],
+            url="https://linkedin.com/messaging/thread/new/",
+        ),
+    ])
+    session = FakeSession(page)
+    provider = FakeProvider(['{"action":"type","index":1,"text":"hi anas","submit":true}'])
+    outcome = await browser_loop.run_browse(session, "message anas hi", provider)
+    assert outcome.action_approval_required is True
+    assert "hi anas" in outcome.action_description
+    assert outcome.action_site == "linkedin.com"
+    assert page.acted == []             # nothing typed, nothing sent
+
+
+async def test_run_browse_performs_the_action_once_approved():
+    """With action_approved=True (the resume after the user's yes) the gate stands
+    down and the one approved gesture fires — fill + Enter."""
+    page = ScriptedPage([
+        _page(
+            [_el(1, role="textbox", name="Write a message",
+                 form={"submit": False, "method": "POST"})],
+            url="https://linkedin.com/messaging/thread/new/",
+        ),
+        _page([_el(1, role="link", name="Message sent")],
+              url="https://linkedin.com/messaging/thread/123/"),
+    ])
+    session = FakeSession(page)
+    provider = FakeProvider([
+        '{"action":"type","index":1,"text":"hi anas","submit":true}',
+        '{"action":"done","reason":"the message was sent"}',
+    ])
+    outcome = await browser_loop.run_browse(
+        session, "message anas hi", provider, action_approved=True
+    )
+    assert outcome.action_approval_required is False
+    assert outcome.success is True
+    kinds = [a[2] for a in page.acted]
+    assert "fill" in kinds and "press" in kinds
 
 
 async def test_commit_submit_gates_on_an_unsolved_embedded_widget():

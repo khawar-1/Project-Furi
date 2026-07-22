@@ -188,21 +188,23 @@ export function StatusBar() {
           </div>
         )}
 
-        {/* Committed-form result window (Phase 14.6) — left open to show the response */}
+        {/* Kept-open browser window — a submitted form's response page (14.6) or
+            the persistent agent browse window (2026-07-21), left open so the
+            user can see the result */}
         {resultWindow.open && (
           <div
             className="flex items-center gap-1"
-            title={resultWindow.title || 'A form result is open in the browser'}
+            title={resultWindow.title || 'A browser window is open'}
           >
             <FileCheck size={10} className="text-cyan-400" />
             <span className="text-cyan-400 max-w-[220px] truncate">
-              Form submitted{resultWindow.title ? `: ${resultWindow.title}` : ''}
+              Browser window{resultWindow.title ? `: ${resultWindow.title}` : ' open'}
             </span>
             <button
               onClick={() => void closeWindow()}
               disabled={resultWindow.closing}
               className="ml-0.5 text-muted hover:text-danger transition-fast disabled:opacity-50"
-              title="Close the result window"
+              title="Close the browser window"
             >
               <X size={11} />
             </button>

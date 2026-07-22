@@ -23,6 +23,7 @@ from app.api.task_router import (
     _classify_message,
     conversation_context,
     is_action_followup,
+    is_browse_followup,
     looks_like_task,
     wants_background,
 )
@@ -471,6 +472,27 @@ def test_gate_fires_for_sign_in_and_web_app_requests(message):
     assert looks_like_task(message) is True
 
 
+@pytest.mark.parametrize("message", [
+    # Live bug 2026-07-21: a named web app the user DRIVES ("open linkedin and
+    # navigate it") names no file/media noun and no "sign in" verb — "open" is
+    # only a weak-path verb with no weak noun beside it — so the gate missed and
+    # it fell to plain chat (which offered a "magic word" rephrase and then
+    # fabricated "that instruction has been passed to the system"). The generic
+    # browse-intent tier (`_is_browse_intent` → grounding.ground_origins) must
+    # fire when the user names a site to go to / act on.
+    "hey open linkedin and go to the networks tab and open profile of anas mubashar",
+    "Open LinkedIn, go to the networks tab, and open the profile of anas mubashar",
+    # The FIX MUST BE GENERAL — the browser stack is Skyvern-class (any site, no
+    # per-site code). These sites are in NO routing list; a nav cue + the named
+    # destination is the whole signal:
+    "open nytimes.com and read me the front page",
+    "go to overleaf and open my latest document",
+    "navigate to figma and open the design file",
+])
+def test_gate_fires_for_named_web_apps(message):
+    assert looks_like_task(message) is True
+
+
 def test_classify_prompt_covers_sign_in_and_lists_browse_in_the_answer():
     """BROWSE must appear in the CLOSING answer enumeration (it was omitted —
     'One word (TASK, EMAIL, CALENDAR, WEB, or CHAT)' — which biased the model
@@ -522,6 +544,42 @@ def test_followup_ignores_long_messages():
     # words — nine-plus words is not a follow-up steer.
     long_msg = "please send my warmest regards to everyone attending the party tonight"
     assert is_action_followup(long_msg, _EMAIL_CONVO) is False
+
+
+# ------------------------------- browse follow-up (open agent window, 2026-07-21)
+def test_browse_followup_fires_only_with_a_live_window(monkeypatch):
+    """After Jarvis opens a page, a short browser-verb message ("message him
+    'hi'") continues that session — but ONLY while a live window is held. The
+    window is the domain signal, so no site keyword is needed. Live bug: it fell
+    to plain chat, which offered a magic-word rephrase."""
+    monkeypatch.setattr("app.api.task_router._browse_window_active", lambda: True)
+    assert is_browse_followup("message him 'hi'") is True
+    assert is_browse_followup("text him hi") is True
+    assert is_browse_followup("click the first result") is True
+    assert is_browse_followup("scroll down") is True
+    # No browser-ish verb, or too long — not a steer.
+    assert is_browse_followup("thanks that worked") is False
+    assert is_browse_followup("send my warmest regards to everyone at the party tonight") is False
+
+    # With no window open, the same short steer does NOT fire here (the normal
+    # gate/classifier still sees a full new task on its own words).
+    monkeypatch.setattr("app.api.task_router._browse_window_active", lambda: False)
+    assert is_browse_followup("message him 'hi'") is False
+
+
+def test_browse_window_active_reflects_the_registry(monkeypatch):
+    from app.api import task_router
+    from app.browser.registry import REGISTRIES
+
+    REGISTRIES["browse"].clear_nowait()
+    assert task_router._browse_window_active() is False
+    # A held session (a fake object is enough — peek only reads the slot).
+    REGISTRIES["browse"]._session = object()
+    REGISTRIES["browse"]._meta = {"url": "https://www.linkedin.com/in/anas"}
+    try:
+        assert task_router._browse_window_active() is True
+    finally:
+        REGISTRIES["browse"].clear_nowait()
 
 
 async def test_followup_send_it_reaches_the_classifier(client):
@@ -670,6 +728,13 @@ async def test_chat_label_yields_no_plan_chunk(client):
     "I've started a search for the latest news on the *Black Clover* anime "
     "release date. I'll let you know what I find.",
     "I have begun a search for the latest updates on that.",
+    # Hand-off-to-the-backend fabrication (live bug 2026-07-21): on a routing
+    # miss the chat LLM claimed it had dispatched the request — chat cannot pass
+    # anything to any system, so a past-tense passed/handed/routed claim is a
+    # fabrication.
+    "That instruction has been passed to the system. Give me a moment, sir.",
+    "I have handed that off to the planner.",
+    "It's been routed to the right system, sir.",
 ])
 def test_impersonation_guard_catches_email_calendar_fabrications(text):
     assert _SYSTEM_VOICE_RE.search(text) is not None
@@ -685,6 +750,11 @@ def test_impersonation_guard_catches_email_calendar_fabrications(text):
     "I can search the web for you — just say 'search the web for the release date'.",
     "You can ask me to search the web for anything current, sir.",
     "I can start a search for the latest news if you'd like — just say the word.",
+    # A conditional offer to route / the honest "say it as a direct instruction"
+    # rephrase hint must NOT be cut (it is true, not a fabrication) — the belt is
+    # anchored to PAST-TENSE dispatch claims only.
+    "I can pass this to the system if you like, sir.",
+    "To do this, say it as a direct instruction so it routes to the right system.",
 ])
 def test_impersonation_guard_allows_capability_statements(text):
     assert _SYSTEM_VOICE_RE.search(text) is None
