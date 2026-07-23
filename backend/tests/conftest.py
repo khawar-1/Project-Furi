@@ -154,6 +154,40 @@ def _hermetic_voice_tts():
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_secrets():
+    """secrets_store's default backend is the real Windows DPAPI (Win32 API +
+    a per-user key). Tests must never depend on the OS crypto or platform: swap
+    in a reversible, always-available fake so autofill secret round-trips are
+    deterministic everywhere. The fake still produces the dpapi: prefix, so
+    'is it encrypted at rest?' assertions hold; it is trivially reversible, so
+    decrypt recovers the plaintext."""
+    from app.core import secrets_store
+
+    class _ReversibleBackend:
+        # A visible, reversible transform (byte-invert) standing in for DPAPI —
+        # NOT real crypto, only enough to prove the stored form differs from the
+        # plaintext and that decrypt undoes it.
+        def available(self) -> bool:
+            return True
+
+        def protect(self, data: bytes) -> bytes:
+            return bytes(b ^ 0xFF for b in data)
+
+        def unprotect(self, data: bytes) -> bytes:
+            return bytes(b ^ 0xFF for b in data)
+
+        def __repr__(self) -> str:  # pragma: no cover - debug aid
+            return "<ReversibleBackend fake>"
+
+    original = secrets_store.CRYPTO_BACKEND
+    secrets_store.CRYPTO_BACKEND = _ReversibleBackend()
+    secrets_store._warned = False
+    yield
+    secrets_store.CRYPTO_BACKEND = original
+    secrets_store._warned = False
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_browser():
     """browser_tools' default paths go to the REAL internet (Tavily, then the
     DuckDuckGo scrapers, then any URL a plan names). Both factories default to

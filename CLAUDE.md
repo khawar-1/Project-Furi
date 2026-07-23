@@ -2392,6 +2392,27 @@ gate + the headed watchable window + CAPTCHAs never auto-solved.
   prompt or history — the prompt block lists only the KEY + a `{{secret:key}}`
   placeholder, the loop substitutes the real value in CODE at fill time. `/api/autofill`
   CRUD (a secret value is NEVER returned) + a Settings `AutofillCard`.
+  **Secrets are also ENCRYPTED AT REST** (browser-refactor Phase 7, 2026-07-23):
+  a SECRET-kind value was plaintext in the `autofill_fields.value` column (the API
+  masked it on read, but a local process / backup / synced `jarvis.db` read it in
+  the clear). `app/core/secrets_store.py` seals it with Windows DPAPI
+  (`CryptProtectData`/`CryptUnprotectData` via ctypes — zero new dep, key held by
+  the OS per Windows user, so ciphertext is bound to this user+machine; the
+  `~/.jarvis/auth_token` posture, one level stronger), stored in the SAME column
+  behind a `dpapi:<b64>` prefix (an unprefixed value is legacy plaintext and passes
+  through). `upsert_field` encrypts SECRET writes after validation; `to_snapshot`
+  decrypts in code into `_secrets` (password-never-read is unchanged — the model
+  still only ever sees the placeholder); only SECRET kind is encrypted (text/link/
+  document stay readable curated grounding data). `CRYPTO_BACKEND` is the injectable
+  seam (the `STT_MODEL_FACTORY` pattern; conftest autouse `_hermetic_secrets`
+  installs a reversible fake so the suite never calls Win32). Degrades honestly: no
+  DPAPI or a crypto failure → plaintext with a LOUD one-time warning (a secret is
+  never lost to a hiccup); an undecryptable blob (corrupt / sealed for a different
+  Windows user) → `""`, never surfaced as ciphertext (the fill then pauses to ask).
+  Idempotent startup migration `autofill.encrypt_plaintext_secrets(db)` (in the ONE
+  table accessor, best-effort from the `main.py` lifespan) rewrites any unprefixed
+  SECRET row in place — no Alembic migration (same column, discriminated in-value).
+  Tests: `test_secrets_store.py`.
 - **15.3 — Vision fallback** (`app/providers/vision.py` seam + `dom_observe`
   screenshot/bbox + `browser_loop` stuck-escalation): DOM stays PRIMARY; vision
   fires ONLY when the loop is stuck (`_decide`→None / element-not-found — the

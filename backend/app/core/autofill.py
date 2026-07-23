@@ -27,6 +27,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import secrets_store
 from app.db.models import AutofillField
 
 # The recognised field kinds. `document` values are file paths (path-safety
@@ -254,7 +255,9 @@ def to_snapshot(rows: list[AutofillField]) -> FillProfile:
     for row in rows:
         if row.kind == "secret":
             profile.secret_keys.append(row.key)
-            profile._secrets[row.key] = row.value
+            # Stored encrypted at rest (Phase 7) — decrypted here, in code, so the
+            # real value reaches _secrets (code-only) and never a prompt/history.
+            profile._secrets[row.key] = secrets_store.decrypt_secret(row.value)
             continue
         profile.entries.append(_to_entry(row))
         if row.kind == "document":
@@ -306,13 +309,20 @@ async def upsert_field(
     kind = (kind or "text").strip().lower()
     _validate(label, value, kind)
 
+    # SECRET values are encrypted at rest (Phase 7); text/link/document stay
+    # readable (curated grounding data, not sensitive). Encrypt AFTER validation
+    # so an empty/invalid value is still rejected on its plaintext.
+    stored = value.strip()
+    if kind == "secret":
+        stored = secrets_store.encrypt_secret(stored)
+
     row = await get_field(db, key)
     if row is None:
-        row = AutofillField(key=key, label=label.strip(), value=value.strip(), kind=kind)
+        row = AutofillField(key=key, label=label.strip(), value=stored, kind=kind)
         db.add(row)
     else:
         row.label = label.strip()
-        row.value = value.strip()
+        row.value = stored
         row.kind = kind
     await db.commit()
     await db.refresh(row)
@@ -326,6 +336,29 @@ async def delete_field(db: AsyncSession, key: str) -> bool:
     await db.delete(row)
     await db.commit()
     return True
+
+
+async def encrypt_plaintext_secrets(db: AsyncSession) -> int:
+    """One-time, idempotent startup migration (Phase 7): encrypt any SECRET row
+    still stored as plaintext (no dpapi: prefix). Returns how many rows were
+    rewritten. Already-encrypted rows are skipped; on a host without at-rest
+    crypto encrypt_secret is a no-op, so nothing is rewritten and the pass is
+    safe to run every boot. Best-effort — the caller wraps it, a failure never
+    blocks startup."""
+    result = await db.execute(
+        select(AutofillField).where(AutofillField.kind == "secret")
+    )
+    changed = 0
+    for row in result.scalars().all():
+        if secrets_store.is_encrypted(row.value):
+            continue
+        encrypted = secrets_store.encrypt_secret(row.value)
+        if encrypted != row.value:
+            row.value = encrypted
+            changed += 1
+    if changed:
+        await db.commit()
+    return changed
 
 
 async def load_profile(db: AsyncSession) -> FillProfile:

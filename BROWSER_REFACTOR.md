@@ -1,6 +1,6 @@
 # Browser Automation Stack — Full Refactor
 
-**Status: Phases 0–6 of 8 complete** (0–5 committed; **Phase 6 uncommitted**, git deferred). Suite green at every phase. Phases 7–8 pending owner go-ahead.
+**Status: Phase 7 of 8 complete** (0–5 committed; **Phases 6–7 uncommitted**, git deferred). Suite green at every phase. **Phase 8 deliberately deferred** — no functional/security/correctness benefit, real regression surface (see below).
 **Goal:** Skyvern / GPT-Atlas-class capability — "do what I do in a browser" on any site, with no per-site code — on top of Jarvis's existing safety model.
 **Approved:** 2026-07-21 (plan file: `~/.claude/plans/hey-see-this-codebase-zippy-crane.md`). Test suite: **2103 green** as of the latest commit.
 
@@ -61,14 +61,57 @@ Old paths (`app/core/browser_session.py`, `app/core/dom_observe.py`, `app/core/b
 
 ---
 
-## Phases — left
+## Phase 7 — secrets-at-rest (done, uncommitted 2026-07-23)
 
-> Owner instruction: complete the current phase only; **do not start the next phase without asking.**
+Autofill SECRET values (a form password, an API key) were **plaintext in the
+`autofill_fields.value` column** (verified bug #7) — the API masked them on READ,
+but any local process, backup, or synced copy of `jarvis.db` read them in the
+clear, contradicting the project's own posture (auth-token 0600, credentials
+never entered by Jarvis). Now encrypted at rest:
 
-| Phase | Size | What it is |
-|---|---|---|
-| **7 — secrets** | small | Autofill secrets are **plaintext in SQLite today** (verified bug #7). New `app/core/secrets_store.py`: Windows DPAPI via ctypes (zero new dependency, key managed by the OS user account), injectable `CRYPTO_BACKEND` seam for tests, `dpapi:<b64>` prefix-discriminated values in the same column, idempotent startup migration encrypting non-prefixed rows, API keeps masking on read. |
-| **8 — importer migration** | medium | Rewrite the ~30 importers to `app.browser.*`, delete the compatibility shims, rewrite the browser architecture sections of `CLAUDE.md` (several are now stale — they describe the pre-refactor stack). |
+- **`app/core/secrets_store.py`** — Windows DPAPI (`CryptProtectData` /
+  `CryptUnprotectData` via **ctypes, zero new dependency**; the key is derived +
+  held by the OS for the logged-in Windows user, so ciphertext is bound to this
+  user+machine with no key file of our own to guard). Injectable `CRYPTO_BACKEND`
+  seam (the `STT_MODEL_FACTORY` pattern; conftest autouse `_hermetic_secrets`
+  installs a reversible fake so the suite never calls Win32 and is
+  platform-independent). Values stored in the SAME column, discriminated by a
+  `dpapi:<b64>` prefix — an unprefixed value is legacy plaintext and passes
+  through `decrypt_secret` unchanged.
+- **Graceful degradation** (the memory-engine rule): a host without DPAPI, or a
+  crypto failure, falls back to plaintext with a LOUD one-time warning rather
+  than losing the secret; a prefixed blob that can't be decrypted (corrupt, or
+  sealed for a different Windows user) yields `""` (the fill then pauses to ask)
+  — never surfaced as ciphertext.
+- **`autofill.encrypt_plaintext_secrets(db)`** — idempotent startup migration
+  (in the ONE table accessor, the reminders rule; called best-effort from the
+  `main.py` lifespan): rewrites every unprefixed SECRET row in place. No-op once
+  prefixed, no-op without DPAPI, safe to run every boot. **No Alembic migration**
+  (same column, discriminated in-value). `upsert_field` encrypts SECRET writes
+  after validation; `to_snapshot` decrypts in code into `_secrets` (never a
+  prompt/history — the password-never-read rule is unchanged). Only SECRET kind
+  is encrypted; text/link/document stay readable (curated grounding data).
+- Tests: `test_secrets_store.py` (11 — prefix/round-trip/idempotence/legacy
+  passthrough/unavailable-fallback/undecryptable→empty, a win32-guarded REAL
+  DPAPI round-trip, and DB integration through `upsert_field`/`load_profile` +
+  the in-place migration). **2244 green.**
+
+## Phase 8 — importer migration (DEFERRED — no benefit now)
+
+**Not implemented, by design.** Reviewed 2026-07-23: rewrite the ~6 non-test +
+~10 test importers of the old `app.core.browser_*` / `app.agents.browser_*`
+paths to `app.browser.*`, delete the 6 `sys.modules` self-replacement shims
+(11–13 lines each), and rewrite the (now-stale) browser sections of `CLAUDE.md`.
+
+This is **pure mechanical tidiness + doc freshness with zero functional,
+correctness, or security benefit**, against a real regression surface (~100 test
+monkeypatches reference the old paths — the exact reason the shims exist — plus a
+large, error-prone `CLAUDE.md` rewrite). The shims are transparent and working.
+Lead-engineer call: not worth the churn/risk today. Revisit only if the browser
+stack is being actively re-touched anyway, so the import rewrite and doc refresh
+ride along with work that must open those files regardless.
+
+> Owner instruction (still in force): **do not start Phase 8 without asking.**
 
 ### Also outstanding (not phases)
 

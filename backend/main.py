@@ -112,6 +112,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as e:
         logger.warning(f"⚠️  Expired-state purge failed (non-critical): {e}")
 
+    # Phase 7 (browser refactor): encrypt any autofill SECRET still stored as
+    # plaintext at rest. Idempotent — a no-op once every secret carries the
+    # dpapi: prefix, and a no-op on a host without DPAPI. Best-effort.
+    try:
+        from app.core.autofill import encrypt_plaintext_secrets
+        from app.db.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as session:
+            migrated = await encrypt_plaintext_secrets(session)
+        if migrated:
+            logger.info(f"🔒 Encrypted {migrated} plaintext autofill secret(s) at rest")
+    except Exception as e:
+        logger.warning(f"⚠️  Autofill secret encryption pass failed (non-critical): {e}")
+
     # Initialize Qdrant connection (creates all Phase 2 collections)
     try:
         await init_qdrant()
