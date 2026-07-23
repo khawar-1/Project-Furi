@@ -101,10 +101,43 @@ async def test_a_browse_login_wall_pauses_the_plan(db_session, monkeypatch):
     assert plan.status == PlanStatus.AWAITING_CHOICE
     assert plan.question is not None
     assert "sign in" in plan.question.text.lower()
-    assert plan.question.options == ["I've signed in — continue"]
+    # Two options (2026-07-23): sign in yourself, OR continue as a guest — many
+    # sites are usable without an account and a modal can read as a wall.
+    assert plan.question.options == [
+        "I've signed in — continue",
+        "Continue without signing in",
+    ]
     assert calls["n"] == 1
     # Nothing was completed; the browse step is not left in a terminal state.
     assert all(s.status != StepStatus.COMPLETED for s in plan.steps)
+
+
+async def test_continue_without_login_resumes_as_a_guest(db_session, monkeypatch):
+    """Choosing 'Continue without signing in' resumes the SAME browse step with
+    skip_login_wall stamped, so the loop ignores the wall and proceeds as a guest
+    — no re-draft, and the step carries the flag into run_browse."""
+    seq = [_login_result(), _success_result()]
+    seen: list[str] = []
+    skip_flags: list[bool] = []
+
+    async def fake_exec(tool, params, db, session_id=None, approved=False):
+        seen.append(tool)
+        skip_flags.append(bool(params.get("skip_login_wall")))
+        return seq.pop(0)
+
+    monkeypatch.setattr(planner_mod, "execute_tool", fake_exec)
+    provider = FakeProvider([plan_json([_browse_step()])])
+    planner = AgentPlanner(db_session, provider, session_id="s-guest")
+
+    plan = await planner.start("play jane by the long faces on youtube")
+    assert plan.status == PlanStatus.AWAITING_CHOICE
+
+    resumed = await planner.answer(plan, "Continue without signing in")
+
+    assert resumed.status == PlanStatus.COMPLETED
+    assert seen == ["browse", "browse"]         # ran once (wall), then again (guest)
+    assert skip_flags == [False, True]          # the resume carries the skip flag
+    assert resumed.skip_login_wall is True
 
 
 async def test_resume_after_sign_in_reruns_the_browse(db_session, monkeypatch):

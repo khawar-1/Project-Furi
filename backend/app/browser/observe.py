@@ -670,14 +670,115 @@ _UNMARK_JS = """() => {
 }"""
 
 
-async def capture_marked(
-    page: Any, observation: "Observation", skip_elements: int = 0
+def _mark_font(size: int) -> Any:
+    """A bitmap font for the badge numbers. Pillow ≥10.1 sizes its default font;
+    older Pillow ignores the size. None when Pillow's font module is absent (the
+    caller draws no text — the outline still marks the element). Never raises."""
+    try:
+        from PIL import ImageFont
+    except Exception:
+        return None
+    try:
+        return ImageFont.load_default(size=size)   # Pillow ≥ 10.1
+    except TypeError:
+        try:
+            return ImageFont.load_default()
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def overlay_marks(
+    base_jpeg: bytes, observation: "Observation", skip_elements: int = 0
 ) -> Optional[bytes]:
-    """A set-of-marks screenshot: overlay numbered badges + outlines for the
-    elements in the rendered window, capture the viewport, remove the overlay.
-    Best-effort at every stage — a mark failure degrades to the plain
-    screenshot, a capture failure to None (the caller falls back to the
-    text-only decision path)."""
+    """Draw the set-of-marks overlay in PYTHON (Pillow) onto an already-captured
+    base screenshot — instead of the in-page _MARK_JS / _UNMARK_JS round-trips —
+    so the capture can run CONCURRENTLY with observe() (Phase 6 pipelining).
+    Replicates the in-page badge exactly: a rose outline per element + a numbered
+    badge at its top-left, the number being the element's index (the vision model
+    answers with it, so it must match the text list).
+
+    The element rects are CSS px (viewport coords); the base image is device px,
+    already downscaled by capture_screenshot. ONE scale factor per axis
+    (image_size / viewport_size) maps between them and absorbs BOTH the
+    device-pixel-ratio and the downscale — which is exactly why
+    Observation.viewport is carried. Returns None when it cannot draw (Pillow
+    absent, unknown viewport, decode failure) so the caller falls back to the
+    in-page path. Never raises."""
+    vw, vh = observation.viewport
+    if vw <= 0 or vh <= 0:
+        return None
+    try:
+        import io
+
+        from PIL import Image, ImageDraw
+    except Exception:
+        return None
+    try:
+        with Image.open(io.BytesIO(base_jpeg)) as opened:
+            img = opened.convert("RGB")
+    except Exception as exc:
+        logger.debug(f"overlay_marks decode: {type(exc).__name__}: {exc}")
+        return None
+    try:
+        iw, ih = img.size
+        sx = iw / float(vw)
+        sy = ih / float(vh)
+        lo, hi = visible_span(observation, skip_elements)
+        draw = ImageDraw.Draw(img)
+        rose = (225, 29, 72)      # #e11d48 — the in-page outline/badge colour
+        white = (255, 255, 255)
+        outline_w = max(1, round(2 * sx))
+        font = _mark_font(int(min(20, max(11, round(12 * sy)))))
+        for e in observation.elements[lo:hi]:
+            x, y, w, h = e.rect
+            if w <= 0 or h <= 0:
+                continue
+            x0, y0 = x * sx, y * sy
+            x1, y1 = (x + w) * sx, (y + h) * sy
+            draw.rectangle([x0, y0, x1, y1], outline=rose, width=outline_w)
+            label = str(e.index)
+            try:
+                left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
+                tw, th = (right - left), (bottom - top)
+            except Exception:
+                tw, th = 7 * len(label), 12
+            bx0 = max(0.0, x0 - 1)
+            by0 = max(0.0, y0 - th - 3)
+            draw.rectangle([bx0, by0, bx0 + tw + 4, by0 + th + 2], fill=rose)
+            draw.text((bx0 + 2, by0 + 1), label, fill=white, font=font)
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=_SCREENSHOT_JPEG_QUALITY)
+        return buffer.getvalue()
+    except Exception as exc:
+        logger.debug(f"overlay_marks draw: {type(exc).__name__}: {exc}")
+        return None
+
+
+async def capture_marked(
+    page: Any,
+    observation: "Observation",
+    skip_elements: int = 0,
+    *,
+    base_image: Optional[bytes] = None,
+) -> Optional[bytes]:
+    """A set-of-marks screenshot: numbered badges + outlines for the elements in
+    the rendered window.
+
+    PIPELINED PATH (Phase 6): when `base_image` is supplied — a base screenshot
+    the loop captured CONCURRENTLY with observe() — the marks are drawn in Python
+    (overlay_marks), skipping the in-page _MARK_JS / screenshot / _UNMARK_JS
+    round-trips entirely. Falls back to the IN-PAGE path when no base is supplied,
+    or when overlay_marks can't draw (Pillow absent / unknown viewport). Every
+    stage is best-effort: a mark failure degrades to the plain screenshot, a
+    capture failure to None (the caller then falls back to the text-only path)."""
+    if base_image is not None:
+        marked = overlay_marks(base_image, observation, skip_elements)
+        if marked is not None:
+            return marked
+        # Pillow absent / undrawable → fall through to the in-page path, which
+        # draws marks in the DOM (no viewport scaling needed) and re-captures.
     lo, hi = visible_span(observation, skip_elements)
     items = [
         {"i": e.index, "x": e.rect[0], "y": e.rect[1], "w": e.rect[2], "h": e.rect[3]}

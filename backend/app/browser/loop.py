@@ -645,6 +645,97 @@ def _fast_path_action(goal: str, obs: dom_observe.Observation) -> Optional[dict]
     return {"action": "type", "index": target.index, "text": term, "submit": True}
 
 
+# ------------------------------------------------------ episode-number navigation
+# When the goal names a SPECIFIC episode number ("play episode 170 of black
+# clover", "ep 4 of my hero academia") and the loop is already on an episode page
+# of that title, the reliable move is to reach the exact episode BY URL rather than
+# by clicking a paginated episode list — anikoto and its kin hide episodes past
+# 100 behind a range dropdown the loop can't operate, and a flat DOM list has no
+# episode-number ordering (text-only picked element 96 → "Episode 87", live
+# 2026-07-23). Deterministic and SITE-AGNOSTIC: the fix keys on the page TITLE
+# saying "Episode M" AND the URL containing that same integer M as a standalone
+# path number — that agreement PROVES which URL number is the episode, so swapping
+# M→target is grounded, never the reverted "highest number on the page" heuristic
+# (which grabbed a YEAR). This reads NO bare number off the page content; only the
+# title's own "Episode M" label, cross-checked against the URL.
+#
+# Once on the target episode (title + URL both name it) the play/watch goal is met
+# — the video plays on its own (the decision prompt's own done rule) — so this
+# also TERMINATES, which stops the over-click-then-wander cascade that lost an
+# already-open "Episode 4" and searched again into the wrong season (live 2026-07-23).
+
+# The episode number the GOAL asks for: "episode 170", "ep 4", "epi 12", or the
+# "s2e4" shorthand (the episode part). A worded "last/latest episode" carries no
+# number and is deliberately NOT matched (that case is the model's/vision's job).
+_GOAL_EPISODE_RE = re.compile(
+    r"\b(?:episodes?|eps?|epi)\.?\s*(\d{1,4})\b|\bs\d+\s*e\s*(\d{1,4})\b",
+    re.IGNORECASE,
+)
+# The episode number the PAGE TITLE declares ("… Episode 87 …", "… Ep 4 …").
+_TITLE_EPISODE_RE = re.compile(
+    r"\bepisode\s*(\d{1,4})\b|\bep\.?\s*(\d{1,4})\b", re.IGNORECASE
+)
+
+
+def _target_episode(goal: str) -> Optional[int]:
+    """The specific episode number the goal names, or None when it names none."""
+    m = _GOAL_EPISODE_RE.search(goal or "")
+    if not m:
+        return None
+    raw = m.group(1) or m.group(2)
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return n if 1 <= n <= 9999 else None
+
+
+def _current_episode(obs: dom_observe.Observation) -> Optional[int]:
+    """The episode number of the page we're on, but ONLY when PROVEN: the title
+    says "Episode M" and the URL contains that exact integer M as a standalone
+    path number. None otherwise — the page is not a recognizable episode page (so
+    the loop should navigate/search its way there first)."""
+    tm = _TITLE_EPISODE_RE.search(obs.title or "")
+    if not tm:
+        return None
+    m = int(tm.group(1) or tm.group(2))
+    if not re.search(rf"(?<!\d){m}(?!\d)", obs.url or ""):
+        return None
+    return m
+
+
+def _swap_episode_in_url(url: str, current: int, target: int) -> Optional[str]:
+    """Replace the LAST standalone occurrence of `current` in `url` with `target`
+    (the episode number is the last path number; a coincidental digit run earlier
+    in the slug is left alone). None when `current` is not found as a whole number."""
+    matches = list(re.finditer(rf"(?<!\d){current}(?!\d)", url or ""))
+    if not matches:
+        return None
+    last = matches[-1]
+    return url[: last.start()] + str(target) + url[last.end():]
+
+
+def _episode_action(goal: str, obs: dom_observe.Observation) -> Optional[dict]:
+    """The deterministic episode move: navigate to the target episode's URL, or
+    (already there) finish. None when the goal names no episode or the current
+    page is not a proven episode page."""
+    target = _target_episode(goal)
+    if target is None:
+        return None
+    current = _current_episode(obs)
+    if current is None:
+        return None
+    if current == target:
+        return {
+            "action": "done",
+            "reason": f"Episode {target} is open — the video plays on its own.",
+        }
+    new_url = _swap_episode_in_url(obs.url, current, target)
+    if not new_url or new_url == obs.url:
+        return None
+    return {"action": "navigate", "url": new_url}
+
+
 # --------------------------------------------------------- login-wall guard
 # Dedicated sign-in hosts. Deliberately SMALL and conservative: a mid-task
 # landing on one of these is a login wall the loop must never try to pass — it
@@ -1153,6 +1244,7 @@ async def _decide(
     vision: Any = None,
     session: Any = None,
     counters: Optional[dict] = None,
+    base_image: Optional[bytes] = None,
 ) -> Optional[dict]:
     """One temp-0 call → the next action, validated against THIS observation's
     index map (a chosen index that is not on the page is refused, never resolved
@@ -1209,7 +1301,8 @@ async def _decide(
         and not (counters or {}).get("vision_dead")
     ):
         action = await _decide_with_vision(
-            _prompt(True), vision, session, obs, skip_elements, counters
+            _prompt(True), vision, session, obs, skip_elements, counters,
+            base_image=base_image,
         )
         if action is not None:
             if counters is not None:
@@ -1286,14 +1379,19 @@ async def _decide_with_vision(
     obs: dom_observe.Observation,
     skip_elements: int,
     counters: Optional[dict],
+    base_image: Optional[bytes] = None,
 ) -> Optional[dict]:
     """The hybrid's vision half: set-of-marks screenshot + the full decision
     prompt → one describe() call → a validated action. A fractional point is
     mapped back to a real element index (vision LOCATES, DOM ACTS — the
     staleness/index contract and the gesture gate apply unchanged downstream).
     None on ANY failure; the caller falls back to the text provider for this
-    same step. Never raises."""
-    image = await dom_observe.capture_marked(session.page, obs, skip_elements)
+    same step. Never raises. `base_image` is the base screenshot captured
+    concurrently with observe (Phase 6): capture_marked draws the marks onto it
+    in Python, skipping the in-page round-trips; None → in-page capture."""
+    image = await dom_observe.capture_marked(
+        session.page, obs, skip_elements, base_image=base_image
+    )
     if not image:
         image = await dom_observe.capture_screenshot(session.page)
     if not image:
@@ -1575,6 +1673,7 @@ async def run_browse(
     vision: Any = None,
     auth_resolved: Optional[set[str]] = None,
     action_approved: bool = False,
+    skip_login_wall: bool = False,
 ) -> BrowseOutcome:
     """Drive `session` toward `goal`, observing and acting until the model says
     done, the action budget is spent, or a dead-loop is detected. Read-only by
@@ -1667,7 +1766,20 @@ async def run_browse(
                 llm_calls=llm_calls, vision_calls=vision_calls,
             )
         await session.settle()
-        obs = await dom_observe.observe(session.page)
+        # PIPELINED CAPTURE (Phase 6): with a vision provider configured, the
+        # marked screenshot is needed THIS step, so capture the base viewport
+        # CONCURRENTLY with the DOM observe — two independent CDP reads whose
+        # round-trip + encode overlap instead of running back-to-back. The marks
+        # are drawn in Python from obs rects afterwards (dom_observe.overlay_marks),
+        # so the base needs no obs. Text-only runs capture nothing (base_shot None).
+        if vision is not None:
+            base_shot, obs = await asyncio.gather(
+                dom_observe.capture_screenshot(session.page),
+                dom_observe.observe(session.page),
+            )
+        else:
+            base_shot = None
+            obs = await dom_observe.observe(session.page)
         if obs.url != paged_url:
             element_skip = 0
             paged_url = obs.url
@@ -1675,7 +1787,11 @@ async def run_browse(
         # Sign-in wall (14.4): stop the loop cleanly — it has no credentials and
         # must never type any. The tool turns this into a user-driven login
         # window + an AWAITING_CHOICE pause; the resumed browse runs signed in.
-        wall = detect_login_wall(obs)
+        # skip_login_wall (2026-07-23): the user chose "continue without signing
+        # in" on a prior pause — many sites (anikoto &c.) are fully usable as a
+        # guest, and a modal/overlay can read as a wall. Honour that for this run
+        # so the loop proceeds past the offer instead of re-pausing on it forever.
+        wall = None if skip_login_wall else detect_login_wall(obs)
         if wall is not None:
             kind, site = wall
             logger.info(
@@ -1747,15 +1863,25 @@ async def run_browse(
                 out.auth_offer_url = obs.url
                 return out
 
+        # DETERMINISTIC EPISODE NAVIGATION (2026-07-23): the goal names a specific
+        # episode and we can PROVE which URL number is the episode (the title↔URL
+        # agreement in _current_episode) — reach the exact episode by URL
+        # (bypassing a paginated episode list) or, if already there, finish. No
+        # LLM/vision call. Non-commit only (the commit form-fill path is untouched).
+        action = _episode_action(goal, obs) if not commit else None
+        if action is not None:
+            logger.info(f"browse: deterministic episode navigation → {action}")
+
         # The fast path fills a single search box with the goal's TITLE — a
         # search, not a form submission — so it is disabled in commit mode (the
         # model must fill the real form's fields and choose "submit"). Taking the
         # first search in CODE is what keeps the model off a hostile homepage's ad
         # links: free-form, it clicked an ad on anikoto.cz instead of searching
         # (2026-07-22b). Everything after step 0 is the model's job.
-        action = _fast_path_action(goal, obs) if (step == 0 and not commit) else None
-        if action is not None:
-            logger.info("browse: took the fast path (single search box) — no LLM call")
+        if action is None and step == 0 and not commit:
+            action = _fast_path_action(goal, obs)
+            if action is not None:
+                logger.info("browse: took the fast path (single search box) — no LLM call")
         if action is None:
             action = await _decide(
                 goal, obs, history, provider, allowed,
@@ -1763,8 +1889,10 @@ async def run_browse(
                 fill_grounding=fill_grounding, skip_elements=element_skip,
                 # VISION-FIRST HYBRID: with a vision provider configured, every
                 # decision sees the marked screenshot; a vision hiccup falls
-                # back to the text provider inside _decide, per step.
+                # back to the text provider inside _decide, per step. base_image is
+                # the base viewport captured concurrently with observe (Phase 6).
                 vision=vision, session=session, counters=counters,
+                base_image=base_shot,
             )
             llm_calls += 1
             vision_calls = counters.get("vision", 0)

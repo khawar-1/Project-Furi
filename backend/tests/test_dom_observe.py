@@ -423,3 +423,100 @@ async def test_capture_marked_survives_a_failing_overlay():
         page_text="", text_truncated=False,
     )
     assert await capture_marked(_Page(), obs) == b"\xff\xd8\xff\xe0-plain"
+
+
+# --------------------------------------- Phase 6: pipelined Python-side marks
+def test_overlay_marks_draws_in_python_from_a_base_image():
+    """The pipelining win: given a base screenshot pre-captured concurrently with
+    observe(), the numbered marks are drawn in Python (Pillow) from the obs rects
+    — a valid JPEG comes back and it differs from the blank base (something drew)."""
+    Image = pytest.importorskip("PIL.Image")
+    import io
+
+    from app.core.dom_observe import Element, Observation, overlay_marks
+
+    buf = io.BytesIO()
+    Image.new("RGB", (200, 100), (255, 255, 255)).save(buf, format="JPEG")
+    base = buf.getvalue()
+    obs = Observation(
+        observation_id="o", url="u", title="", element_total=1,
+        elements=[Element(index=7, role="button", name="Go", rect=(10, 10, 100, 30))],
+        page_text="", text_truncated=False, viewport=(200, 100),
+    )
+    out = overlay_marks(base, obs)
+    assert out is not None and out[:2] == b"\xff\xd8"   # a JPEG came back
+    assert out != base                                  # marks were drawn on it
+
+
+def test_overlay_marks_returns_none_on_an_unknown_viewport():
+    """Without a viewport there is no CSS→image scale factor, so overlay_marks
+    bows out (returns None) and the caller falls back to the in-page path."""
+    from app.core.dom_observe import Element, Observation, overlay_marks
+
+    obs = Observation(
+        observation_id="o", url="u", title="", element_total=1,
+        elements=[Element(index=1, role="button", name="Go", rect=(1, 1, 5, 5))],
+        page_text="", text_truncated=False, viewport=(0, 0),
+    )
+    assert overlay_marks(b"anything", obs) is None
+
+
+async def test_capture_marked_uses_the_python_overlay_when_given_a_base_image():
+    """With a base_image, capture_marked draws marks in Python and never touches
+    the page — no _MARK_JS evaluate, no re-screenshot (the round-trips it saves)."""
+    pytest.importorskip("PIL.Image")
+    import io
+
+    from PIL import Image
+
+    from app.core.dom_observe import Element, Observation, capture_marked
+
+    buf = io.BytesIO()
+    Image.new("RGB", (120, 80), (0, 0, 0)).save(buf, format="JPEG")
+
+    class _Page:
+        def __init__(self):
+            self.evaluate_calls = 0
+            self.screenshot_calls = 0
+
+        async def evaluate(self, js, arg=None):
+            self.evaluate_calls += 1
+
+        async def screenshot(self, **kwargs):
+            self.screenshot_calls += 1
+            return b"should-not-be-used"
+
+    page = _Page()
+    obs = Observation(
+        observation_id="o", url="u", title="", element_total=1,
+        elements=[Element(index=1, role="button", name="Go", rect=(5, 5, 20, 10))],
+        page_text="", text_truncated=False, viewport=(120, 80),
+    )
+    out = await capture_marked(page, obs, base_image=buf.getvalue())
+    assert out is not None and out[:2] == b"\xff\xd8"
+    assert page.evaluate_calls == 0      # Python overlay — no in-page marks
+    assert page.screenshot_calls == 0    # base reused — no second capture
+
+
+async def test_capture_marked_falls_back_to_in_page_when_overlay_cannot_draw():
+    """A base_image the overlay can't use (unknown viewport → overlay None) still
+    yields marks via the in-page path — a vision decision is never dropped for it."""
+    from app.core.dom_observe import Element, Observation, capture_marked
+
+    calls = []
+
+    class _Page:
+        async def evaluate(self, js, arg=None):
+            calls.append(js[:20])
+
+        async def screenshot(self, **kwargs):
+            return b"\xff\xd8\xff\xe0-plain"
+
+    obs = Observation(
+        observation_id="o", url="u", title="", element_total=1,
+        elements=[Element(index=1, role="button", name="Go", rect=(1, 1, 5, 5))],
+        page_text="", text_truncated=False, viewport=(0, 0),   # overlay → None
+    )
+    out = await capture_marked(_Page(), obs, base_image=b"not-a-real-jpeg")
+    assert out == b"\xff\xd8\xff\xe0-plain"   # in-page path ran
+    assert len(calls) == 2                    # mark + unmark

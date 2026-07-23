@@ -53,19 +53,36 @@ class Settings(BaseSettings):
     OLLAMA_TIMEOUT_SECONDS: int = 300
 
     # ------------------------------------------------------------------ Vision
-    # The browser loop's DOM-first vision fallback (Phase 15.3): a SECOND,
-    # image-capable model used ONLY when the observe→decide→act loop is stuck on
-    # a page whose target has no usable DOM text (icon-only buttons, canvas apps).
+    # The browser loop's vision channel (Phase 15.3, vision-first since 2026-07-21):
+    # a SECOND, image-capable model that sees the page as a set-of-marks screenshot.
     # The primary provider (deepseek-chat) has no image input, so this is a
     # separate model behind app/providers/vision.py's seam. Off unless the user
     # opts in (browser_vision.config) AND a key is configured — otherwise the loop
     # stays DOM-only. VISION_API_KEY falls back to GEMINI_API_KEY so a user who
     # already has Gemini configured needs only to flip the toggle. The model must
-    # accept image input (gemini-2.0-flash does; a text-only model would fail the
-    # vision call and the loop degrades to DOM-only).
+    # accept image input (gemini-2.0-flash / Groq's Llama-4 do; a text-only model
+    # fails the vision call and the loop degrades to DOM-only).
     VISION_PROVIDER: str = "gemini"
     VISION_API_KEY: str = ""
     VISION_MODEL: str = "gemini-2.0-flash"
+
+    # MULTI-KEY ROTATION (2026-07-23). The vision channel rotates through EVERY
+    # configured key: a key that hits its quota / rate limit is set cooling-down
+    # and the next key is tried, and only when ALL keys are cooling does the loop
+    # fall to DOM-text — so quota exhaustion NEVER fails a browse. Groq is tried
+    # before Gemini (its free tier is far more generous and its Llama-4 models
+    # accept images). Keys are comma-separated; the singular VISION_API_KEY /
+    # GEMINI_API_KEY above still work (they extend the Gemini pool). Leaving all of
+    # these blank keeps today's single-key behaviour.
+    VISION_GROQ_API_KEYS: str = ""      # comma-separated Groq keys (tried first)
+    VISION_GEMINI_API_KEYS: str = ""    # comma-separated Gemini keys (tried after Groq)
+    VISION_GROQ_MODEL: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    VISION_GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    # How long a key stays cooling after a quota/rate-limit/auth error before it is
+    # re-probed. Long enough to stop hammering a daily-exhausted key; short enough
+    # that a per-minute rate limit recovers within a session. Process-global, reset
+    # on restart (quotas may have reset by then).
+    VISION_KEY_COOLDOWN_SECONDS: int = 900
 
     # ------------------------------------------------------------------ Identity resolution / memory
     # Minimum fuzzy score for a contact-name match to count as a candidate

@@ -244,6 +244,20 @@ class AgentPlan(BaseModel):
     # broken promise is only discoverable ON the resume, which may itself be
     # after a park); defaulted for old payloads.
     browse_note: str = ""
+    # A hard LOGIN wall the current browse hit, awaiting the user's choice
+    # (2026-07-23). Unlike a soft auth-offer this page BLOCKED the loop — but many
+    # sites (anikoto &c.) are usable as a guest and a modal/overlay can read as a
+    # wall, so the pause offers "continue without signing in" alongside the
+    # sign-in hand-off. Set to the wall's site when the plan pauses on the
+    # login-wall question so answer() can tell that reply apart. SERIALIZED beside
+    # the other pending_* markers; defaulted for old payloads.
+    pending_login_wall: Optional[str] = None
+    # Set True when the user answered a login-wall pause with "continue without
+    # signing in" (2026-07-23), and injected into the resumed browse step's
+    # parameters so the loop does NOT stop on a login wall for that run. Only ever
+    # True on such a resume; a later replan re-drafts the step and this clears.
+    # SERIALIZED; defaulted for old payloads.
+    skip_login_wall: bool = False
 
     def next_pending_index(self) -> Optional[int]:
         for i, step in enumerate(self.steps):

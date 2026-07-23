@@ -8,6 +8,7 @@ been bypassed rather than satisfied — so they are written to fail loudly.
 """
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -448,22 +449,21 @@ async def test_interceptor_counts_requests_and_ssrf_checks(fake_browser, monkeyp
     assert d["ssrf_checks"] == 1
 
 
-async def test_settle_stops_early_on_a_stable_page(fake_browser, monkeypatch):
-    """Adaptive settle: it polls the DOM node count and returns as soon as it
-    holds steady, instead of the old flat 2.5s sleep every step."""
-    monkeypatch.setattr(browser_session, "SETTLE_RENDER_POLL_SECONDS", 0.0)
+async def test_settle_stops_early_on_a_stable_page(fake_browser):
+    """Event-driven settle: the MutationObserver quiet-window (_QUIET_JS) is a
+    SINGLE page.evaluate raced against networkidle, not the old polling loop —
+    a stable page returns promptly on the first signal, no repeated sampling."""
     session = await _session()
     page = fake_browser.page
-    page.evaluate_results = [120, 120, 120]     # node count already stable
     await session.settle()
-    # Stopped once the count held steady for STABLE_SAMPLES samples (not the cap).
-    assert page.evaluate_calls == browser_session.SETTLE_RENDER_STABLE_SAMPLES + 1
+    assert page.evaluate_calls == 1     # one _QUIET_JS evaluate, never a poll loop
     assert session.stats.settle_seconds >= 0.0
 
 
 async def test_settle_survives_an_evaluate_failure(fake_browser):
-    """A page that navigated / closed mid-poll (evaluate raises) is not an error —
-    settle returns cleanly, never raises."""
+    """A page that navigated / closed mid-settle (the quiet evaluate raises) is
+    not an error — networkidle wins the race and the quiet task's exception is
+    drained, so settle returns cleanly and never raises."""
 
     async def _boom(expression, *args):
         raise RuntimeError("execution context was destroyed")
@@ -471,6 +471,24 @@ async def test_settle_survives_an_evaluate_failure(fake_browser):
     session = await _session()
     fake_browser.page.evaluate = _boom
     await session.settle()  # must not raise
+
+
+async def test_settle_is_bounded_when_the_page_never_quiets(fake_browser, monkeypatch):
+    """A page whose quiet-window never fires AND never goes network-idle is bounded
+    by the outer race deadline (SETTLE_HARD_CAP_SECONDS), not left hanging."""
+    monkeypatch.setattr(browser_session, "SETTLE_HARD_CAP_SECONDS", 0.05)
+    session = await _session()
+    never = asyncio.Event()   # never set — both signals hang
+
+    async def _hang(*a, **kw):
+        await never.wait()
+
+    fake_browser.page.evaluate = _hang
+    fake_browser.page.wait_for_load_state = _hang
+    started = time.monotonic()
+    await session.settle()    # returns via the deadline, never hangs
+    assert time.monotonic() - started < 1.0
+    assert session.stats.settle_seconds >= 0.0
 
 
 async def test_close_logs_a_summary_without_raising(fake_browser):

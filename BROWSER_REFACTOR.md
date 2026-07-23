@@ -1,6 +1,6 @@
 # Browser Automation Stack — Full Refactor
 
-**Status: Phases 0–5 of 8 complete** (committed, suite green at every phase). Phases 6–8 pending owner go-ahead.
+**Status: Phases 0–6 of 8 complete** (0–5 committed; **Phase 6 uncommitted**, git deferred). Suite green at every phase. Phases 7–8 pending owner go-ahead.
 **Goal:** Skyvern / GPT-Atlas-class capability — "do what I do in a browser" on any site, with no per-site code — on top of Jarvis's existing safety model.
 **Approved:** 2026-07-21 (plan file: `~/.claude/plans/hey-see-this-codebase-zippy-crane.md`). Test suite: **2103 green** as of the latest commit.
 
@@ -50,6 +50,7 @@ Old paths (`app/core/browser_session.py`, `app/core/dom_observe.py`, `app/core/b
 | **3c — multi-commit resume** | `c4a279b` | The road to form N+1 can surface **any** hand-off (login/fill/auth/challenge/origin were silently dropped before — verified bug); `auth_resolved` rides the session so a decided sign-in offer is never re-asked; restart honesty via serialized `AgentPlan.browse_note` ("that window is gone — starting again"). 2087 tests. |
 | **4 — action-level safety** | `0cdeb9e` | The capability unlock: page XHR/POST traffic **flows** (SPAs work); network Rule 1 only aborts unapproved top-level form-POST navigations; the **submit-gesture gate** in `_act` refuses click-on-submit-control / Enter-in-form in code (search-shaped + GET forms exempt); the commit permit matches the SPA fetch transport too; context-level routing closes the popup first-request gap; unrelated popups closed, superseded tabs closed; downloads refused; challenge-vendor traffic carve-out deleted (it's ordinary traffic now). 2096 tests. |
 | **5 — vision-first hybrid** | `c4a7ed1` | `capture_marked` set-of-marks overlay; `_decide` sends the marked screenshot + full prompt to the vision provider as the PRIMARY channel with per-step text fallback; old stuck-only vision escalation (`MAX_VISION_CALLS=2`) deleted; richer action space: `select_option`, `hover`, `scroll`, `press_key` (whitelist, never Enter — that's the submit gesture), `wait`, `back` — motion actions exempt from the repeat-dedupe and wandering detector. 2099 tests. |
+| **6 — speed** | *uncommitted (2026-07-23)* | Event-driven `settle()`: a MutationObserver 250ms quiet-window (`_QUIET_JS`) RACED against networkidle (demoted from gate to race participant) under a 2s cap — replaces the old sequential networkidle(≤2.5s)+node-count-poll(≥0.5s) EVERY step; an already-painted page returns at ~250ms. Typed `goto` retry: `_NAV_TIMEOUT_ERRORS` (Playwright `TimeoutError` + builtin, guarded import) replaces the `"Timeout" in str(exc)` string-sniff. Pipelined screenshot: the base viewport is captured CONCURRENTLY with `observe()` (only when a vision provider is configured) and the set-of-marks badges are drawn in Python (`observe.overlay_marks`, Pillow — scale = image/viewport absorbs DPR+downscale), skipping the 3 in-page `_MARK_JS`/screenshot/`_UNMARK_JS` round-trips; full fallback chain preserved (base None / no Pillow → in-page marks → plain shot → text-only). 2206 tests. |
 
 ### Post-refactor live-incident fixes (from the first real acceptance runs, 2026-07-21)
 
@@ -66,7 +67,6 @@ Old paths (`app/core/browser_session.py`, `app/core/dom_observe.py`, `app/core/b
 
 | Phase | Size | What it is |
 |---|---|---|
-| **6 — speed** | small-medium | Event-driven settle: MutationObserver quiet-window (250ms) raced with a 2s cap, immediate short-circuit on already-stable pages (removes the residual settle floor; networkidle demoted to a race participant). Typed `goto` retry on Playwright `TimeoutError` (replaces string-sniffing "Timeout"). Pipelined screenshot capture. *(The budget-assertion piece of Phase 6 already shipped early in `25b1c22`, forced by the live incident.)* |
 | **7 — secrets** | small | Autofill secrets are **plaintext in SQLite today** (verified bug #7). New `app/core/secrets_store.py`: Windows DPAPI via ctypes (zero new dependency, key managed by the OS user account), injectable `CRYPTO_BACKEND` seam for tests, `dpapi:<b64>` prefix-discriminated values in the same column, idempotent startup migration encrypting non-prefixed rows, API keeps masking on read. |
 | **8 — importer migration** | medium | Rewrite the ~30 importers to `app.browser.*`, delete the compatibility shims, rewrite the browser architecture sections of `CLAUDE.md` (several are now stale — they describe the pre-refactor stack). |
 

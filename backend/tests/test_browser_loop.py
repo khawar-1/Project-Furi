@@ -15,14 +15,99 @@ import pytest
 from app.agents import browser_loop
 from app.agents.browser_loop import (
     BrowseOutcome,
+    _current_episode,
+    _episode_action,
     _extract_search_term,
     _fast_path_action,
     _parse_action,
+    _swap_episode_in_url,
+    _target_episode,
     detect_auth_offer,
     run_browse,
 )
 from app.core import browser_session
 from app.providers.base import LLMResponse
+
+
+def _ep_obs(url, title):
+    return browser_loop.dom_observe.Observation(
+        observation_id="o", url=url, title=title, element_total=0,
+        elements=[], page_text="", text_truncated=False,
+    )
+
+
+# ---------------------------------------- deterministic episode navigation (Fix 1+2)
+def test_target_episode_reads_the_number_or_none():
+    assert _target_episode("play episode 170 of black clover on anikoto.cz") == 170
+    assert _target_episode("play ep 4 of my hero academia on anikoto.cz") == 4
+    assert _target_episode("watch epi 12 of naruto") == 12
+    assert _target_episode("play s2e7 of demon slayer") == 7
+    # a worded "last episode" carries no number → the model's/vision's job, not this path
+    assert _target_episode("play the last episode of black clover") is None
+    # no episode named at all
+    assert _target_episode("play black clover") is None
+    # a bare title number is not an episode qualifier
+    assert _target_episode("play blink 182 videos") is None
+
+
+def test_current_episode_needs_title_and_url_to_agree():
+    # title says Episode 87 AND the URL carries 87 → proven current episode
+    assert _current_episode(
+        _ep_obs("https://anikoto.cz/watch/black-clover-g7tjy/ep-87", "Watch Black Clover Episode 87")
+    ) == 87
+    # title says an episode the URL does NOT carry → not proven (None)
+    assert _current_episode(
+        _ep_obs("https://anikoto.cz/watch/black-clover-g7tjy/", "Watch Black Clover Episode 87")
+    ) is None
+    # not an episode page at all
+    assert _current_episode(
+        _ep_obs("https://anikoto.cz/browse", "Browse & Filter - Anikoto")
+    ) is None
+
+
+def test_swap_episode_replaces_only_the_last_standalone_number():
+    # the coincidental "7" in the slug g7tjy is left alone; the ep number swaps
+    assert _swap_episode_in_url(
+        "https://anikoto.cz/watch/black-clover-g7tjy/ep-87", 87, 170
+    ) == "https://anikoto.cz/watch/black-clover-g7tjy/ep-170"
+    assert _swap_episode_in_url(
+        "https://anikoto.cz/watch/my-hero-academia-kuzfp/ep-1", 1, 4
+    ) == "https://anikoto.cz/watch/my-hero-academia-kuzfp/ep-4"
+    assert _swap_episode_in_url("https://x/none-here", 5, 9) is None
+
+
+def test_episode_action_navigates_to_the_target_by_url():
+    # on Episode 87, want 170 → navigate to ep-170 (bypasses the range dropdown)
+    action = _episode_action(
+        "play episode 170 of black clover on anikoto.cz",
+        _ep_obs("https://anikoto.cz/watch/black-clover-g7tjy/ep-87", "Black Clover Episode 87"),
+    )
+    assert action == {
+        "action": "navigate",
+        "url": "https://anikoto.cz/watch/black-clover-g7tjy/ep-170",
+    }
+
+
+def test_episode_action_finishes_when_already_on_the_target():
+    # on Episode 4, want 4 → done (stops the over-click-then-wander cascade)
+    action = _episode_action(
+        "play ep 4 of my hero academia on anikoto.cz",
+        _ep_obs("https://anikoto.cz/watch/my-hero-academia-kuzfp/ep-4", "My Hero Academia Episode 4"),
+    )
+    assert action is not None and action["action"] == "done"
+
+
+def test_episode_action_none_when_no_number_or_not_on_an_episode_page():
+    # no number in the goal
+    assert _episode_action(
+        "play the last episode of black clover",
+        _ep_obs("https://anikoto.cz/watch/black-clover-g7tjy/ep-87", "Black Clover Episode 87"),
+    ) is None
+    # numbered goal but not on a recognizable episode page yet
+    assert _episode_action(
+        "play episode 170 of black clover",
+        _ep_obs("https://anikoto.cz/browse", "Browse & Filter - Anikoto"),
+    ) is None
 
 
 def _auth_obs(url, *elements):

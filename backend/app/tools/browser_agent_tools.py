@@ -249,6 +249,11 @@ class BrowseTool(BaseTool):
         # ever True on a resume the user just approved — a fresh draft never
         # carries it, and a later replan re-drafts the step without it.
         action_approved = bool(kwargs.get("action_approved"))
+        # Set by the planner when the user answered a login-wall pause with
+        # "continue without signing in" (2026-07-23): the loop then does NOT stop
+        # on a login wall for this run (the site is usable as a guest). Only ever
+        # True on such a resume; a fresh draft never carries it.
+        skip_login_wall = bool(kwargs.get("skip_login_wall"))
 
         async def _drive_browser() -> dict:
             # Runs on the dedicated browser loop (browser_runtime): Playwright
@@ -330,6 +335,7 @@ class BrowseTool(BaseTool):
                 outcome = await browser_loop.run_browse(
                     session, goal, provider, vision=vision,
                     action_approved=action_approved,
+                    skip_login_wall=skip_login_wall,
                 )
 
                 output = {

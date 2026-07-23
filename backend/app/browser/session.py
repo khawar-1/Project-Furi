@@ -142,6 +142,18 @@ BROWSER_PROFILE_DIR = Path.home() / ".jarvis" / "browser"
 # is unchanged until the user drops a folder in. See _extension_load_args().
 BROWSER_EXTENSIONS_DIR = Path.home() / ".jarvis" / "browser_extensions"
 NAV_TIMEOUT_MS = 20_000
+# The navigation-timeout types goto() retries on. Playwright's TimeoutError is
+# resolved ONCE here, guarded so a base install without Playwright never fails at
+# import (the lazy-dependency rule) — a missing Playwright yields the builtin
+# TimeoutError alone (which IS asyncio.TimeoutError on 3.11+). Replaces the old
+# brittle `"Timeout" in str(exc)` string-sniff in goto().
+try:
+    from playwright.async_api import TimeoutError as _PlaywrightTimeoutError
+    _NAV_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (
+        _PlaywrightTimeoutError, TimeoutError,
+    )
+except Exception:
+    _NAV_TIMEOUT_ERRORS = (TimeoutError,)
 # A launch on the SHARED single-instance profile can HANG indefinitely (not fail)
 # when an orphaned Chromium still holds the OS profile lock — Chromium the process
 # waits/hands off rather than erroring, and launch_persistent_context has no
@@ -161,24 +173,49 @@ LAUNCH_TIMEOUT_SECONDS = 45.0
 # outer BROWSE_HARD_TIMEOUT is sized against THIS number (pinned test in
 # test_browser_runtime.py).
 LAUNCH_CHAIN_BUDGET_SECONDS = 120.0
-# networkidle is a BEST-EFFORT quiet signal, not a correctness gate — a busy
-# analytics/ad page never truly goes idle, so waiting the old 5s on it just
-# burned time every step. 2.5s is enough for a normal page to settle; a busy one
-# times out and we observe anyway (the adaptive render poll below is what waits
-# for real content, not this).
-SETTLE_TIMEOUT_MS = 2_500       # best-effort wait for the page to go quiet
-# SPAs lazy-render their real content AFTER the network briefly goes idle, so
-# networkidle can return before the elements the loop needs have painted
-# (measured live 2026-07-17: a YouTube results page observed with only its header
-# and tabs, the video links not yet in the DOM). The OLD fix was a FLAT 2.5s sleep
-# every step (up to 15 steps/browse) — most of it wasted on already-painted pages.
-# Instead POLL the DOM node count until it stops growing (lazy content appearing
-# IS the node count growing), stopping early on a stable page and hard-capping so
-# a perpetually-churning page can't stall the loop. Generic — a property of
-# client-rendered pages, not a YouTube special-case.
-SETTLE_RENDER_MAX_SECONDS = 1.5   # hard cap on the stability poll
-SETTLE_RENDER_POLL_SECONDS = 0.25  # sample interval
-SETTLE_RENDER_STABLE_SAMPLES = 2   # consecutive unchanged samples ⇒ settled
+# EVENT-DRIVEN SETTLE (Phase 6 "speed", 2026-07-23). The page tells US when it has
+# painted, instead of us polling for it. Two signals RACED, not run in sequence:
+#   1. a MutationObserver quiet-window — the DOM going SETTLE_QUIET_MS with no
+#      mutations means lazy SPA content has finished appearing (mutations ARE the
+#      content painting; measured live 2026-07-17 a YouTube results page observed
+#      before its video links rendered). A page already stable fires no mutations
+#      and resolves at ~250ms — the residual floor, down from the old sequential
+#      networkidle(≤2.5s) + node-count poll(≥0.5s) EVERY step (up to 25 steps).
+#   2. networkidle — DEMOTED from the gate it used to be to a mere race participant
+#      (a busy analytics/ad page never truly goes idle, so waiting on it alone just
+#      burned time). Whichever fires first wins; a hard cap bounds a churning page.
+# Generic — a property of client-rendered pages, no per-site knowledge.
+SETTLE_QUIET_MS = 250              # DOM quiet window ⇒ painted (in-page)
+SETTLE_HARD_CAP_MS = 2_000        # in-page + networkidle belt (ms)
+SETTLE_HARD_CAP_SECONDS = 2.0     # outer race deadline (a never-quiet page)
+
+# The MutationObserver quiet-window, run in-page. Resolves the instant the DOM has
+# been QUIET (no childList/attribute/text mutations) for SETTLE_QUIET_MS, or at the
+# in-page belt cap — whichever first. A PLAIN observer (never dom_observe's stamping
+# extraction), so sampling never mutates the page it watches; every branch resolves
+# (a failed observe() resolves immediately), so page.evaluate never hangs on it and
+# the outer race deadline is only a backstop. {q, cap} are injected so the constants
+# live in Python. Returns a short reason string the caller ignores.
+_QUIET_JS = """({ q, cap }) => new Promise((resolve) => {
+  let settled = false, timer = null;
+  const done = (why) => {
+    if (settled) return;
+    settled = true;
+    try { obs.disconnect(); } catch (e) {}
+    if (timer) clearTimeout(timer);
+    resolve(why);
+  };
+  const arm = () => { if (timer) clearTimeout(timer); timer = setTimeout(() => done('quiet'), q); };
+  let obs;
+  try {
+    obs = new MutationObserver(arm);
+    obs.observe(document.documentElement || document, {
+      subtree: true, childList: true, attributes: true, characterData: true,
+    });
+  } catch (e) { return done('no-observer'); }
+  arm();                                  // a page that never mutates resolves at q
+  setTimeout(() => done('cap'), cap);     // in-page belt
+})"""
 
 # ~/.jarvis/browser is a SINGLE persistent profile: at most one live Chromium may
 # hold it. A Chromium keeps the OS single-instance lock for a short moment after
@@ -1511,9 +1548,10 @@ class BrowserSession:
         # bounded to exactly one retry so a truly dead site still fails in ~40s.
         try:
             await self.page.goto(target, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-        except Exception as exc:
-            if "Timeout" not in type(exc).__name__ and "Timeout" not in str(exc):
-                raise
+        except _NAV_TIMEOUT_ERRORS:
+            # A navigation TIMEOUT only — any other error (DNS, refused connection)
+            # propagates untouched (never retried). The retry is OUTSIDE this handler,
+            # so a second timeout raises: bounded to exactly one retry (~40s worst case).
             logger.info(f"browser: goto timed out once for {target[:100]} — retrying")
             await self.page.goto(target, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         return await self._verify_landing()
@@ -1560,48 +1598,40 @@ class BrowserSession:
         page is a normal outcome, never an error — timing out just means we
         observe slightly earlier.
 
-        Two-stage: a short networkidle wait, then an ADAPTIVE render poll (see
-        _wait_for_render). Replaces the old flat 2.5s sleep EVERY step, which paid
-        full price on already-stable pages — a big share of per-step latency
-        across up to MAX_BROWSER_ACTIONS steps (the 2026-07-19 'slow browser'
-        round). Time spent here accrues into stats.settle_seconds for the close
-        summary."""
+        EVENT-DRIVEN (Phase 6): RACE a MutationObserver quiet-window (_QUIET_JS,
+        the primary signal — the DOM tells us when it stopped painting) against
+        networkidle (demoted to a race participant), whichever fires first, under
+        an outer SETTLE_HARD_CAP_SECONDS deadline for a page that never quiets.
+        Replaces the old sequential networkidle(≤2.5s) + node-count poll(≥0.5s)
+        run EVERY step — an already-painted page now returns at ~250ms. Time spent
+        accrues into stats.settle_seconds for the close summary. Never raises."""
         started = time.monotonic()
+        quiet = asyncio.ensure_future(
+            self.page.evaluate(_QUIET_JS, {"q": SETTLE_QUIET_MS, "cap": SETTLE_HARD_CAP_MS})
+        )
+        idle = asyncio.ensure_future(
+            self.page.wait_for_load_state("networkidle", timeout=SETTLE_HARD_CAP_MS)
+        )
         try:
-            await self.page.wait_for_load_state("networkidle", timeout=SETTLE_TIMEOUT_MS)
-        except Exception:
-            pass
-        await self._wait_for_render()
-        self.stats.settle_seconds += time.monotonic() - started
-
-    async def _wait_for_render(self) -> None:
-        """Poll the DOM node count until it stops growing (or the cap): lazy SPA
-        content appearing IS the node count rising, so a stable count means the
-        page has painted. Stops after SETTLE_RENDER_STABLE_SAMPLES unchanged
-        samples, hard-capped at SETTLE_RENDER_MAX_SECONDS. Generic — no per-site
-        knowledge, and a PLAIN count (never dom_observe's stamping extraction), so
-        the probe never mutates the page it samples. Never raises."""
-        deadline = time.monotonic() + SETTLE_RENDER_MAX_SECONDS
-        last = -1
-        stable = 0
-        while time.monotonic() < deadline:
-            try:
-                count = int(await self.page.evaluate(
-                    "document.getElementsByTagName('*').length"
-                ))
-            except Exception:
-                return  # navigated / closed mid-poll — nothing left to wait for
-            if count == last:
-                stable += 1
-                if stable >= SETTLE_RENDER_STABLE_SAMPLES:
-                    return
-            else:
-                stable = 0
-                last = count
-            try:
-                await asyncio.sleep(SETTLE_RENDER_POLL_SECONDS)
-            except Exception:
-                return
+            await asyncio.wait(
+                {quiet, idle},
+                timeout=SETTLE_HARD_CAP_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            # Always cancel the loser and DRAIN both — even if settle itself is
+            # cancelled mid-wait (a browse hard-timeout) — so neither child leaks
+            # nor logs an "exception never retrieved" warning. A busy networkidle
+            # timeout, a quiet evaluate on a closed page, or our own cancel is
+            # never an error here (the child's CancelledError, not settle's).
+            for task in (quiet, idle):
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            self.stats.settle_seconds += time.monotonic() - started
 
     # -------------------------------------------------------------- commit
     # COMMIT mode (14.5): the ONLY path by which this session ever issues a

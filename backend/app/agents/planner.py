@@ -1583,23 +1583,49 @@ def _login_wall_question(info: dict) -> PlanQuestion:
     site = str(info.get("login_site") or "the site")
     kind = str(info.get("wall_kind") or "login").lower()
     opened = info.get("login_window_opened", True)
+    # Many sites (anikoto &c.) are fully usable WITHOUT an account, and an
+    # optional register modal/overlay can read as a wall — so always offer a
+    # guest path alongside the sign-in hand-off (2026-07-23). Choosing it resumes
+    # the browse with the login wall ignored for that run.
+    guest = "Continue without signing in"
     if kind == "signup":
         lead = "I've opened a sign-up window" if opened else "Open the Jarvis browser window"
         text = (
             f"This looks like creating an account on {site}, which I won't do for "
-            f"you. {lead} — please sign up there yourself (I never enter your "
-            "details), then say 'continue' (or click below)."
+            f"you. If you need an account: {lead.lower()} — sign up there yourself "
+            "(I never enter your details), then say 'I've signed up — continue'. "
+            "If the site works without one, choose 'Continue without signing in' "
+            "and I'll carry on as a guest."
         )
         action = "I've signed up — continue"
     else:
         lead = "I've opened a sign-in window" if opened else "Open the Jarvis browser window"
         text = (
-            f"You need to sign in to {site} before I can continue, and I won't "
-            f"enter your credentials. {lead} — please sign in there yourself, then "
-            "say 'continue' (or click below)."
+            f"{site} is asking me to sign in, and I won't enter your credentials. "
+            f"If you want to sign in: {lead.lower()} — sign in there yourself, then "
+            "say 'I've signed in — continue'. If the site works without an account "
+            "(many do), choose 'Continue without signing in' and I'll carry on as "
+            "a guest."
         )
         action = "I've signed in — continue"
-    return PlanQuestion(text=text, options=[action], kind=kind)
+    return PlanQuestion(text=text, options=[action, guest], kind=kind)
+
+
+# Whether a reply to a login-wall pause chose the GUEST path ("continue without
+# signing in") rather than "I've signed in — continue". Deterministic, matching
+# both the option text and free-typed variants; anything not clearly a guest
+# choice is treated as "signed in" (the safe default — the profile now has the
+# cookie, and a signed-in resume never leaks credentials).
+_LOGIN_GUEST_RE = re.compile(
+    r"without\s+sign|as\s+a?\s*guest|\bguest\b|don'?t\s+(?:want|need)|no\s+account|"
+    r"skip\s+(?:the\s+)?(?:sign|login|log\s*in)|continue\s+without",
+    re.IGNORECASE,
+)
+
+
+def _chose_guest_login(answer: str) -> bool:
+    """True when a login-wall reply means 'proceed without signing in'."""
+    return bool(_LOGIN_GUEST_RE.search((answer or "").strip()))
 
 
 def _challenge_wall_question(info: dict) -> PlanQuestion:
@@ -2320,6 +2346,33 @@ class AgentPlanner:
                 logger.info(f"user declined the browser action: {pending_action}")
                 return plan
 
+        # Login-wall hand-off (2026-07-23): the browse hit a hard sign-in wall and
+        # paused offering EITHER "I've signed in — continue" OR "continue without
+        # signing in". Decide HERE, in code. Guest → stamp skip_login_wall on the
+        # paused browse step so the resumed run ignores the wall (the site is
+        # usable without an account). Signed-in → resume as-is (the persistent
+        # profile now carries the cookie). Either way re-enter EXECUTE directly on
+        # the intact PENDING step — deterministic, one fewer LLM call, and it does
+        # not re-draft the start_url (the origin-approval resume-blind lesson).
+        pending_login = getattr(plan, "pending_login_wall", None)
+        if pending_login:
+            plan.pending_login_wall = None
+            self._note_expired_window(plan)
+            if _chose_guest_login(answer):
+                plan.skip_login_wall = True
+                for step in plan.pending_steps():
+                    if step.tool == _BROWSE_TOOL:
+                        step.parameters["skip_login_wall"] = True
+                logger.info(
+                    f"user chose to continue without signing in to {pending_login} "
+                    "— resuming as a guest"
+                )
+            else:
+                logger.info(f"user signed in to {pending_login} — resuming")
+            plan.status = PlanStatus.EXECUTING
+            state = await self._graph.ainvoke(self._initial_state(plan, set()))
+            return state["plan"]
+
         plan.status = PlanStatus.EXECUTING
         state = await self._graph.ainvoke(
             self._initial_state(plan, set(), entry="revise")
@@ -2595,6 +2648,9 @@ class AgentPlanner:
         elif reason in (browse_state.Handoff.LOGIN, browse_state.Handoff.SIGNUP):
             if opened is None:
                 opened = await self._open_commit_login(payload.site)
+            # Remember a wall is open so answer() can tell a "continue without
+            # signing in" reply apart from "I've signed in — continue".
+            plan.pending_login_wall = payload.site or "the site"
             question = _login_wall_question(
                 {
                     "login_site": payload.site,

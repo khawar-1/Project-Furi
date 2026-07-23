@@ -735,6 +735,17 @@ async def test_chat_label_yields_no_plan_chunk(client):
     "That instruction has been passed to the system. Give me a moment, sir.",
     "I have handed that off to the planner.",
     "It's been routed to the right system, sir.",
+    # Browser/media action claims (live bug 2026-07-23): a follow-up correction
+    # ("i meant ep 5 of season 2 in english dub") missed routing, fell to plain
+    # chat, and the LLM fabricated a completed browser switch. Chat cannot drive
+    # a browser, so a switch/now-playing/playing-on-<site> claim is a fabrication.
+    "I'll switch it over. Episode 5 of My Hero Academia Season 2 in English "
+    "dub is now open and playing on anikoto.cz. All done, sir.",
+    "Switching it over to the dub now, sir.",
+    "I've switched the episode over — enjoy, sir.",
+    "Episode 5 is now open and playing on anikoto.cz.",
+    "It's now open and playing, sir.",
+    "Done — the video is now playing on youtube.com.",
 ])
 def test_impersonation_guard_catches_email_calendar_fabrications(text):
     assert _SYSTEM_VOICE_RE.search(text) is not None
@@ -755,6 +766,13 @@ def test_impersonation_guard_catches_email_calendar_fabrications(text):
     # anchored to PAST-TENSE dispatch claims only.
     "I can pass this to the system if you like, sir.",
     "To do this, say it as a direct instruction so it routes to the right system.",
+    # Browser/media capability OFFERS must NOT trip the guard — a routing miss
+    # should ask the user to rephrase, not get cut.
+    "I can play videos on YouTube for you — just say 'play jane on youtube'.",
+    "Would you like me to switch it to the dub? Just say the word, sir.",
+    "I can open that page in a browser if you'd like.",
+    "I can switch it over if you tell me the season and episode.",
+    "You can ask me to play any episode — just say it as a direct instruction.",
 ])
 def test_impersonation_guard_allows_capability_statements(text):
     assert _SYSTEM_VOICE_RE.search(text) is None
@@ -1209,8 +1227,10 @@ def test_chat_prompt_carries_capabilities_and_task_outcome_honesty():
 
     prompt = _build_system_prompt()
     # Round 5: never deny access, never pretend a missed task ran
-    assert "Never claim you lack file-system, email, calendar, web, or computer access" in prompt
+    assert "Never claim you lack file-system, email, calendar, web, browser, or computer access" in prompt
     assert "do NOT pretend you did it" in prompt
+    # 2026-07-23: browser/media is a real capability and a fabrication vector
+    assert "drive a real web browser to act on live sites" in prompt
     # Phase 5 Part 5: email + calendar are real capabilities now
     assert "read and send email" in prompt
     assert "manage the user's Google Calendar" in prompt
@@ -1333,6 +1353,32 @@ async def test_impersonated_task_initiation_claim_is_corrected(client):
     text = streamed_text(events)
     assert "Correction from the Jarvis system" in text
     assert "no task ran" in text
+
+
+async def test_impersonated_browser_media_switch_is_corrected(client):
+    """Live bug 2026-07-23: after a real 'play ep X on anikoto.cz', the
+    follow-up correction 'i meant ep 5 of season 2 in english dub' missed
+    routing, fell to plain chat, and the LLM fabricated 'I'll switch it over.
+    Episode 5 … is now open and playing on anikoto.cz.' — nothing happened.
+    Chat cannot drive a browser, so the claim is cut and corrected, and the
+    fabricated tail (the false 'now playing on <site>') never reaches the user."""
+    use_provider(streams=[
+        "I'll switch it over. Episode 5 of My Hero Academia Season 2 in "
+        "English dub is now open and playing on anikoto.cz. All done, sir."
+    ])
+    events = await post_chat(
+        client, "i meant ep 5 of season 2 in english dub", "s-imp-media"
+    )
+
+    text = streamed_text(events)
+    assert "Correction from the Jarvis system" in text
+    assert "no browser opened or video played" in text
+    # Cut at the marker: the false "now playing" claim and the fabricated tail
+    # never reached the user. (The correction text names anikoto.cz as an
+    # example, so assert on the fabrication-only phrasing instead.)
+    assert "now open and playing" not in text
+    assert "All done, sir" not in text
+    assert events[-1]["done"] is True
 
 
 async def test_normal_chat_stream_is_untouched_by_the_guard(client):
