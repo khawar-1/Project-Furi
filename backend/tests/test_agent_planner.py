@@ -1147,3 +1147,185 @@ async def test_summary_llm_never_sees_an_empty_record(db_session):
     assert streamed["calls"] == 0  # the LLM was never asked
     assert "file3.pdf" not in text  # nothing invented
     assert "No matching files were found" in text
+
+
+# ============================ domain-agent specialization (boss + agents model)
+
+def test_tools_json_is_filtered_to_the_agent_subset():
+    """A specialized planner shows the LLM only its agent's tools — the
+    structural, zero-cost specialization (the model can't draft what it can't
+    see). The email agent has send_email + shared reads, never delete_file."""
+    from app.agents.planner import _tools_json
+    from app.agents.agent_registry import agent_for_label
+
+    email = agent_for_label("EMAIL")
+    catalog = json.loads(_tools_json(email.tools))
+    names = {t["name"] for t in catalog}
+    assert names == set(email.tools)          # exactly the subset, nothing extra
+    assert "send_email" in names
+    assert "search_files" in names            # shared read — "tools not starved"
+    assert "delete_file" not in names
+    assert "browse_commit" not in names
+
+
+def test_tools_json_unfiltered_is_the_full_registry():
+    """The general agent (tools=None) sees every registered tool — the
+    pre-agent behavior, so nothing regresses."""
+    from app.agents.planner import _tools_json
+    from app.tools.registry import registry
+
+    names = {t["name"] for t in json.loads(_tools_json())}
+    assert names == set(registry.names())
+
+
+def test_plan_prompt_carries_the_agent_persona():
+    from app.agents.planner import _build_plan_prompt
+    from app.agents.agent_registry import agent_for_label
+
+    browser = agent_for_label("BROWSE")
+    prompt = _build_plan_prompt("x", tools=browser.tools, persona=browser.persona)
+    assert "browser agent" in prompt.lower()
+
+    # the general agent adds no persona header
+    assert "browser agent" not in _build_plan_prompt("x").lower()
+
+
+# ============================================ LLM transport failures (2026-07-26)
+# Live incident: a machine-wide DNS outage killed junaidjamshed.com AND
+# api.deepseek.com inside 25s. The step failed with a perfectly good code-authored
+# reason ("Couldn't load www.junaidjamshed.com: it didn't respond in time."), the
+# replan then died on DNS, and the user was told:
+#     "Step '...' failed and replanning also failed: LLM call failed:
+#      [Errno 11001] getaddrinfo failed"
+# — the replan's own death overwrote the diagnosis, phrased as a dead end.
+
+
+class RaisingProvider(FakeProvider):
+    """FakeProvider that RAISES a scripted exception instead of answering, from
+    the Nth call on — how a network outage mid-plan actually looks."""
+
+    def __init__(self, responses: List[str], *, raise_from_call: int, exc: BaseException):
+        super().__init__(responses)
+        self._raise_from_call = raise_from_call
+        self._exc = exc
+
+    async def chat(self, messages, temperature: float = 0.7, max_tokens: Optional[int] = None):
+        if self.calls + 1 >= self._raise_from_call:
+            self.calls += 1
+            raise self._exc
+        return await super().chat(messages, temperature, max_tokens)
+
+
+def _dns_outage() -> BaseException:
+    """The incident's exact exception shape: an httpx transport error wrapping
+    the OSError that carries WSAHOST_NOT_FOUND."""
+    import httpx
+
+    try:
+        try:
+            raise OSError(11001, "getaddrinfo failed")
+        except OSError as inner:
+            raise httpx.ConnectError("") from inner   # empty message, as it was live
+    except BaseException as exc:
+        return exc
+
+
+async def test_replan_transport_failure_leads_with_the_step_reason(db_session, tmp_path):
+    """THE INCIDENT, frozen. When the replan dies on a network error, the
+    user-facing message must LEAD with the STEP's own reason — the one thing
+    they can act on — not the replanner's errno."""
+    folder = tmp_path / "ghost.txt"
+    folder.mkdir()  # read_file on a directory: a non-recoverable failure
+    doomed = [step("Read it", "read_file", path=str(folder))]
+    provider = RaisingProvider(
+        [plan_json(doomed)], raise_from_call=2, exc=_dns_outage()
+    )
+
+    plan = await AgentPlanner(db_session, provider).start("read ghost.txt")
+
+    assert plan.status == PlanStatus.FAILED
+    # the STEP's own diagnosis survives and comes first
+    assert "is a directory" in plan.message
+    assert plan.message.index("is a directory") < plan.message.index("Replanning also failed")
+    # the network is named in plain language; the raw errno never reaches the user
+    assert "network looks down" in plan.message
+    assert "getaddrinfo" not in plan.message
+    assert "11001" not in plan.message
+
+
+async def test_replan_model_failure_still_reads_as_a_planning_failure(db_session, tmp_path):
+    """The other class must stay distinguishable: when the MODEL failed (not the
+    network), the message says so — a transport phrasing there would be a lie."""
+    folder = tmp_path / "ghost.txt"
+    folder.mkdir()
+    doomed = [step("Read it", "read_file", path=str(folder))]
+    provider = RaisingProvider(
+        [plan_json(doomed)], raise_from_call=2, exc=ValueError("choices key missing")
+    )
+
+    plan = await AgentPlanner(db_session, provider).start("read ghost.txt")
+
+    assert plan.status == PlanStatus.FAILED
+    assert "is a directory" in plan.message          # still leads with the step
+    assert "LLM call failed" in plan.message
+    assert "ValueError" in plan.message               # never an empty reason
+    assert "network looks down" not in plan.message
+
+
+async def test_transport_failure_backs_off_but_a_model_failure_does_not(monkeypatch):
+    """Measured in the incident: the two attempts landed 1.1s apart — the same
+    failure twice, not a retry. A transport failure now waits; a model failure
+    keeps the immediate retry it has always had (waiting buys nothing there)."""
+    import asyncio as _asyncio
+
+    from app.agents import planner as planner_mod
+
+    slept: list = []
+
+    async def _record(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(_asyncio, "sleep", _record)
+
+    async def _run(exc) -> list:
+        slept.clear()
+        provider = RaisingProvider([], raise_from_call=1, exc=exc)
+        p = planner_mod.AgentPlanner(None, provider)
+        steps, _reason, _q, error, _acc = await p._generate_steps(
+            "prompt", allow_empty=False, goal="g"
+        )
+        assert steps is None and error
+        assert provider.calls == 2      # still exactly two attempts, not a new budget
+        return list(slept), error
+
+    transport_sleeps, transport_error = await _run(_dns_outage())
+    assert transport_sleeps == [planner_mod._LLM_RETRY_BACKOFF_SECONDS]
+    assert transport_error == planner_mod._LLM_UNREACHABLE_MESSAGE
+
+    model_sleeps, model_error = await _run(ValueError("bad json"))
+    assert model_sleeps == []
+    assert "LLM call failed" in model_error
+
+
+def test_an_exception_with_no_message_still_logs_its_class():
+    """Attempt 1 logged `Planner LLM call failed (attempt 1): ` — nothing after
+    the colon — so half the failure was undiagnosable from the log."""
+    from app.agents.planner import _exc_text
+
+    assert _exc_text(ValueError("")) == "ValueError"
+    assert _exc_text(ValueError("boom")) == "ValueError: boom"
+
+
+def test_transport_classification_matrix():
+    """A DNS/connect death is transport; a model or HTTP-status failure is not —
+    a 400 must keep the legible body the 2026-07-24 round gave it."""
+    import httpx
+
+    from app.agents.planner import _is_transport_error
+
+    assert _is_transport_error(_dns_outage())                       # wrapped OSError
+    assert _is_transport_error(OSError(11001, "getaddrinfo failed"))
+    assert _is_transport_error(httpx.ConnectTimeout("timed out"))
+    assert _is_transport_error(RuntimeError("connection refused"))  # text marker
+    assert not _is_transport_error(ValueError("choices key missing"))
+    assert not _is_transport_error(RuntimeError("400 Bad Request: content risk"))

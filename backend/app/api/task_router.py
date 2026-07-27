@@ -68,6 +68,7 @@ from app.agents import (
     put_plan,
     start_task,
 )
+from app.agents.agent_registry import GENERAL, AgentSpec, agent_for_key, agent_for_label
 from app.agents.summary import stream_completed_summary
 from app.api.agent import _plan_response
 from app.browser.grounding import ground_origins
@@ -490,10 +491,15 @@ Judge the INTENT, not the vocabulary:
 - A question about JARVIS'S OWN actions is TASK, not CHAT — Jarvis answers it from its action record, never from memory: "what was the name of the folder you created?", "did you delete anything today?", "who created the jarvis_test folder?" (Jarvis may have) are all TASK; "I deleted a bunch of files yesterday" is CHAT (the user talking about their own actions).
 Any wording that asks for one of those actions now — or asks about actions Jarvis itself performed — gets its action label; anything else is CHAT.
 
+Then, for an ACTION label only (never for CHAT), add a SECOND word for how to run it:
+INLINE — a quick lookup Jarvis can answer in essentially one read, right now, that only READS and changes nothing: "what's on my desktop", "list my downloads", "any new emails?", "what's my next meeting", "look up today's weather", "who is the CEO of X". The user waits a moment and gets the answer in the chat.
+DELEGATE — real work: anything that CREATES, MOVES, DELETES, SENDS, or CHANGES something; drives a browser (every BROWSE); or clearly takes several steps. "organize my downloads", "email jamil about dinner", "delete the temp files", "apply to 3 jobs", "play a song on youtube". It runs in the background as its own agent while the user keeps talking, and Jarvis notifies them when it is done.
+When unsure, choose DELEGATE.
+
 {context_block}USER MESSAGE:
 {message}
 
-One word (TASK, EMAIL, CALENDAR, WEB, BROWSE, or CHAT):"""
+One word (TASK, EMAIL, CALENDAR, WEB, BROWSE, or CHAT) — and for any action label (not CHAT) add its mode, INLINE or DELEGATE, e.g. "TASK INLINE", "EMAIL DELEGATE", "BROWSE DELEGATE":"""
 
 # The recognized action labels. All three feed the SAME planner and the same
 # approval gates — there is one execution path. The label buys recall +
@@ -515,11 +521,16 @@ A short follow-up that continues an action being discussed in that conversation 
 
 async def _classify_message(
     provider: LLMProvider, message: str, context: str = ""
-) -> str:
-    """One tiny temperature-0 call returning a routing label: "TASK", "EMAIL",
-    "CALENDAR", "WEB", or "CHAT". Any failure — an exception OR an unrecognized reply —
-    means CHAT (fail open): the message flows into the untouched Phase 2 chat
-    path, never a broken action route."""
+) -> tuple[str, str]:
+    """One tiny temperature-0 call returning (label, mode): label is a routing
+    label ("TASK"/"EMAIL"/"CALENDAR"/"WEB"/"BROWSE"/"CHAT"), mode is
+    "INLINE" (a quick read answered in this turn) or "DELEGATE" (real work handed
+    to a background agent). Any failure — an exception OR an unrecognized reply —
+    means ("CHAT", "DELEGATE") (fail open): the message flows into the untouched
+    Phase 2 chat path, never a broken action route. A recognized action label
+    with no/blank mode defaults to DELEGATE — chat is never left blocked, and a
+    quick read mis-tagged DELEGATE only costs one extra notification (both paths
+    share the same approval gate, so the mode is a UX choice, never a safety one)."""
     context_block = (
         _CLASSIFY_CONTEXT_TEMPLATE.format(context=context) if context else ""
     )
@@ -541,12 +552,15 @@ async def _classify_message(
         )
     except Exception as e:
         logger.warning(f"Message classification failed — treating as chat: {e}")
-        return "CHAT"
+        return "CHAT", "DELEGATE"
     reply = response.content.strip().upper()
     for label in _ACTION_LABELS:
         if reply.startswith(label):
-            return label
-    return "CHAT"
+            # Mode is the second word; anything but an explicit INLINE (or a
+            # blank/garbled mode) falls to DELEGATE — the safe UX default.
+            mode = "INLINE" if "INLINE" in reply else "DELEGATE"
+            return label, mode
+    return "CHAT", "DELEGATE"
 
 
 # ======================================================== background intent
@@ -698,20 +712,49 @@ async def maybe_handle_task(
     # cheap, while the saved wall time is paid on every action turn. Neither
     # coroutine raises by contract (classify fails to CHAT, memory to "").
     effective_goal = cleaned_goal if background else goal
-    label, memory = await asyncio.gather(
+    classification, memory = await asyncio.gather(
         _classify_message(provider, effective_goal, conversation),
         planner_memory_context(db, effective_goal),
     )
+    label, mode = classification
     if label == "CHAT":
         return None
 
-    logger.info(f"Chat message routed to agent planner [{label}]: '{goal[:80]}'")
+    # The boss assigns the domain agent from the classifier's label; the
+    # cross-domain fallback (general, all tools) covers an unmapped label.
+    agent = agent_for_label(label)
 
-    if background:
+    # Explicit background intent ("…tell me when you're done") always delegates —
+    # a user override. Otherwise the classifier's mode decides: DELEGATE hands
+    # the goal to its domain agent as a background Task (the user keeps talking
+    # and can start another agent concurrently); INLINE is a quick read streamed
+    # in this turn. Safety is identical either way — the approval gate applies
+    # on both paths, so a mis-tagged write just pauses instead of running.
+    #
+    # BROWSE is ALWAYS delegated, whatever mode the classifier returned. A browse
+    # drives a real browser — it launches Chromium, runs a multi-step
+    # observe→decide→act loop with several LLM calls, navigates pages, and (for
+    # play/watch) keeps a window open. It is NEVER "a quick read answered in one
+    # turn": run INLINE it holds the chat SSE open for the entire browse and locks
+    # the user out of starting anything else (live bug 2026-07-24 — "play latest
+    # episode of one piece on anikoto.cz" was tagged BROWSE INLINE by the LLM, the
+    # browse ran in-turn, and the chat froze "processing and processing" until it
+    # finished; the multi-agent concurrency the user relies on evaporates because
+    # it depends entirely on DELEGATE). The prompt already says "every BROWSE →
+    # DELEGATE"; this is the structural backstop for when the LLM ignores it —
+    # structural-over-prompt, the house rule.
+    delegate = background or mode == "DELEGATE" or label == "BROWSE"
+    logger.info(
+        f"Chat message routed to {agent.display_name} "
+        f"[{label}/{'DELEGATE' if delegate else 'INLINE'}]: '{goal[:80]}'"
+    )
+
+    if delegate:
+        run_goal = cleaned_goal if background else goal
         return _stream_task_background(
-            goal, cleaned_goal, conversation, memory, session_id, db, provider,
+            goal, run_goal, conversation, memory, session_id, db, provider, agent,
         )
-    return _stream_task(goal, conversation, memory, session_id, db, provider)
+    return _stream_task(goal, conversation, memory, session_id, db, provider, agent)
 
 
 # ============================================================== task stream
@@ -735,11 +778,12 @@ def _stream_task(
     session_id: str,
     db: AsyncSession,
     provider: LLMProvider,
+    agent: Optional[AgentSpec] = None,
 ) -> StreamingResponse:
     async def run(planner: AgentPlanner) -> AgentPlan:
         return await planner.start(goal)
 
-    return _stream_plan_run(goal, conversation, memory, run, session_id, db, provider)
+    return _stream_plan_run(goal, conversation, memory, run, session_id, db, provider, agent=agent)
 
 
 def _stream_answer(
@@ -762,6 +806,8 @@ def _stream_answer(
     return _stream_plan_run(
         answer_text, plan.conversation, plan.memory_context, run,
         session_id, db, provider,
+        # Resume the same specialist the paused plan was drafted as.
+        agent=agent_for_key(plan.agent_key),
     )
 
 
@@ -812,15 +858,19 @@ def _stream_task_background(
     session_id: str,
     db: AsyncSession,
     provider: LLMProvider,
+    agent: Optional[AgentSpec] = None,
 ) -> StreamingResponse:
-    """Start a background Task for the goal and acknowledge immediately. No
-    plan chunk here — if the plan pauses, the PlanCard arrives via the push
-    channel; if it completes, the outcome message does."""
+    """Hand the goal to its domain agent as a background Task and acknowledge
+    immediately. No plan chunk here — if the plan pauses, the PlanCard arrives
+    via the push channel; if it completes, the outcome message does."""
+    agent = agent or GENERAL
+
     async def reply() -> str:
         try:
             await start_task(
                 db, cleaned_goal, session_id,
                 conversation=conversation, memory=memory, provider=provider,
+                agent=agent,
             )
         except Exception as e:
             logger.error(f"Starting background task failed for '{goal[:80]}': {e}")
@@ -828,9 +878,15 @@ def _stream_task_background(
                 "I couldn't start that as a background task, so nothing was "
                 "changed. Please try again."
             )
+        # Agent-aware ack: name the specialist for the general case, keep it
+        # natural ("working on that") for the general agent.
+        who = (
+            f"the {agent.display_name.lower()}" if agent.key != "general"
+            else "one of my agents"
+        )
         return (
-            "I've started working on that in the background. I'll notify you "
-            "when it's done — or first, if any step needs your approval."
+            f"I've handed that to {who} — it's running in the background. I'll "
+            "notify you when it's done, or first if any step needs your approval."
         )
 
     return _stream_static_text(goal, session_id, db, provider, reply)
@@ -874,11 +930,12 @@ def _stream_plan_run(
     db: AsyncSession,
     provider: LLMProvider,
     persist_user: bool = True,
+    agent: Optional[AgentSpec] = None,
 ) -> StreamingResponse:
     return StreamingResponse(
         plan_run_events(
             user_text, conversation, memory, run, session_id, db, provider,
-            persist_user=persist_user,
+            persist_user=persist_user, agent=agent,
         ),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
@@ -894,6 +951,7 @@ def plan_run_events(
     db: AsyncSession,
     provider: LLMProvider,
     persist_user: bool = True,
+    agent: Optional[AgentSpec] = None,
 ):
     """The plan-run SSE generator, exposed so a caller that is ALREADY
     streaming can delegate to it mid-flight (chat.py's dead-end backstop).
@@ -920,6 +978,7 @@ def plan_run_events(
             planner = AgentPlanner(
                 db, provider, session_id=session_id,
                 conversation=conversation, memory=memory,
+                agent=agent or GENERAL,
             )
             plan = await run(planner)
         except Exception as e:

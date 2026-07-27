@@ -24,7 +24,15 @@ class HealthStatus(str, Enum):
 # ============================================================
 class ChatMessage(BaseModel):
     role: str = Field(..., pattern="^(user|assistant|system)$")
-    content: str = Field(..., min_length=1)
+    # Empty content is TOLERATED (default ""), never rejected: the frontend hosts
+    # an approval / clarifying-question PlanCard as an assistant message with no
+    # text (the card IS the message), and one such empty entry in the history
+    # must never 422 the whole conversation and lock the session (live bug
+    # 2026-07-24 — a delegated background task paused for approval, the pushed
+    # empty PlanCard message rode the next chat POST, and every following turn
+    # failed string_too_short). Empty entries are dropped in _provider_history
+    # before the LLM ever sees them.
+    content: str = ""
 
 
 class ChatRequest(BaseModel):

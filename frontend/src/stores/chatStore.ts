@@ -117,11 +117,14 @@ export const useChatStore = create<ChatState>((set, get) => {
     // the sentence segmenter — chatStore itself stays thin.
     voiceOutput.beginTurn();
 
-    // Build the message history for the request
-    const history = [...messages, userMessage].map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
+    // Build the message history for the request. Drop empty-content messages:
+    // an approval / clarifying-question PlanCard is hosted as an assistant
+    // message with no text (the card IS the message), and such an entry carries
+    // nothing the LLM needs. Sending it would 422 the whole turn on the backend's
+    // content check and lock the session until reload (live bug 2026-07-24).
+    const history = [...messages, userMessage]
+      .filter((m) => m.content.trim().length > 0)
+      .map((m) => ({ role: m.role, content: m.content }));
 
     await chatApi.streamChat(
       {

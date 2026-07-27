@@ -38,6 +38,7 @@ from app.agents.cancellation import (
     log_cancellation,
     request_cancel,
 )
+from app.agents.agent_registry import GENERAL, AgentSpec, agent_for_key
 from app.agents.plan_store import put_plan
 from app.agents.planner import AgentPlanner
 from app.agents.rendering import deterministic_plan_text, serialize_plan_for_api
@@ -138,16 +139,21 @@ async def start_task(
     conversation: str = "",
     memory: str = "",
     provider: Optional[LLMProvider] = None,
+    agent: Optional[AgentSpec] = None,
 ) -> Task:
     """Persist the Task row FIRST (row-before-work, like create_reminder),
     then start planning/executing in the background. The caller's provider is
-    reused by the detached run — providers are stateless clients."""
-    task = Task(goal=goal, session_id=session_id, status="running")
+    reused by the detached run — providers are stateless clients. ``agent`` is
+    the boss-assigned domain specialist (None → general); its key is stamped on
+    the Task row (Task.domain) for the Agents panel + progress queries, and the
+    planner is specialized to it."""
+    agent = agent or GENERAL
+    task = Task(goal=goal, session_id=session_id, status="running", domain=agent.key)
     db.add(task)
     await db.commit()
     await db.refresh(task)
-    logger.info(f"Background task {task.id} started: '{goal[:80]}'")
-    _spawn(task.id, _run_new(task.id, goal, session_id, conversation, memory, provider))
+    logger.info(f"Background task {task.id} [{agent.key}] started: '{goal[:80]}'")
+    _spawn(task.id, _run_new(task.id, goal, session_id, conversation, memory, provider, agent))
     return task
 
 
@@ -226,6 +232,7 @@ async def _run_new(
     conversation: str,
     memory: str,
     provider: Optional[LLMProvider],
+    agent: Optional[AgentSpec] = None,
 ) -> None:
     async with _session_factory()() as db:
         task = await db.get(Task, task_id)
@@ -237,6 +244,7 @@ async def _run_new(
                 db, provider, session_id=session_id,
                 conversation=conversation, memory=memory,
                 cancel_check=lambda: cancel_requested(task_id),
+                agent=agent or GENERAL,
             )
             plan = await planner.start(goal)
             await _settle(db, task, plan)
@@ -261,6 +269,9 @@ async def _run_continuation(
                 db, provider, session_id=plan.session_id,
                 conversation=plan.conversation, memory=plan.memory_context,
                 cancel_check=lambda: cancel_requested(task_id),
+                # Rebuild the SAME specialist the plan was drafted as, so a
+                # paused browser/email task never resumes as the general agent.
+                agent=agent_for_key(plan.agent_key),
             )
             if answer is None:
                 plan = await planner.resume(plan, approved=True)

@@ -1,5 +1,16 @@
 # Browser Automation Stack — Full Refactor
 
+> **Status update 2026-07-26.** The refactor phases below are done (0–5 committed;
+> 6–7 uncommitted). A subsequent round — *perception, honesty, speed, and a scored
+> acceptance gate* — has since changed three things this document asserts:
+> the vision posture is now **DOM-first by default** (not vision-first), the
+> gesture approval is a **one-shot per-gesture permit** (not a run-wide boolean),
+> and the loop's budgets are **measured** (deadline 400s, belt 700s). Extraction is
+> also no longer LLM-only: `app/browser/extract.py` reads records in code.
+> **The authoritative description is the "Browser stack — CURRENT STATE" section at
+> the end of `CLAUDE.md`.** Phase 8 (importer migration) remains deliberately
+> deferred, and the doc-freshness half of it is what that section discharges.
+
 **Status: Phase 7 of 8 complete** (0–5 committed; **Phases 6–7 uncommitted**, git deferred). Suite green at every phase. **Phase 8 deliberately deferred** — no functional/security/correctness benefit, real regression surface (see below).
 **Goal:** Skyvern / GPT-Atlas-class capability — "do what I do in a browser" on any site, with no per-site code — on top of Jarvis's existing safety model.
 **Approved:** 2026-07-21 (plan file: `~/.claude/plans/hey-see-this-codebase-zippy-crane.md`). Test suite: **2103 green** as of the latest commit.

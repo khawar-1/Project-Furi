@@ -48,8 +48,20 @@ from loguru import logger
 
 from app.core import dom_observe
 from app.core.base_tool import BaseTool, PermissionLevel, ToolDefinition, ToolResult
-from app.tools.browser_tools import _fail, _ok, _validate_url
+from app.tools.browser_tools import _fail, _ok, _partial, _validate_url
 from app.tools.registry import register_tool
+
+# Playwright's TimeoutError is NOT a subclass of the builtin TimeoutError (it
+# derives from playwright.Error → Exception), so `except TimeoutError` never
+# catches a navigation timeout. Resolved once at import, guarded so a base
+# install without Playwright still imports this module — the same shape
+# browser/session.py uses for _NAV_TIMEOUT_ERRORS.
+try:  # pragma: no cover - import shape depends on the install
+    from playwright.async_api import TimeoutError as _PlaywrightTimeoutError
+
+    _PW_TIMEOUT: tuple[type[BaseException], ...] = (_PlaywrightTimeoutError,)
+except Exception:  # pragma: no cover
+    _PW_TIMEOUT = ()
 
 # MULTI-COMMIT (15.1): the hard, code-enforced ceiling on how many approved
 # submits ONE browse goal may perform. The user (via the planner) sets
@@ -57,6 +69,77 @@ from app.tools.registry import register_tool
 # not a prompt. Kept small: every submit is a separate human approval, so a large
 # number would be a wall of approval prompts, not a convenience.
 MAX_COMMITS_CAP = 5
+
+
+async def _open_start_url(session, start_url: str):
+    """Navigate to the goal's opening URL. Returns None on success, or a
+    STRUCTURED browse-output dict describing a hand-off the planner can pause on.
+
+    Two hand-offs, both of which used to be fatal here:
+
+    ORIGIN APPROVAL — the site we were allowed to open redirected us somewhere
+    else. That is provenance by construction, not a claim we have to trust:
+    `start_url` already passed origin_allowed inside goto(), so the only way the
+    landing differs is that the permitted server (or its own JS) sent us there.
+    A model-PROPOSED jump can never reach this line — it is refused earlier, at
+    goto's allowlist check, and never gets as far as _verify_landing. So the two
+    cases stay structurally distinguishable, and this one is exactly the "may I
+    follow?" question the mid-loop path already asks.
+
+    SITE UNREACHABLE — bad certificate, DNS, refused connection. Reported
+    honestly, naming the site and the reason, so the planner can ask the user or
+    pick another source. Never an alternate-domain guess.
+    """
+    from app.browser.session import BrowserBlocked, BrowserUnreachable
+
+    try:
+        await session.goto(start_url)
+        return None
+    except BrowserBlocked as exc:
+        redirect = getattr(session, "last_redirect_offsite", None)
+        if not redirect:
+            raise
+        output = _empty_browse_output(start_url, str(exc))
+        output["origin_approval_required"] = True
+        output["origin_candidate"] = redirect.get("host", "")
+        output["origin_url"] = redirect.get("url", "")
+        logger.info(
+            f"browse: start URL redirected to {redirect.get('host')} — "
+            "asking for approval instead of failing"
+        )
+        return output
+    except BrowserUnreachable as exc:
+        output = _empty_browse_output(start_url, str(exc))
+        output["site_unreachable"] = True
+        output["unreachable_url"] = start_url
+        logger.info(f"browse: start URL unreachable — {exc}")
+        return output
+
+
+def _empty_browse_output(start_url: str, reason: str) -> dict:
+    """The browse output shape for a failure that happened BEFORE any page was
+    read — a launch failure, an unreachable start URL, the outer timeout.
+
+    The shape is uniform on purpose: every consumer (the summary renderer, the
+    replanner, the ActivityLog audit row) can read `extracted` / `rendered` /
+    `url` off a browse result without first testing whether output is None. An
+    empty list here means "nothing was gathered", which is a fact; None meant
+    "ask someone else", which is what the old _fail said to every caller.
+    """
+    return {
+        "url": start_url,
+        "title": "",
+        "page_excerpt": "",
+        "done_reason": "",
+        "rendered": "",
+        "extracted": [],
+        "goal_reached": False,
+        "actions_taken": 0,
+        "blocked": {},
+        "playing": False,
+        "window_open": False,
+        "error": reason,
+    }
 
 # The outermost browse timeout lives in browser_runtime (the marshaling boundary);
 # re-exported here for the tool-boundary except-clauses. No browse wedges a chat
@@ -244,11 +327,13 @@ class BrowseTool(BaseTool):
         allowlist.add(_normalize_origin(start_url))
         keep_open = bool(kwargs.get("keep_open"))
         # Set by the planner on the resumed step after the user approved a
-        # world-acting gesture (2026-07-22): lifts the READ-mode gesture gate for
-        # THIS run so the loop completes the one action the user said yes to. Only
-        # ever True on a resume the user just approved — a fresh draft never
-        # carries it, and a later replan re-drafts the step without it.
-        action_approved = bool(kwargs.get("action_approved"))
+        # world-acting gesture (2026-07-22): the PERMIT for the ONE gesture the
+        # user said yes to, bound to that control on that site and consumed when
+        # it fires (2026-07-26 — it was a run-wide boolean, which authorised every
+        # gesture in the resumed run). Only ever present on a resume the user just
+        # approved; a fresh draft never carries it, and a later replan re-drafts
+        # the step without it.
+        approved_gesture = str(kwargs.get("approved_gesture") or "").strip()
         # Set by the planner when the user answered a login-wall pause with
         # "continue without signing in" (2026-07-23): the loop then does NOT stop
         # on a login wall for this run (the site is usable as a guest). Only ever
@@ -310,6 +395,15 @@ class BrowseTool(BaseTool):
                         except Exception:
                             pass
                         session = None
+                # THE FIRST NAVIGATION IS A HAND-OFF POINT LIKE ANY OTHER
+                # (2026-07-26). It used to be the one navigation with no recovery
+                # path: `_act` swallows BrowserBlocked mid-loop and turns a
+                # site-initiated redirect into an origin-approval PAUSE, but the
+                # opening goto sat outside the loop, so the same redirect here
+                # just raised and killed the task. Live, hangers.com.pk redirected
+                # to its host www.webx.pk and the run died on step one — the user
+                # was never asked a question they would have answered in a word.
+                # Now both navigations reach the same pause.
                 if session is not None:
                     # Stay put when the page is already on an allowed site — the
                     # whole point of continuity ("click the top book" continues
@@ -317,7 +411,9 @@ class BrowseTool(BaseTool):
                     # start_url as before.
                     current = _normalize_origin(str(session.page.url or ""))
                     if not current or not session.origin_allowed(current):
-                        await session.goto(start_url)
+                        handoff = await _open_start_url(session, start_url)
+                        if handoff is not None:
+                            return handoff
                 else:
                     # One profile = one live persistent context. A sign-in window,
                     # a kept-open commit result window, OR a kept-open media
@@ -331,11 +427,15 @@ class BrowseTool(BaseTool):
                     await browser_session.close_result_window()
                     await browser_session.stop_media()
                     session = await BrowserSession.open(allowlist)
-                    await session.goto(start_url)
+                    handoff = await _open_start_url(session, start_url)
+                    if handoff is not None:
+                        return handoff
                 outcome = await browser_loop.run_browse(
                     session, goal, provider, vision=vision,
-                    action_approved=action_approved,
+                    vision_first=bool(getattr(vision_config, "vision_first", False)),
+                    approved_gesture=approved_gesture,
                     skip_login_wall=skip_login_wall,
+                    keep_open=keep_open,
                 )
 
                 output = {
@@ -350,6 +450,19 @@ class BrowseTool(BaseTool):
                     "page_excerpt": str(outcome.final.get("page_text") or "")[:600],
                     "done_reason": outcome.done_reason,
                     "rendered": str(outcome.final.get("rendered") or ""),
+                    # Structured records the loop gathered with `extract`
+                    # (Skyvern/Atlas parity) — the answer to a list/compare goal
+                    # ("the 3 cheapest phones", "highest-rated"). Early in the dict
+                    # so it survives the audit row's ~1000-char clip like
+                    # page_excerpt. DATA read off the page, never a grounding source.
+                    "extracted": outcome.extracted,
+                    # What this browse actually DID on the world, if anything, in
+                    # the loop's own grounded phrase. Early in the dict with the
+                    # other evidence so it survives the audit row's ~1000-char
+                    # clip: a mutation that cannot be found in the audit trail is
+                    # not auditable, and every other write in this codebase is.
+                    # Empty on a read-only run, which is nearly all of them.
+                    "performed_gesture": outcome.performed_gesture,
                     "goal_reached": outcome.success,
                     "actions_taken": outcome.actions_taken,
                     "blocked": outcome.blocked,
@@ -439,15 +552,16 @@ class BrowseTool(BaseTool):
                 # delete / buy. Close the session (free the single-profile lock,
                 # like the origin/login hand-offs) and return the structured
                 # signal; the planner pauses on an approval question naming the
-                # action, and on "yes" the resumed browse runs with
-                # action_approved lifting the gate so the one approved action can
-                # fire. Jarvis never acts on a live site without this yes.
+                # action, and on "yes" the resumed browse runs carrying THAT
+                # gesture's permit so exactly that one action can fire. Jarvis
+                # never acts on a live site without this yes.
                 if outcome.action_approval_required:
                     await session.close()
                     session = None  # the finally must not double-close it
                     output["action_approval_required"] = True
                     output["action_description"] = outcome.action_description
                     output["action_site"] = outcome.action_site
+                    output["action_fingerprint"] = outcome.action_fingerprint
                     return output
 
                 # A play/watch goal: the FINDING is done — now leave a window OPEN
@@ -534,22 +648,38 @@ class BrowseTool(BaseTool):
                 _drive_browser(), timeout=BROWSE_HARD_TIMEOUT
             )
         except (TimeoutError, asyncio.TimeoutError):
+            # The OUTER belt (browser_runtime's wait_for). A Playwright navigation
+            # timeout is a different class entirely — see the _PW_TIMEOUT arm below.
             logger.warning(f"browse timed out for goal '{goal[:80]}'")
-            return _fail(
+            return _partial(
                 self,
                 f"The browser task timed out after {BROWSE_HARD_TIMEOUT:.0f}s "
                 "without finishing.",
+                _empty_browse_output(start_url, "the browser task timed out"),
             )
         except BrowserUnavailable as exc:
             logger.info(f"browse unavailable: {exc}")
             return _fail(self, str(exc))
         except BrowserBlocked as exc:
             return _fail(self, str(exc))
+        except _PW_TIMEOUT as exc:
+            # Playwright's TimeoutError is NOT a subclass of the builtin, so it
+            # used to fall to the generic arm and surface as an opaque
+            # "TimeoutError: Timeout 20000ms exceeded" with no URL in it — which
+            # is exactly what the user saw for daraz.pk and ebay.com on
+            # 2026-07-26. Name the page that timed out.
+            logger.warning(f"browse navigation timed out for goal '{goal[:80]}': {exc}")
+            return _partial(
+                self,
+                f"The browser could not finish loading {start_url} in time.",
+                _empty_browse_output(start_url, f"navigation timed out: {str(exc)[:160]}"),
+            )
         except Exception as exc:
             logger.warning(f"browse failed for goal '{goal[:80]}': {type(exc).__name__}: {exc}")
-            return _fail(
+            return _partial(
                 self,
                 f"The browser task failed: {type(exc).__name__}: {str(exc)[:200]}",
+                _empty_browse_output(start_url, f"{type(exc).__name__}: {str(exc)[:160]}"),
             )
 
         if output.get("login_required"):
@@ -616,6 +746,21 @@ class BrowseTool(BaseTool):
                 permission_level=self.permission_level,
             )
 
+        if output.get("site_unreachable"):
+            # The site could not be reached at all — bad certificate, DNS, refused
+            # connection (2026-07-26: outfitters.com, a parked domain whose cert
+            # fails). A replan cannot fix this by trying harder, and Jarvis must
+            # NOT guess a neighbouring domain (an origin the user never named is
+            # outside the grounding corpus by construction). So: say which site
+            # and why, and let the planner ask the user or choose another source.
+            return _partial(
+                self,
+                f"{output.get('error') or 'That site could not be reached.'} "
+                "I can't reach it, and I won't guess a different address — tell me "
+                "the right one if you know it.",
+                output,
+            )
+
         if output.get("origin_approval_required"):
             # An off-site navigation hand-off (2026-07-18). Return a STRUCTURED
             # signal so the planner pauses on a yes/no question instead of failing
@@ -653,6 +798,14 @@ class BrowseTool(BaseTool):
         if not output.get("goal_reached"):
             # The loop reached its bound without finishing. Report what it saw
             # (the final page) so the summary has something real, not silence.
+            #
+            # It said that from the day it was written and did the opposite: the
+            # call was _fail, whose output is None, so `rendered`, `page_excerpt`,
+            # `extracted` and the URL were all discarded and only the prose
+            # survived. Live 2026-07-26, an eBay run extracted listings and hit
+            # the action cap; the user was told "it failed" while the answer sat
+            # in a dict that was thrown away one line later. _partial keeps it:
+            # success stays False, the evidence travels.
             detail = output.get("error") or "the browser task did not complete"
             where = output.get("url") or "unknown"
             open_note = (
@@ -660,7 +813,7 @@ class BrowseTool(BaseTool):
                 if output.get("window_open")
                 else ""
             )
-            return _fail(self, f"{detail}. Last page: {where}{open_note}")
+            return _partial(self, f"{detail}. Last page: {where}{open_note}", output)
 
         # Best-effort: light up the StatusBar indicator immediately (the StatusBar
         # also polls /api/browser/media to recover on reload). push() touches
@@ -682,7 +835,11 @@ class BrowseTool(BaseTool):
                 "Drive a real web browser to accomplish a goal on a live site: "
                 "open a page, search, and click through to what the user asked "
                 "for (e.g. 'search for a song on YouTube and play it', 'find the "
-                "pricing page on a site'). It observes the page and decides each "
+                "pricing page on a site'). It can also GATHER and COMPARE data "
+                "across items on a page — 'the three cheapest phones under 10000', "
+                "'list the highest-rated laptops with their prices and ratings' — "
+                "reading the page's own items into a structured list and reporting "
+                "or ranking them. It observes the page and decides each "
                 "step itself — no site-specific setup. It opens a VISIBLE browser "
                 "window and is READ-ONLY: it can navigate and click, but it "
                 "CANNOT fill in or submit forms, log in, send, buy, or change "
@@ -805,7 +962,14 @@ class BrowseCommitTool(BaseTool):
             vision_config=vision_config,
         )
         if not result.get("submitted"):
-            return _fail(self, result.get("error") or "The form was not submitted.")
+            # Not submitted is a real failure — but perform() has usually READ the
+            # page by now (the discovery observation, an earlier commit's server
+            # response) and that evidence is the difference between "the form was
+            # not submitted" and "the form was not submitted; the page said your
+            # session expired". Carry it, the same rule the browse path follows.
+            return _partial(
+                self, result.get("error") or "The form was not submitted.", result
+            )
 
         # Light up the StatusBar "window open" indicator immediately (it also
         # polls /api/browser/media to recover on reload). push() touches main-loop

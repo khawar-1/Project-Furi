@@ -389,9 +389,39 @@ export type ActivePanel =
   | 'routines'
   | 'initiative'
   | 'threads'
+  | 'agents'
   | 'tools'
   | 'voice'
   | 'settings';
+
+// ============================================================
+// Background agents / tasks (boss + domain-specialized agents)
+// ============================================================
+export type TaskStatus =
+  | 'running'
+  | 'awaiting_approval'
+  | 'awaiting_choice'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+/** A serialized background Task (GET /api/tasks) — one worker owned by a
+ *  domain agent (browser / file / email / research / calendar / general). */
+export interface Task {
+  id: string;
+  session_id: string | null;
+  goal: string;
+  status: TaskStatus;
+  /** The domain agent that owns it ("browser", "file", …) and its display name. */
+  domain: string | null;
+  agent: string;
+  plan_id: string | null;
+  plan: AgentPlan | null;
+  message: string | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
 
 // ============================================================
 // Integrations (Phase 5, Part 1 — Google account)

@@ -5,22 +5,46 @@ No API key, no extra services, no Docker — runs inside the Python process.
 """
 import asyncio
 from functools import lru_cache
+from pathlib import Path
 from typing import List
 
 from loguru import logger
+
+# Model weights live under ~/.jarvis/fastembed — a STABLE home, the ~/.jarvis
+# convention shared with whisper/kokoro/voices. fastembed's DEFAULT cache is the
+# system Temp dir (AppData\Local\Temp\fastembed_cache on Windows), which Windows
+# and disk-cleanup tools periodically WIPE — and once the model is gone it must
+# be re-downloaded, so every offline startup after a Temp sweep silently loses
+# memory/semantic search (live incident 2026-07-24: the Temp copy was left a
+# corrupted `.incomplete` download and, with no network that session, contact /
+# memory / episode / file search all fell back to non-vector search). Pinning the
+# cache to ~/.jarvis means the model is downloaded ONCE and survives Temp sweeps
+# and reboots. Override via FASTEMBED_CACHE_DIR for scripted/hermetic use.
+import os
+
+FASTEMBED_DIR = Path(
+    os.getenv("FASTEMBED_CACHE_DIR", str(Path.home() / ".jarvis" / "fastembed"))
+)
 
 
 @lru_cache(maxsize=1)
 def _get_text_embedding_model():
     """
     Lazy-load the fastembed model as a singleton.
-    First call downloads the model (~23 MB) to a local cache.
+    First call downloads the model (~23 MB) into ~/.jarvis/fastembed.
     Subsequent calls return the cached instance instantly.
     """
     try:
         from fastembed import TextEmbedding
-        model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        logger.info("fastembed model loaded: BAAI/bge-small-en-v1.5 (384 dims)")
+        FASTEMBED_DIR.mkdir(parents=True, exist_ok=True)
+        model = TextEmbedding(
+            model_name="BAAI/bge-small-en-v1.5",
+            cache_dir=str(FASTEMBED_DIR),
+        )
+        logger.info(
+            f"fastembed model loaded: BAAI/bge-small-en-v1.5 (384 dims) "
+            f"[cache: {FASTEMBED_DIR}]"
+        )
         return model
     except ImportError:
         raise ImportError(

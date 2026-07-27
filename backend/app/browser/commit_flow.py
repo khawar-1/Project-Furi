@@ -65,6 +65,88 @@ from app.browser.state import (  # noqa: F401
     HandoffPayload,
     handoff_from_outcome,
 )
+from app.browser import trace as browse_trace
+
+
+def _trace_pre_loop_failure(session: Any, goal: str, error: str) -> None:
+    """Write a one-line trace for a discovery that died BEFORE the loop started.
+
+    2026-07-26 incident: `browse_commit` on junaidjamshed.com failed in the
+    opening `session.goto()` — during a machine-wide DNS outage — and produced NO
+    file in ~/.jarvis/logs/browse/ at all. BrowseTrace is constructed in exactly
+    one place (run_browse), so every failure BEFORE the loop starts is invisible
+    to the artifact built to make runs diagnosable; the post-mortem had to be
+    reconstructed from backend.log.
+
+    `session.browse_trace` is the precise discriminator: run_browse stamps it on
+    the session the moment it opens its own trace, so a set value means the loop
+    ran and already wrote (and closed) one — never write a second. Best-effort in
+    the same way BrowseTrace itself is: tracing never breaks a run."""
+    if getattr(session, "browse_trace", None) is not None:
+        return
+    try:
+        browse_trace.BrowseTrace(goal, commit=True).finish(success=False, error=error)
+    except Exception as exc:  # noqa: BLE001 — tracing never breaks a run
+        logger.debug(f"pre-loop trace unavailable: {type(exc).__name__}: {exc}")
+
+
+async def _wait_for_commit(session: Any) -> None:
+    """Bounded wait for the approved submission to be observed. Tolerates a
+    session without the method (test fakes) — the caller still settles."""
+    waiter = getattr(session, "wait_for_commit", None)
+    if waiter is None:
+        return
+    try:
+        await waiter()
+    except Exception as exc:  # noqa: BLE001 — never break the submit phase
+        logger.debug(f"wait_for_commit: {type(exc).__name__}: {exc}")
+
+
+def _submitted_url(session: Any) -> str:
+    """The representation url the submission actually used, when it differed
+    from the form's declared action (else "")."""
+    try:
+        return str(session.commit_submitted_url() or "")
+    except Exception:
+        return ""
+
+
+def _unfired_reason(session: Any, approved: dict, form_found: Any) -> str:
+    """Say what was OBSERVED, never what we assume (2026-07-26).
+
+    The message this replaces read "the site did not send the approved request
+    (it may submit by a mechanism this tool can't drive). Nothing was sent." Two
+    faults, both the class the network round fixed one layer over: it asserted a
+    CAUSE nothing had checked, and it asserted "Nothing was sent" — which this
+    code cannot know. All it ever knows is that no request matched one exact url,
+    and an in-page fetch is never blocked, so absence of a match is not absence of
+    a request. Each branch below is a fact we hold evidence for."""
+    method = str(approved.get("method") or "POST").upper()
+    url = str(approved.get("url") or "")
+    if form_found is False:
+        return (
+            "The approved form is no longer on the page, so nothing was "
+            "submitted. Ask me to prepare it again."
+        )
+    observed: list[str] = []
+    try:
+        observed = list(session.commit_observations() or [])
+    except Exception:
+        observed = []
+    if observed:
+        return (
+            f"I fired the form's submit, but the page sent {observed[0]} instead "
+            f"of the approved {method} {url}. I did not treat that as your "
+            "approved submission, so it is not confirmed — check the site before "
+            "trying again."
+        )
+    from app.core import browser_session  # runtime — the module's own convention
+
+    return (
+        f"I fired the form's submit, but no request left the page within "
+        f"{browser_session.COMMIT_WAIT_SECONDS:.0f}s — the site appears not to "
+        "have accepted it. Nothing was confirmed as sent."
+    )
 
 
 @dataclass
@@ -291,6 +373,7 @@ async def discover(
         BrowserBlocked,
         BrowserSession,
         BrowserUnavailable,
+        BrowserUnreachable,
         _normalize_origin,
     )
     from app.providers.factory import build_provider
@@ -385,6 +468,7 @@ async def discover(
                 fill_grounding=fill_grounding,
                 fields=params.get("fields") if isinstance(params.get("fields"), dict) else None,
                 vision=vision,
+                vision_first=bool(getattr(vision_config, "vision_first", False)),
                 auth_resolved=set(auth_resolved or set()),
             )
 
@@ -413,11 +497,39 @@ async def discover(
             held = True  # the registry owns the session now — do NOT close it
             return CommitDiscovery(state=outcome.commit_state)
         except BrowserUnavailable as exc:
+            _trace_pre_loop_failure(session, goal, str(exc))
+            return CommitDiscovery(error=str(exc))
+        except BrowserUnreachable as exc:
+            # Bad certificate / DNS / refused connection. A distinct outcome from
+            # "blocked": nothing was refused by policy, the site simply is not
+            # there. Reported plainly; never a licence to try a neighbouring
+            # domain the user never named.
+            _trace_pre_loop_failure(session, goal, str(exc))
             return CommitDiscovery(error=str(exc))
         except BrowserBlocked as exc:
+            # A REDIRECT the allowlisted site itself issued is a question, not a
+            # dead end (2026-07-26). Live, hangers.com.pk redirected to its host
+            # www.webx.pk and this arm returned a flat failure — the task died on
+            # step one and the user was never asked something they'd have answered
+            # in one word. The mid-loop path has always turned this into an
+            # origin-approval pause; the opening navigation now does too.
+            redirect = getattr(session, "last_redirect_offsite", None) if session else None
+            if redirect:
+                host = redirect.get("host") or "another site"
+                logger.info(
+                    f"commit: start URL redirected to {host} — asking for approval"
+                )
+                return CommitDiscovery(
+                    origin_approval_required=True,
+                    origin_candidate=host,
+                    origin_url=redirect.get("url", ""),
+                    error=f"needs your approval to visit {host}",
+                )
+            _trace_pre_loop_failure(session, goal, str(exc))
             return CommitDiscovery(error=str(exc))
         except Exception as exc:
             logger.warning(f"commit discovery failed for '{goal[:80]}': {type(exc).__name__}: {exc}")
+            _trace_pre_loop_failure(session, goal, f"{type(exc).__name__}: {exc}")
             return CommitDiscovery(
                 error=f"Preparing the form failed: {type(exc).__name__}: {str(exc)[:200]}"
             )
@@ -518,7 +630,15 @@ async def perform(
                 str(approved.get("method") or "POST"),
                 str(approved.get("url") or ""),
             )
-            await session.submit_commit()
+            form_found = await session.submit_commit()
+            # WAIT FOR THE REQUEST, NOT FOR THE PAINT (2026-07-26). This used to
+            # be settle() alone — a DOM-quiet detector that returns in ~250ms on
+            # an already-painted page, which a product page sitting through an
+            # approval pause always is. Measured on the junaidjamshed incident:
+            # 240ms from arm to session teardown, against a theme handler that
+            # `await`s before posting. Event-driven, so a form that posts promptly
+            # costs no more than it did; only one that never posts pays the wait.
+            await _wait_for_commit(session)
             await session.settle()
 
             fired = session.commit_fired()
@@ -545,6 +665,7 @@ async def perform(
 
             result = {
                 "submitted": fired,
+                "submitted_url": _submitted_url(session),
                 "url": summary.get("url", ""),
                 "title": summary.get("title", ""),
                 "rendered": summary.get("rendered", ""),
@@ -554,13 +675,7 @@ async def perform(
                 "commits_done": commits_done,
                 "blocked": session.stats.as_dict(),
                 "error": (
-                    ""
-                    if fired
-                    else (
-                        "The submission did not go through — the site did not send "
-                        "the approved request (it may submit by a mechanism this "
-                        "tool can't drive). Nothing was sent."
-                    )
+                    "" if fired else _unfired_reason(session, approved, form_found)
                 ),
             }
 
@@ -668,6 +783,7 @@ async def _resume_for_next_form(
             fill_grounding=fill_grounding,
             fields=fields if isinstance(fields, dict) else None,
             vision=vision,
+            vision_first=bool(getattr(vision_config, "vision_first", False)),
             auth_resolved=set(auth_resolved or set()),
         )
     except Exception as exc:

@@ -7,7 +7,9 @@ from app.agents.rendering import _STEP_RESULT_CAPS
 from app.core import dom_observe
 from app.core.dom_observe import (
     _ELEMENT_BUDGET,
+    _NAME_MAX,
     _PAGE_TEXT_BUDGET,
+    _PAGE_TEXT_CAPTURE,
     Element,
     Observation,
     StaleObservation,
@@ -50,6 +52,218 @@ def _payload(elements=(), text="", title="Example", url="https://example.com", t
 
 def _element(index, role="link", name="x", value="", href=""):
     return {"index": index, "role": role, "name": name, "value": value, "href": href}
+
+
+# --------------------------------------------- cross-frame observation (Phase 6)
+#
+# Frames are where checkout forms, booking widgets and player controls live, and
+# before 2026-07-26 they were invisible: the walk ran on one document and a page
+# whose whole purpose sat inside an iframe read as empty.
+#
+# The security-critical half is the CHALLENGE-ZONE UNION. The top document's probe
+# descends only into SAME-ORIGIN subframes (a cross-origin contentDocument throws),
+# but Playwright's frame.evaluate works cross-origin — so walking frames without
+# carrying their zones up would make a CAPTCHA widget in a cross-origin frame
+# listable and clickable by an agent that must never touch one.
+class FakeFrame:
+    def __init__(self, url, payload, box, *, raises=False):
+        self.url = url
+        self._payload = payload
+        self._box = box
+        self._raises = raises
+        self.evaluated = 0
+
+    async def evaluate(self, js, arg=None):
+        self.evaluated += 1
+        if self._raises:
+            raise RuntimeError("cross-origin refused")
+        base = (arg or {}).get("base", 0) if isinstance(arg, dict) else 0
+        out = dict(self._payload)
+        out["elements"] = [
+            {**e, "index": base + i + 1}
+            for i, e in enumerate(self._payload.get("elements", []))
+        ]
+        return out
+
+    async def frame_element(self):
+        box = self._box
+
+        class _Handle:
+            async def bounding_box(self):
+                return box
+
+        return _Handle()
+
+    async def query_selector(self, selector):
+        return "frame-handle" if selector in self._payload.get("_present", set()) else None
+
+
+class FramedPage(FakePage):
+    def __init__(self, payload=None, present=(), frames=()):
+        super().__init__(payload, present)
+        self.main_frame = object()
+        self.frames = [self.main_frame, *frames]
+
+
+async def test_a_content_frame_extends_the_element_list():
+    """Indices CONTINUE the top document's numbering, so they stay globally
+    unique — an index means one element in one document."""
+    frame = FakeFrame(
+        "https://pay.test/widget",
+        {"elements": [_element(1, role="button", name="Pay now")], "total": 1},
+        {"x": 40.0, "y": 200.0, "width": 600.0, "height": 400.0},
+    )
+    page = FramedPage(_payload([_element(1), _element(2)]), frames=[frame])
+
+    obs = await observe(page)
+
+    assert obs.element_total == 3
+    assert [e.index for e in obs.elements] == [1, 2, 3]
+    pay = obs.elements[-1]
+    assert pay.name == "Pay now"
+    assert pay.frame_id.endswith("https://pay.test/widget")
+    assert pay.frame_url == "https://pay.test/widget"
+
+
+async def test_a_frame_elements_rect_is_translated_into_top_page_space():
+    """The silent-corruption case: overlay_marks draws badges in TOP-page
+    coordinates, so an untranslated frame rect puts every badge in the wrong
+    place and hands the vision model a mislabelled screenshot."""
+    frame = FakeFrame(
+        "https://pay.test/w",
+        {"elements": [{**_element(1), "rect": {"x": 10.0, "y": 20.0, "w": 100.0, "h": 30.0}}],
+         "total": 1},
+        {"x": 40.0, "y": 200.0, "width": 600.0, "height": 400.0},
+    )
+    page = FramedPage(_payload([_element(1)]), frames=[frame])
+
+    obs = await observe(page)
+
+    assert obs.elements[-1].rect == (50.0, 220.0, 100.0, 30.0)
+
+
+async def test_a_frames_challenge_zones_are_unioned_and_translated():
+    """NON-NEGOTIABLE. A CAPTCHA widget inside a frame must contribute its
+    no-touch zones to the top-page probe, translated — otherwise walking frames
+    would make it clickable."""
+    frame = FakeFrame(
+        "https://captcha.test/w",
+        {
+            "elements": [_element(1)],
+            "total": 1,
+            "challenge": {
+                "kind": "reCAPTCHA", "blocking": True, "mode": "interstitial",
+                "zones": [{"x": 5.0, "y": 5.0, "w": 300.0, "h": 80.0}],
+            },
+        },
+        {"x": 100.0, "y": 300.0, "width": 600.0, "height": 400.0},
+    )
+    page = FramedPage(_payload([_element(1)]), frames=[frame])
+
+    obs = await observe(page)
+
+    assert obs.challenge is not None
+    zones = obs.challenge["zones"]
+    assert {"x": 105.0, "y": 305.0, "w": 300.0, "h": 80.0} in zones
+    # `blocking` must NOT be promoted: a challenge INSIDE a frame is an EMBEDDED
+    # widget from the page's point of view. Promoting it would make every page
+    # carrying a reCAPTCHA read as a full-page interstitial and pause the run.
+    assert obs.challenge.get("blocking") is not True
+    assert obs.challenge.get("mode") != "interstitial"
+
+
+async def test_a_tiny_frame_is_never_walked():
+    """Tracking beacons and 1x1 ad slots must not cost a round-trip each."""
+    beacon = FakeFrame(
+        "https://ads.test/beacon",
+        {"elements": [_element(1, name="Tracker")], "total": 1},
+        {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0},
+    )
+    page = FramedPage(_payload([_element(1)]), frames=[beacon])
+
+    obs = await observe(page)
+
+    assert beacon.evaluated == 0
+    assert obs.element_total == 1
+
+
+async def test_a_non_http_frame_is_skipped():
+    """about:blank / data: / srcdoc stubs carry nothing worth a round-trip."""
+    stub = FakeFrame(
+        "about:blank",
+        {"elements": [_element(1, name="Stub")], "total": 1},
+        {"x": 0.0, "y": 0.0, "width": 600.0, "height": 400.0},
+    )
+    page = FramedPage(_payload([_element(1)]), frames=[stub])
+
+    await observe(page)
+    assert stub.evaluated == 0
+
+
+async def test_a_frame_that_refuses_never_breaks_the_observation():
+    """A frame that navigated mid-read, or a cross-origin one that refuses, is
+    normal. The top document's observation stands on its own."""
+    hostile = FakeFrame(
+        "https://x.test/f", {"elements": [], "total": 0},
+        {"x": 0.0, "y": 0.0, "width": 600.0, "height": 400.0}, raises=True,
+    )
+    page = FramedPage(_payload([_element(1, name="Top link")]), frames=[hostile])
+
+    obs = await observe(page)
+    assert obs.element_total == 1
+    assert obs.elements[0].name == "Top link"
+
+
+async def test_resolve_tries_the_top_document_before_any_frame():
+    """Ordering matters: the top document is where almost every element lives,
+    and it is the only arm a fake page without frames ever reaches."""
+    frame = FakeFrame(
+        "https://pay.test/w",
+        {"elements": [_element(1, name="In frame")], "total": 1},
+        {"x": 0.0, "y": 0.0, "width": 600.0, "height": 400.0},
+    )
+    page = FramedPage(_payload([_element(1, name="Top")]), frames=[frame])
+    obs = await observe(page)
+
+    top = obs.elements[0]
+    sel = f'[data-jarvis-obs="{obs.observation_id}"][data-jarvis-idx="{top.index}"]'
+    page._present.add(sel)
+
+    assert await resolve(page, obs, top.index) == "handle"
+    assert page.queries[-1] == sel
+
+
+async def test_a_frame_element_resolves_in_its_own_frame():
+    frame = FakeFrame(
+        "https://pay.test/w",
+        {"elements": [_element(1, name="In frame")], "total": 1},
+        {"x": 0.0, "y": 0.0, "width": 600.0, "height": 400.0},
+    )
+    page = FramedPage(_payload([_element(1, name="Top")]), frames=[frame])
+    obs = await observe(page)
+
+    target = obs.elements[-1]
+    sel = f'[data-jarvis-obs="{obs.observation_id}"][data-jarvis-idx="{target.index}"]'
+    frame._payload["_present"] = {sel}
+
+    assert await resolve(page, obs, target.index) == "frame-handle"
+
+
+async def test_a_frame_element_whose_frame_is_gone_is_stale():
+    """The staleness promise holds structurally across documents: a frame that
+    navigated away took its stamps with it."""
+    frame = FakeFrame(
+        "https://pay.test/w",
+        {"elements": [_element(1, name="In frame")], "total": 1},
+        {"x": 0.0, "y": 0.0, "width": 600.0, "height": 400.0},
+    )
+    page = FramedPage(_payload([_element(1)]), frames=[frame])
+    obs = await observe(page)
+    target = obs.elements[-1]
+
+    page.frames = [page.main_frame]  # the frame is gone
+    with pytest.raises(StaleObservation):
+        await resolve(page, obs, target.index)
 
 
 # -------------------------------------------------------- the index contract
@@ -137,6 +351,58 @@ async def test_page_text_is_capped():
     obs = await observe(page)
     assert len(obs.page_text) == _PAGE_TEXT_BUDGET
     assert obs.text_truncated is True
+
+
+# ------------------------------------------------------- capture vs render
+# A PROMPT budget is not a CAPTURE budget (2026-07-26). These were the same
+# number, so nothing downstream could see past what the decision model was shown:
+# `_extract_data` reads the prose and clipped it to its own 9000-char ceiling, a
+# ceiling it could never reach. Live consequence — on daraz.pk's real results page
+# extraction saw only header/nav/filters and returned ZERO records three times.
+async def test_the_page_text_is_captured_past_the_prompt_budget():
+    page = FakePage(_payload(text="y" * (_PAGE_TEXT_BUDGET * 3)))
+    obs = await observe(page)
+    assert len(obs.page_text) == _PAGE_TEXT_BUDGET          # what the prompt shows
+    assert len(obs.text_full) == _PAGE_TEXT_BUDGET * 3      # what code can read
+    assert obs.text_full.startswith(obs.page_text)
+
+
+async def test_capture_is_itself_bounded():
+    page = FakePage(_payload(text="z" * (_PAGE_TEXT_CAPTURE * 2)))
+    obs = await observe(page)
+    assert len(obs.text_full) == _PAGE_TEXT_CAPTURE
+
+
+async def test_a_short_page_has_identical_capture_and_render_text():
+    page = FakePage(_payload(text="a short page"))
+    obs = await observe(page)
+    assert obs.page_text == obs.text_full == "a short page"
+    assert obs.text_truncated is False
+
+
+async def test_the_rendered_prompt_did_not_grow_with_the_wider_capture():
+    """The whole point of splitting them: the decision prompt must be exactly as
+    tight as it was, or a perception fix silently becomes a cost regression."""
+    page = FakePage(_payload(text="w" * (_PAGE_TEXT_CAPTURE * 2)))
+    out = render(await observe(page))
+    assert len(out) < _ELEMENT_BUDGET + _PAGE_TEXT_BUDGET + 500
+    assert "… (truncated)" in out
+
+
+async def test_an_elements_full_name_survives_the_prompt_clip():
+    """A results-grid card carries title, price and rating inside ONE element's
+    innerText; cutting that at the prompt's _NAME_MAX is how the data went
+    missing. `name` stays clipped so the prompt, the action signature and the page
+    fingerprint do not move; `name_full` is what extraction reads."""
+    long_name = "Yonex Astrox 99 Pro Badminton Racket " * 5 + "Rs. 24,999 4.7 (128)"
+    page = FakePage(_payload([_element(1, name=long_name)]))
+    element = (await observe(page)).elements[0]
+    assert len(element.name) == _NAME_MAX
+    assert len(element.name_full) > _NAME_MAX
+    assert "Rs. 24,999" in element.name_full          # the price survived
+    assert element.name_full.startswith(element.name)
+    assert element.name in element.render()           # the prompt sees the clip
+    assert element.name_full not in element.render()
 
 
 async def test_a_huge_element_list_is_cut_and_the_cut_is_marked():
@@ -330,11 +596,33 @@ def test_the_extract_js_skips_elements_inside_challenge_zones():
     """The walk-side half runs only in a real browser — pin the structural
     contract: zones are computed BEFORE the walk and every stamped element is
     checked against them (a challenge control is never listed, so the LLM can
-    never be handed it)."""
+    never be handed it).
+
+    Re-pinned 2026-07-26 when the walk was rewritten for shadow DOM and the wide
+    tier. The check now lives in eligible(), which is the SINGLE gate both tiers
+    pass through — that is a stronger guarantee than the old inline test, but
+    only while it stays single. These assertions are what keep it so: a future
+    tier that lists elements without calling eligible() would list a CAPTCHA
+    control, and that must fail loudly here rather than in a live browser."""
     js = dom_observe._EXTRACT_JS
     assert "inChallengeZone" in js
-    walk = js.split("for (const el of document.querySelectorAll(SELECTOR))")[1]
-    assert "inChallengeZone(el.getBoundingClientRect())" in walk
+    # Zones are computed before anything is listed.
+    assert js.index("challengeZones") < js.index("const eligible")
+    # The one gate carries the check...
+    gate = js.split("const eligible = (el) => {")[1].split("};")[0]
+    assert "inChallengeZone(r)" in gate
+
+    # ...and there is EXACTLY ONE place an element can enter a candidate list, so
+    # a tier added later cannot slip past the gate. The walk classifies into a
+    # tier first and admits through a single eligible() call; if that ever
+    # becomes two calls, this fails and the reviewer has to re-argue the
+    # guarantee rather than discovering the hole in a live browser.
+    walk = js.split("while (stack.length")[1].split("let listed")[0]
+    assert walk.count("eligible(el)") == 1, (
+        "the walk must admit candidates through ONE eligible() gate; found "
+        f"{walk.count('eligible(el)')}"
+    )
+    assert "if (tier >= 0 && eligible(el)) {" in walk
 
 
 # ------------------------- form membership (action-level safety, 2026-07-21)

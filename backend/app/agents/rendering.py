@@ -556,6 +556,13 @@ def _fmt_browse(output: dict) -> str:
     url = str(output.get("url") or "")
     where = f"**{title}** — {url}" if title else url
     handoff = str(output.get("handoff") or "")
+    # A media/play outcome's head line IS the complete answer ("opened it, playing").
+    # Its final page is a video player whose element list (hundreds of links — a
+    # site's whole episode index / A-Z footer) is pure noise dumped into the chat
+    # (live 2026-07-25: a "done" notification was a wall of 161 DOM elements). So
+    # the page is rendered ONLY for the informational fallback below (a browse that
+    # READ a fact — the book-price case relies on the excerpt surviving).
+    show_page = False
     if output.get("playing") and handoff == "clean_window":
         # Handed off to a normal, ad-blocked (uBlock) window (2026-07-22). Honest
         # about the one trade-off: a non-automation window can't be told to press
@@ -577,6 +584,7 @@ def _fmt_browse(output: dict) -> str:
     else:
         reason = str(output.get("done_reason") or "").strip()
         head = f"Browsed to {where}" + (f" — {reason}" if reason else "")
+        show_page = True
 
     blocked = output.get("blocked") or {}
     if isinstance(blocked, dict) and blocked.get("blocked_mutations"):
@@ -585,8 +593,47 @@ def _fmt_browse(output: dict) -> str:
             f"were blocked — browsing is read-only.)"
         )
 
+    # Structured records the loop gathered with `extract` (Skyvern/Atlas parity) —
+    # the answer to a list/compare goal ("the 3 cheapest phones", "highest-rated").
+    # Rendered before the page fence so a listing goal is answered from the real
+    # gathered data, not the raw element dump.
+    extracted_block = _fmt_extracted(output.get("extracted"))
+
     rendered = str(output.get("rendered") or "").strip()
-    return head + ("\n" + _fence(rendered) if rendered else "")
+    return (
+        head
+        + extracted_block
+        + ("\n" + _fence(rendered) if (show_page and rendered) else "")
+    )
+
+
+# How much gathered data to surface in a browse summary. Bounded so a large scrape
+# never floods the chat; the full set is in the tool output for a follow-up.
+_EXTRACTED_MAX_ROWS = 25
+_EXTRACTED_MAX_CHARS = 4000
+
+
+def _fmt_extracted(records: object) -> str:
+    """Render the `extract` records as a compact numbered list, or "" when there
+    are none. Each record is a flat dict of copied page values (str/number) — the
+    loop's _coerce_record guarantees the shape, so this only lays them out."""
+    if not isinstance(records, list) or not records:
+        return ""
+    rows = []
+    for i, rec in enumerate(records[:_EXTRACTED_MAX_ROWS], 1):
+        if not isinstance(rec, dict):
+            continue
+        parts = ", ".join(f"{k}: {v}" for k, v in rec.items() if str(v).strip())
+        if parts:
+            rows.append(f"{i}. {parts}")
+    if not rows:
+        return ""
+    body = "\n".join(rows)
+    if len(body) > _EXTRACTED_MAX_CHARS:
+        body = body[:_EXTRACTED_MAX_CHARS] + "\n…"
+    more = len(records) - len(rows)
+    tail = f"\n…and {more} more." if more > 0 else ""
+    return f"\n\nGathered from the page ({len(records)} item(s)):\n" + body + tail
 
 
 def _one_commit_block(commit: dict, *, label: str = "") -> str:
@@ -600,6 +647,13 @@ def _one_commit_block(commit: dict, *, label: str = "") -> str:
         f" to {url}" if url else ""
     )
     head += f". The site responded: **{title}**" if title else "."
+    # When the site carried the submission on a different url than the form's
+    # declared action (a `.js`/`.json` twin — the Shopify add-to-cart idiom), the
+    # record says so. The user approved a contract; the honest confirmation names
+    # the request that actually delivered it (2026-07-26).
+    sent_to = str(commit.get("submitted_url") or "").strip()
+    if sent_to:
+        head += f" (Sent as {sent_to}.)"
     response = str(commit.get("response_text") or "").strip()
     if response:
         return head + "\nThe page shows:\n" + _fence(response)
@@ -678,16 +732,42 @@ _RESULT_FORMATTERS = {
 
 
 def _render_step(step) -> str | None:
-    """One completed step's real output as readable text, or None when there
-    is nothing to show. Shared by the deterministic completion text and the
-    inline summary LLM's input — both always see the same rendering.
+    """One step's real output as readable text, or None when there is nothing
+    to show. Shared by the deterministic completion text and the inline summary
+    LLM's input — both always see the same rendering.
 
     The cap is PER TOOL (_step_cap): web steps carry the prose a factual answer
-    rests on, so the file-listing default would starve them."""
+    rests on, so the file-listing default would starve them.
+
+    PARTIAL EVIDENCE (2026-07-26). A FAILED step used to render as nothing at
+    all, which was right while every failure carried output=None. It stopped
+    being right when the browser tools learned to salvage (browser_tools._partial):
+    a browse that reached eBay's results, extracted the listings and then hit its
+    action cap now HAS the answer on a failed step, and dropping it here would
+    discard the evidence one layer above where it was rescued.
+
+    So a failed step renders IFF it carries structured output a code formatter
+    can read — and it is labelled, because the difference between "here is the
+    answer" and "here is as far as I got" is the whole honesty of the report. A
+    failed step with no output still renders nothing; the error prose already
+    covers it."""
+    partial = False
     if step.status != StepStatus.COMPLETED:
-        return None
+        if step.status != StepStatus.FAILED:
+            return None
+        output = step.result.output if step.result else None
+        if not isinstance(output, dict) or step.tool not in _RESULT_FORMATTERS:
+            return None
+        partial = True
     cap = _step_cap(step.tool)
     output = step.result.output if step.result else None
+    if partial:
+        body = _clip(_RESULT_FORMATTERS[step.tool](output), cap)
+        reason = str((step.result.error if step.result else "") or "").strip()
+        head = "PARTIAL — this step did NOT finish"
+        if reason:
+            head += f" ({reason})"
+        return f"{head}. What it got as far as:\n{body}"
     formatter = _RESULT_FORMATTERS.get(step.tool)
     if formatter is not None and isinstance(output, dict):
         return _clip(formatter(output), cap)

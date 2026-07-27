@@ -14,6 +14,7 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_db, get_llm_provider, get_qdrant
+from app.core.task_status import active_tasks_context
 from app.db.models import Message, utc_iso
 from app.db.persist import persist_message_best_effort
 from app.db.schemas import ChatRequest, ChatResponse, StreamChunk
@@ -290,6 +291,7 @@ def _build_system_prompt(
     ambiguous_mentions: list = None,
     affective_note: str = "",
     screen_note: str = "",
+    background_note: str = "",
 ) -> str:
     """Build the Jarvis OS system prompt, with optional memory context block.
     `affective_note` (Phase 13.2) is an optional, best-effort brevity steer when
@@ -370,6 +372,13 @@ SCREEN CONTEXT (what's on the user's screen right now and recently — or an hon
 {screen_note}
 """
 
+    if background_note:
+        base += f"""
+{background_note}
+
+When the user asks how a task or an agent is doing, answer from the BACKGROUND WORK block above. If a task they mention is not listed, say you don't see it running — never invent progress or results.
+"""
+
     if memory_context:
         base += f"""
 {memory_context}
@@ -446,8 +455,12 @@ _HISTORY_MAX_CHARS = 24_000
 
 
 def _provider_history(request_messages) -> list[LLMMessage]:
-    """The capped slice of the request's history that goes to the LLM."""
-    window = list(request_messages)[-_HISTORY_MAX_MESSAGES:]
+    """The capped slice of the request's history that goes to the LLM. Empty-
+    content entries are dropped first: the frontend may include a PlanCard-hosting
+    message (an approval / clarifying-question card, no text) in the history, and
+    the LLM has no use for an empty turn — nor should one ever reach the provider."""
+    window = [m for m in request_messages if (m.content or "").strip()]
+    window = window[-_HISTORY_MAX_MESSAGES:]
     total = sum(len(m.content or "") for m in window)
     while len(window) > 1 and total > _HISTORY_MAX_CHARS:
         total -= len(window.pop(0).content or "")
@@ -884,6 +897,7 @@ async def chat_stream(
     # Build message history with memory-enhanced system prompt
     affective_note = await _affective_note(db)
     screen_note = await _screen_note(db)
+    background_note = await active_tasks_context(db, session_id)
     messages: list[LLMMessage] = [
         LLMMessage(role="system", content=_build_system_prompt(
             memory_context, pending_resolution, disambiguation_resolved_note,
@@ -891,6 +905,7 @@ async def chat_stream(
             ambiguous_mentions=ambiguous_mentions,
             affective_note=affective_note,
             screen_note=screen_note,
+            background_note=background_note,
         ))
     ]
     messages.extend(_provider_history(request.messages))
@@ -1265,10 +1280,11 @@ async def chat(
 
     affective_note = await _affective_note(db)
     screen_note = await _screen_note(db)
+    background_note = await active_tasks_context(db, session_id)
     messages: list[LLMMessage] = [
         LLMMessage(role="system", content=_build_system_prompt(
             memory_context, pending_resolution, affective_note=affective_note,
-            screen_note=screen_note,
+            screen_note=screen_note, background_note=background_note,
         ))
     ]
     messages.extend(_provider_history(request.messages))

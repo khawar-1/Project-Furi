@@ -145,6 +145,14 @@ class AgentPlan(BaseModel):
     # left memory) and is fair to audit. Empty = the goal had one reading, or
     # we could not tell — both mean "leave the summary's own judgement alone".
     primary_reading: str = ""
+    # The domain agent that owns this plan (the boss+agents model): "file" /
+    # "email" / "calendar" / "research" / "browser" / "general". SERIALIZED
+    # (unlike the planner inputs above) so a paused task's resume rebuilds the
+    # SAME specialized planner (its tool subset + persona) from the parked
+    # payload — a background browser task must not resume as the general agent.
+    # Defaulted so plans parked before this field deserialize as "general".
+    # Not a signature input (observability, never a gate decision).
+    agent_key: str = "general"
     # Off-site navigation hand-off (2026-07-18): page-derived origins the USER
     # explicitly approved visiting (a job board's 'Apply' link to an external
     # ATS, &c.). A browse loop never follows a page-derived site on its own — it
@@ -176,13 +184,25 @@ class AgentPlan(BaseModel):
     # is answered. SERIALIZED beside the other pending_* markers; defaulted for
     # old payloads.
     pending_action_approval: Optional[str] = None
-    # Set True by an affirmative answer to the action-approval question, and
-    # injected into the resumed browse step's parameters (_inject_action_approved)
-    # so the loop may perform the approved action THIS run. The READ-mode
-    # gesture gate is lifted ONLY for the resumed run the user just approved; a
-    # later replan re-drafts the step and this clears. SERIALIZED; defaulted for
-    # old payloads.
-    action_approved: bool = False
+    # The FINGERPRINT of the gesture being asked about (browser.loop's
+    # gesture_fingerprint: kind + the control's role/name/href + the host), set
+    # beside pending_action_approval and cleared with it.
+    pending_action_fingerprint: Optional[str] = None
+    # The gesture an affirmative answer approved, injected into the resumed browse
+    # step's parameters so the loop may perform THAT ONE action.
+    #
+    # THIS WAS A BOOLEAN until 2026-07-26, and that was the weakest link in the
+    # browser safety model: `action_approved=True` lifted the READ-mode gesture
+    # gate for EVERY world-acting gesture in the resumed run, so a yes to "send
+    # this message" also authorised any buy, delete or post the loop chose next.
+    # Everything around it is bound to a fingerprint and consumed once
+    # (session.arm_commit / _commit_fingerprint); this now is too. A different
+    # control, a different gesture, or a different site pauses again.
+    #
+    # SERIALIZED; defaulted, so a plan parked before this change deserializes with
+    # NO permit — it pauses again rather than inheriting a blanket yes, which is
+    # the safe direction.
+    approved_action_fingerprint: str = ""
     # How many times this plan has handed a browse CAPTCHA / verification
     # challenge off to the user (2026-07-19). Some challenges (Cloudflare
     # Turnstile) fingerprint the automated browser and RE-ISSUE no matter how

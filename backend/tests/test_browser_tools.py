@@ -189,6 +189,34 @@ async def test_tavily_skipped_without_key(monkeypatch):
     assert await browser_tools._tavily_search("q", 5) == []
 
 
+async def test_google_cse_skipped_without_both_credentials(monkeypatch):
+    # Key-gated like Tavily: missing EITHER the key or the engine id → no-op [],
+    # so the default install never calls Google and the chain falls through.
+    monkeypatch.setattr(browser_tools.settings, "GOOGLE_SEARCH_API_KEY", "k")
+    monkeypatch.setattr(browser_tools.settings, "GOOGLE_SEARCH_CX", "")
+    assert await browser_tools._google_cse_search("q", 5) == []
+    monkeypatch.setattr(browser_tools.settings, "GOOGLE_SEARCH_API_KEY", "")
+    monkeypatch.setattr(browser_tools.settings, "GOOGLE_SEARCH_CX", "cx")
+    assert await browser_tools._google_cse_search("q", 5) == []
+
+
+def test_google_cse_rows_maps_items_and_is_preferred_in_the_chain():
+    rows = browser_tools._google_cse_rows(
+        {"items": [
+            {"title": "Black Clover", "link": "https://x.test/bc",
+             "snippet": "the latest episode is 170"},
+            {"link": "ftp://skip.me", "snippet": "bad scheme is dropped"},
+        ]},
+        5,
+    )
+    assert len(rows) == 1
+    assert rows[0]["url"] == "https://x.test/bc"
+    assert "170" in rows[0]["content"] and "170" in rows[0]["snippet"]
+    assert rows[0]["truncated"] is False
+    # Google is first — preferred when configured (the fresher-index fix).
+    assert browser_tools._SEARCH_PROVIDERS[0][0] == "google-cse"
+
+
 # ============================================================= read_webpage
 
 _HTML = """

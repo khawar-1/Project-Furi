@@ -37,13 +37,15 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_MODEL: str = "anthropic/claude-3.5-sonnet"
 
-    # DeepSeek — OpenAI-compatible cloud API. Use MODEL=deepseek-chat (V3, a
-    # non-reasoning model); deepseek-reasoner (R1) would re-trigger the
-    # classifier's empty-output problem on thinking models. Driven through the
-    # shared GroqProvider base_url path (the Groq SDK is OpenAI-compatible).
+    # DeepSeek — OpenAI-compatible cloud API. DeepSeek retired the deepseek-chat
+    # (V3) name on 2026-07-24; the V4 line is deepseek-v4-flash (fast/cheap,
+    # non-reasoning — the drop-in) and deepseek-v4-pro (higher quality). Use a
+    # NON-reasoning model: deepseek-reasoner (R1) / any thinking tier re-triggers
+    # the classifier's empty-output problem (reasoning tokens eat the token
+    # budget). Driven through the OpenAICompatProvider ({base_url}/chat/completions).
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
     DEEPSEEK_API_KEY: str = ""
-    DEEPSEEK_MODEL: str = "deepseek-chat"
+    DEEPSEEK_MODEL: str = "deepseek-v4-flash"
 
     # Ollama
     OLLAMA_BASE_URL: str = "http://localhost:11434"
@@ -131,6 +133,19 @@ class Settings(BaseSettings):
     # Tavily errors or returns nothing. Blank = DuckDuckGo only (the default —
     # a fresh clone works with no signup). Get a free key at https://tavily.com.
     TAVILY_API_KEY: str = ""
+
+    # Optional. Google Programmable Search (Custom Search JSON API). When BOTH are
+    # set, web_search PREFERS Google — its index is fresher than the aggregator
+    # snippets Tavily/DDG return, which matters for "latest episode / newest / today"
+    # facts (2026-07-25: Tavily reported Black Clover's latest as a stale 131 vs the
+    # true 170). Falls through to Tavily → DuckDuckGo when unset or when Google
+    # returns nothing. Free tier: 100 queries/day. Create a key at
+    # https://developers.google.com/custom-search/v1/introduction and an engine
+    # (set to "search the entire web") at https://programmablesearchengine.google.com
+    # — CX is the engine id. Direct google.com/search scraping is deliberately NOT
+    # used: it violates Google's ToS and is CAPTCHA-blocked for automated clients.
+    GOOGLE_SEARCH_API_KEY: str = ""
+    GOOGLE_SEARCH_CX: str = ""
 
     # ------------------------------------------------------------------ Voice
     WHISPER_MODEL: str = "base"

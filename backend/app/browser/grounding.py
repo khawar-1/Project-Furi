@@ -66,6 +66,8 @@ import re
 from typing import Iterable, Optional
 from urllib.parse import urlparse
 
+from app.browser.publicsuffix import registrable_name
+
 # A registrable-looking hostname anywhere in the text: one or more dot-separated
 # labels ending in a TLD. Matches "youtube.com", "www.linkedin.com",
 # "example.co.uk"; not a bare word. Case-insensitive.
@@ -211,12 +213,15 @@ def origin_is_grounded(candidate: str, grounded: set[str]) -> bool:
     host = _normalize_origin(candidate)
     if not host:
         return False
-    labels = host.split(".")
-    # The registrable NAME label: the part left of the effective TLD, approximated
-    # as the second-to-last label ('indeed' of both 'indeed.com' and
-    # 'jobs.indeed.com'). Deliberately not any deeper component — that is what
-    # blocks the 'indeed.attacker.com' lookalike from a bare 'indeed'.
-    name_label = labels[-2] if len(labels) >= 2 else labels[0]
+    # The registrable NAME label: the part left of the EFFECTIVE public suffix.
+    # This was approximated as labels[-2], which is right for a single-label
+    # suffix ('indeed.com' -> 'indeed') and wrong for a multi-label one: the
+    # second-to-last label of 'outfitters.com.pk' is the string "com", so
+    # 'go to outfitters' could not reach the Pakistani site the user meant
+    # (live 2026-07-26). publicsuffix.registrable_name computes what the
+    # docstring always claimed. The lookalike guard is unaffected —
+    # 'indeed.attacker.com' still yields 'attacker'.
+    name_label = registrable_name(host)
     for origin in grounded:
         if "." in origin:
             if host == origin or host.endswith("." + origin) or origin.endswith("." + host):

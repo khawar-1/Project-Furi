@@ -614,7 +614,15 @@ async def test_goto_retries_a_navigation_timeout_once(fake_browser):
 
 
 async def test_a_double_timeout_still_fails(fake_browser):
-    """Bounded to exactly one retry — a dead site fails in two attempts."""
+    """Bounded to exactly one retry — a dead site fails in two attempts.
+
+    The FAILURE TYPE changed on 2026-07-26: a site that will not respond at all
+    is now BrowserUnreachable, not a bare TimeoutError. The distinction is the
+    point of the two-phase navigation — a SLOW page is no longer a failure of
+    any kind (it commits, misses readiness, and gets observed anyway), so the
+    only thing left that can raise here is a site that never answered."""
+    from app.browser.session import BrowserUnreachable
+
     session = await _session(allowlist={"example.com"})
     calls = []
 
@@ -623,9 +631,213 @@ async def test_a_double_timeout_still_fails(fake_browser):
         raise TimeoutError("Page.goto: Timeout 20000ms exceeded.")
 
     fake_browser.page.goto = _dead_goto
-    with pytest.raises(TimeoutError):
+    with pytest.raises(BrowserUnreachable) as excinfo:
         await session.goto("https://example.com/dead")
     assert len(calls) == 2
+    assert "example.com" in str(excinfo.value), "name the site that failed"
+
+
+# ------------------------------------------- two-phase navigation (2026-07-26)
+#
+# THE LIVE DEFECT: goto() waited for "domcontentloaded" and treated a timeout as
+# fatal. daraz.pk and ebay.com each timed out twice at 20s and killed the whole
+# browse — while the session stats showed 95 and 349 requests, i.e. the pages
+# were loading fine and simply never fired DCL inside the budget. A slow page
+# must not be a failure; the loop should look at what IS there.
+async def test_a_page_that_never_reaches_readiness_is_still_navigated(fake_browser):
+    """The daraz.pk case. The document commits and then keeps building forever.
+    Old behaviour: raise, discard the page, fail the task. New: hand it to the
+    loop anyway and count it."""
+    session = await _session(allowlist={"example.com"})
+    polls = {"n": 0}
+
+    async def _never_ready(expression, *args):
+        polls["n"] += 1
+        # A growing page: node count keeps changing, so the stall exit never
+        # fires either. The budget is the only way out.
+        return {"ready": False, "acts": 1, "text": 10, "nodes": 100 + polls["n"]}
+
+    async def _committed_goto(url, **kwargs):
+        fake_browser.page.url = url
+
+    fake_browser.page.goto = _committed_goto
+    fake_browser.page.evaluate = _never_ready
+
+    from app.browser import session as sess_mod
+
+    monkey_budget = 0.6  # keep the test fast; the real budget is 15s
+    original = sess_mod.READY_POLL_MS
+    sess_mod.READY_POLL_MS = int(monkey_budget * 1000)
+    try:
+        final = await session.goto("https://example.com/heavy")
+    finally:
+        sess_mod.READY_POLL_MS = original
+
+    assert final == "https://example.com/heavy", "the page must still be usable"
+    assert session.stats.slow_navigations == 1, "and honestly marked as slow"
+    assert polls["n"] > 1, "it really did poll"
+
+
+async def test_a_finished_page_takes_the_readyState_fast_path(fake_browser):
+    """readyState 'complete' is the platform's definitive "this page is done", so
+    a page reporting it needs only to be holding still — it must not be made to
+    prove a full second of stillness it demonstrated on the first poll.
+
+    MEASURED (2026-07-26): example.com reports 'complete' at 0.66s while
+    daraz.pk's results page stays 'interactive' until 8.8s, so the flag really
+    does separate a trivial page from one still assembling itself."""
+    session = await _session(allowlist={"example.com"})
+    polls = {"n": 0}
+
+    async def _complete(expression, *args):
+        polls["n"] += 1
+        return {"ready": True, "complete": True, "acts": 40, "text": 3000, "nodes": 900}
+
+    async def _committed_goto(url, **kwargs):
+        fake_browser.page.url = url
+
+    fake_browser.page.goto = _committed_goto
+    fake_browser.page.evaluate = _complete
+
+    await session.goto("https://example.com/fast")
+    assert polls["n"] <= 3, f"the fast path cost {polls['n']} polls"
+    assert session.stats.slow_navigations == 0
+
+
+async def test_a_substantive_page_must_also_hold_still(fake_browser):
+    """THE daraz.pk MEASUREMENT, pinned. Substance alone fired at 2.31s when the
+    page had 54 controls of nav chrome; the products arrived at 5.79s and the DOM
+    went still at 6.36s. A page that is substantive but NOT 'complete' has to
+    stop growing before it is observed — otherwise the loop is handed a header
+    and asked to compare products that are not there yet."""
+    session = await _session(allowlist={"example.com"})
+    polls = {"n": 0}
+
+    async def _growing_then_still(expression, *args):
+        polls["n"] += 1
+        # Grows for the first few polls, then holds.
+        nodes = 300 * polls["n"] if polls["n"] <= 3 else 1000
+        return {"ready": True, "complete": False, "acts": 20, "text": 900, "nodes": nodes}
+
+    async def _committed_goto(url, **kwargs):
+        fake_browser.page.url = url
+
+    fake_browser.page.goto = _committed_goto
+    fake_browser.page.evaluate = _growing_then_still
+
+    await session.goto("https://example.com/spa")
+
+    from app.browser import session as sess_mod
+
+    assert polls["n"] >= 3 + sess_mod.READY_STABLE_POLLS, (
+        f"returned after {polls['n']} polls — it did not wait for the DOM to settle"
+    )
+    assert session.stats.slow_navigations == 0
+
+
+async def test_a_painted_but_quiet_spa_exits_on_the_growth_stall(fake_browser):
+    """An SPA that painted and will never fire another event: `ready` stays
+    false (thin prose) but the node count stops moving. Without this exit the
+    poll would spend its whole budget on a page that is already finished."""
+    session = await _session(allowlist={"example.com"})
+    polls = {"n": 0}
+
+    async def _stalled(expression, *args):
+        polls["n"] += 1
+        return {"ready": False, "acts": 2, "text": 12, "nodes": 500}  # never changes
+
+    async def _committed_goto(url, **kwargs):
+        fake_browser.page.url = url
+
+    fake_browser.page.goto = _committed_goto
+    fake_browser.page.evaluate = _stalled
+
+    await session.goto("https://example.com/spa")
+    assert session.stats.slow_navigations == 0, "a stalled page is DONE, not slow"
+    assert polls["n"] <= 6, f"should exit on the stall, polled {polls['n']} times"
+
+
+async def test_an_unrecognised_evaluate_result_is_treated_as_ready(fake_browser):
+    """THE TEST-SHAPE RULE, and it is production-correct too. The suite's fake
+    pages return canned dicts from evaluate(); without this every navigating
+    test would block for the full poll budget. And in production, a result we
+    cannot interpret means proceed and let the observation be judged — not burn
+    the budget on a question nothing can answer."""
+    session = await _session(allowlist={"example.com"})
+
+    async def _canned(expression, *args):
+        return {"found": 0, "playing": 0}  # the real fixture's shape
+
+    async def _committed_goto(url, **kwargs):
+        fake_browser.page.url = url
+
+    fake_browser.page.goto = _committed_goto
+    fake_browser.page.evaluate = _canned
+
+    final = await session.goto("https://example.com/x")
+    assert final == "https://example.com/x"
+    assert session.stats.slow_navigations == 0
+
+
+@pytest.mark.parametrize(
+    "message, expected",
+    [
+        ("net::ERR_CERT_AUTHORITY_INVALID at https://www.outfitters.com/", "certificate"),
+        ("net::ERR_NAME_NOT_RESOLVED", "resolve"),
+        ("net::ERR_CONNECTION_REFUSED", "refused"),
+        ("net::ERR_INTERNET_DISCONNECTED", "no internet"),
+    ],
+)
+async def test_a_network_error_is_unreachable_and_never_retried(
+    fake_browser, message, expected
+):
+    """The outfitters.com case (a parked domain with a bad certificate). These
+    are NOT timeouts — retrying spends the budget twice for the same answer —
+    and they are NOT a licence to guess a different domain."""
+    from app.browser.session import BrowserUnreachable
+
+    session = await _session(allowlist={"example.com"})
+    calls = []
+
+    async def _net_error_goto(url, **kwargs):
+        calls.append(url)
+        raise RuntimeError(message)
+
+    fake_browser.page.goto = _net_error_goto
+    with pytest.raises(BrowserUnreachable) as excinfo:
+        await session.goto("https://example.com/dead")
+
+    assert len(calls) == 1, "a network error is never retried"
+    assert expected in str(excinfo.value).lower()
+    assert "example.com" in str(excinfo.value)
+
+
+async def test_the_landing_check_runs_after_the_readiness_poll(fake_browser):
+    """PHASE C ordering. A client-side redirect (meta-refresh, location.replace)
+    happens DURING the poll, so the landing check has to run after it — with the
+    old domcontentloaded wait such a redirect got only a sliver of time. Here
+    the page moves off-allowlist mid-poll and must still be caught."""
+    from app.browser.session import BrowserBlocked
+
+    session = await _session(allowlist={"example.com"})
+    polls = {"n": 0}
+
+    async def _redirecting(expression, *args):
+        polls["n"] += 1
+        if polls["n"] >= 2:
+            fake_browser.page.url = "https://elsewhere.test/landed"
+            return {"ready": True, "acts": 5, "text": 900, "nodes": 400}
+        return {"ready": False, "acts": 0, "text": 0, "nodes": 10}
+
+    async def _committed_goto(url, **kwargs):
+        fake_browser.page.url = url
+
+    fake_browser.page.goto = _committed_goto
+    fake_browser.page.evaluate = _redirecting
+
+    with pytest.raises(BrowserBlocked):
+        await session.goto("https://example.com/redirects")
+    assert session.last_redirect_offsite["host"] == "elsewhere.test"
 
 
 async def test_a_non_timeout_navigation_error_is_never_retried(fake_browser):
@@ -2000,3 +2212,224 @@ def test_extension_discovery_never_raises(monkeypatch):
 
     monkeypatch.setattr(browser_session, "BROWSER_EXTENSIONS_DIR", _Boom())
     assert browser_session._extension_load_args() == []
+
+
+# ------------------------------------------ SSRF host guard: single flight
+async def test_concurrent_lookups_of_one_cold_host_resolve_it_once():
+    """A page's first load fires many requests at the same handful of cold CDN
+    hosts within milliseconds. The cache made the STEADY state cheap and left the
+    stampede in place: every one of those misses spawned its own
+    to_thread(getaddrinfo) before the first wrote its result."""
+    import asyncio
+
+    from app.browser import session as sess
+
+    sess.reset_host_cache()
+    calls = {"n": 0}
+
+    def _slow_probe(host):
+        calls["n"] += 1
+        import time as _t
+        _t.sleep(0.05)
+        return False
+
+    original = sess._host_is_blocked
+    sess._host_is_blocked = _slow_probe
+    try:
+        results = await asyncio.gather(*[
+            sess._host_blocked_cached("cdn.example.test") for _ in range(12)
+        ])
+    finally:
+        sess._host_is_blocked = original
+        sess.reset_host_cache()
+
+    assert results == [False] * 12
+    assert calls["n"] == 1, f"resolved {calls['n']} times for one host"
+
+
+async def test_a_failing_lookup_is_not_cached_and_still_raises():
+    """A resolution ERROR must not be memoised as an answer, and it must reach
+    the caller's own guard — which already fails closed."""
+    from app.browser import session as sess
+
+    sess.reset_host_cache()
+
+    def _boom(host):
+        raise OSError("resolver down")
+
+    original = sess._host_is_blocked
+    sess._host_is_blocked = _boom
+    try:
+        with pytest.raises(OSError):
+            await sess._host_blocked_cached("broken.example.test")
+        assert "broken.example.test" not in sess._host_block_cache
+        assert "broken.example.test" not in sess._host_block_inflight
+    finally:
+        sess._host_is_blocked = original
+        sess.reset_host_cache()
+
+
+# ====================== the AJAX submit — a form's action is not its endpoint
+# 2026-07-26, junaidjamshed.com. Discovery read the product form correctly
+# (POST /cart/add, 10 fields — that IS what the markup declares), the user
+# approved, and the submit reported "Nothing was sent". The site's own theme
+# does `fetchJSON("/cart/add.js", {method:"POST"})`, so the exact-match permit
+# could NEVER fire on that site, and the failure message was built entirely on
+# the absence of a match it could not have got.
+#
+# The split these pin: PERMISSION (_commit_allows) is untouched — it is the only
+# thing that turns an abort into an allow. RECOGNITION (_is_commit_variant) is
+# consulted solely for traffic Rule 1 was letting through anyway.
+async def test_an_ajax_submit_to_the_actions_js_twin_is_recognised(fake_browser):
+    """THE INCIDENT. Armed for the form's action; the page posts the `.js` twin
+    (an in-page fetch — never a navigation). It must count as the approved
+    submission and report the url that actually carried it."""
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/cart/add")
+
+    assert (
+        await _verdict(
+            session, url="https://example.com/cart/add.js", method="POST",
+            navigation=False,
+        )
+        == "continue"
+    )
+    assert session.commit_fired() is True
+    assert session.commit_submitted_url() == "https://example.com/cart/add.js"
+    assert session.stats.allowed_commits == 1
+    assert session._armed_commit is None              # one-shot, re-locked
+
+
+async def test_the_json_twin_is_recognised_too(fake_browser):
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/cart/add")
+    await _verdict(
+        session, url="https://example.com/cart/add.json", method="POST",
+        navigation=False,
+    )
+    assert session.commit_fired() is True
+
+
+async def test_variant_recognition_grants_no_new_permission(fake_browser):
+    """The load-bearing property: recognition is RECORDING only. A main-frame
+    NAVIGATION to the `.js` twin is still an unapproved form navigation — it dies
+    exactly as before, and nothing is recorded as fired."""
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/cart/add")
+
+    assert (
+        await _verdict(
+            session, url="https://example.com/cart/add.js", method="POST",
+            navigation=True,
+        )
+        == "abort"
+    )
+    assert session.commit_fired() is False
+    assert session.stats.allowed_commits == 0
+    assert session._armed_commit is not None          # permit NOT consumed
+
+
+@pytest.mark.parametrize(
+    "url, why",
+    [
+        ("https://example.com/cart/addresses", "a longer path, not a suffix"),
+        ("https://example.com/cart/add/confirm", "a different path"),
+        ("https://example.com/cart/add.js.evil", "suffix must END the url"),
+        ("https://example.com/cart/add?x=1", "query is inside the normalized form"),
+        ("https://other.example/cart/add.js", "another host"),
+        ("https://example.com/cart/add.php", "not a representation suffix"),
+    ],
+)
+async def test_variant_recognition_is_narrow(fake_browser, url, why):
+    """Nothing outside `armed + .js/.json` is ever taken for the user's approved
+    submission — it is merely observed, so the failure can name it."""
+    session = await _session(allowlist={"example.com", "other.example"})
+    session.arm_commit("POST", "https://example.com/cart/add")
+    await _verdict(session, url=url, method="POST", navigation=False)
+    assert session.commit_fired() is False, why
+
+
+async def test_a_different_method_is_not_the_approved_submission(fake_browser):
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/cart/add")
+    await _verdict(
+        session, url="https://example.com/cart/add.js", method="DELETE",
+        navigation=False,
+    )
+    assert session.commit_fired() is False
+
+
+async def test_same_origin_traffic_during_the_window_is_recorded_for_the_report(
+    fake_browser,
+):
+    """So a failure can say what the page sent INSTEAD, rather than assert that
+    nothing was sent — which this layer never has the evidence for."""
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/cart/add")
+    await _verdict(
+        session, url="https://example.com/analytics/beacon", method="POST",
+        navigation=False,
+    )
+    assert session.commit_fired() is False
+    assert session.commit_observations() == ["POST https://example.com/analytics/beacon"]
+
+
+async def test_observations_ignore_other_hosts_and_stay_bounded(fake_browser):
+    session = await _session(allowlist={"example.com", "other.example"})
+    session.arm_commit("POST", "https://example.com/cart/add")
+    await _verdict(
+        session, url="https://other.example/track", method="POST", navigation=False
+    )
+    assert session.commit_observations() == []
+    for i in range(12):
+        await _verdict(
+            session, url=f"https://example.com/x/{i}", method="POST", navigation=False
+        )
+    assert len(session.commit_observations()) <= 8
+
+
+async def test_arming_resets_the_previous_windows_observations(fake_browser):
+    """Multi-commit: form #2's report must not inherit form #1's evidence."""
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/cart/add")
+    await _verdict(
+        session, url="https://example.com/noise", method="POST", navigation=False
+    )
+    assert session.commit_observations()
+
+    session.arm_commit("POST", "https://example.com/checkout")
+    assert session.commit_observations() == []
+    assert session.commit_submitted_url() == ""
+    assert session.commit_fired() is False
+
+
+# ---- waiting for the REQUEST, not for the paint
+async def test_wait_for_commit_returns_as_soon_as_the_request_is_seen(fake_browser):
+    """settle() is a DOM-quiet detector that returns in ~250ms on an already
+    painted page, so the old `submit → settle → read` sequence gave an async
+    handler no chance. This waits on the request itself and returns the instant
+    it lands — a prompt form costs no more than before."""
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/cart/add")
+
+    async def _fire_soon():
+        await asyncio.sleep(0.05)
+        await _verdict(
+            session, url="https://example.com/cart/add.js", method="POST",
+            navigation=False,
+        )
+
+    task = asyncio.ensure_future(_fire_soon())
+    assert await session.wait_for_commit(timeout=5.0) is True
+    await task
+
+
+async def test_wait_for_commit_times_out_quietly_when_nothing_posts(fake_browser):
+    session = await _session(allowlist={"example.com"})
+    session.arm_commit("POST", "https://example.com/cart/add")
+    assert await session.wait_for_commit(timeout=0.15) is False
+
+
+async def test_wait_for_commit_without_an_arm_never_raises(fake_browser):
+    session = await _session(allowlist={"example.com"})
+    assert await session.wait_for_commit(timeout=0.1) is False

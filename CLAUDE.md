@@ -940,6 +940,17 @@ The polish layer on Parts 1 and 5: watch a plan's steps tick in real time, stop 
 - **API** (`POST /api/tasks/{id}/cancel`): only a `running` task is cancellable here (paused tasks cancel from their approval card via `/api/agent/approve` — the approval gates stay in one place; that inline path still settles WITHOUT a push, unchanged). The response is honest about cooperation: `accepted=true` means the flag was set on a live run — the cancelled outcome arrives later as a normal `"task"` push event; `accepted=false` carries the reason (settled already / paused / no live run in this process).
 - **Frontend**: `receiveStepEvent` in `chatStore.ts` (wired via `onPush('plan_step', ...)` in `App.tsx`, current session only) patches the matching step row on any message whose plan id matches — `running` renders a spinner in `PlanCard`'s `StepStatusIcon`, a `failed` event carries the error before the authoritative final plan arrives. `plan_step` is in `notifications.ts`' `SILENT_TYPES` (a plan can emit dozens of ticks; the plan-level `task` events are the toast-worthy ones). The "Running in the background" banner gains a Cancel button → `cancelBackgroundTask` → `tasksApi.cancel`; while the request is pending the banner says the running step will finish first, and the cancelled `task` push event resolves the card (terminal patches clear `planCancelRequested`). A not-accepted cancel re-enables the button and surfaces the backend's reason as the card error.
 
+### The boss + domain agents (2026-07-24)
+Jarvis becomes a BOSS that dispatches: the router classifies a task's DOMAIN and hands it to the matching domain agent (file / email / calendar / research / browser), which runs in the background by default while the user keeps talking. The load-bearing design decision — an agent is a SPECIALIZATION, not a new engine. Every agent is the SAME proven `AgentPlanner` running through the SAME `task_runner`, and inherits the entire safety stack unchanged: the structural approval gate (`registry.execute_tool`), the recipient / event-id / upload / browse-origin grounding locks, the path guards, the placeholder resolver, the cancellation flag. There is ONE execution path; the "agent" only changes what the planner LLM is allowed to draft from. Rules, all in code:
+- **Specialization = a filtered tool catalog + a one-line persona, at ZERO execution cost** (`app/agents/agent_registry.py`). An `AgentSpec` is `{key, display_name, label, tools, persona}`. The subset only filters `_tools_json(allowed)` (planner.py) — the catalog the LLM is SHOWN — so the model can only draft steps from its lane's tools WITHOUT any change to `execute_tool`; the approval gate stays the real guard and there is no new regression surface. The persona is a one-line "you are Jarvis's <domain> agent" header (`_persona_block`) prepended to the plan / reflect / revise prompts; empty for `general`.
+- **Five agents + a general fallback**, each carrying `_SHARED_READS` on top of its domain tools (`recall_memory`, `lookup_contact`, `recall_actions`, `search_files`, `read_file`, `list_directory`, `semantic_file_search`) — all strictly READ, so cross-domain CHAINING is never starved: the email agent keeps the file reads for "find the file about X and email it to me" (ONE worker, ONE plan, no decomposition). `file` → move/rename/create/delete/run_command/execute_script; `email` → the six Gmail tools; `calendar` → the five Calendar tools; `research` → web_search/read_webpage/browse_page (READ web only, never acts on a live site); `browser` → browse/browse_commit/stop_media (drives a real browser). `general` (`tools=None`) sees ALL tools — EXACTLY the pre-agent behavior, so an unknown/blank/`CHAT` label falls here and nothing regresses. `agent_for_label(label)` maps the classifier label → agent (case-insensitive, unknown → general, never an error); `agent_for_key(key)` rebuilds one from a persisted `AgentPlan.agent_key`.
+- **The router is now a TWO-TOKEN classifier** (`task_router.py`): the one temp-0 routing call returns `(label, mode)`. `label` is the existing `TASK/EMAIL/CALENDAR/WEB/BROWSE/CHAT`; `mode` is `INLINE` (a quick READ answered in this same turn — "what's on my desktop", "any new emails?", "what's my next meeting") or `DELEGATE` (real work — anything that creates/moves/deletes/sends/changes, every BROWSE, or clearly multi-step — handed to a background domain agent while the user keeps talking). `MODE IS A UX CHOICE, NEVER A SAFETY ONE`: both paths share the approval gate, so a read mis-tagged DELEGATE only costs one extra notification and a write mis-tagged INLINE just pauses inline. It fails safe every way — an exception or unrecognized reply → `("CHAT","DELEGATE")` (fail open to the untouched Phase 2 chat path); a recognized action label with a blank/garbled mode → `DELEGATE` ("when unsure, DELEGATE"). Explicit background intent ("…tell me when you're done") still forces DELEGATE as a user override. `maybe_handle_task` assigns `agent = agent_for_label(label)` and dispatches: `DELEGATE` → `_stream_task_background(..., agent)` (a background `Task`), `INLINE` → `_stream_task(..., agent)` (streamed this turn).
+- **Resume rebuilds the SAME specialist** (`schemas.py`): `AgentPlan.agent_key` is SERIALIZED (unlike the planner inputs `conversation`/`memory_context`, which are excluded) precisely so a paused browser/email task resumes as its own specialist, not as general — `task_runner._run_continuation` and `task_router._stream_answer` rebuild it via `agent_for_key(plan.agent_key)`. Defaulted `"general"`, so a plan parked before this field deserializes cleanly. It is NOT a signature input — observability, never a gate decision. `AgentPlanner.__init__` gains an `agent` arg defaulting to `GENERAL`, so every pre-agent caller is unchanged.
+- **Progress-aware chat — the boss reports on its agents with NO new route** (`app/core/task_status.py`): `active_tasks_context(db, session_id)` renders a compact read-only `BACKGROUND WORK` block (this session's active tasks + anything finished in the last ~30 min, agent display-name + status phrase + goal) that `chat._build_system_prompt` injects alongside MEMORY CONTEXT (new `background_note`). So "how's the browser task going?" is answered from the LIVE `Task` rows, never the chat LLM's imagination. Framed data-never-instructions + "this is the COMPLETE status — do not embellish beyond running/waiting/completed/failed"; best-effort → `""` on any failure (the `planner_memory_context` rule), where the chat prompt's TASK OUTCOME HONESTY rule takes over. Scoped to the delivery session; the Agents panel is the cross-session view.
+- **Schema / telemetry**: `Task.domain` (migration `b8e1d3f0a2c5`, `down_revision` `a3f5c9e17b42`; idempotent add-column + `ix_tasks_domain` guard, the create_all-race analogue mirroring `e2c4a6b8d013`) records which agent owns a background task; `start_task(agent=…)` stamps it (`Task(..., domain=agent.key)`). `tasks.py` `_serialize` adds `domain` + a human `agent` name (`agent_for_key(task.domain).display_name`) for the UI.
+- **Frontend**: a new "Agents" panel (`components/tasks/TasksPanel.tsx` + `stores/tasksStore.ts`) — the cross-session worker view, live-reconciled off the EXISTING `task` + `plan_step` pushes (`App.tsx` now also feeds `useTasksStore`), so no new push type. Sidebar gains an "Agents" nav item (Bot icon); `StatusBar` shows a clickable "N agents working" indicator (8s SILENT poll — a just-started worker doesn't push until it pauses/finishes — reconciled between polls by the `task` push; click → the Agents panel). `types/index.ts` gains `TaskStatus`/`Task` + the `agents` ActivePanel; `api.ts` gains `tasksApi.list/get`.
+- Tests: `test_agent_registry.py` (every agent tool is a real registered tool; general sees all; label→agent mapping incl. case-insensitivity + unknown→general; shared-reads present in every domain agent; the email agent cannot see file destructive tools) and `test_task_status.py` (session scoping, active/awaiting phrasing, the recent-terminal window, missing-domain→general label). 2271 green, runtime-verified. Uncommitted (git deferred).
+
 ### Google integration foundation (Phase 5, Part 1)
 The shared plumbing for email/calendar tools and the daily briefing. `app/integrations/google_auth.py` is the ONLY module that reads or writes Google credentials; `app/integrations/google_services.py` is the ONE way business code gets a Gmail/Calendar client. Rules, all in code:
 - **OAuth 2.0 installed-app loopback flow** (`GoogleAuthManager.start_connect` → `_run_flow_sync`): the consent page opens in the system browser and the redirect lands on an ephemeral 127.0.0.1 port (loopback only — the backend's own bind rule). `run_local_server` BLOCKS, so the flow runs in a worker thread (`asyncio.to_thread`, task kept referenced like task_runner's `_RUNNING`) with a hard `OAUTH_FLOW_TIMEOUT_SECONDS = 300` — an abandoned browser tab can never wedge connect forever; one flow at a time (`_connecting` under `_state_lock`; a second POST /connect returns `in_progress`). POST /connect returns immediately (`pending`) and the UI polls GET /status.
@@ -2090,6 +2101,18 @@ the Initiative Engine as new gatherers/candidates; only 11.3 adds a store.
   `/api/threads` create/dedupe/resolve/400, `next_check = event_date + 1 day`.
 
 ### Universal browser control (Phase 14)
+
+> **⚠️ HISTORICAL FROM HERE TO "Browser stack — CURRENT STATE".** Everything from
+> this heading down to that section is a LOG of how the browser stack was built,
+> incident by incident, and it is kept because each entry records WHY a guard
+> exists — delete the reasoning and the next person deletes the guard. But three
+> claims in it are **no longer true of the shipped code** and are called out where
+> they appear: the GET-only interceptor (replaced by action-level safety in
+> refactor Phase 4), vision as a stuck-only fallback and then as the primary
+> channel (now DOM-first by default), and `action_approved` as a run-wide boolean
+> (now a one-shot per-gesture permit). **Read "Browser stack — CURRENT STATE"
+> first; treat anything here that contradicts it as history.**
+
 "Jarvis does what I do in a browser" — ONE real Chromium plus an agent loop that
 reads a page and decides the next action, with NO per-site code. This INVERTS the
 Phases 1–13 doctrine: page content now drives the action loop directly (there is
@@ -2696,3 +2719,261 @@ yourself"*, but **no window appeared** — the user had to open Indeed themselve
   waits after a recent close and is a no-op otherwise). No migration, no frontend
   change. **Live acceptance still pending** (the real Selector loop via
   `npm run dev`). Uncommitted (git deferred).
+
+### Browser stack — CURRENT STATE (authoritative; supersedes the log above)
+
+Everything above this heading is the build log. This section is what the code does
+today. Where they disagree, this wins.
+
+**Package layout** — everything browser lives in `backend/app/browser/`:
+`runtime.py` (dedicated Proactor-thread loop + `run_browser` marshaling + the outer
+belt) · `session.py` (lifecycle, launch chain, interception, profile lock, the six
+held-window registries) · `observe.py` (DOM → numbered element list, index/obs-id
+staleness contract, cross-frame union, challenge probe, screenshots) ·
+**`extract.py`** (deterministic structured extraction) · `loop.py` (observe→decide→
+act, fast paths, wall detectors, budgets) · `commit_flow.py` (discover → approve →
+submit, multi-commit) · `grounding.py` (origin/fill/upload grounding) ·
+`registry.py` (one generic `HeldSessionRegistry`) · `state.py` (the `Handoff`
+vocabulary) · **`trace.py`** (per-run JSONL trace) · `publicsuffix.py`.
+The old `app/core/browser_*` and `app/agents/browser_*` paths are `sys.modules`
+self-replacement shims (~100 test monkeypatches target them; Phase 8 of the refactor
+deliberately did not delete them).
+
+**Safety, as shipped.** NOT "non-GET is aborted" — that changed in refactor Phase 4
+so SPAs could render at all. Page traffic FLOWS; what is gated is what the AGENT
+does:
+- **The submit-gesture gate** (`loop._act` + the `run_browse` hand-off): a gesture
+  that would ACT on the world — a form's own submit control, a send/post/upload/
+  like/delete/buy control, or Enter in a non-search field — STOPS the run and asks.
+  A genuine search submit is reading and is never caught.
+- **ONE APPROVAL, ONE GESTURE** (2026-07-26). The user's yes returns a
+  `gesture_fingerprint` — the gesture KIND + the control's role/name/href + the
+  HOST — which the loop consumes when that gesture fires (`gesture_spent`). A
+  different control, a different kind of gesture, or a different site pauses again.
+  This replaced `AgentPlan.action_approved: bool`, a run-wide flag under which a yes
+  to "send this message" also authorised any buy, delete or post the loop chose
+  next. Keyed on element IDENTITY, never index (indices are re-assigned every
+  observation). A plan parked before the change deserializes with NO permit and
+  pauses again — fail closed. The fired gesture is recorded on the outcome
+  (`performed_gesture`) and rides into the ActivityLog row.
+- **A form submit** still goes only through `arm_commit` → `submit_commit` under a
+  signature approval of the code-read contract (method, URL, every field value, any
+  attached file). Never a raw click.
+- **Grounding** is unchanged and is the exfiltration bound: origins, fill values and
+  upload paths must trace to the user's words or their curated profile — never to
+  page content. Autofill secrets are DPAPI-encrypted at rest and never enter a
+  prompt.
+- **CAPTCHAs are never solved or touched**; credentials are never entered by Jarvis;
+  the window is headed and watchable.
+- **Honest residual limit**, unchanged: within an allowlisted, authenticated origin a
+  compromised loop has full user authority.
+
+**Perception is DOM-FIRST** (2026-07-26, owner decision, reversing the 2026-07-21
+vision-first decision on measurement — vision was spending up to 12s a step on
+cooling keys and returning "unusable" while DOM did all the real work):
+- The text/DOM channel decides every step. Vision is consulted only where the DOM
+  cannot help: a page with NO actionable elements, or a step the text model could
+  not turn into an action (the `evidence_resolver` escalation shape).
+- `MAX_VISION_CALLS = 6` is a HARD per-run ceiling — it did not exist before; vision
+  was bounded only by a 12s timeout and a 2-strike failure breaker, so `vision_calls`
+  was a tally and a slow-but-usable provider could be consulted on all 25 steps.
+- Posture is a setting (`BrowserVisionConfig.posture`, `dom_first` | `vision_first`,
+  PUT `/api/browser/vision`), so switching back needs no code change. Under
+  DOM-first the per-step screenshot is not captured at all.
+- Vision LOCATES, DOM ACTS — a fractional point maps back to a real element and the
+  click still runs through the index/obs-id contract.
+
+**Extraction reads what the loop can see** (`app/browser/extract.py`, 2026-07-26).
+The defect it repairs: on daraz.pk's real results page `extract` returned ZERO
+records three times and the run died reporting "the page didn't respond" — on a page
+holding 158 product cards. Two causes, both structural: `page_text` was truncated to
+the PROMPT budget at CAPTURE (so nothing downstream could see past 4000 chars of
+header/nav), and the extractor only ever read prose. Now:
+- `observe.py` separates CAPTURE from RENDER — `Observation.text_full` (24k) and
+  `Element.name_full` alongside the prompt-clipped `page_text`/`name`. Both are CODE
+  data; `render()` is untouched, so the decision prompt, the action signature and the
+  page fingerprint did not move.
+- `extract.structured_records` reads records in CODE, **zero LLM calls, cannot
+  fabricate** (every value is a slice of the observation, and a test asserts it).
+  Two readers: element cards (title+price in one element's text), then the page's
+  PROSE as a line sequence (`Title / Rs. X / …` — the generic list-page idiom, and
+  what daraz actually is: 155 elements, ZERO carrying a price). It DECLINES rather
+  than guesses — fewer than 2 cards, or no currency token, yields nothing and the LLM
+  path runs.
+- The LLM path now reads the element list AND the full prose, with the share
+  allocated by EVIDENCE (`_element_share_fraction`): a fixed 60% to elements made the
+  measured page worse, starving the prose that held every price. That is the 5-wide
+  trap, walked into once and now tested against.
+- A structural result that does not cover every requested field is kept as a FALLBACK
+  if the LLM finds nothing — evidence is not a deletion.
+
+**Failure is self-diagnosing** (2026-07-26). The three-strikes returns used to say
+"the page didn't respond to that action" / "several actions in a row failed", which
+sent the investigation to the browser while the reader was blind. `last_failure` now
+carries the layer's own words ("read this page and found no name, price in its text
+or element list"). A read that comes back empty also stops being OFFERED for that
+page fingerprint (`barren`) — the repeat guard only counted, and each retry was a
+real ~15s call.
+
+**Every run writes a trace** (`app/browser/trace.py`): one JSONL per run under
+`~/.jarvis/logs/browse/` — per step the url, element count, text size, the action,
+WHICH channel decided it (`fast-path` | `dom` | `vision`), the result, records
+gathered, and ms; then a `finish` line with success/steps/error/llm_calls/
+vision_calls/records. Bounded (lines, string sizes, files kept), never raises, and
+timed with `perf_counter` — deliberately NOT the `monotonic` clock the loop's
+deadline reads, because merely asking that clock consumed the run's deadline and the
+trace changed the run it was observing. `TRACE_DIR` is the injectable seam; conftest
+points the suite at a scratch dir.
+
+**Budgets, measured not guessed** (`scripts/browse_bench.py`, six real tasks):
+`MAX_BROWSER_ACTIONS = 25`, `BROWSE_DEADLINE_SECONDS = 400`,
+`BROWSE_HARD_TIMEOUT = 700`. The deadline was 300 — sized on an estimate of "5-10s a
+step" when the real median is ~12s, so it licensed 25 actions and then killed the run
+at 25 × 12; the eBay task spent 248s on 21 actions riding the limit. The action cap is
+meant to bound work and the deadline to be a backstop; when the backstop binds first,
+a run still making progress dies for nothing. A pinned inequality in
+`test_browser_runtime.py` keeps the outer belt above the pipeline's worst case.
+
+**The acceptance gate is a number** (`scripts/browse_bench.py` +
+`scripts/browse_tasks.json`). Real browser, real providers, real sites, on the
+SELECTOR event loop production actually has (a standalone `asyncio.run()` is Proactor
+on Windows and hides the Playwright-subprocess bug class that shipped twice). Scored
+in CODE against grounded evidence — records gathered, fields present, every reported
+price verbatim in what the page returned, final URL, page text — so a
+confident-sounding answer cannot pass. Results are written to
+`scripts/bench-results/` so a change is a delta. Run:
+`venv\Scripts\python -u scripts\browse_bench.py [task-id]` (never collected by
+pytest). **Measured 2026-07-26: 6/6 pass, median 34s/task** — including all four
+tasks that failed live that morning. The daraz task went 0 records → 40 records with
+40/40 prices grounded and no LLM call for the extraction.
+
+### Network failure is legible, and never shadows the step's own diagnosis (2026-07-26)
+A `browse_commit` on junaidjamshed.com reported *"Step '…' failed and replanning
+also failed: **LLM call failed: [Errno 11001] getaddrinfo failed**"*. **The root
+cause was environmental — a machine-wide DNS outage**, not a logic bug: three
+independent hosts died inside a 25-second window (junaidjamshed.com,
+api.deepseek.com, oauth2.googleapis.com), preceded by two abnormally slow LLM
+calls (15.7s, 13.1s), with `requests=2` confirming almost nothing left the box.
+Measured after: the site is a healthy Shopify store (5/5 × HTTP 200, TTFB
+0.36–1.30s), so **`NAV_COMMIT_MS = 10_000` has ~8× headroom and was deliberately
+NOT raised** — an environmental blip is not a reason to move a timeout, and
+inflating it doubles the cost of every genuinely-dead site. It IS a reason to fix
+how the system reports one, because this will recur. Four defects, all fixed:
+- **The replan's death overwrote the step's diagnosis.** `plan.message` was
+  composed from `error`, which by that point holds the *replanner's* failure — so
+  a replan dying on DNS discarded `failed_step.result.error`, the one thing the
+  user could act on ("Couldn't load www.junaidjamshed.com: it didn't respond in
+  time."). It now LEADS with the step's own reason and demotes the replan failure
+  to a parenthetical. **General rule: a downstream failure must never shadow the
+  upstream diagnosis** — the same principle as the `last_failure` round, one layer
+  up.
+- **No transport-vs-model classification, and no real backoff.** The two attempts
+  landed **1.1s apart** — the same failure twice, not a retry. `_is_transport_error`
+  (planner.py) matches exception CLASS NAME + text markers + errno (11001/11002/
+  −2/−3) and walks `__cause__`/`__context__`, so it is provider-agnostic (the
+  `browser/session._network_error_kind` shape); a transport failure now sleeps
+  `_LLM_RETRY_BACKOFF_SECONDS = 1.5` before attempt 2 and reports the plain-language
+  `_LLM_UNREACHABLE_MESSAGE` ("the network looks down. Worth retrying.") instead of
+  implying the goal is impossible. Still 2 attempts — a backoff, not a new budget.
+- **An exception logged as nothing.** Attempt 1 logged `Planner LLM call failed
+  (attempt 1): ` — `httpx.ConnectError("")` has an EMPTY `str()`. Normalized at the
+  provider boundary (`openai_compat._unreachable`, chained `from exc`) so all ~13
+  call sites get a legible message naming the class and the base URL. HTTP *status*
+  errors are deliberately untouched — the 2026-07-24 round's body preservation
+  still holds, and a 400 is the model failing, not the network.
+- **No trace for a run that died before the loop.** `BrowseTrace` is constructed in
+  exactly one place (`run_browse`), so a discovery dying in the opening `goto()`
+  wrote NOTHING to `~/.jarvis/logs/browse/` — the post-mortem had to come from
+  backend.log. `commit_flow._trace_pre_loop_failure` writes one on the failure arms
+  only, gated on `session.browse_trace` (set ⇒ the loop ran and already wrote one),
+  so there is never a duplicate and zero risk to the working path.
+- Tests: `test_agent_planner.py` (+5 — the incident frozen: a `ConnectError("")`
+  chained from `OSError(11001)` reproduces the exact shape; the step reason comes
+  FIRST, "network looks down" is present, and `getaddrinfo`/`11001` never reach the
+  user; transport sleeps, a model failure does not), `test_openai_compat_provider.py`
+  (+4), `test_browser_commit.py` (+2 — a pre-loop death writes exactly one JSONL
+  with `mode:"commit"`, `success:false`). **2494 green.**
+
+### A form's `action` is not its endpoint — the AJAX submit round (2026-07-26)
+Live: *"go to junaidjamshed.com and add janan sports perfume in cart"*. The network
+was healthy, discovery worked, the user approved — and the submit reported *"The
+submission did not go through — the site did not send the approved request (it may
+submit by a mechanism this tool can't drive). **Nothing was sent.**"* Four browse
+runs, three distinct defects, and the reported cause was never verified.
+- **⚠️ ROOT CAUSE: the approved-request matcher cannot see a modern submit.**
+  Discovery read the product form CORRECTLY — `POST /cart/add`, 10 fields, which is
+  exactly what the markup declares. But that form never posts to its own action:
+  the theme's `custom.js` does `await fetchJSON("/cart/add.js", {method:"POST"})`.
+  Proven, not inferred — `_normalize_commit_url('/cart/add')` != `.../cart/add.js`,
+  so **`commit_fired` could never become True on that site**, whatever happened.
+  Shopify is a large fraction of e-commerce and the `.js`/`.json` representation
+  POST is the Rails idiom, so this was never one site's quirk.
+- **THE SPLIT THAT MAKES THE FIX SAFE.** In READ mode Rule 1 only aborts a
+  *main-frame navigation* non-GET (the 2026-07-21 action-level change, so SPAs
+  render); an in-page fetch/XHR **flows regardless**. So the permit was never what
+  gated an AJAX submit — the gate that actually worked is the loop's submit-gesture
+  stop (visible in the trace: *"that would submit the form — in a commit flow the
+  submit happens only through the approved submit step"*). Therefore:
+  `_commit_allows` (PERMISSION — the only thing that turns an abort into an allow)
+  is **UNCHANGED**, and a NEW `_is_commit_variant` (RECOGNITION) is consulted only
+  for traffic Rule 1 was letting through anyway. **Recognising a submission grants
+  no capability; it only stops us lying about one.** A main-frame navigation to the
+  variant url still dies in the abort branch and consumes no permit — pinned by
+  `test_variant_recognition_grants_no_new_permission`.
+- **The variant test is narrow on purpose**: string equality against
+  `armed + suffix` over the ALREADY-NORMALIZED url, `_COMMIT_VARIANT_SUFFIXES =
+  (".js", ".json")`. `/cart/add` matches `/cart/add.js`; it does NOT match
+  `/cart/addresses` (no suffix boundary), `/cart/add/confirm`, `/cart/add.js.evil`,
+  a different query (query is inside the normalized form), another host, or another
+  method. Anything else is merely OBSERVED (`_note_commit_traffic`, same-origin,
+  bounded at 8) so a failure can NAME what the page sent instead.
+- **WAIT FOR THE REQUEST, NOT FOR THE PAINT.** The submit phase was
+  `submit_commit() -> settle() -> commit_fired()`, and `settle()` is a DOM-QUIET
+  detector whose own contract is *"an already-painted page returns at ~250ms"* —
+  which a product page sitting through an approval pause always is. **Measured on
+  the incident: 240ms from `arm_commit` to session teardown**, against a theme
+  handler that `await`s before posting. `wait_for_commit()` (event-driven, set by
+  the interceptor, `COMMIT_WAIT_SECONDS = 6.0`) returns the instant the submission
+  is observed, so a prompt form costs what it always did and only a form that never
+  posts pays the wait. Quiet is not the signal; the request is.
+- **The message asserted what the code never checked** — the same class the network
+  round above fixed one layer over. `"Nothing was sent."` is not knowable here (an
+  in-page fetch is never blocked, so absence of a *match* is not absence of a
+  *request*), and *"it may submit by a mechanism this tool can't drive"* was a
+  guess that happened to be right. Worse, `submit_commit` **DISCARDED the JS return
+  value**, so "there was no form to fire" and "we fired it but recognised nothing"
+  produced the identical text. It now returns `True/False/None` and
+  `_unfired_reason` has one branch per fact held in evidence: form gone → *"no
+  longer on the page"*; other same-origin traffic seen → *"the page sent POST …
+  instead of the approved POST … — not confirmed"*; nothing at all → *"no request
+  left the page within 6s"*. `result["submitted_url"]` + `_one_commit_block`'s
+  *"(Sent as …)"* clause record the url that actually carried an approved contract.
+- **The double "Apply as guest".** `_auth_offer_question` hardcoded job-application
+  vocabulary — *"lets you sign in before applying, but I can also apply as a
+  guest"* — into a hand-off that fires on ANY site with a sign-in link, i.e. every
+  storefront. Now task-neutral ("…first, but I can also carry on without one";
+  option `Continue as guest`, and `_GUEST_CHOICE_RE` still parses a plan parked
+  under the old label). And the gate tested `obs.url not in auth_seen` — per PAGE —
+  so answering on /search bought nothing when the loop opened /products/…: two
+  identical interrupts, ~35s, on one add-to-cart. `_auth_site_decided` compares
+  REGISTRABLE DOMAINS read out of the URLs already stored, so it is once per SITE
+  with no schema or serialized-field change.
+- **Contributing, not a defect:** run 1 lost 96s to `deepseek-v4-flash` returning an
+  EMPTY decision twice; `_decide`'s one-retry and its honest logging (added earlier
+  the same day) worked exactly as designed.
+- Tests: `test_browser_session.py` (+17 — the incident frozen; `.json` twin; the
+  no-new-permission property; a 6-case narrowness matrix; observation recording,
+  host filtering, bounding and per-arm reset; `wait_for_commit` fires on the
+  request, times out quietly, never raises unarmed), `test_browser_commit.py` (+5 —
+  the phase waits; the carrying url is reported; vanished-form vs unrecognised-
+  submission vs silence each say their own thing; an unfired submit still spends no
+  budget), `test_plan_rendering.py` (+2), `test_browser_loop.py` (+3 same-site
+  dedupe), `test_browser_field_learning.py` (task-neutral wording, legacy label
+  still parses).
+- **HONEST LIMIT:** recognising the `.js`/`.json` twin covers the Rails/Shopify
+  idiom, not every SPA — a site that posts to an unrelated endpoint (a GraphQL
+  mutation, `/api/v2/cart`) is still not recognised as the approved submission. That
+  case is now REPORTED rather than mis-stated ("the page sent POST … instead of the
+  approved …"), which is the difference between a diagnosable gap and a false
+  claim. **Live acceptance of the cart flow is still pending** — the hermetic suite
+  is the gate met.

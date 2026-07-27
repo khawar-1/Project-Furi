@@ -177,6 +177,27 @@ def _fail(tool: "BaseTool", message: str) -> ToolResult:
     )
 
 
+def _partial(tool: "BaseTool", message: str, output: Any) -> ToolResult:
+    """A FAILED result that still carries what the tool actually saw.
+
+    The browse loop gathers real evidence — extracted rows, the final page's
+    prose, the URL it reached — and then every failure path funnelled it into
+    _fail, whose output is None. Live 2026-07-26: four browser tasks failed and
+    the user was told "it failed" while the loop had, in one case, already
+    pulled the listings it was asked to compare. The replan saw an error string
+    where a page belonged.
+
+    This is the evidence_resolver rule one layer down: a thin result is
+    EVIDENCE, not a deletion. success stays False — the goal was not reached and
+    nothing here pretends otherwise — but the summary can now give a partial
+    answer grounded in the real page, and the replanner can see where it got to.
+    """
+    return ToolResult(
+        success=False, output=output, error=message,
+        permission_level=tool.permission_level,
+    )
+
+
 def _ok(tool: "BaseTool", output: Any) -> ToolResult:
     return ToolResult(success=True, output=output, permission_level=tool.permission_level)
 
@@ -353,6 +374,62 @@ async def _tavily_search(query: str, max_results: int) -> list[dict]:
     return _tavily_rows(data, max_results)
 
 
+_GOOGLE_CSE_ENDPOINT = "https://www.googleapis.com/customsearch/v1"
+
+
+def _google_cse_rows(data: dict, max_results: int) -> list[dict]:
+    """Map a Google Custom Search JSON response to result rows. PURE — no network
+    (the _tavily_rows testability seam). Google returns a `snippet` only (no full
+    page content), so `content` mirrors the snippet and is never marked truncated;
+    the evidence-escalation layer (read_webpage on the top hit) enriches it when a
+    factual answer needs the whole page, exactly as it does for a DDG scrape."""
+    results: list[dict] = []
+    for r in data.get("items") or []:
+        url = str(r.get("link") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        snippet = str(r.get("snippet") or "").strip()
+        results.append({
+            "title": str(r.get("title") or "").strip() or url,
+            "url": url,
+            "snippet": snippet[:SNIPPET_MAX_CHARS],
+            "content": snippet[:CONTENT_MAX_CHARS],
+            "truncated": False,
+        })
+        if len(results) >= max_results:
+            break
+    return results
+
+
+async def _google_cse_search(query: str, max_results: int) -> list[dict]:
+    """Google Programmable Search (Custom Search JSON API). PREFERRED when both a
+    key and an engine id are configured — a fresher index than the aggregator
+    snippets Tavily/DDG return, which is what "latest / newest / today" facts need
+    (2026-07-25: Tavily gave Black Clover's latest as a stale 131). Skipped in code
+    when unconfigured, so the default install never calls it; an error propagates to
+    the chain, which falls through to Tavily → DuckDuckGo."""
+    key = (settings.GOOGLE_SEARCH_API_KEY or "").strip()
+    cx = (settings.GOOGLE_SEARCH_CX or "").strip()
+    if not key or not cx:
+        return []
+    import httpx
+
+    async with httpx.AsyncClient(timeout=WEB_TIMEOUT_SECONDS) as client:
+        resp = await client.get(
+            _GOOGLE_CSE_ENDPOINT,
+            params={
+                "key": key,
+                "cx": cx,
+                "q": query,
+                # CSE caps `num` at 10; ask for what we need, bounded to the API max.
+                "num": max(1, min(int(max_results), 10)),
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    return _google_cse_rows(data, max_results)
+
+
 async def _ddg_html_search(query: str, max_results: int) -> list[dict]:
     """DuckDuckGo HTML endpoint, parsed with stdlib regex. Fragile by nature
     (unofficial markup). The endpoint requires a POST with browser-like headers
@@ -402,6 +479,10 @@ async def _ddg_lite_search(query: str, max_results: int) -> list[dict]:
 # fragile (the whole reason this is a chain) degrades quietly instead of
 # reporting "no such fact".
 _SEARCH_PROVIDERS: list[tuple[str, Callable[[str, int], Any]]] = [
+    # Google first when configured — freshest index (the "latest episode" fix,
+    # 2026-07-25). Both Google and Tavily are key-gated and return [] keyless, so
+    # the default install is still DuckDuckGo-only with no signup.
+    ("google-cse", _google_cse_search),
     ("tavily", _tavily_search),
     ("duckduckgo-html", _ddg_html_search),
     ("duckduckgo-lite", _ddg_lite_search),

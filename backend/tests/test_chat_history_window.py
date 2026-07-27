@@ -60,3 +60,35 @@ def test_latest_message_survives_even_when_oversized():
 
 def test_empty_history_is_fine():
     assert _provider_history([]) == []
+
+
+# ---- Empty-content entries (the PlanCard-host message) — live bug 2026-07-24 --
+# The frontend hosts an approval / clarifying-question PlanCard as an assistant
+# message with no text. Such an entry must (1) pass request validation instead of
+# 422-ing the whole conversation, and (2) never reach the provider.
+
+def test_empty_content_messages_are_dropped():
+    history = [
+        _msg("user", "hey"),
+        _msg("assistant", ""),        # a pushed PlanCard host — no text
+        _msg("assistant", "   "),     # whitespace-only counts as empty
+        _msg("user", "what's the progress?"),
+    ]
+    out = _provider_history(history)
+    assert [m.content for m in out] == ["hey", "what's the progress?"]
+    assert all(m.content.strip() for m in out)
+
+
+def test_history_of_only_empty_messages_yields_nothing():
+    assert _provider_history([_msg("assistant", ""), _msg("assistant", "  ")]) == []
+
+
+def test_chat_message_schema_tolerates_empty_content():
+    """The schema must NOT reject empty content — one empty PlanCard-host entry
+    in the history can no longer 422 the turn and lock the session."""
+    from app.db.schemas import ChatMessage
+
+    m = ChatMessage(role="assistant", content="")
+    assert m.content == ""
+    # A missing content field also defaults to empty rather than erroring.
+    assert ChatMessage(role="assistant").content == ""

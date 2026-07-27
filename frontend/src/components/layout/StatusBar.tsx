@@ -4,20 +4,29 @@
  */
 import { useEffect, useState } from 'react';
 import { clsx } from 'clsx';
-import { Circle, Cpu, Eye, FileCheck, Mic, Play, Sparkles, Wifi, WifiOff, RefreshCw, X } from 'lucide-react';
+import { Bot, Circle, Cpu, Eye, FileCheck, Mic, Play, Sparkles, Wifi, WifiOff, RefreshCw, X } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 import { usePushStore } from '@/stores/pushStore';
 import { useContextStore } from '@/stores/contextStore';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { useBrowserStore } from '@/stores/browserStore';
+import { useTasksStore } from '@/stores/tasksStore';
 import { initiativeApi } from '@/lib/api';
 
 const SENSING_POLL_MS = 10_000;
 const INITIATIVE_POLL_MS = 30_000;
+const AGENTS_POLL_MS = 8_000;
+const AGENT_ACTIVE = new Set(['running', 'awaiting_approval', 'awaiting_choice']);
 
 export function StatusBar() {
   const { backendStatus, healthData, isCheckingHealth, checkBackendHealth } = useUIStore();
+  const setActivePanel = useUIStore((s) => s.setActivePanel);
   const pushConnected = usePushStore((s) => s.connected);
+  // Active background agents (workers) — clickable jump to the Agents panel.
+  const agentActive = useTasksStore(
+    (s) => s.tasks.filter((t) => AGENT_ACTIVE.has(t.status)).length
+  );
+  const loadTasks = useTasksStore((s) => s.loadTasks);
   const sensing = useContextStore((s) => s.status);
   const fetchSensingStatus = useContextStore((s) => s.fetchStatus);
   // Phase 12.2: the required visible indicator while the wake-word mic is armed.
@@ -42,6 +51,15 @@ export function StatusBar() {
     const t = setInterval(() => void fetchSensingStatus(), SENSING_POLL_MS);
     return () => clearInterval(t);
   }, [fetchSensingStatus]);
+
+  // Keep the active-agents count fresh even when the Agents panel is closed —
+  // a just-started worker does not push until it pauses or finishes. Silent,
+  // low-frequency; the "task" push reconciles between polls.
+  useEffect(() => {
+    void loadTasks({ silent: true });
+    const t = setInterval(() => void loadTasks({ silent: true }), AGENTS_POLL_MS);
+    return () => clearInterval(t);
+  }, [loadTasks]);
 
   // Phase 9: a quiet "Jarvis may speak first" indicator. Proactivity state
   // changes rarely, so a slow poll is plenty; failures keep the last value.
@@ -168,6 +186,20 @@ export function StatusBar() {
             <Sparkles size={10} className="text-cyan-400" />
             <span className="text-cyan-400">Initiative: On</span>
           </div>
+        )}
+
+        {/* Active background agents (workers) — click to open the Agents panel */}
+        {agentActive > 0 && (
+          <button
+            onClick={() => setActivePanel('agents')}
+            className="flex items-center gap-1 text-cyan-400 hover:text-cyan-300 transition-fast"
+            title={`${agentActive} agent${agentActive === 1 ? '' : 's'} working in the background`}
+          >
+            <Bot size={10} className="text-cyan-400" />
+            <span>
+              {agentActive} agent{agentActive === 1 ? '' : 's'} working
+            </span>
+          </button>
         )}
 
         {/* Browser playback (Phase 14) — a browse window is open and playing */}

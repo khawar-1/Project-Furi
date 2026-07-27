@@ -1,0 +1,87 @@
+{
+  "_comment": [
+    "The browse acceptance suite. Each task is run through the REAL `browse` tool",
+    "against the REAL web with the REAL providers, and scored by a GROUNDED check",
+    "— never by asking a model whether the answer looks good.",
+    "",
+    "`check` kinds, all evaluated in code by scripts/browse_bench.py:",
+    "  records_at_least  — the run gathered >= n structured records",
+    "  field_present     — every gathered record carries this field",
+    "  price_grounded    — the cheapest/most expensive price named in the answer",
+    "                      actually appears in the gathered records",
+    "  url_contains      — the final page's URL contains this substring",
+    "  text_contains_any — the final page's text contains one of these strings",
+    "",
+    "Tasks are deliberately ordinary — the ones a user actually asked for on",
+    "2026-07-26 and all four of which failed. A benchmark of things we already",
+    "pass measures nothing."
+  ],
+  "tasks": [
+    {
+      "id": "daraz-compare",
+      "why": "THE INCIDENT TASK. Failed live 2026-07-26: three empty extracts, then 'the page didn't respond'.",
+      "goal": "Search for Yonex badminton rackets and extract the top 5 products with their names and prices",
+      "start_url": "https://www.daraz.pk",
+      "allowed_origins": ["daraz.pk"],
+      "checks": [
+        {"kind": "records_at_least", "n": 3},
+        {"kind": "field_present", "field": "price"},
+        {"kind": "price_grounded"}
+      ]
+    },
+    {
+      "id": "books-toscrape-extract",
+      "why": "A stable, scraping-friendly control. If this fails the harness itself is broken, not the site.",
+      "goal": "Extract the names and prices of the books listed on this page",
+      "start_url": "https://books.toscrape.com/",
+      "allowed_origins": ["books.toscrape.com"],
+      "checks": [
+        {"kind": "records_at_least", "n": 10},
+        {"kind": "field_present", "field": "price"},
+        {"kind": "price_grounded"}
+      ]
+    },
+    {
+      "id": "books-toscrape-navigate",
+      "why": "Multi-step: the loop must ACT (open a category) and then read, not just read the landing page.",
+      "goal": "Open the Travel category and extract the names and prices of the books in it",
+      "start_url": "https://books.toscrape.com/",
+      "allowed_origins": ["books.toscrape.com"],
+      "checks": [
+        {"kind": "url_contains", "value": "travel"},
+        {"kind": "records_at_least", "n": 2}
+      ]
+    },
+    {
+      "id": "quotes-pagination",
+      "why": "Gather ACROSS pages — working memory has to carry records past a navigation.",
+      "goal": "Extract the quotes and their authors from the first two pages of this site",
+      "start_url": "https://quotes.toscrape.com/",
+      "allowed_origins": ["quotes.toscrape.com"],
+      "checks": [
+        {"kind": "records_at_least", "n": 12}
+      ]
+    },
+    {
+      "id": "ebay-search",
+      "why": "Failed live 2026-07-26 (hit the action cap after a real extract). A commercial site with heavy JS.",
+      "goal": "Search for wireless earbuds and extract the first 5 listings with their prices",
+      "start_url": "https://www.ebay.com",
+      "allowed_origins": ["ebay.com"],
+      "checks": [
+        {"kind": "records_at_least", "n": 3},
+        {"kind": "field_present", "field": "price"}
+      ]
+    },
+    {
+      "id": "wikipedia-read",
+      "why": "A prose page: the structural reader must DECLINE and the LLM path must carry it.",
+      "goal": "Find out what year the Eiffel Tower was completed",
+      "start_url": "https://en.wikipedia.org/wiki/Eiffel_Tower",
+      "allowed_origins": ["wikipedia.org"],
+      "checks": [
+        {"kind": "text_contains_any", "values": ["1889"]}
+      ]
+    }
+  ]
+}

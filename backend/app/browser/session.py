@@ -142,6 +142,55 @@ BROWSER_PROFILE_DIR = Path.home() / ".jarvis" / "browser"
 # is unchanged until the user drops a folder in. See _extension_load_args().
 BROWSER_EXTENSIONS_DIR = Path.home() / ".jarvis" / "browser_extensions"
 NAV_TIMEOUT_MS = 20_000
+# TWO-PHASE NAVIGATION (2026-07-26). goto() used to wait for "domcontentloaded"
+# and treat a timeout as fatal. Live, that killed three of four browser tasks:
+# daraz.pk and ebay.com each timed out twice at 20s and the whole browse died —
+# while the session stats showed 95 and 349 requests, i.e. the page was loading
+# fine, it just never fired DCL inside the budget. DCL waits for the full HTML
+# parse plus deferred scripts, which on a heavy commercial page is a coin flip,
+# and it is the WRONG QUESTION anyway. What the loop needs to know is not "did
+# the parser finish" but "is there anything here to act on yet".
+#
+#   Phase A — commit: the response arrived and the document is being built.
+#             Server-side 30x hops are already followed at commit, so page.url
+#             is the final server target (what _verify_landing reads).
+#   Phase B — readiness poll: ask the PAGE whether it has actionable content.
+#             NEVER fatal. A page with bytes but no readiness is handed to
+#             observe() and the page-quality gate decides what it is.
+#   Phase C — _verify_landing, now AFTER the poll, so a client-side redirect
+#             (meta-refresh, location.replace) gets the whole poll window —
+#             strictly more than the sliver DCL used to give it.
+#
+# Worst case 10 + 10 + 15 = 35s, DOWN from the old 40s double-DCL timeout.
+NAV_COMMIT_MS = 10_000
+READY_POLL_MS = 15_000
+READY_STEP_MS = 250
+# STABILITY, not just substance — and this is a MEASURED constant, not a guess.
+#
+# The first cut asked only "does the page have content yet" and returned the
+# instant it did. Measured against daraz.pk's real search results (2026-07-26):
+#
+#     2.31s  ready=True   acts=  54  nodes= 345   <- the old predicate fired HERE
+#     3.82s               acts= 322  nodes=2558
+#     5.79s               acts=1026  nodes=4838   <- the products actually arrive
+#     6.36s                                       <- node count goes still
+#
+# A site's HEADER alone satisfies "has content", so the observation ran at 2.3s
+# and the loop was handed 11 elements of nav chrome on a page that would shortly
+# have 200 including 80 product links. It then asked the model to compare
+# products that were not there. Requiring the DOM to STOP GROWING is what moves
+# readiness to ~6.4s, where the answer is.
+#
+# Costs ~500ms on a page that was already still. That is the trade, knowingly:
+# half a second per navigation against observing the wrong page.
+READY_COMPLETE_POLLS = 2     # readyState 'complete' + this much stillness ⇒ done
+READY_STABLE_POLLS = 4       # consecutive settled polls ⇒ substantive AND done
+READY_STALL_POLLS = 4        # settled this long ⇒ done even if still thin
+# Node counts jitter by a handful as lazy images swap in (measured: 4833 → 4830 →
+# 4833 on a settled page), so "settled" is a tolerance, not equality. Exact
+# equality would read that jitter as growth and poll to the deadline every time.
+READY_GROWTH_TOLERANCE = 1.02
+READY_GROWTH_FLOOR = 2
 # The navigation-timeout types goto() retries on. Playwright's TimeoutError is
 # resolved ONCE here, guarded so a base install without Playwright never fails at
 # import (the lazy-dependency rule) — a missing Playwright yields the builtin
@@ -189,6 +238,21 @@ SETTLE_QUIET_MS = 250              # DOM quiet window ⇒ painted (in-page)
 SETTLE_HARD_CAP_MS = 2_000        # in-page + networkidle belt (ms)
 SETTLE_HARD_CAP_SECONDS = 2.0     # outer race deadline (a never-quiet page)
 
+# How long the SUBMIT phase waits for the approved request to actually be
+# observed after firing the form (2026-07-26). Bounded and event-driven: it
+# returns the instant the interceptor sees the submission, so the normal cost is
+# a few hundred ms and only a form that never posts pays the full wait. Sized to
+# cover a handler that awaits validation/recaptcha before posting, without
+# stalling a genuinely dead form for long.
+COMMIT_WAIT_SECONDS = 6.0
+
+# A form's declared `action` is not reliably the url its submit hits: the Rails/
+# Shopify convention is to POST the SAME path with a `.js`/`.json` representation
+# suffix from JS. Recognising exactly those (and nothing else) is what lets an
+# ordinary AJAX add-to-cart be reported truthfully — see _is_commit_variant,
+# which is RECORDING-only and grants no permission.
+_COMMIT_VARIANT_SUFFIXES = (".js", ".json")
+
 # The MutationObserver quiet-window, run in-page. Resolves the instant the DOM has
 # been QUIET (no childList/attribute/text mutations) for SETTLE_QUIET_MS, or at the
 # in-page belt cap — whichever first. A PLAIN observer (never dom_observe's stamping
@@ -216,6 +280,75 @@ _QUIET_JS = """({ q, cap }) => new Promise((resolve) => {
   arm();                                  // a page that never mutates resolves at q
   setTimeout(() => done('cap'), cap);     // in-page belt
 })"""
+
+# The readiness question, asked of the page itself: is there anything here worth
+# handing to the loop yet? Deliberately CHEAPER and LOOSER than dom_observe's
+# extraction — this runs up to 60 times per navigation, so it counts a plain
+# selector and measures two lengths, and it stamps nothing.
+#
+# "Ready" is two clauses, either sufficient:
+#   1. Substantive: ≥3 actionable controls AND ≥200 chars of prose. A real page.
+#   2. Done-enough: the parser is no longer 'loading' and there is at least ONE
+#      control. A sparse-but-finished page (a login screen, a redirect stub) is
+#      ready even though clause 1 will never fire on it.
+# The caller adds a third exit outside this script: a node count that stops
+# growing (see READY_STALL_POLLS).
+_READY_JS = """() => {
+  const d = document;
+  if (!d || !d.body) return { ready: false, acts: 0, text: 0, nodes: 0 };
+  const acts = d.querySelectorAll(
+    'a[href],button,input:not([type=hidden]),select,textarea,' +
+    '[role=button],[role=link],[role=textbox],[role=searchbox]'
+  ).length;
+  const text = (d.body.innerText || '').trim().length;
+  const nodes = d.getElementsByTagName('*').length;
+  const loading = d.readyState === 'loading';
+  return {
+    ready: (acts >= 3 && text >= 200) || (!loading && acts >= 1),
+    // 'complete' means the load event fired and every subresource finished — the
+    // one DEFINITIVE "this page is done" signal the platform offers. Measured
+    // 2026-07-26: example.com reports it on the first poll (0.66s) while
+    // daraz.pk's results page stays 'interactive' until 8.8s, i.e. it separates
+    // a trivial page from one still assembling itself. Used as a FAST PATH so a
+    // simple page is not made to prove stillness it demonstrated immediately.
+    complete: d.readyState === 'complete',
+    acts: acts, text: text, nodes: nodes,
+  };
+}"""
+
+# Chromium net-error markers that mean the site could not be reached AT ALL, and
+# the plain-language reason for each. A slow page is not in this list — that is
+# the whole point of the readiness poll. Neither is a policy refusal, which is
+# BrowserBlocked. These are the cases where retrying the same URL is pointless
+# and the honest move is to say so and let the planner choose another source.
+_UNREACHABLE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("err_cert_", "its HTTPS certificate isn't valid"),
+    ("err_ssl_", "its secure connection failed"),
+    ("err_bad_ssl_", "its secure connection failed"),
+    ("err_name_not_resolved", "that address doesn't resolve"),
+    ("err_name_resolution_failed", "that address doesn't resolve"),
+    ("err_connection_refused", "it refused the connection"),
+    ("err_connection_reset", "the connection was reset"),
+    ("err_connection_closed", "the connection was closed"),
+    ("err_connection_timed_out", "it didn't answer"),
+    ("err_connection_failed", "the connection failed"),
+    ("err_address_unreachable", "it is unreachable"),
+    ("err_empty_response", "it returned nothing"),
+    ("err_internet_disconnected", "there's no internet connection"),
+    ("err_proxy_connection_failed", "the proxy connection failed"),
+)
+
+
+def _network_error_kind(exc: BaseException) -> str:
+    """The plain-language reason for a Chromium net error, or "" when the
+    exception is not one. Matched on the ERR_ token, which Chromium puts in the
+    message verbatim — the marker is stable across Playwright versions in a way
+    the surrounding prose is not."""
+    text = str(exc).lower()
+    for marker, reason in _UNREACHABLE_MARKERS:
+        if marker in text:
+            return reason
+    return ""
 
 # ~/.jarvis/browser is a SINGLE persistent profile: at most one live Chromium may
 # hold it. A Chromium keeps the OS single-instance lock for a short moment after
@@ -653,6 +786,35 @@ _SUBMIT_COMMIT_FORM_JS = """() => {
   return true;
 }"""
 
+# Find the TRACK a range-slider handle rides on (for the drag `to_fraction`
+# path). From the handle, walk a few ancestors and return the box of the first
+# that looks like a slider track: an explicit slider/track/rail role or class, or
+# (fallback) simply an ancestor much longer than the handle on the drag axis —
+# a horizontal track is far wider than its knob, a vertical one far taller. Best
+# guess only; null when nothing plausible is found, and the caller then refuses
+# the drag with an honest note rather than sliding to a made-up position.
+_SLIDER_TRACK_JS = """(el) => {
+  const hr = el.getBoundingClientRect();
+  let node = el.parentElement;
+  let hops = 0;
+  while (node && hops < 6) {
+    const r = node.getBoundingClientRect();
+    const role = (node.getAttribute && (node.getAttribute('role') || '')) || '';
+    const cls = (node.className && node.className.toString
+      ? node.className.toString() : '').toLowerCase();
+    const named = role === 'slider' || role === 'group' ||
+      /slider|track|rail|range|scrubber/.test(cls);
+    const widerX = r.width >= (hr.width || 1) * 2 && r.width > 40;
+    const tallerY = r.height >= (hr.height || 1) * 2 && r.height > 40;
+    if ((named && (widerX || tallerY)) || widerX || tallerY) {
+      return { x: r.left, y: r.top, w: r.width, h: r.height };
+    }
+    node = node.parentElement;
+    hops++;
+  }
+  return null;
+}"""
+
 # BROWSER_FACTORY() -> browser handle exposing async new_page() and close().
 # None = the real Chromium path below.
 BROWSER_FACTORY: Optional[Callable[[], Any]] = None
@@ -665,6 +827,25 @@ class BrowserUnavailable(RuntimeError):
 class BrowserBlocked(RuntimeError):
     """A navigation was refused by the allowlist or the SSRF guard. Carries a
     user-facing reason — code-authored, never LLM prose."""
+
+
+class BrowserUnreachable(RuntimeError):
+    """The site could not be reached at all — bad certificate, DNS failure,
+    refused/reset connection, no internet.
+
+    Three things this is NOT, and the distinctions are load-bearing:
+      - NOT a policy refusal. That is BrowserBlocked, and it means the site was
+        reachable and we chose not to go there.
+      - NOT a slow page. Since the readiness poll, a page that loads slowly is a
+        non-event — it gets observed anyway.
+      - NOT an invitation to guess another address. outfitters.com failing its
+        certificate check does NOT license a browse to try outfitters.com.pk:
+        an origin the user never named is outside the grounding corpus by
+        construction (browser/grounding.ground_origins), and inventing one here
+        would route around the exfiltration bound the whole browse stack rests
+        on. The honest move is to report which site failed and why, and let the
+        planner ask or choose another source.
+    """
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -681,19 +862,48 @@ async def _maybe_await(value: Any) -> Any:
 _host_block_cache: dict[str, bool] = {}
 
 
+_host_block_inflight: dict[str, asyncio.Future] = {}
+
+
 async def _host_blocked_cached(host: str) -> bool:
     key = host.strip().lower().rstrip(".")
     cached = _host_block_cache.get(key)
     if cached is not None:
         return cached
-    blocked = await asyncio.to_thread(_host_is_blocked, key)
+
+    # SINGLE FLIGHT. A page's first load fires many requests at the same handful
+    # of cold CDN hosts within milliseconds, and every one of them used to miss
+    # the cache and spawn its OWN to_thread(getaddrinfo) before the first wrote
+    # its result — a dozen threads resolving one name. The cache made the STEADY
+    # state cheap and left the stampede in place. Later arrivals now await the
+    # first lookup instead of duplicating it.
+    inflight = _host_block_inflight.get(key)
+    if inflight is not None:
+        return await asyncio.shield(inflight)
+
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future = loop.create_future()
+    _host_block_inflight[key] = future
+    try:
+        blocked = await asyncio.to_thread(_host_is_blocked, key)
+    except BaseException as exc:
+        if not future.done():
+            future.set_exception(exc)
+        _host_block_inflight.pop(key, None)
+        # Never swallow: the caller's own guard decides what an unresolvable host
+        # means, and it already fails closed.
+        raise
     _host_block_cache[key] = blocked
+    if not future.done():
+        future.set_result(blocked)
+    _host_block_inflight.pop(key, None)
     return blocked
 
 
 def reset_host_cache() -> None:
     """Test/shutdown hook — the cache is a performance detail, never state."""
     _host_block_cache.clear()
+    _host_block_inflight.clear()
 
 
 # ------------------------------------------------------- ad / tracker block
@@ -1108,8 +1318,19 @@ class InterceptStats:
     # Performance measurement (2026-07-19 "slow browser" round) — surfaced in the
     # per-session close summary so the interception tax is measured, not guessed.
     total_requests: int = 0     # requests the interceptor fielded
-    ssrf_checks: int = 0        # host-block lookups actually invoked (allowlisted skipped)
+    # CONSULTATIONS, not DNS calls. _host_block_cache is process-global, so the
+    # Nth request to a host costs a dict lookup. This counter is incremented
+    # BEFORE the cache is consulted, and reading it as a resolution count is a
+    # mistake that has already been made once: a 349-request page showing
+    # "ssrf_checks=313" was read as 313 DNS lookups and nearly bought a
+    # performance fix for a cost that does not exist (2026-07-26). The real
+    # navigation cost was domcontentloaded, not this.
+    ssrf_checks: int = 0        # host-block lookups consulted (allowlisted GETs skipped)
     settle_seconds: float = 0.0  # cumulative time spent in settle() this session
+    # Navigations that committed but never reached readiness inside the poll
+    # budget — a heavy site observed mid-build, which is a fact worth having in
+    # the log when reading back what the loop saw.
+    slow_navigations: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1123,6 +1344,7 @@ class InterceptStats:
             "total_requests": self.total_requests,
             "ssrf_checks": self.ssrf_checks,
             "settle_seconds": round(self.settle_seconds, 2),
+            "slow_navigations": self.slow_navigations,
         }
 
 
@@ -1204,6 +1426,25 @@ class BrowserSession:
         # one the site never issued. See the module docstring.
         self._armed_commit: Optional[tuple[str, str]] = None
         self._commit_fired = False
+        # COMMIT OBSERVATION (2026-07-26, the junaidjamshed add-to-cart incident):
+        # a form's `action` is NOT reliably the URL its submit actually hits. The
+        # site's own theme reads the form and posts to `/cart/add.js` while the
+        # form declares action="/cart/add" — so the exact-match permit could never
+        # fire, and the submit phase reported "Nothing was sent" about a request it
+        # simply could not recognise. These three record what the page ACTUALLY
+        # did during the submit window so the report is grounded in observation
+        # rather than in the absence of one exact match:
+        #   _commit_variant_url — the representation-variant URL that WAS accepted
+        #                         as the approved submission (see _is_commit_variant)
+        #   _commit_observed    — other same-origin non-GETs seen while armed, so a
+        #                         failure can name what the page sent instead
+        #   _commit_event       — signalled the instant the submission is observed,
+        #                         so the submit phase can WAIT for the request
+        #                         instead of for the paint (settle() returns in
+        #                         ~250ms and was racing every async handler).
+        self._commit_variant_url: str = ""
+        self._commit_observed: list[str] = []
+        self._commit_event: Optional[asyncio.Event] = None
         # COMMIT + UPLOAD (14.6): files attached to the form during discovery via
         # set_input_files. Python is the source of truth for the PATH — a browser
         # strips file paths from JS, so _READ_COMMIT_FORM_JS cannot see them. Each
@@ -1374,17 +1615,29 @@ class BrowserSession:
             # real submission for the submit phase. The approved request still
             # falls through to Rules 2 & 3 — approval never buys past them.
             if method not in _READ_METHODS:
+                blockable = self._read_only and self._is_main_frame_navigation(request)
                 if self._commit_allows(method, url):
-                    self._armed_commit = None       # one-shot: consume, re-lock
-                    self._commit_fired = True
-                    self.stats.allowed_commits += 1
+                    self._record_commit_fired(url, variant=False)
                     logger.info(
                         f"browser: allowed APPROVED {method} {url[:120]} "
                         "(commit) — re-locking"
                     )
                     # fall through to Rules 2 & 3 — an approved commit is not
                     # exempt from the SSRF and allowlist guards.
-                elif self._read_only and self._is_main_frame_navigation(request):
+                elif not blockable and self._is_commit_variant(method, url):
+                    # The approved submission at its representation url — the
+                    # `.js`/`.json` twin of the form's own action (2026-07-26).
+                    # Only reached for traffic Rule 1 was letting through anyway
+                    # (`not blockable`), so this RECORDS a submission, it never
+                    # unblocks one: a main-frame navigation to the variant url
+                    # still falls to the abort branch below.
+                    self._record_commit_fired(url, variant=True)
+                    logger.info(
+                        f"browser: APPROVED submission observed as {method} "
+                        f"{url[:120]} (the form's action's .js/.json twin) "
+                        "— re-locking"
+                    )
+                elif blockable:
                     self.stats.blocked_mutations += 1
                     if len(self.stats.mutation_urls) < 10:
                         self.stats.mutation_urls.append(f"{method} {url[:120]}")
@@ -1394,8 +1647,13 @@ class BrowserSession:
                     )
                     await self._safe_route(route.abort)
                     return
-                # else: the page's own non-GET traffic (or the playback
-                # hand-off) — flows; Rules 2 & 3 below still apply.
+                else:
+                    # The page's own non-GET traffic (or the playback hand-off) —
+                    # flows; Rules 2 & 3 below still apply. While a commit is
+                    # armed, same-origin traffic is RECORDED so a submission that
+                    # went somewhere unexpected can be named in the failure
+                    # message instead of reported as "nothing was sent".
+                    self._note_commit_traffic(method, url)
 
             # RULE 2 — SSRF, same rule read_webpage obeys, shared not copied.
             # SKIPPED for a READ (GET/HEAD/OPTIONS) to an ALLOWLISTED host
@@ -1541,20 +1799,122 @@ class BrowserSession:
                 f"task is allowed to visit ({', '.join(sorted(self.allowlist)) or 'none'})."
             )
 
-        # ONE retry on a navigation timeout (2026-07-19): ad-heavy sites (WWR)
-        # intermittently blow the 20s budget on the first hit and load fine on
-        # the second — three separate live runs each burned a whole browse (and a
-        # replan) on a transient first-load timeout. A GET is safe to reissue;
-        # bounded to exactly one retry so a truly dead site still fails in ~40s.
+        # PHASE A — commit. ONE retry on a timeout (2026-07-19): ad-heavy sites
+        # intermittently blow the budget on the first hit and load fine on the
+        # second. A GET is safe to reissue; bounded to exactly one retry. A
+        # network error (bad cert, DNS, refused) is NEVER retried — retrying a
+        # site that cannot be reached just spends the budget twice.
         try:
-            await self.page.goto(target, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            await self.page.goto(target, wait_until="commit", timeout=NAV_COMMIT_MS)
         except _NAV_TIMEOUT_ERRORS:
-            # A navigation TIMEOUT only — any other error (DNS, refused connection)
-            # propagates untouched (never retried). The retry is OUTSIDE this handler,
-            # so a second timeout raises: bounded to exactly one retry (~40s worst case).
-            logger.info(f"browser: goto timed out once for {target[:100]} — retrying")
-            await self.page.goto(target, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            logger.info(f"browser: commit timed out once for {target[:100]} — retrying")
+            try:
+                await self.page.goto(target, wait_until="commit", timeout=NAV_COMMIT_MS)
+            except _NAV_TIMEOUT_ERRORS as exc2:
+                raise BrowserUnreachable(
+                    f"Couldn't load {host or target}: it didn't respond in time."
+                ) from exc2
+            except Exception as exc2:
+                reason = _network_error_kind(exc2)
+                if reason:
+                    raise BrowserUnreachable(f"Couldn't load {host or target}: {reason}.") from exc2
+                raise
+        except Exception as exc:
+            reason = _network_error_kind(exc)
+            if reason:
+                raise BrowserUnreachable(f"Couldn't load {host or target}: {reason}.") from exc
+            raise
+
+        # PHASE B — readiness. Bytes are arriving; wait for something to act on.
+        # NOT fatal: a page that never satisfies the predicate but has content is
+        # handed to observe() anyway and the loop's page-quality gate decides what
+        # it is. This is the whole fix for the 2026-07-26 daraz/ebay deaths — the
+        # old code raised here and threw the page away.
+        if not await self._await_readiness():
+            self.stats.slow_navigations += 1
+            logger.info(
+                f"browser: {target[:100]} never reached readiness in "
+                f"{READY_POLL_MS}ms — observing it anyway"
+            )
+
+        # PHASE C — landing check, AFTER the poll so a client-side redirect
+        # (meta-refresh, location.replace) has had the whole window to happen.
         return await self._verify_landing()
+
+    async def await_ready(self) -> bool:
+        """Public readiness wait, for a navigation that did NOT go through goto().
+
+        A form submit or an SPA route change moves the page just as much as a
+        goto does, and until 2026-07-26 only goto waited for the result. Live,
+        that was the difference between seeing daraz.pk's search results and not:
+        the loop typed into the search box, pressed Enter, and observed 8
+        elements of a page that would have 155 once it finished — because the
+        only wait on that path was settle(), whose ceiling is 2s against a render
+        that takes ~6s.
+
+        Cheap on a page that is already done: readyState 'complete' plus stillness
+        exits in two polls (~500ms)."""
+        return await self._await_readiness()
+
+    async def _await_readiness(self) -> bool:
+        """Poll the page until it has something actionable on it. True when it
+        got there, False when the budget ran out — never raises, never fatal.
+
+        THE TEST-SHAPE RULE, and it is load-bearing in production too: a poll
+        result that does not look like our payload (no "ready" key) is treated as
+        READY and returns immediately. The suite's fake pages return canned dicts
+        from evaluate(), and without this every session test that navigates would
+        block for the full 15 real seconds. It is also the right production
+        answer — if we cannot tell what state the page is in, proceed and let
+        assess_page judge the observation, rather than burning the budget on a
+        question nothing can answer."""
+        deadline = time.monotonic() + (READY_POLL_MS / 1000.0)
+        last_nodes = -1
+        settled = 0
+        while True:
+            try:
+                state = await self.page.evaluate(_READY_JS)
+            except Exception as exc:
+                # A navigation mid-poll destroys the execution context. That is
+                # normal (a redirect), not an error — and unknowable state means
+                # proceed, per the rule above.
+                logger.debug(f"readiness poll: {type(exc).__name__}: {exc}")
+                return True
+            if not isinstance(state, dict) or "ready" not in state:
+                return True
+
+            # Is the DOM still growing? Tolerance, not equality — a settled page
+            # jitters by a few nodes as lazy images swap in.
+            nodes = int(state.get("nodes") or 0)
+            if last_nodes >= 0 and nodes <= last_nodes * READY_GROWTH_TOLERANCE + READY_GROWTH_FLOOR:
+                settled += 1
+            else:
+                settled = 0
+            last_nodes = nodes
+
+            # FAST PATH — the platform says the page is finished. 'complete'
+            # means the load event fired and every subresource resolved; a page
+            # that reports it and is holding still needs no further proof, and
+            # making a trivial page wait a full second for stillness it showed on
+            # the first poll is pure latency.
+            if state.get("complete") and settled >= READY_COMPLETE_POLLS:
+                return True
+
+            # SUBSTANTIVE **AND** STILL. Either half alone is wrong: substance
+            # alone fires on a bare header while the real content is still
+            # arriving (the daraz.pk measurement above), and stillness alone
+            # fires on a blank page that has not started.
+            if state.get("ready") and settled >= READY_STABLE_POLLS:
+                return True
+
+            # Still but THIN: the page has finished and simply does not have much
+            # on it — a login screen, a redirect stub, an SPA that painted once.
+            if settled >= READY_STALL_POLLS and int(state.get("acts") or 0) >= 1:
+                return True
+
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(READY_STEP_MS / 1000.0)
 
     async def _verify_landing(self) -> str:
         """Re-check where we ACTUALLY ended up. Playwright route handlers do NOT
@@ -1645,10 +2005,19 @@ class BrowserSession:
         double-submit finds nothing armed and is aborted like any mutation."""
         self._armed_commit = ((method or "POST").upper(), _normalize_commit_url(url))
         self._commit_fired = False
+        self._commit_variant_url = ""
+        self._commit_observed = []
+        self._commit_event = asyncio.Event()
         logger.info(f"browser: armed one-shot commit {self._armed_commit[0]} {url[:120]}")
 
     def _commit_allows(self, method: str, url: str) -> bool:
-        """True only when a permit is armed AND this exact request matches it."""
+        """True only when a permit is armed AND this exact request matches it.
+
+        DELIBERATELY UNCHANGED by the 2026-07-26 observation round: this is the
+        PERMISSION test — the only thing that can turn an abort into an allow —
+        and widening it would grant new capability. The variant recognition below
+        is a separate, RECORDING-only test applied to traffic that was going to
+        flow either way."""
         if self._armed_commit is None:
             return False
         want_method, want_url = self._armed_commit
@@ -1656,10 +2025,99 @@ class BrowserSession:
             _normalize_commit_url(url) == want_url
         )
 
+    def _is_commit_variant(self, method: str, url: str) -> bool:
+        """True when this request is the approved submission expressed at its
+        REPRESENTATION url — the armed url plus a `.js`/`.json` suffix, same
+        method, same origin, same path, same query.
+
+        Why this exists (junaidjamshed.com, 2026-07-26): a Shopify storefront
+        declares `<form action="/cart/add">` and its theme posts to `/cart/add.js`.
+        Nothing about the exact-match permit could ever recognise that, so a
+        perfectly ordinary add-to-cart was reported as "Nothing was sent".
+
+        NARROW ON PURPOSE — string equality against `armed + suffix` on the
+        already-normalized form. `/cart/add` matches `/cart/add.js` and does NOT
+        match `/cart/addresses` (no suffix boundary), `/cart/add/confirm`
+        (different path) or `/cart/add?x=1.js` (query is inside the normalized
+        form). Anything outside this is merely OBSERVED and reported, never
+        counted as the user's approved submission.
+
+        Grants NO new permission: this is only ever consulted for a request the
+        interceptor was about to let through anyway (an in-page fetch/XHR is not
+        a main-frame navigation, so Rule 1 never aborted it)."""
+        if self._armed_commit is None:
+            return False
+        want_method, want_url = self._armed_commit
+        if (method or "GET").upper() != want_method:
+            return False
+        got = _normalize_commit_url(url)
+        return any(got == want_url + suffix for suffix in _COMMIT_VARIANT_SUFFIXES)
+
+    def _record_commit_fired(self, url: str, *, variant: bool) -> None:
+        """Consume the one-shot permit and mark the approved submission observed."""
+        self._armed_commit = None       # one-shot: consume, re-lock
+        self._commit_fired = True
+        if variant:
+            self._commit_variant_url = url
+        self.stats.allowed_commits += 1
+        event = self._commit_event
+        if event is not None:
+            try:
+                event.set()
+            except Exception:
+                pass
+
+    def _note_commit_traffic(self, method: str, url: str) -> None:
+        """Record a same-origin non-GET seen while a commit is armed but which is
+        NOT the approved submission — so a failure can say what the page sent
+        instead of asserting that nothing was sent. Bounded; never raises."""
+        if self._armed_commit is None or len(self._commit_observed) >= 8:
+            return
+        try:
+            armed_host = urlparse(self._armed_commit[1]).hostname or ""
+            if (urlparse(url).hostname or "") != armed_host:
+                return
+            self._commit_observed.append(f"{(method or 'GET').upper()} {url[:160]}")
+        except Exception:
+            pass
+
     def commit_fired(self) -> bool:
         """Whether the armed commit was actually consumed by a live request —
         so the submit phase can distinguish a real submission from a form the
         site never posted (a JS handler that swallowed it, a validation block)."""
+        return self._commit_fired
+
+    def commit_submitted_url(self) -> str:
+        """The representation url the submission actually used, when it differed
+        from the form's declared action (else "")."""
+        return self._commit_variant_url
+
+    def commit_observations(self) -> list[str]:
+        """Same-origin non-GETs seen during the submit window that were NOT the
+        approved submission — evidence for an honest failure message."""
+        return list(self._commit_observed)
+
+    async def wait_for_commit(
+        self, timeout: float = COMMIT_WAIT_SECONDS
+    ) -> bool:
+        """Wait (bounded) for the approved submission to actually be observed.
+
+        This replaces reading commit_fired() straight after settle(). settle() is
+        a page-QUIET detector — its own contract is "an already-painted page
+        returns at ~250ms" — so on a product page that had been sitting idle
+        through the approval pause it returned essentially instantly and the
+        session was torn down ~240ms after the submit was fired (measured,
+        2026-07-26). A theme handler that `await`s anything never stood a chance.
+        Quiet is not the signal; the request is. Never raises."""
+        if self._commit_fired:
+            return True
+        event = self._commit_event
+        if event is None:
+            return False
+        try:
+            await asyncio.wait_for(event.wait(), timeout=max(0.1, float(timeout)))
+        except Exception:
+            pass
         return self._commit_fired
 
     async def read_commit_target(
@@ -1738,6 +2196,102 @@ class BrowserSession:
         logger.info(f"browser: attached file {resolved} to input '{name}'")
         return True, ""
 
+    async def drag(
+        self,
+        observation: Any,
+        index: int,
+        *,
+        to_index: Optional[int] = None,
+        to_fraction: Optional[float] = None,
+        axis: str = "x",
+    ) -> tuple[bool, str]:
+        """Perform a real mouse drag (down → move → up) — the one gesture the
+        action vocabulary lacked and vision could not add (vision LOCATES a point
+        for a click; there is no drag). Two forms:
+          • to_index  — drag the source element onto a target element (sortables,
+            drag-and-drop uploads); the target is the DROP point.
+          • to_fraction (0..1, along `axis`) — drag a RANGE-SLIDER handle to a
+            position on its own track (the price/date filter with no number box).
+
+        READ-safe: a drag is a UI gesture; any request it triggers is governed by
+        the session interceptor exactly like a click (a slider filter's request is
+        a GET). Returns (ok, note); NEVER raises — a bad target is an event the
+        loop reacts to, not a crash. Geometry is read LIVE (bounding_box /
+        track-rect eval), not from the observation, so it is act-time accurate."""
+        from app.core import dom_observe  # local: dom_observe never imports us
+
+        try:
+            src = await dom_observe.resolve(self.page, observation, index)
+        except dom_observe.StaleObservation:
+            return False, "the element changed before it could be dragged"
+        except Exception as exc:
+            return False, f"could not find the element to drag ({type(exc).__name__})"
+
+        try:
+            box = await src.bounding_box()
+        except Exception as exc:
+            return False, f"could not measure the element ({type(exc).__name__})"
+        if not box or not box.get("width") or not box.get("height"):
+            return False, "the element is not visible to drag"
+        sx = box["x"] + box["width"] / 2.0
+        sy = box["y"] + box["height"] / 2.0
+
+        tx = ty = None
+        if to_index is not None:
+            try:
+                dst = await dom_observe.resolve(self.page, observation, to_index)
+                dbox = await dst.bounding_box()
+            except dom_observe.StaleObservation:
+                return False, "the drop target changed before it could be used"
+            except Exception as exc:
+                return False, f"could not find the drop target ({type(exc).__name__})"
+            if not dbox or not dbox.get("width") or not dbox.get("height"):
+                return False, "the drop target is not visible"
+            tx = dbox["x"] + dbox["width"] / 2.0
+            ty = dbox["y"] + dbox["height"] / 2.0
+        elif to_fraction is not None:
+            frac = max(0.0, min(1.0, float(to_fraction)))
+            try:
+                track = await src.evaluate(_SLIDER_TRACK_JS)
+            except Exception:
+                track = None
+            if not isinstance(track, dict) or not track.get("w") or not track.get("h"):
+                return False, (
+                    "couldn't find the slider track to drag along — try a number "
+                    "input or a preset option if the page offers one"
+                )
+            if axis == "y":
+                tx = sx
+                ty = track["y"] + frac * track["h"]
+            else:
+                tx = track["x"] + frac * track["w"]
+                ty = sy
+        else:
+            return False, "a drag needs either a drop target or a track fraction"
+
+        mouse = getattr(self.page, "mouse", None)
+        if mouse is None:
+            return False, "the mouse is unavailable on this page"
+        try:
+            await mouse.move(sx, sy)
+            await mouse.down()
+            # Move in steps so a site's drag/pointermove JS actually fires — a
+            # single teleport is often ignored by slider widgets.
+            await mouse.move(tx, ty, steps=12)
+            await mouse.up()
+        except Exception as exc:
+            # Best-effort release so a half-finished drag never wedges the pointer.
+            try:
+                await mouse.up()
+            except Exception:
+                pass
+            return False, f"the drag failed ({type(exc).__name__})"
+        try:
+            await self.settle()  # let a filter/AJAX (a GET) apply
+        except Exception:
+            pass
+        return True, ""
+
     async def verify_commit(self, approved: dict[str, Any]) -> bool:
         """Re-read the stamped form and confirm it STILL matches what the user
         approved (method + action + every field value + every attached file).
@@ -1757,14 +2311,22 @@ class BrowserSession:
         current = {**raw, "uploads": self.uploads}
         return _commit_fingerprint(current) == _commit_fingerprint(approved)
 
-    async def submit_commit(self) -> None:
+    async def submit_commit(self) -> Optional[bool]:
         """Fire the stamped form's own submit — the one request the arm permits.
         Best-effort; whether the POST actually went out is read from
-        commit_fired() afterwards, not assumed here."""
+        commit_fired() afterwards, not assumed here.
+
+        Returns True when the stamped form was found and its submit fired, False
+        when the form is GONE from the page, and None when we could not tell (the
+        evaluate failed, or a fake). That distinction was DISCARDED until
+        2026-07-26, which is why a submit that never had a form to fire and a
+        submit whose request we simply failed to recognise produced the identical
+        message — one asserting a cause neither had evidence for."""
         try:
-            await self.page.evaluate(_SUBMIT_COMMIT_FORM_JS)
+            return bool(await self.page.evaluate(_SUBMIT_COMMIT_FORM_JS))
         except Exception as exc:
             logger.debug(f"submit_commit: {type(exc).__name__}: {exc}")
+            return None
 
     # ------------------------------------------------------------- handoff
     async def enter_playback_mode(self, *, reload: bool = True) -> None:
@@ -1804,7 +2366,11 @@ class BrowserSession:
         if not reload:
             return
         try:
-            await self.page.reload(wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            # "commit" for the same reason goto() uses it — this reload runs on a
+            # media page whose player scripts routinely keep DCL pending, and the
+            # caller (ensure_playing) polls for a playing <video> afterwards
+            # anyway, so waiting for the parser here buys nothing but delay.
+            await self.page.reload(wait_until="commit", timeout=NAV_COMMIT_MS)
         except Exception as exc:
             logger.debug(f"playback reload: {type(exc).__name__}: {exc}")
 

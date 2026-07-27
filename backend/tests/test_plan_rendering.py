@@ -10,6 +10,7 @@ each completed step's REAL output in code (per-tool formatters matching
 the tools' own result shapes); no LLM ever runs in the background runner.
 """
 from app.agents.rendering import (
+    _fmt_browse_commit,
     completed_results_text,
     deterministic_plan_text,
     steps_for_summary,
@@ -512,6 +513,33 @@ def test_browse_clean_window_handoff_is_honest_about_the_play_button():
     assert "press play" in text
 
 
+def test_browse_media_handoff_never_dumps_the_page_element_list():
+    """The 'wall of text' live miss (2026-07-25): a play/handoff 'done' notification
+    fenced the whole final observation — 161 DOM elements (a site's entire episode
+    index + A-Z footer). A media outcome's head line IS the answer; the element dump
+    is pure noise, so it must be suppressed for playing/handoff results (it survives
+    only for the read-a-fact fallback — see the book-price test)."""
+    dump = "ELEMENTS (96 of 161 shown):\n[1] link -> /home\n" + "\n".join(
+        f'[{i}] link "11{i:02d}" -> https://anikoto.cz/watch/one-piece-odmau/ep-11{i:02d}'
+        for i in range(1, 90)
+    )
+    text = completed_results_text(completed_plan(done_step(
+        "browse",
+        {
+            "playing": True,
+            "handoff": "clean_window",
+            "url": "https://anikoto.cz/watch/one-piece-odmau/ep-1170",
+            "title": "Anime One Piece Episode 1170 Watch Online Free - Anikoto",
+            "rendered": dump,
+        },
+    )))
+    # The headline outcome is present; the DOM dump is gone.
+    assert "ad-free" in text
+    assert "ep-1170" in text
+    assert "ELEMENTS (" not in text
+    assert "/watch/one-piece-odmau/ep-1150" not in text
+
+
 def test_browse_media_handoff_that_could_not_open_tells_the_user_to_open_it():
     """The clean window couldn't open (no system browser) — the summary is honest:
     it found the video but the user must open the link themselves."""
@@ -527,6 +555,40 @@ def test_browse_media_handoff_that_could_not_open_tells_the_user_to_open_it():
     )))
     assert "couldn't open" in text
     assert "anikoto.cz/watch/123" in text
+
+
+def test_browse_extracted_data_is_surfaced_in_the_summary():
+    """A list/compare browse goal that gathered records with `extract` renders them
+    into the summary (the answer to 'the 3 cheapest phones'), grounded in the copied
+    page values — not the raw element dump."""
+    text = completed_results_text(completed_plan(done_step(
+        "browse",
+        {
+            "playing": False,
+            "handoff": "",
+            "url": "https://shop.test/phones",
+            "title": "Phones",
+            "done_reason": "compared them",
+            "rendered": "",
+            "extracted": [
+                {"name": "Phone A", "price": "$100", "rating": "4.5"},
+                {"name": "Phone B", "price": "$200", "rating": "4.8"},
+            ],
+        },
+    )))
+    assert "Gathered from the page (2 item(s))" in text
+    assert "name: Phone A, price: $100, rating: 4.5" in text
+    assert "name: Phone B, price: $200, rating: 4.8" in text
+
+
+def test_browse_with_no_extracted_data_renders_no_gathered_block():
+    """A plain browse (no extract) never grows an empty 'Gathered' section."""
+    text = completed_results_text(completed_plan(done_step(
+        "browse",
+        {"playing": False, "handoff": "", "url": "https://x.test/", "title": "X",
+         "done_reason": "here", "rendered": "", "extracted": []},
+    )))
+    assert "Gathered from the page" not in text
 
 
 # ---------------------------- 15.5: a multi-commit flow quotes EACH response
@@ -620,3 +682,28 @@ def test_failed_plan_with_no_completed_steps_is_unchanged():
     )
     text = deterministic_plan_text(plan)
     assert text == "I couldn't do that. nothing ran"
+
+
+def test_browse_commit_names_the_url_that_actually_carried_the_submission():
+    """2026-07-26: a form's declared action is not reliably its endpoint (Shopify
+    posts /cart/add.js for action="/cart/add"). When they differ, the grounded
+    confirmation names the request that actually delivered the approved
+    contract — the audit record should not read as if the action url was used."""
+    text = _fmt_browse_commit(
+        {
+            "url": "https://shop.test/products/janan-sport",
+            "submitted_url": "https://shop.test/cart/add.js",
+            "title": "JANAN SPORT",
+            "response_text": "Added to cart",
+        }
+    )
+    assert "https://shop.test/cart/add.js" in text
+    assert "Added to cart" in text
+
+
+def test_browse_commit_stays_quiet_when_the_action_url_was_used():
+    """The common case gains no noise — the clause appears only on a difference."""
+    text = _fmt_browse_commit(
+        {"url": "https://shop.test/thanks", "title": "Thanks", "response_text": "Done"}
+    )
+    assert "Sent as" not in text

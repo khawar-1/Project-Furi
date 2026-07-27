@@ -31,6 +31,7 @@ import type {
   Suggestion,
   SuggestionStatus,
   SemanticMemory,
+  Task,
   SttStatus,
   StreamChunk,
   TranscribeResult,
@@ -242,6 +243,13 @@ export const agentApi = {
 // Background tasks (Phase 4, Parts 5-6)
 // ============================================================
 export const tasksApi = {
+  /** List background tasks (newest first), optionally filtered by status. */
+  list: (status?: string): Promise<Task[]> =>
+    apiFetch(`/api/tasks${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+
+  get: (taskId: string): Promise<Task> =>
+    apiFetch(`/api/tasks/${encodeURIComponent(taskId)}`),
+
   /** Cooperative mid-plan cancel (Part 6): sets the flag a running plan
    *  checks between steps. The step currently executing finishes; the
    *  cancelled outcome then arrives as a "task" push event. */

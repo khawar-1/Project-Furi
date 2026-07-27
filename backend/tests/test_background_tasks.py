@@ -485,3 +485,66 @@ async def test_typed_chat_answer_keeps_task_in_background(client, pushed, tmp_pa
     final = (await client.get(f"/api/tasks/{task_id}")).json()
     assert final["status"] == "completed"
     assert pushed[-1][1]["status"] == "completed"
+
+
+# =============================== boss dispatch: default background + domain agents
+
+async def test_delegate_routes_to_a_domain_agent_in_the_background(client, pushed, tmp_path):
+    """The new default: real work is handed to its domain agent in the
+    background — the turn returns an ack (no plan chunk), and the Task row
+    carries the assigned agent's domain."""
+    steps = [step("List files", "list_directory", path=str(tmp_path))]
+    use_provider(responses=["TASK DELEGATE", plan_json(steps), plan_json(steps)])
+
+    response = await client.post("/chat/stream", json={
+        "messages": [{"role": "user", "content": f"list the files in {tmp_path}"}],
+        "session_id": "s-delegate",
+    })
+    events = sse_events(response.text)
+    assert plan_events(events) == []                     # delegated — no inline plan
+    text = streamed_text(events).lower()
+    assert "in the background" in text
+    assert "file agent" in text                          # named the specialist
+
+    tasks = (await client.get("/api/tasks")).json()
+    assert len(tasks) == 1
+    assert tasks[0]["domain"] == "file"
+    assert tasks[0]["agent"] == "File agent"
+
+    await task_runner.wait_for_task(tasks[0]["id"])
+    assert (await client.get(f"/api/tasks/{tasks[0]['id']}")).json()["status"] == "completed"
+
+
+async def test_bare_label_with_no_mode_defaults_to_delegate(client, pushed, tmp_path):
+    """A classifier reply with no INLINE/DELEGATE word defaults to DELEGATE —
+    chat is never left blocked, and real work still escapes the turn."""
+    steps = [step("List files", "list_directory", path=str(tmp_path))]
+    use_provider(responses=["TASK", plan_json(steps), plan_json(steps)])
+
+    response = await client.post("/chat/stream", json={
+        "messages": [{"role": "user", "content": f"list the files in {tmp_path}"}],
+        "session_id": "s-bare",
+    })
+    assert plan_events(sse_events(response.text)) == []  # went to the background
+    tasks = (await client.get("/api/tasks")).json()
+    assert len(tasks) == 1 and tasks[0]["domain"] == "file"
+    await task_runner.wait_for_task(tasks[0]["id"])
+
+
+async def test_inline_mode_answers_in_the_chat_turn(client, pushed, tmp_path):
+    """A quick read tagged INLINE answers in the turn — a plan chunk streams and
+    NO background task is created (the whole point of "quick reads inline")."""
+    steps = [step("List files", "list_directory", path=str(tmp_path))]
+    use_provider(
+        responses=["TASK INLINE", plan_json(steps), plan_json(steps)],
+        streams=["Here are your files, sir."],
+    )
+    response = await client.post("/chat/stream", json={
+        "messages": [{"role": "user", "content": f"list the files in {tmp_path}"}],
+        "session_id": "s-inline",
+    })
+    events = sse_events(response.text)
+    plans = plan_events(events)
+    assert len(plans) == 1
+    assert plans[0]["plan"]["status"] == "completed"
+    assert (await client.get("/api/tasks")).json() == []  # nothing backgrounded

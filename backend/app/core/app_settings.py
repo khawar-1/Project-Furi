@@ -657,22 +657,43 @@ async def set_initiative_job_id(db: AsyncSession, job_id: Optional[str]) -> None
 # ------------------------------------------- browser-vision config (Phase 15.3)
 
 
+BROWSER_VISION_POSTURES = ("dom_first", "vision_first")
+
+
 @dataclass(frozen=True)
 class BrowserVisionConfig:
-    """Phase 15.3 — the browser loop's DOM-first vision fallback toggle.
+    """The browser loop's vision toggle and POSTURE.
 
-    `enabled` defaults OFF: vision uses a SECOND, image-capable model (the
-    primary deepseek-chat has none) and sends a screenshot to it, so it is
-    strictly opt-in like sensing/index/voice. Even enabled, it only actually runs
-    when a vision key is configured in .env (VISION_API_KEY / GEMINI_API_KEY) and
-    only when the loop is STUCK — otherwise the loop stays DOM-only. There is no
-    credential field here on purpose: the key lives in .env (the OAuth/API-key
-    convention), only the toggle is a runtime setting."""
+    `enabled` defaults OFF: vision uses a SECOND, image-capable model (the primary
+    deepseek model has none) and sends a screenshot to it, so it is strictly opt-in
+    like sensing/index/voice. Even enabled it only runs when a vision key is
+    configured in .env. There is no credential field here on purpose: the key lives
+    in .env (the OAuth/API-key convention), only the toggle is a runtime setting.
+
+    `posture` decides WHEN vision is consulted, and it is a setting rather than a
+    constant because the right answer is measurable and has already changed once:
+
+      - "dom_first" (DEFAULT): the DOM/text channel decides every step, and vision
+        is consulted only where DOM genuinely cannot help — a page with no
+        actionable elements at all, or a step the text model could not turn into an
+        action. Chosen 2026-07-26 on evidence: vision-first spent up to 12s per
+        step on cooling keys and returned "unusable", while DOM was doing all the
+        real work anyway.
+      - "vision_first": every step sends a set-of-marks screenshot as the PRIMARY
+        channel (the 2026-07-21 posture). Better on visually complex pages, and
+        worth switching back to with a healthy paid key.
+
+    An unrecognised stored value coerces to the default rather than crashing."""
     enabled: bool
+    posture: str = "dom_first"
+
+    @property
+    def vision_first(self) -> bool:
+        return self.posture == "vision_first"
 
 
 def default_browser_vision_config() -> BrowserVisionConfig:
-    return BrowserVisionConfig(enabled=False)
+    return BrowserVisionConfig(enabled=False, posture="dom_first")
 
 
 def _coerce_browser_vision(raw: Any) -> BrowserVisionConfig:
@@ -681,7 +702,12 @@ def _coerce_browser_vision(raw: Any) -> BrowserVisionConfig:
     default = default_browser_vision_config()
     if not isinstance(raw, dict):
         return default
-    return BrowserVisionConfig(enabled=bool(raw.get("enabled", default.enabled)))
+    posture = str(raw.get("posture", default.posture) or "").strip().lower()
+    if posture not in BROWSER_VISION_POSTURES:
+        posture = default.posture
+    return BrowserVisionConfig(
+        enabled=bool(raw.get("enabled", default.enabled)), posture=posture
+    )
 
 
 async def get_browser_vision_config(db: AsyncSession) -> BrowserVisionConfig:
@@ -694,4 +720,8 @@ async def get_browser_vision_config(db: AsyncSession) -> BrowserVisionConfig:
 async def set_browser_vision_config(
     db: AsyncSession, config: BrowserVisionConfig
 ) -> None:
-    await set_setting(db, BROWSER_VISION_CONFIG_KEY, {"enabled": config.enabled})
+    await set_setting(
+        db,
+        BROWSER_VISION_CONFIG_KEY,
+        {"enabled": config.enabled, "posture": config.posture},
+    )

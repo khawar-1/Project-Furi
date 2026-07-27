@@ -15,6 +15,8 @@ Two halves are pinned here:
 The interceptor's one-shot arming — the security core — is pinned in
 test_browser_session.py.
 """
+import json
+
 import pytest
 
 import app.tools  # noqa: F401 — registers the real tools
@@ -594,12 +596,19 @@ async def test_execute_tool_refuses_browse_commit_without_approval(db_session):
 class StubCommitSession:
     """A held session as browser_commit.perform sees it — no real browser."""
 
-    def __init__(self, *, verify=True, fired=True):
+    def __init__(self, *, verify=True, fired=True, form_found=None, observed=None,
+                 submitted_url=""):
         self._verify = verify
         self._fired = fired
+        # What the in-page submit reported (2026-07-26): True = the stamped form
+        # was found and fired, False = it is GONE, None = we could not tell.
+        self._form_found = form_found
+        self._observed = list(observed or [])
+        self._submitted_url = submitted_url
         self.armed = None
         self.submitted = False
         self.closed = False
+        self.waited = False
         self.playback = False  # set iff enter_playback_mode is ever called
         self.page = object()
         self.stats = browser_session.InterceptStats()
@@ -618,12 +627,23 @@ class StubCommitSession:
 
     async def submit_commit(self):
         self.submitted = True
+        return self._form_found
+
+    async def wait_for_commit(self, timeout=None):
+        self.waited = True
+        return self._fired
 
     async def settle(self):
         pass
 
     def commit_fired(self):
         return self._fired
+
+    def commit_submitted_url(self):
+        return self._submitted_url
+
+    def commit_observations(self):
+        return list(self._observed)
 
     async def close(self):
         self.closed = True
@@ -686,15 +706,27 @@ async def test_perform_reports_an_expired_session(_direct_browser_runtime):
 
 
 async def test_perform_reports_a_submission_that_did_not_fire(_direct_browser_runtime):
-    """The form was armed and submit() called, but no matching request went out
-    (a JS handler swallowed it) — honest 'not sent', never a false success."""
+    """The form was armed and submit() called, but no request went out — honest
+    'not sent', never a false success.
+
+    The message must state only what was OBSERVED (2026-07-26). It used to assert
+    a CAUSE nothing had checked ("it may submit by a mechanism this tool can't
+    drive") and a fact this code cannot know ("Nothing was sent") — an in-page
+    fetch is never blocked, so the absence of a matching request is not the
+    absence of a request."""
     stub = StubCommitSession(verify=True, fired=False)
     await browser_session.hold_commit(stub, state=dict(_STATE))
 
     result = await browser_commit.perform(dict(_STATE))
 
     assert result["submitted"] is False
-    assert "did not go through" in result["error"]
+    error = result["error"]
+    assert "no request left the page" in error
+    assert "Nothing was confirmed as sent" in error
+    # The retired claims: an unverified mechanism guess, and a certainty about
+    # the world that the code never had evidence for.
+    assert "can't drive" not in error
+    assert "Nothing was sent." not in error
     assert stub.closed is True
 
 
@@ -1640,3 +1672,158 @@ async def test_an_embedded_challenge_giveup_releases_the_held_session(
     assert "evade" in (plan.message or "").lower()
     assert held.closed is True                             # the hold was released
     assert browser_session.pending_challenge() is None
+
+
+# ===================================== pre-loop failure tracing (2026-07-26)
+
+
+async def test_discovery_that_dies_before_the_loop_still_writes_a_trace(monkeypatch, tmp_path):
+    """THE OBSERVABILITY HOLE, frozen. BrowseTrace is constructed in exactly one
+    place — run_browse — so a discovery that dies in the OPENING navigation wrote
+    no trace at all. Live 2026-07-26: browse_commit on junaidjamshed.com failed in
+    session.goto() during a DNS outage and left ~/.jarvis/logs/browse/ empty for
+    that run; the post-mortem had to be reconstructed from backend.log — exactly
+    what the trace exists to prevent."""
+    from app.browser import trace as browse_trace
+    from app.core.browser_session import BrowserUnreachable
+
+    trace_dir = tmp_path / "traces"
+    monkeypatch.setattr(browse_trace, "TRACE_DIR", trace_dir)
+
+    class DeadSession:
+        browse_trace = None          # the loop never ran, so it never stamped one
+        allowlist: set = set()
+
+        async def goto(self, url):
+            raise BrowserUnreachable(
+                "Couldn't load www.junaidjamshed.com: it didn't respond in time."
+            )
+
+        async def close(self):
+            pass
+
+    async def _open(allowlist, *a, **kw):
+        return DeadSession()
+
+    monkeypatch.setattr(BrowserSession, "open", staticmethod(_open))
+
+    result = await browser_commit.discover(
+        {"goal": "add janan sports perfume to the cart",
+         "start_url": "https://www.junaidjamshed.com"}
+    )
+
+    assert "didn't respond in time" in result.error
+
+    files = sorted(trace_dir.glob("*.jsonl"))
+    assert len(files) == 1, f"expected exactly one trace, got {[f.name for f in files]}"
+    lines = [json.loads(l) for l in files[0].read_text(encoding="utf-8").splitlines() if l.strip()]
+    start = next(e for e in lines if e["event"] == "start")
+    finish = next(e for e in lines if e["event"] == "finish")
+    assert start["mode"] == "commit"
+    assert "janan sports perfume" in start["goal"]
+    assert finish["success"] is False
+    assert "didn't respond in time" in finish["error"]
+
+
+def test_a_run_that_reached_the_loop_is_not_traced_twice():
+    """run_browse opens (and closes) its own trace and stamps it on the session.
+    That stamp is the discriminator: a set value means the loop ran, so the
+    pre-loop helper must write nothing — one run, one trace file."""
+    from app.browser import trace as browse_trace
+    from app.browser.commit_flow import _trace_pre_loop_failure
+
+    loop_ran = type("LoopRan", (), {})()
+    loop_ran.browse_trace = browse_trace.BrowseTrace("already traced", commit=True)
+
+    before = sorted(p.name for p in browse_trace.TRACE_DIR.glob("*.jsonl"))
+    _trace_pre_loop_failure(loop_ran, "goal", "some failure")
+    after = sorted(p.name for p in browse_trace.TRACE_DIR.glob("*.jsonl"))
+    assert after == before
+
+
+# ============ the submit phase reports what it OBSERVED (2026-07-26 incident)
+# A form's declared `action` is not reliably the url its submit hits. When the
+# exact match fails, the old code asserted a mechanism ("it may submit by a
+# mechanism this tool can't drive") and a fact about the world ("Nothing was
+# sent") that it had no evidence for. Each branch now states one observed thing.
+async def test_perform_waits_for_the_request_not_just_for_the_paint(
+    _direct_browser_runtime,
+):
+    """settle() returns in ~250ms on an already-painted page — which a product
+    page sitting through an approval pause always is. The submit phase must wait
+    on the REQUEST; measured on the incident, it gave the site 240ms."""
+    stub = StubCommitSession(verify=True, fired=True)
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    result = await browser_commit.perform(dict(_STATE))
+
+    assert result["submitted"] is True
+    assert stub.waited is True
+
+
+async def test_perform_reports_the_url_that_actually_carried_the_submission(
+    _direct_browser_runtime,
+):
+    """THE INCIDENT: approved POST /cart/add, the site posts /cart/add.js. The
+    submission is real and the result names the url that carried it, so the
+    audit record is not the fiction that the action url was used."""
+    stub = StubCommitSession(
+        verify=True, fired=True,
+        submitted_url="https://example.com/cart/add.js",
+    )
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    result = await browser_commit.perform(dict(_STATE))
+
+    assert result["submitted"] is True
+    assert result["submitted_url"] == "https://example.com/cart/add.js"
+
+
+async def test_a_vanished_form_says_so_instead_of_guessing_a_mechanism(
+    _direct_browser_runtime,
+):
+    """submit_commit's return value was DISCARDED, so 'there was no form to fire'
+    and 'we fired it but saw no request' produced the identical message."""
+    stub = StubCommitSession(verify=True, fired=False, form_found=False)
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    result = await browser_commit.perform(dict(_STATE))
+
+    assert result["submitted"] is False
+    assert "no longer on the page" in result["error"]
+    assert "no request left the page" not in result["error"]
+
+
+async def test_an_unrecognised_submission_names_what_the_page_sent(
+    _direct_browser_runtime,
+):
+    """Evidence beats assertion: when same-origin traffic WAS seen, say what it
+    was — and be explicit that it is unconfirmed rather than claim nothing went
+    out, which an in-page fetch makes impossible to know from here."""
+    stub = StubCommitSession(
+        verify=True, fired=False, form_found=True,
+        observed=["POST https://example.com/graphql"],
+    )
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    result = await browser_commit.perform(dict(_STATE))
+
+    assert result["submitted"] is False
+    assert "POST https://example.com/graphql" in result["error"]
+    assert "not confirmed" in result["error"]
+    assert "Nothing was sent." not in result["error"]
+
+
+async def test_a_submission_that_did_not_fire_is_never_counted_or_confirmed(
+    _direct_browser_runtime,
+):
+    """Whatever the wording, the safety property is unchanged: no fire, no budget
+    spend, no success."""
+    stub = StubCommitSession(verify=True, fired=False, form_found=True)
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    result = await browser_commit.perform(dict(_STATE))
+
+    assert result["submitted"] is False
+    assert result["commits_done"] == 0
+    assert stub.commits_done == 0

@@ -9,6 +9,7 @@ flows into the Phase 2 path exactly as before (fail-open), and a message
 that IS a task streams a {"type": "plan"} chunk plus readable text.
 """
 import json
+from types import SimpleNamespace
 from typing import AsyncIterator, List, Optional
 
 import httpx
@@ -458,6 +459,38 @@ def test_classify_prompt_has_browse_label():
     assert "play jane by the long faces on youtube" in _CLASSIFY_PROMPT.lower()
 
 
+async def test_browse_inline_is_forced_to_background(client, monkeypatch):
+    """A BROWSE task ALWAYS delegates to a background agent, even when the
+    classifier mis-tags it INLINE. Live bug 2026-07-24: 'play latest episode of
+    one piece on anikoto.cz' was classified BROWSE INLINE, ran in-turn, held the
+    chat SSE open for the whole browse, and locked the user out of starting
+    anything else — the multi-agent concurrency evaporated. A browse drives a
+    real browser (Chromium launch + multi-step loop + kept-open media) and is
+    NEVER a quick in-turn read; the code forces DELEGATE regardless of mode.
+
+    Observable proof: the background path calls start_task and streams NO plan
+    chunk (an INLINE dispatch would stream one). start_task is stubbed so no real
+    browser or detached task spawns."""
+    started: list[str] = []
+
+    async def _fake_start_task(db, goal, session_id, **kwargs):
+        started.append(goal)
+        return SimpleNamespace(id="t-browse", status="running")
+
+    monkeypatch.setattr("app.api.task_router.start_task", _fake_start_task)
+    # classify → BROWSE INLINE (the mis-tag). No plan responses are needed: the
+    # forced-delegate path never plans in-turn.
+    use_provider(responses=["BROWSE INLINE"])
+
+    events = await post_chat(
+        client, "play latest episode of one piece on anikoto.cz", "s-browse-inline"
+    )
+
+    assert started, "BROWSE INLINE must still start a background task"
+    assert plan_events(events) == []  # delegated → no in-turn plan chunk
+    assert "background" in streamed_text(events).lower()
+
+
 @pytest.mark.parametrize("message", [
     # The github sign-in incident (2026-07-18): named no file/media domain noun,
     # missed the gate, fell to plain chat which asked for the user's password.
@@ -630,7 +663,7 @@ async def test_unknown_verb_phrasing_reaches_the_approval_gate(client, tmp_path)
     victim = tmp_path / "notes.txt"
     victim.write_text("x")
     steps = [step("Delete notes.txt", "delete_file", path=str(victim))]
-    use_provider(responses=["TASK", plan_json(steps), plan_json(steps)])
+    use_provider(responses=["TASK INLINE", plan_json(steps), plan_json(steps)])
 
     events = await post_chat(
         client, f"get rid of the txt files in {tmp_path}", "s-recall-e2e"
@@ -658,22 +691,35 @@ async def test_unknown_verb_phrasing_reaches_the_approval_gate(client, tmp_path)
 ])
 async def test_classify_message_returns_label(reply, expected):
     provider = FakeProvider([reply])
-    label = await _classify_message(provider, "some message", "")
+    label, _mode = await _classify_message(provider, "some message", "")
     assert label == expected
     assert provider.chat_calls == 1  # still exactly one temp-0 call
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ("TASK INLINE", ("TASK", "INLINE")),
+    ("EMAIL DELEGATE", ("EMAIL", "DELEGATE")),
+    ("BROWSE DELEGATE", ("BROWSE", "DELEGATE")),
+    ("WEB inline", ("WEB", "INLINE")),          # case-insensitive
+    ("TASK", ("TASK", "DELEGATE")),             # no mode → DELEGATE (safe default)
+    ("CALENDAR.\n", ("CALENDAR", "DELEGATE")),  # stray punctuation, no mode
+])
+async def test_classify_message_parses_mode(reply, expected):
+    provider = FakeProvider([reply])
+    assert await _classify_message(provider, "some message", "") == expected
 
 
 @pytest.mark.parametrize("reply", ["I think this is email", "", "unsure", "yes"])
 async def test_classify_message_unrecognized_fails_open_to_chat(reply):
     # An unrecognized word is NOT an action label — fail open to CHAT, exactly
-    # as an exception would.
+    # as an exception would. Mode is DELEGATE but irrelevant for CHAT.
     provider = FakeProvider([reply])
-    assert await _classify_message(provider, "some message", "") == "CHAT"
+    assert await _classify_message(provider, "some message", "") == ("CHAT", "DELEGATE")
 
 
 async def test_classify_message_exception_fails_open_to_chat():
     provider = FakeProvider([])  # chat() raises AssertionError when exhausted
-    assert await _classify_message(provider, "some message", "") == "CHAT"
+    assert await _classify_message(provider, "some message", "") == ("CHAT", "DELEGATE")
 
 
 async def test_email_intent_routes_to_planner(client, tmp_path):
@@ -686,7 +732,7 @@ async def test_email_intent_routes_to_planner(client, tmp_path):
         "Email jamil@example.com about dinner", "send_email",
         to="jamil@example.com", subject="Dinner", body="Dinner tonight?",
     )]
-    use_provider(responses=["EMAIL", plan_json(steps), plan_json(steps)])
+    use_provider(responses=["EMAIL INLINE", plan_json(steps), plan_json(steps)])
 
     events = await post_chat(
         client, "email jamil@example.com about dinner tonight", "s-email-e2e"
@@ -887,7 +933,7 @@ async def test_task_planner_receives_conversation_context(client, tmp_path):
     (tmp_path / "a.txt").write_text("x")
     steps = [step("List the files", "list_directory", path=str(tmp_path))]
     provider = use_provider(
-        responses=["TASK", plan_json(steps), plan_json(steps)],
+        responses=["TASK INLINE", plan_json(steps), plan_json(steps)],
         streams=["There is 1 file: a.txt"],
     )
     response = await client.post("/chat/stream", json={
@@ -994,7 +1040,7 @@ async def test_read_only_task_streams_plan_and_summary(client, tmp_path):
     (tmp_path / "a.txt").write_text("x")
     steps = [step("List the files", "list_directory", path=str(tmp_path))]
     provider = use_provider(
-        responses=["TASK", plan_json(steps), plan_json(steps)],  # classify, plan, reflect
+        responses=["TASK INLINE", plan_json(steps), plan_json(steps)],  # classify, plan, reflect
         streams=["You have 1 file there: a.txt"],                # summary
     )
     events = await post_chat(client, f"list the files in {tmp_path}", "s-task-read")
@@ -1025,7 +1071,7 @@ async def test_summary_llm_receives_rendered_results_never_raw_json(client, tmp_
     (tmp_path / "audio1.wav").write_text("x")
     steps = [step("List the files", "list_directory", path=str(tmp_path))]
     provider = use_provider(
-        responses=["TASK", plan_json(steps), plan_json(steps)],
+        responses=["TASK INLINE", plan_json(steps), plan_json(steps)],
         streams=["Your folder has audio1.wav and khawar-resume.pdf"],
     )
     await post_chat(client, f"show me the files in {tmp_path}", "s-task-render")
@@ -1042,7 +1088,7 @@ async def test_summary_llm_receives_rendered_results_never_raw_json(client, tmp_
 async def test_write_task_pauses_with_plan_chunk_then_approves(client, tmp_path):
     target = tmp_path / "notes.txt"
     steps = [step("Create notes.txt", "create_file", path=str(target), content="hi")]
-    provider = use_provider(responses=["TASK", plan_json(steps), plan_json(steps)])
+    provider = use_provider(responses=["TASK INLINE", plan_json(steps), plan_json(steps)])
     events = await post_chat(client, f"create a file {target} saying hi", "s-task-write")
 
     plans = plan_events(events)
@@ -1070,7 +1116,7 @@ async def test_destructive_step_labeled_in_approval_text(client, tmp_path):
     victim = tmp_path / "old.log"
     victim.write_text("bye")
     steps = [step("Delete old.log", "delete_file", path=str(victim))]
-    use_provider(responses=["TASK", plan_json(steps), plan_json(steps)])
+    use_provider(responses=["TASK INLINE", plan_json(steps), plan_json(steps)])
     events = await post_chat(client, f"delete {victim}", "s-task-destroy")
 
     assert "DESTRUCTIVE" in streamed_text(events)
@@ -1079,7 +1125,7 @@ async def test_destructive_step_labeled_in_approval_text(client, tmp_path):
 
 
 async def test_failed_plan_reports_honestly(client):
-    use_provider(responses=["TASK", plan_json([], reason="No email tool is available")])
+    use_provider(responses=["TASK INLINE", plan_json([], reason="No email tool is available")])
     events = await post_chat(client, "run a command to email my files to ali", "s-task-fail")
 
     plans = plan_events(events)
@@ -1104,7 +1150,7 @@ async def test_question_pause_streams_choice_chunk_and_chat_answer_resumes(clien
     read_step = [step("Read the chosen file", "read_file", path=str(the_one))]
     provider = use_provider(
         responses=[
-            "TASK",                                  # classify turn 1
+            "TASK INLINE",                           # classify turn 1 (quick read → inline)
             plan_json([], question=question),        # draft asks
             plan_json(read_step),                    # revise after the answer
         ],
@@ -1144,7 +1190,7 @@ async def test_choose_endpoint_answers_question(client, tmp_path):
     question = {"text": "Which file?", "options": [str(target)]}
     read_step = [step("Read a.txt", "read_file", path=str(target))]
     use_provider(
-        responses=["TASK", plan_json([], question=question), plan_json(read_step)],
+        responses=["TASK INLINE", plan_json([], question=question), plan_json(read_step)],
         streams=[],
     )
 
@@ -1167,7 +1213,7 @@ async def test_typed_answer_survives_backend_restart(client, tmp_path):
     question = {"text": "Which file?", "options": [str(target)]}
     read_step = [step("Read a.txt", "read_file", path=str(target))]
     use_provider(
-        responses=["TASK", plan_json([], question=question), plan_json(read_step)],
+        responses=["TASK INLINE", plan_json([], question=question), plan_json(read_step)],
         streams=["It says: still here"],
     )
 
@@ -1185,7 +1231,7 @@ async def test_typed_answer_survives_backend_restart(client, tmp_path):
 async def test_approve_click_cannot_destroy_an_open_question(client, tmp_path):
     """A stray approve on a question plan re-parks it; cancel resolves it."""
     question = {"text": "Which file?", "options": ["a", "b"]}
-    use_provider(responses=["TASK", plan_json([], question=question)])
+    use_provider(responses=["TASK INLINE", plan_json([], question=question)])
 
     events = await post_chat(client, "delete that file of mine", "s-stray")
     plan_id = plan_events(events)[0]["plan"]["id"]
@@ -1206,7 +1252,7 @@ async def test_approve_click_cannot_destroy_an_open_question(client, tmp_path):
 async def test_summary_stream_failure_falls_back_to_deterministic_text(client, tmp_path):
     steps = [step("List the files", "list_directory", path=str(tmp_path))]
     # No scripted streams → the summary stream raises immediately.
-    use_provider(responses=["TASK", plan_json(steps), plan_json(steps)], streams=[])
+    use_provider(responses=["TASK INLINE", plan_json(steps), plan_json(steps)], streams=[])
     events = await post_chat(client, f"list the files in {tmp_path}", "s-task-fb")
 
     assert plan_events(events)[0]["plan"]["status"] == "completed"
@@ -1259,7 +1305,7 @@ async def test_classifier_sees_the_conversation_for_followups(client, tmp_path):
     steps = [step("Search for txt files in phase3test", "search_files",
                   directory=str(tmp_path), file_type=".txt")]
     provider = use_provider(
-        responses=["TASK", plan_json(steps), plan_json(steps)],
+        responses=["TASK INLINE", plan_json(steps), plan_json(steps)],
         streams=["Found 1 txt file: firstname.txt"],
     )
     response = await client.post(

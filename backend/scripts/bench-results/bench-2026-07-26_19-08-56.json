@@ -1,0 +1,60 @@
+{
+  "when": "2026-07-26_19-08-56",
+  "passed": 1,
+  "scored": 1,
+  "blocked": 1,
+  "total": 2,
+  "tasks": [
+    {
+      "id": "daraz-compare",
+      "passed": true,
+      "seconds": 25.0,
+      "actions": 2,
+      "records": 40,
+      "url": "https://www.daraz.pk/catalog/?q=Yonex+badminton+rackets",
+      "tool_success": true,
+      "error": "",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": true,
+          "detail": "40 records (needed 3)"
+        },
+        {
+          "kind": "field_present",
+          "passed": true,
+          "detail": "40/40 records carry 'price'"
+        },
+        {
+          "kind": "price_grounded",
+          "passed": true,
+          "detail": "40/40 prices grounded"
+        }
+      ],
+      "sample": [
+        {
+          "name": "Yonex, Hi Qua badminton Racket (single) premium quality",
+          "price": "Rs. 1,750"
+        },
+        {
+          "name": "Yonex Badminton Racket Astrox Smash with Carrey bag and one special shuttlecock",
+          "price": "Rs. 2,290"
+        },
+        {
+          "name": "Yonex, VS badminton Racket (single) premium quality",
+          "price": "Rs. 1,544"
+        }
+      ]
+    },
+    {
+      "id": "ebay-search",
+      "passed": null,
+      "blocked": "a CAPTCHA / verification wall (never auto-solved)",
+      "seconds": 46.4,
+      "actions": null,
+      "records": 0,
+      "url": null,
+      "error": ""
+    }
+  ]
+}

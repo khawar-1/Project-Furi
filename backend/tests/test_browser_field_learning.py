@@ -83,17 +83,33 @@ def test_auth_offer_question_shows_only_offered_options():
         {"auth_offer_site": "jobs.test", "auth_offer_signin": True, "auth_offer_signup": True}
     )
     assert both.kind == "auth_offer"
-    assert both.options == ["Sign in", "Sign up", "Apply as guest"]
+    assert both.options == ["Sign in", "Sign up", "Continue as guest"]
 
     signin_only = _auth_offer_question(
         {"auth_offer_site": "jobs.test", "auth_offer_signin": True, "auth_offer_signup": False}
     )
-    assert signin_only.options == ["Sign in", "Apply as guest"]
+    assert signin_only.options == ["Sign in", "Continue as guest"]
+
+
+def test_auth_offer_wording_is_task_neutral():
+    """2026-07-26: this hand-off fires on ANY site with a sign-in link — which is
+    every storefront — but its words were hardcoded job-application vocabulary.
+    Live it asked "…lets you sign in before applying, but I can also apply as a
+    guest" twice, about adding a perfume to a cart."""
+    q = _auth_offer_question(
+        {"auth_offer_site": "shop.test", "auth_offer_signin": True, "auth_offer_signup": True}
+    )
+    assert "apply" not in q.text.lower()
+    assert "shop.test" in q.text
+    assert "never enter your credentials" in q.text   # the standing promise
+    assert all("apply" not in o.lower() for o in q.options)
 
 
 def test_auth_offer_choice_defaults_to_guest():
     assert _auth_offer_choice("Sign in") == "signin"
     assert _auth_offer_choice("I'll sign up") == "signup"
+    assert _auth_offer_choice("Continue as guest") == "guest"
+    # A plan parked before the rename still answers correctly.
     assert _auth_offer_choice("Apply as guest") == "guest"
     assert _auth_offer_choice("no thanks") == "guest"
     assert _auth_offer_choice("") == "guest"          # fail-safe: never sign in on noise

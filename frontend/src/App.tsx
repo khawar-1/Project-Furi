@@ -13,6 +13,7 @@ import { ReminderPanel } from '@/components/reminders/ReminderPanel';
 import { RoutinesPanel } from '@/components/routines/RoutinesPanel';
 import { ThreadsPanel } from '@/components/threads/ThreadsPanel';
 import { SuggestionPanel } from '@/components/initiative/SuggestionPanel';
+import { TasksPanel } from '@/components/tasks/TasksPanel';
 import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { useUIStore } from '@/stores/uiStore';
 import { connectPush, disconnectPush, onPush } from '@/lib/push';
@@ -25,6 +26,7 @@ import { useVoiceStore } from '@/stores/voiceStore';
 import { useContextStore } from '@/stores/contextStore';
 import { useSuggestionsStore } from '@/stores/suggestionsStore';
 import { useBrowserStore } from '@/stores/browserStore';
+import { useTasksStore } from '@/stores/tasksStore';
 import type { ActivePanel } from '@/types';
 
 function PanelContent({ panel }: { panel: ActivePanel }) {
@@ -45,6 +47,8 @@ function PanelContent({ panel }: { panel: ActivePanel }) {
       return <SuggestionPanel />;
     case 'threads':
       return <ThreadsPanel />;
+    case 'agents':
+      return <TasksPanel />;
     case 'settings':
       return <SettingsPanel />;
     default:
@@ -62,6 +66,7 @@ function ComingSoonPanel({ panel }: { panel: ActivePanel }) {
     routines: 'Routines',
     initiative: 'Suggestions',
     threads: 'Threads',
+    agents: 'Agents',
     tools: 'Tool Execution Log',
     voice: 'Voice Controls',
     settings: 'Settings',
@@ -76,6 +81,7 @@ function ComingSoonPanel({ panel }: { panel: ActivePanel }) {
     routines: '6',
     initiative: '9',
     threads: '11',
+    agents: '4',
     tools: '5',
     voice: '6',
     settings: '5',
@@ -171,11 +177,15 @@ export default function App() {
     // live in chat — the PlanCard the push carries IS the approval UI.
     const stopTasks = onPush('task', (event) => {
       useChatStore.getState().receiveTaskEvent(event.payload);
+      // …and reconcile the Agents panel's worker list live.
+      useTasksStore.getState().receiveTaskEvent(event.payload);
     });
     // Part 6: per-step narration — tick the matching PlanCard row live while
     // a plan executes (running → completed/failed).
     const stopSteps = onPush('plan_step', (event) => {
       useChatStore.getState().receiveStepEvent(event.payload);
+      // …and the Agents panel's live "step X of N" progress.
+      useTasksStore.getState().receiveStepEvent(event.payload);
     });
     // Phase 5 Part 6: a daily briefing fires unprompted — show it live in chat
     // if it belongs to the open session (and always as a toast via notifications).

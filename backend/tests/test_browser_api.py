@@ -170,6 +170,35 @@ async def test_vision_put_round_trips(client, monkeypatch):
     assert off.json()["enabled"] is False
 
 
+async def test_vision_posture_defaults_to_dom_first_and_round_trips(client, monkeypatch):
+    """The POSTURE is a setting because the right answer is measurable and has
+    already changed once: vision-first (2026-07-21) → DOM-first (2026-07-26), on
+    evidence that vision was spending 12s a step on cooling keys while the DOM did
+    the work. Switching back must not need a code change."""
+    from app.api import browser as browser_api
+
+    monkeypatch.setattr(browser_api, "_vision_configured", lambda: True)
+
+    assert (await client.get("/api/browser/vision")).json()["posture"] == "dom_first"
+
+    put = await client.put(
+        "/api/browser/vision", json={"enabled": True, "posture": "vision_first"}
+    )
+    assert put.json()["posture"] == "vision_first"
+    assert (await client.get("/api/browser/vision")).json()["posture"] == "vision_first"
+
+    # A pre-posture client's body stays valid and LEAVES the posture alone — the
+    # VoiceConfig PUT convention (a defaulted field never silently resets).
+    kept = await client.put("/api/browser/vision", json={"enabled": True})
+    assert kept.json()["posture"] == "vision_first"
+
+    # Junk coerces to the default rather than 400-ing or persisting nonsense.
+    junk = await client.put(
+        "/api/browser/vision", json={"enabled": True, "posture": "telepathy"}
+    )
+    assert junk.json()["posture"] == "dom_first"
+
+
 async def test_media_status_reports_the_persistent_browse_window(client):
     """The held agent browse window (2026-07-21) surfaces through the SAME
     window fields the StatusBar already renders, and POST /close-window closes

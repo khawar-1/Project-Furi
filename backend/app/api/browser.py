@@ -7,6 +7,8 @@ app/core/browser_session.py (a live Chromium page is not serializable —
 memory-only BY DESIGN); this router only opens/reads/clears them. Behind
 AuthMiddleware like every route.
 """
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel
@@ -121,6 +123,11 @@ async def close_login() -> dict:
 # ----------------------------------------------------- vision fallback (15.3)
 class VisionUpdate(BaseModel):
     enabled: bool
+    # Optional so a pre-posture client's {"enabled": true} body stays valid (the
+    # VoiceConfig PUT convention). An unrecognised value coerces to the default in
+    # app_settings rather than 400-ing — one field of a toggle card is not worth
+    # failing a save over.
+    posture: Optional[str] = None
 
 
 def _vision_configured() -> bool:
@@ -137,6 +144,7 @@ def _vision_configured() -> bool:
 def _vision_state(cfg: BrowserVisionConfig) -> dict:
     return {
         "enabled": cfg.enabled,
+        "posture": cfg.posture,
         "configured": _vision_configured(),
         "provider": settings.VISION_PROVIDER,
         "model": settings.VISION_MODEL,
@@ -151,9 +159,17 @@ async def get_vision(db=Depends(get_db)) -> dict:
     return _vision_state(await get_browser_vision_config(db))
 
 
-@router.put("/vision", summary="Enable/disable the browser vision fallback")
+@router.put("/vision", summary="Enable/disable browser vision, and set its posture")
 async def put_vision(update: VisionUpdate, db=Depends(get_db)) -> dict:
-    """Flip the vision fallback on/off. Even ON, it only runs when a vision key
-    is configured AND the loop is stuck — otherwise the loop stays DOM-only."""
-    await set_browser_vision_config(db, BrowserVisionConfig(enabled=bool(update.enabled)))
+    """Flip vision on/off and choose its posture ("dom_first" — the default — or
+    "vision_first"). Even ON it only runs when a vision key is configured in .env;
+    under dom_first it is consulted only where the DOM cannot help."""
+    current = await get_browser_vision_config(db)
+    await set_browser_vision_config(
+        db,
+        BrowserVisionConfig(
+            enabled=bool(update.enabled),
+            posture=(update.posture or current.posture),
+        ),
+    )
     return _vision_state(await get_browser_vision_config(db))

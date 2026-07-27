@@ -1,0 +1,35 @@
+{
+  "when": "2026-07-26_18-20-24",
+  "passed": 0,
+  "total": 1,
+  "tasks": [
+    {
+      "id": "daraz-compare",
+      "passed": false,
+      "seconds": 50.4,
+      "actions": 2,
+      "records": 0,
+      "url": "https://www.daraz.pk/catalog/?spm=a2a0e.tm80335142.search.d_go&q=Yonex%20badminton%20rackets",
+      "tool_success": true,
+      "error": "",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": false,
+          "detail": "0 records (needed 3)"
+        },
+        {
+          "kind": "field_present",
+          "passed": false,
+          "detail": "no records at all"
+        },
+        {
+          "kind": "price_grounded",
+          "passed": false,
+          "detail": "no records at all"
+        }
+      ],
+      "sample": []
+    }
+  ]
+}

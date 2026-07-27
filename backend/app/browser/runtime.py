@@ -70,7 +70,12 @@ _start_lock = threading.Lock()
 # browses again. Every INNER stage is individually bounded, so this belt is only
 # ever reached by a genuine hang — a generous value costs nothing in the normal
 # case.
-BROWSE_HARD_TIMEOUT = 600.0
+#
+# 600 → 700 (2026-07-26) because BROWSE_DEADLINE_SECONDS moved 300 → 400 on
+# measured per-step cost. A browse is always DELEGATED to a background task, so a
+# generous outer belt does not block a chat turn; what it buys is that a run still
+# making progress at action 21 is not killed by the clock.
+BROWSE_HARD_TIMEOUT = 700.0
 
 
 def _new_loop() -> asyncio.AbstractEventLoop:

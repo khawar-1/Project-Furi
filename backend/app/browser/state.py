@@ -69,6 +69,7 @@ class HandoffPayload:
     suggested_value: str = ""     # FILL_FIELD: page-derived value, for correction
     origin: str = ""              # ORIGIN_APPROVAL: the normalized candidate
     action_desc: str = ""         # ACTION_APPROVAL: what the loop is about to do
+    action_fingerprint: str = ""  # ACTION_APPROVAL: the permit for THAT one gesture
     challenge_kind: str = ""      # CHALLENGE: reCAPTCHA / Cloudflare / hCaptcha
     challenge_mode: str = ""      # CHALLENGE: "interstitial" | "embedded"
     auth_signin: bool = False     # AUTH_OFFER: the page offers sign-in
@@ -88,6 +89,7 @@ class HandoffPayload:
             "suggested_value": self.suggested_value,
             "origin": self.origin,
             "action_desc": self.action_desc,
+            "action_fingerprint": self.action_fingerprint,
             "challenge_kind": self.challenge_kind,
             "challenge_mode": self.challenge_mode,
             "auth_signin": self.auth_signin,
@@ -112,6 +114,7 @@ class HandoffPayload:
             suggested_value=str(data.get("suggested_value") or ""),
             origin=str(data.get("origin") or ""),
             action_desc=str(data.get("action_desc") or ""),
+            action_fingerprint=str(data.get("action_fingerprint") or ""),
             challenge_kind=str(data.get("challenge_kind") or ""),
             challenge_mode=str(data.get("challenge_mode") or ""),
             auth_signin=bool(data.get("auth_signin")),
@@ -170,6 +173,7 @@ def handoff_from_outcome(outcome: Any) -> Optional[HandoffPayload]:
         return HandoffPayload(
             reason=Handoff.ACTION_APPROVAL,
             action_desc=str(getattr(outcome, "action_description", "") or ""),
+            action_fingerprint=str(getattr(outcome, "action_fingerprint", "") or ""),
             site=str(getattr(outcome, "action_site", "") or ""),
             url=str(getattr(outcome, "url", "") or ""),
         )

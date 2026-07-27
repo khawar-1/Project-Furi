@@ -1,0 +1,48 @@
+{
+  "when": "2026-07-26_18-18-34",
+  "passed": 1,
+  "total": 1,
+  "tasks": [
+    {
+      "id": "books-toscrape-extract",
+      "passed": true,
+      "seconds": 18.6,
+      "actions": 1,
+      "records": 20,
+      "url": "https://books.toscrape.com/",
+      "tool_success": true,
+      "error": "",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": true,
+          "detail": "20 records (needed 10)"
+        },
+        {
+          "kind": "field_present",
+          "passed": true,
+          "detail": "20/20 records carry 'price'"
+        },
+        {
+          "kind": "price_grounded",
+          "passed": true,
+          "detail": "20/20 prices grounded"
+        }
+      ],
+      "sample": [
+        {
+          "name": "A Light in the ...",
+          "price": "£51.77"
+        },
+        {
+          "name": "Tipping the Velvet",
+          "price": "£53.74"
+        },
+        {
+          "name": "Soumission",
+          "price": "£50.10"
+        }
+      ]
+    }
+  ]
+}

@@ -15,13 +15,26 @@ import pytest
 from app.agents import browser_loop
 from app.agents.browser_loop import (
     BrowseOutcome,
+    _EXTRACT_MAX_RECORDS,
+    _coerce_record,
     _current_episode,
     _episode_action,
+    _extract_data,
     _extract_search_term,
+    _extract_what,
     _fast_path_action,
+    _memory_block,
+    _href_latest_episode,
+    _latest_episode_action,
+    _latest_series_action,
+    _max_or_none,
     _parse_action,
+    _range_expand_action,
+    _range_latest,
+    _resolve_latest_episode,
     _swap_episode_in_url,
     _target_episode,
+    _wants_latest_episode,
     detect_auth_offer,
     run_browse,
 )
@@ -63,6 +76,34 @@ def test_current_episode_needs_title_and_url_to_agree():
     assert _current_episode(
         _ep_obs("https://anikoto.cz/browse", "Browse & Filter - Anikoto")
     ) is None
+
+
+def test_current_episode_never_trusts_an_intent_search_host():
+    """The 'humrahi' live miss (2026-07-25): searching 'humrahi episode 35' landed
+    on youtube.com/results?search_query=humrahi+episode+35 with title
+    'humrahi episode 35 - YouTube' — the number echoed into BOTH title and URL, so
+    the catalog title↔URL proof false-fired and the loop declared the RESULTS page
+    done. Intent hosts never number episodes in their URLs, so the proof is void
+    there and _top_result_action owns the pick."""
+    # The exact trap: title AND url both carry 35, yet this is a SEARCH page.
+    assert _current_episode(
+        _ep_obs(
+            "https://www.youtube.com/results?search_query=humrahi+episode+35",
+            "humrahi episode 35 - YouTube",
+        )
+    ) is None
+    # Even a genuine YouTube watch page is not read as a catalog episode page.
+    assert _current_episode(
+        _ep_obs("https://www.youtube.com/watch?v=abc35", "Humrahi Episode 35 [Eng Sub]")
+    ) is None
+    # Google likewise.
+    assert _current_episode(
+        _ep_obs("https://www.google.com/search?q=humrahi+episode+35", "humrahi episode 35 - Google Search")
+    ) is None
+    # A catalog host with the same title+URL agreement is STILL proven (regression).
+    assert _current_episode(
+        _ep_obs("https://anikoto.cz/watch/humrahi-x/ep-35", "Watch Humrahi Episode 35")
+    ) == 35
 
 
 def test_swap_episode_replaces_only_the_last_standalone_number():
@@ -345,14 +386,21 @@ class FakeSession:
 class FakeProvider:
     """Scripted decisions. Records how many times it was asked — the fast-path
     'costs no call' claim is a call-count assertion (the evidence_resolver thesis
-    applied to browsing)."""
+    applied to browsing).
+
+    Also records the PROMPTS. Whether the model was shown the thing it needed is
+    the defect class that cost 2026-07-26: extraction was reading a 4000-char
+    prose prefix while the products sat in the element list, and no call-count
+    assertion could ever have seen that."""
 
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = 0
+        self.prompts: list[str] = []
 
     async def chat(self, messages, temperature=0.7, max_tokens=None):
         self.calls += 1
+        self.prompts.append("\n".join(getattr(m, "content", "") or "" for m in messages))
         content = self.responses.pop(0) if self.responses else '{"action":"done","reason":"end"}'
         return LLMResponse(content=content, model="fake", provider="fake")
 
@@ -419,6 +467,403 @@ def test_fast_path_strips_worded_ordinal_episode_qualifiers():
     assert _extract_search_term(
         "play attack on titan the final season"
     ) == "attack on titan the final season"
+
+
+def test_fast_path_strips_a_release_adjective_before_the_episode_word():
+    """The 2026-07-24 black-clover incident: "last RELEASED ep of black clover" was
+    typed VERBATIM into the search box (the adjective between the ordinal and the
+    media word defeated the ordinal stripper) → landed on a /genre junk page → the
+    run died. The whitelisted adjective slot strips it to the bare title."""
+    assert _extract_search_term(
+        "play last released ep of black clover on anikoto.cz"
+    ) == "black clover"
+    assert _extract_search_term(
+        "play the latest released episode of black clover"
+    ) == "black clover"
+    assert _extract_search_term("watch the newest aired episode of naruto") == "naruto"
+    # And the wants-latest GATE recognizes it, so the latest-number path starts.
+    assert _wants_latest_episode("play last released ep of black clover on anikoto.cz")
+    assert _wants_latest_episode("play the latest released episode of one piece")
+    # TITLE SAFETY — none of the whitelisted adjectives begins a real title, and a
+    # non-whitelisted word between the ordinal and the media word is left intact
+    # (the phrase then simply isn't recognized as an ordinal — no over-eating).
+    assert _extract_search_term("play The Last of Us") == "The Last of Us"
+    assert _extract_search_term("watch The Last Airbender") == "The Last Airbender"
+
+
+def _series_obs(url, *hrefs):
+    """A results/series page: each href becomes a link element."""
+    els = [
+        browser_loop.dom_observe.Element(index=i + 1, role="link", name="", href=h)
+        for i, h in enumerate(hrefs)
+    ]
+    return browser_loop.dom_observe.Observation(
+        observation_id="o", url=url, title="Search results", element_total=len(els),
+        elements=els, page_text="", text_truncated=False,
+    )
+
+
+def test_latest_series_action_builds_the_episode_url_from_one_matching_slug():
+    """Fix B1 (2026-07-25): the number is known but we're not on a proven episode
+    page — build …/watch/<slug>/ep-<latest> from the ONE series link whose slug
+    contains every title token, and navigate. This is the leg the numbered path
+    leans on the model for."""
+    obs = _series_obs(
+        "https://anikoto.cz/filter?keyword=Black+Clover",
+        "/watch/black-clover-g7tjy",
+        "/watch/naruto-shippuden-x/ep-1",
+    )
+    action = _latest_series_action(obs, "black clover", 170, set())
+    assert action == {
+        "action": "navigate",
+        "url": "https://anikoto.cz/watch/black-clover-g7tjy/ep-170",
+    }
+
+
+def test_latest_series_action_picks_the_tightest_slug_over_a_movie_entry():
+    """Fix B1 tiebreak (2026-07-25): a search page lists the TV series AND its
+    movie under the same title. The canonical series is the TIGHTEST slug — fewest
+    EXTRA tokens beyond the title (the id suffix 'g7tjy' is 1 extra; the movie's
+    'mahou-tei-no-ken' is 4) — so code picks it instead of deferring to a confused
+    model (the 2026-07-25 live 'couldn't even open black clover' failure)."""
+    obs = _series_obs(
+        "https://anikoto.cz/filter?keyword=Black+Clover",
+        "/watch/black-clover-g7tjy",
+        "/watch/black-clover-mahou-tei-no-ken",
+    )
+    action = _latest_series_action(obs, "black clover", 158, set())
+    assert action == {
+        "action": "navigate",
+        "url": "https://anikoto.cz/watch/black-clover-g7tjy/ep-158",
+    }
+
+
+def test_latest_series_action_defers_on_a_genuine_tie_for_tightest():
+    """Two equally-tight same-title entries (each carries exactly one extra id
+    token) → a real tie → code never picks; None, so the model decides (with the
+    number injected via B2)."""
+    obs = _series_obs(
+        "https://anikoto.cz/filter?keyword=One+Piece",
+        "/watch/one-piece-abcde",
+        "/watch/one-piece-vwxyz/ep-1",
+    )
+    assert _latest_series_action(obs, "one piece", 1122, set()) is None
+
+
+def test_latest_series_action_none_without_a_number_or_when_already_tried():
+    obs = _series_obs(
+        "https://anikoto.cz/filter?keyword=Black+Clover",
+        "/watch/black-clover-g7tjy",
+    )
+    # unknown number → nothing to build
+    assert _latest_series_action(obs, "black clover", None, set()) is None
+    # a target already attempted (a wrong count that did not land) is not retried
+    assert _latest_series_action(obs, "black clover", 170, {170}) is None
+    # no title tokens → cannot ground a slug match
+    assert _latest_series_action(obs, "", 170, set()) is None
+    # no series link on the page at all
+    assert _latest_series_action(
+        _series_obs("https://anikoto.cz/filter?keyword=Black+Clover", "/about"),
+        "black clover", 170, set(),
+    ) is None
+
+
+# ------------------------------------ paginated episode-range selector (2026-07-25)
+def _range_obs(url, title, *labels):
+    """A page carrying episode-range controls (a '001-100' dropdown / tabs): each
+    label becomes a clickable element with that visible name."""
+    els = [
+        browser_loop.dom_observe.Element(index=i + 1, role="button", name=label, href="")
+        for i, label in enumerate(labels)
+    ]
+    return browser_loop.dom_observe.Observation(
+        observation_id="o", url=url, title=title, element_total=len(els),
+        elements=els, page_text="", text_truncated=False,
+    )
+
+
+def test_max_or_none():
+    assert _max_or_none(None, None) is None
+    assert _max_or_none(None, 5, None, 3) == 5
+    assert _max_or_none(100, 170) == 170
+
+
+def test_range_latest_reads_the_true_max_behind_the_dropdown():
+    """The live 2026-07-25 miss: the grid shows 1-100 but the selector's option
+    labels name '101-170'. The range labels give the true latest (170) even before
+    the higher range is opened — which feeds the verify-before-done gate."""
+    obs = _range_obs("https://anikoto.cz/watch/black-clover-g7tjy/ep-100", "Black Clover Episode 100",
+                     "Sub & Dub", "001-100", "101-170")
+    assert _range_latest(obs) == 170
+
+
+def test_range_latest_is_anchored_so_a_year_or_price_filter_never_inflates_it():
+    """A range needs a '1-N' anchor (an episode paginator's first range is always
+    001-1xx). A lone '2020-2024' year filter has no such anchor → ignored, so it
+    can never be mistaken for episode 2024 and strand the run."""
+    assert _range_latest(_range_obs("https://x.test/", "T", "2020-2024")) is None
+    assert _range_latest(_range_obs("https://x.test/", "T", "Newest", "Oldest")) is None
+    # With the 1-anchored range present, the higher (real) range is trusted.
+    assert _range_latest(_range_obs("https://x.test/", "T", "1-50", "51-90")) == 90
+
+
+def test_range_expand_action_opens_the_highest_unopened_range():
+    """Deterministically operate the selector: click the highest range not yet
+    opened (the collapsed '001-100' toggle first, then '101-170'), tracking opened
+    ranges so it never loops; None once every range has been opened."""
+    obs = _range_obs("https://anikoto.cz/series", "Black Clover", "001-100", "101-170")
+    opened: set = set()
+    first = _range_expand_action(obs, opened)
+    assert first == {"action": "click", "index": 2}  # 101-170 is the highest
+    assert "101-170" in opened
+    second = _range_expand_action(obs, opened)
+    assert second == {"action": "click", "index": 1}  # then 001-100
+    assert _range_expand_action(obs, opened) is None  # all opened → nothing to do
+
+
+def test_range_expand_action_ignores_an_unanchored_filter():
+    """No episode paginator (no 1-N range) → nothing to expand, so it never clicks a
+    year/genre filter."""
+    obs = _range_obs("https://x.test/", "T", "2020-2024", "Action")
+    assert _range_expand_action(obs, set()) is None
+
+
+def test_extract_search_term_handles_compound_planner_goals():
+    """The planner authors compound browse goals ("<verb> and <verb> <title> on
+    <site>") whose strippers did not compose: the greedy trailing-action rule ate
+    "and play the latest episode of One Piece on anikoto.cz" and returned "Find"
+    (live 2026-07-24). The verb CHAIN + pronoun-only trailing action fix it."""
+    assert _extract_search_term(
+        "Find and play the latest episode of One Piece on anikoto.cz"
+    ) == "One Piece"
+    assert _extract_search_term(
+        "go to anikoto.cz and find the latest episode of one piece"
+    ) == "one piece"
+    assert _extract_search_term(
+        "search and play attack on titan season 4 episode 2"
+    ) == "attack on titan"
+    # a genuine trailing throwaway action is still stripped
+    assert _extract_search_term("open lofi hip hop and play it") == "lofi hip hop"
+    # a title's own "and" is never treated as a verb chain
+    assert _extract_search_term("play tom and jerry") == "tom and jerry"
+
+
+# ------------------------------------------ latest-episode navigation (2026-07-24)
+def _ep_obs_links(url, title, *hrefs):
+    els = [
+        browser_loop.dom_observe.Element(
+            index=i + 1, role="link", name=f"Episode {i + 1}", href=h
+        )
+        for i, h in enumerate(hrefs)
+    ]
+    return browser_loop.dom_observe.Observation(
+        observation_id="o", url=url, title=title, element_total=len(els),
+        elements=els, page_text="", text_truncated=False,
+    )
+
+
+def test_wants_latest_episode_intent_matrix():
+    assert _wants_latest_episode("play the latest episode of one piece on anikoto.cz")
+    assert _wants_latest_episode("play latest episode of one piece")
+    assert _wants_latest_episode("watch the newest episode of frieren")
+    assert _wants_latest_episode("play the final episode of naruto")
+    assert _wants_latest_episode("play the most recent episode of bleach")
+    assert _wants_latest_episode("watch the latest season of demon slayer")
+    # a concrete number is the numbered path, not this one
+    assert not _wants_latest_episode("play episode 170 of black clover")
+    # "first/next/previous" is a different target, not "latest"
+    assert not _wants_latest_episode("play the first episode of one piece")
+    assert not _wants_latest_episode("play the next episode")
+    # a title that merely contains an ordinal word is not a latest-request
+    assert not _wants_latest_episode("play The Last of Us")
+    assert not _wants_latest_episode("watch attack on titan the final season")
+    assert not _wants_latest_episode("play one piece")
+
+
+async def test_resolve_latest_episode_parses_the_max_episode(monkeypatch):
+    from app.tools import browser_tools
+
+    def fake_search(query, max_results):
+        assert "one piece" in query.lower()
+        return [
+            {"title": "Wiki", "snippet": "Episode 1120 aired last week.", "content": ""},
+            {"title": "News", "snippet": "", "content": "The latest is Episode 1122 (2026)."},
+        ]
+
+    monkeypatch.setattr(browser_tools, "SEARCH_PROVIDER_FACTORY", fake_search)
+    assert await _resolve_latest_episode("one piece") == 1122
+
+
+async def test_resolve_latest_episode_never_reads_a_year_and_is_best_effort(monkeypatch):
+    from app.tools import browser_tools
+
+    # A year (2026) is a BARE number, not "episode N" — never picked (the reverted
+    # heuristic's exact failure). Nothing parseable → None.
+    monkeypatch.setattr(
+        browser_tools, "SEARCH_PROVIDER_FACTORY",
+        lambda q, n: [{"title": "x", "snippet": "One Piece is popular in 2026.", "content": ""}],
+    )
+    assert await _resolve_latest_episode("one piece") is None
+    # no title → no search, no crash
+    assert await _resolve_latest_episode("") is None
+
+    def boom(q, n):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(browser_tools, "SEARCH_PROVIDER_FACTORY", boom)
+    assert await _resolve_latest_episode("one piece") is None
+
+
+def test_href_latest_episode_picks_the_max_sibling_link():
+    obs = _ep_obs_links(
+        "https://anikoto.cz/watch/one-piece-x/ep-1",
+        "One Piece Episode 1",
+        "https://anikoto.cz/watch/one-piece-x/ep-2",
+        "/watch/one-piece-x/ep-15",                   # relative href, same series
+        "https://anikoto.cz/watch/one-piece-x/ep-9",
+        "https://anikoto.cz/watch/bleach-y/ep-500",   # different series — ignored
+        "https://anikoto.cz/browse",                  # not an episode link
+    )
+    assert _href_latest_episode(obs) == 15
+    # not on an /ep-N page → None
+    assert _href_latest_episode(_ep_obs_links("https://anikoto.cz/browse", "Browse")) is None
+
+
+def test_latest_episode_action_navigates_finishes_and_defers():
+    on_ep1 = _ep_obs("https://anikoto.cz/watch/one-piece-x/ep-1", "One Piece Episode 1")
+    # on ep-1, latest=1122 → navigate to ep-1122
+    assert _latest_episode_action(on_ep1, 1122, set()) == {
+        "action": "navigate",
+        "url": "https://anikoto.cz/watch/one-piece-x/ep-1122",
+    }
+    # already on the latest → done
+    on_latest = _ep_obs("https://anikoto.cz/watch/one-piece-x/ep-1122", "One Piece Episode 1122")
+    a = _latest_episode_action(on_latest, 1122, set())
+    assert a is not None and a["action"] == "done"
+    # target already tried and we're NOT on it (a wrong count / 404) → defer, never loop
+    assert _latest_episode_action(on_ep1, 1122, {1122}) is None
+    # number unknown / not on an episode page → None
+    assert _latest_episode_action(on_ep1, None, set()) is None
+    assert _latest_episode_action(_ep_obs("https://anikoto.cz/browse", "Browse"), 1122, set()) is None
+
+
+async def test_latest_episode_flow_web_number_then_url_swap(monkeypatch):
+    """End to end: on ep-1 with a 'latest episode' goal, the concurrently-searched
+    web number is swapped into the URL and the loop finishes on it — no LLM call."""
+    from app.tools import browser_tools
+
+    monkeypatch.setattr(
+        browser_tools, "SEARCH_PROVIDER_FACTORY",
+        lambda q, n: [{"title": "One Piece", "snippet": "The latest is Episode 1122.", "content": ""}],
+    )
+    page = ScriptedPage([
+        _page([_el(1, "link", "Episodes")],
+              url="https://anikoto.cz/watch/one-piece-x/ep-1", title="Watch One Piece Episode 1"),
+        _page([], url="https://anikoto.cz/watch/one-piece-x/ep-1122",
+              title="Watch One Piece Episode 1122"),
+    ])
+    session = FakeSession(page)
+    provider = FakeProvider([])  # must NOT be consulted — the swap is deterministic
+    outcome = await run_browse(
+        session, "play the latest episode of one piece on anikoto.cz", provider
+    )
+    assert outcome.success
+    assert page.url == "https://anikoto.cz/watch/one-piece-x/ep-1122"
+    assert provider.calls == 0
+
+
+async def test_latest_episode_flow_falls_back_to_on_page_links(monkeypatch):
+    """When the web search yields nothing, the highest visible /ep-N sibling link
+    is used instead — still no LLM call, and arrival at the target is recognized."""
+    from app.tools import browser_tools
+
+    monkeypatch.setattr(browser_tools, "SEARCH_PROVIDER_FACTORY", lambda q, n: [])
+    page = ScriptedPage([
+        _page(
+            [_el(1, "link", "Episode 2", href="https://anikoto.cz/watch/demo-z/ep-2"),
+             _el(2, "link", "Episode 3", href="https://anikoto.cz/watch/demo-z/ep-3")],
+            url="https://anikoto.cz/watch/demo-z/ep-1", title="Demo Episode 1",
+        ),
+        _page([], url="https://anikoto.cz/watch/demo-z/ep-3", title="Demo Episode 3"),
+    ])
+    session = FakeSession(page)
+    provider = FakeProvider([])
+    outcome = await run_browse(session, "play the latest episode of demo on anikoto.cz", provider)
+    assert outcome.success
+    assert page.url == "https://anikoto.cz/watch/demo-z/ep-3"
+    assert provider.calls == 0
+
+
+async def test_verify_gate_rejects_a_premature_done_and_fails_honestly(monkeypatch):
+    """The live 2026-07-25 miss: a paginated site (anikoto's 100-episode dropdown)
+    let the loop settle on the visible max (ep 100 of 170) and report it as the
+    latest. Here the deterministic swap to ep-170 was attempted but the site landed
+    on ep-100; the model then insists "done". The verify-before-done gate KNOWS the
+    latest is 170 (web) and refuses done on ep-100 — the run fails honestly instead
+    of falsely succeeding on the wrong episode."""
+    from app.tools import browser_tools
+
+    monkeypatch.setattr(
+        browser_tools, "SEARCH_PROVIDER_FACTORY",
+        lambda q, n: [{"title": "Demo", "snippet": "The latest is Episode 170.", "content": ""}],
+    )
+    page = ScriptedPage([
+        _page([_el(1, "link", "Episode 2", href="https://anikoto.cz/watch/demo-z/ep-2")],
+              url="https://anikoto.cz/watch/demo-z/ep-1", title="Demo Episode 1"),
+        # The ep-170 deep link landed on ep-100 (a paginated site's quirk).
+        _page([_el(1, "link", "x")],
+              url="https://anikoto.cz/watch/demo-z/ep-100", title="Demo Episode 100"),
+    ])
+    session = FakeSession(page)
+    provider = FakeProvider(['{"action":"done","reason":"playing"}'] * 4)
+    outcome = await run_browse(session, "play the latest episode of demo on anikoto.cz", provider)
+    assert not outcome.success
+    assert "170" in (outcome.error or "") and "100" in outcome.error
+
+
+async def test_verify_gate_accepts_done_when_there_is_no_episode_number(monkeypatch):
+    """YouTube-shaped: 'latest' with no episode number in the URL. The gate has
+    nothing to compare (the open page proves no episode number), so it trusts the
+    model's done — it must never block a legitimately-newest video (the no-number
+    path relies on the model reading upload dates)."""
+    from app.tools import browser_tools
+
+    monkeypatch.setattr(browser_tools, "SEARCH_PROVIDER_FACTORY", lambda q, n: [])
+    page = ScriptedPage([
+        _page([_el(1, "link", "x")],
+              url="https://www.youtube.com/watch?v=sgA9pV6j_dw", title="Humrahi Episode 34"),
+    ])
+    session = FakeSession(page)
+    provider = FakeProvider(['{"action":"done","reason":"playing the newest upload"}'])
+    outcome = await run_browse(session, "play the latest episode of humrahi on youtube", provider)
+    assert outcome.success
+
+
+class FlakyProvider:
+    """Raises once (a transient 400/dropped connection), then answers — to prove
+    the text-decision retry keeps a browse alive instead of stranding it."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    async def chat(self, messages, temperature=0.7, max_tokens=None):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("transient 400 Bad Request")
+        return LLMResponse(
+            content=self.responses.pop(0) if self.responses else '{"action":"done","reason":"ok"}',
+            model="fake", provider="fake",
+        )
+
+
+async def test_decide_retries_once_on_a_transient_llm_failure():
+    page = ScriptedPage([_page([_el(1, "link", "x")], url="https://site.test/")])
+    session = FakeSession(page)
+    provider = FlakyProvider(['{"action":"done","reason":"ok"}'])
+    outcome = await run_browse(session, "do something", provider)
+    assert provider.calls == 2  # failed once, retried, succeeded
+    assert outcome.success
 
 
 def test_fast_path_fires_only_with_a_single_search_box():
@@ -497,6 +942,217 @@ async def test_the_fast_path_search_costs_no_llm_call():
     kinds = [(a[2], a[3]) for a in session.page.acted]
     assert ("fill", "lofi") in kinds
     assert ("press", "Enter") in kinds
+
+
+# ------------------------------ intent vs catalog search semantics (2026-07-25)
+def test_is_intent_search_host_classifies_engines_vs_catalogs():
+    yes = browser_loop._is_intent_search_host
+    assert yes("https://www.youtube.com/results?search_query=humrahi")
+    assert yes("https://m.youtube.com/")
+    assert yes("https://youtu.be/abc")
+    assert yes("https://www.google.co.uk/search?q=x")
+    assert yes("https://www.bing.com/search?q=x")
+    # A catalog — and a lookalike whose label merely CONTAINS a brand — are not.
+    assert not yes("https://anikoto.cz/filter?keyword=Black+Clover")
+    assert not yes("https://my-youtube-clone.com/")
+    assert not yes("https://evil-youtube.com/")
+    assert not yes("")
+
+
+def test_search_query_for_adapts_to_the_site():
+    q = browser_loop._search_query_for
+    # Catalog: the bare title, exactly as before (anikoto needs a literal match).
+    assert q("play latest ep of black clover on anikoto", "https://anikoto.cz/", None) == "black clover"
+    assert q("play black clover on anikoto", "https://anikoto.cz/", 170) == "black clover"
+    # Intent engine + a latest goal → the natural 'latest episode' query, NEVER the
+    # number injected (2026-07-25): '<title> episode 35' ranked the Teaser #1 AND
+    # echoed 35 into the results title+URL, manufacturing the _current_episode
+    # false-positive. The number is ignored here regardless of whether it is known.
+    assert q("play latest ep of humrahi on youtube", "https://youtube.com/", 35) == "humrahi latest episode"
+    assert q("play latest ep of humrahi on youtube", "https://youtube.com/", None) == "humrahi latest episode"
+    # Intent engine, not a latest goal → the plain title.
+    assert q("play lofi hip hop on youtube", "https://youtube.com/", None) == "lofi hip hop"
+    # No tellable title → None (the fast path then defers to the model).
+    assert q("open the travel category then click next", "https://youtube.com/", None) is None
+
+
+def test_top_result_action_clicks_the_first_youtube_video():
+    top = browser_loop._top_result_action
+    E = browser_loop.dom_observe.Element
+    O = browser_loop.dom_observe.Observation
+    results = O(
+        observation_id="o", url="https://www.youtube.com/results?search_query=humrahi",
+        title="humrahi - YouTube", element_total=3,
+        elements=[
+            E(index=1, role="link", name="Filters", href="/results?sp=x"),
+            E(index=2, role="link", name="Humrahi Episode 34", href="/watch?v=sgA9pV6j_dw"),
+            E(index=3, role="link", name="Humrahi Episode 33", href="/watch?v=abc123"),
+        ],
+        page_text="", text_truncated=False,
+    )
+    # Both results overlap the title token {humrahi}; the DOM-first one wins the tie.
+    assert top(results, "play humrahi on youtube") == {"action": "click", "index": 2}
+    # A watch page (its sidebar is full of /watch?v= links) never re-fires.
+    watch = O(
+        observation_id="o", url="https://www.youtube.com/watch?v=sgA9pV6j_dw",
+        title="Humrahi Episode 34", element_total=1,
+        elements=[E(index=1, role="link", name="Up next", href="/watch?v=zzz")],
+        page_text="", text_truncated=False,
+    )
+    assert top(watch, "play humrahi on youtube") is None
+    # A non-YouTube results page is not this leg's job (catalog nav is separate).
+    other = O(
+        observation_id="o", url="https://anikoto.cz/filter?keyword=x", title="x",
+        element_total=1, elements=[E(index=1, role="link", name="a", href="/watch/x/ep-1")],
+        page_text="", text_truncated=False,
+    )
+    assert top(other, "play x on anikoto") is None
+    # A YouTube results page with no video link yet → None (nothing to click).
+    empty = O(
+        observation_id="o", url="https://www.youtube.com/results?search_query=x", title="x",
+        element_total=1, elements=[E(index=1, role="link", name="Filters", href="/results?sp=y")],
+        page_text="", text_truncated=False,
+    )
+    assert top(empty, "play x on youtube") is None
+
+
+def test_top_result_action_ranks_by_relevance_not_dom_order():
+    """The Avengers Doomsday live miss (2026-07-25): the FIRST /watch?v= element in
+    DOM order was an unrelated shelf video (a Jujutsu Kaisen result) → the loop
+    clicked it. DOM order is not visual rank, so candidates are ranked by title-token
+    overlap; the relevant video wins even when it is not first."""
+    top = browser_loop._top_result_action
+    E = browser_loop.dom_observe.Element
+    O = browser_loop.dom_observe.Observation
+    results = O(
+        observation_id="o",
+        url="https://www.youtube.com/results?search_query=avengers+doomsday",
+        title="avengers doomsday - YouTube", element_total=4,
+        elements=[
+            E(index=1, role="link", name="Filters", href="/results?sp=x"),
+            # A shelf video that appears FIRST in the DOM but matches nothing.
+            E(index=37, role="link",
+              name='Jujutsu Kaisen "Jane Juliet VS Yuta"', href="/watch?v=jjk"),
+            E(index=52, role="link",
+              name="Avengers: Doomsday | Official Trailer | Marvel Studios",
+              href="/watch?v=avn"),
+        ],
+        page_text="", text_truncated=False,
+    )
+    assert top(results, "play treailer of avengers doomsday on youtube") == {
+        "action": "click", "index": 52
+    }
+    # When NOTHING overlaps the title, defer to the model rather than click a random
+    # (irrelevant) link — better than the old first-in-DOM-order pick.
+    junk = O(
+        observation_id="o",
+        url="https://www.youtube.com/results?search_query=avengers+doomsday",
+        title="avengers doomsday - YouTube", element_total=2,
+        elements=[
+            E(index=1, role="link", name="Filters", href="/results?sp=x"),
+            E(index=9, role="link", name="Totally Unrelated Video", href="/watch?v=zzz"),
+        ],
+        page_text="", text_truncated=False,
+    )
+    assert top(junk, "play avengers doomsday on youtube") is None
+
+
+async def test_youtube_results_top_video_is_played_deterministically():
+    """The 'humrahi' live miss (2026-07-25): the bare title was typed, then the
+    model fumbled a 179-element results page and FAILED to pick. Now the top video
+    is opened in CODE — the ranker already chose. The search AND the result-pick
+    cost ZERO LLM calls; only the final 'done' on the watch page costs one."""
+    home = _page([_el(1, role="searchbox", name="Search")], url="https://www.youtube.com/")
+    results = _page(
+        [_el(1, role="link", name="Filters", href="/results?sp=x"),
+         _el(2, role="link", name="Humrahi Episode 34", href="/watch?v=abc")],
+        url="https://www.youtube.com/results?search_query=humrahi",
+    )
+    watch = _page([_el(1, role="button", name="Pause")], url="https://www.youtube.com/watch?v=abc")
+    session = FakeSession(ScriptedPage([home, results, watch]))
+    provider = FakeProvider(['{"action":"done","reason":"playing"}'])
+
+    outcome = await run_browse(session, "play humrahi on youtube", provider)
+
+    assert outcome.success is True
+    assert provider.calls == 1  # search + result-pick were free; only 'done' cost a call
+    assert "watch?v=abc" in outcome.url
+    # The top result was opened by a GET navigation, never a JS click.
+    assert any(k == "goto" and "watch?v=abc" in str(v) for (_i, _idx, k, v) in session.page.acted)
+
+
+async def test_latest_episode_on_youtube_never_false_dones_on_the_results_page():
+    """The 'humrahi' live miss (2026-07-25): a LATEST-episode goal on YouTube landed
+    on /results?search_query=humrahi+episode+35 whose title ('humrahi episode 35 -
+    YouTube') AND URL both carried '35'. _current_episode false-fired and the catalog
+    latest-episode leg declared the RESULTS page 'Episode 35 (the latest) is open,
+    done' — nothing played. The intent-host guard now voids that proof, so the loop
+    opens the top result instead of stranding on the search page."""
+    home = _page([_el(4, role="searchbox", name="Search")],
+                 url="https://www.youtube.com/", title="YouTube")
+    # Reproduce the trap directly: the number is echoed into BOTH title and URL.
+    results = _page(
+        [_el(1, role="link", name="Humrahi Episode 35 [Eng Sub]", href="/watch?v=abc")],
+        url="https://www.youtube.com/results?search_query=humrahi+episode+35",
+        title="humrahi episode 35 - YouTube",
+    )
+    watch = _page([_el(1, role="button", name="Pause")],
+                  url="https://www.youtube.com/watch?v=abc", title="Humrahi Episode 35 [Eng Sub]")
+    session = FakeSession(ScriptedPage([home, results, watch]))
+    provider = FakeProvider(['{"action":"done","reason":"playing"}'])
+
+    outcome = await run_browse(session, "play latest ep of humrahi on youtube", provider)
+
+    assert outcome.success is True
+    # Opened the video, never stranded on /results with a bogus 'done'.
+    assert "watch?v=abc" in outcome.url
+    assert any(k == "goto" and "watch?v=abc" in str(v) for (_i, _idx, k, v) in session.page.acted)
+    # The result-pick was deterministic (code); only the final 'done' cost an LLM call.
+    assert provider.calls == 1
+
+
+def test_is_media_watch_page_recognizes_youtube_video_urls():
+    m = browser_loop._is_media_watch_page
+    assert m("https://www.youtube.com/watch?v=sgA9pV6j_dw")
+    assert m("https://www.youtube.com/watch?v=abc&t=6s&pp=xyz")
+    assert m("https://m.youtube.com/watch?feature=share&v=abc123")
+    assert m("https://youtu.be/dQw4w9WgXcQ")
+    # Not a video page: results / home / a catalog watch page are NOT this.
+    assert not m("https://www.youtube.com/results?search_query=humrahi")
+    assert not m("https://www.youtube.com/")
+    assert not m("https://anikoto.cz/watch/one-piece-odmau/ep-1170")
+    assert not m("")
+
+
+async def test_youtube_play_goal_hands_off_from_the_watch_page_without_llm():
+    """The 'humrahi handoff' live miss (2026-07-25): the loop clicked the top result,
+    reached youtube.com/watch?v=…, then FAILED because a pre-roll ad ran in the
+    automation window and _decide could not find a safe action — the step failed, so
+    the clean-window handoff (which runs only on success) never fired, even though
+    the video had loaded. A keep_open play goal now treats REACHING the watch page
+    as done — the clean ad-blocked window is what actually plays it — so it never
+    depends on the ad-heavy automation window and costs ZERO LLM calls."""
+    home = _page([_el(4, role="searchbox", name="Search")],
+                 url="https://www.youtube.com/", title="YouTube")
+    results = _page(
+        [_el(1, role="link", name="Humrahi Episode 38 [Eng Sub]", href="/watch?v=abc")],
+        url="https://www.youtube.com/results?search_query=Humrahi+latest+episode",
+        title="Humrahi latest episode - YouTube",
+    )
+    # A pre-roll ad overlay is on screen — the old path fumbled here; we finish anyway.
+    watch = _page([_el(1, role="button", name="Skip Ad")],
+                  url="https://www.youtube.com/watch?v=abc",
+                  title="Humrahi Episode 38 [Eng Sub]")
+    session = FakeSession(ScriptedPage([home, results, watch]))
+    provider = FakeProvider([])  # must NOT be consulted — the whole path is code
+
+    outcome = await run_browse(
+        session, "play latest ep of humrahi on youtube", provider, keep_open=True
+    )
+
+    assert outcome.success is True
+    assert "watch?v=abc" in outcome.url
+    assert provider.calls == 0  # search, result-pick, AND the done were all deterministic
 
 
 # ------------------------------------- fast-path hardening (2026-07-21)
@@ -582,9 +1238,11 @@ async def test_a_link_is_opened_by_navigating_to_its_href_not_a_js_click():
     )
     watch = _page([_el(1, role="button", name="Pause")], url="https://youtube.com/watch?v=xyz")
     session = FakeSession(ScriptedPage([results, watch]))
-    provider = FakeProvider(['{"action":"click","index":1}', '{"action":"done","reason":"playing"}'])
+    # The top result is now picked in CODE (the intent-engine leg), so the model
+    # only confirms the video is playing on the watch page.
+    provider = FakeProvider(['{"action":"done","reason":"playing"}'])
 
-    outcome = await run_browse(session, "play the song", provider)
+    outcome = await run_browse(session, "play jane by the long faces on youtube", provider)
 
     assert outcome.success is True
     assert "watch?v=xyz" in outcome.url
@@ -620,7 +1278,14 @@ async def test_dedupe_halts_a_repeated_action():
     assert outcome.success is False
     assert "didn't respond" in outcome.error
     # Bounded: it did not consult the model 20 times.
-    assert provider.calls <= browser_loop._MAX_REPEAT + 1
+    #
+    # The bound LOOSENED on 2026-07-26 (was _MAX_REPEAT + 1). A tripped repeat no
+    # longer ends the run — it REFUSES the move, tells the model so in the
+    # history it reads, and lets it choose again; only three refusals in a row
+    # end it. That buys recoverability (the model can route around a dead button
+    # instead of the whole task dying on it) for a few extra decisions on a page
+    # that was doomed anyway. Still a small constant, still nowhere near 20.
+    assert provider.calls <= browser_loop._MAX_REPEAT + 4
 
 
 async def test_progress_detection_stops_a_wheel_spinning_loop():
@@ -746,10 +1411,25 @@ async def test_blocked_mutations_pass_through_to_the_outcome():
 
 async def test_an_unparseable_decision_stops_honestly():
     session = FakeSession(ScriptedPage([_page([_el(1)])]))
-    provider = FakeProvider(["not json at all"])
+    provider = FakeProvider(["not json at all", "still not json"])
     outcome = await run_browse(session, "do something", provider)
     assert outcome.success is False
-    assert provider.calls == 1
+    # ONE retry, then stop. An empty/unparseable reply is the one _decide failure
+    # class that is plausibly transient (a reasoning model that spent its whole
+    # token budget thinking returns an empty string), so it is worth exactly one
+    # more ask — and no more, or every real refusal costs double.
+    assert provider.calls == 2
+
+
+async def test_an_unparseable_decision_is_retried_once_and_recovers():
+    """The retry is not decoration: live, an empty reply killed a browse on a
+    page the model could see perfectly well. A second ask that parses continues
+    the run."""
+    session = FakeSession(ScriptedPage([_page([_el(1)]), _page([_el(1)])]))
+    provider = FakeProvider(["", '{"action":"done","reason":"found it"}'])
+    outcome = await run_browse(session, "do something", provider)
+    assert outcome.success is True
+    assert provider.calls == 2
 
 
 # ---------------------------------------------------------------- parse
@@ -796,7 +1476,7 @@ async def test_navigate_drives_a_get_url_within_the_allowlist():
 def test_parse_action_rejects_garbage_and_unknown_verbs():
     assert _parse_action("") is None
     assert _parse_action("nonsense") is None
-    assert _parse_action('{"action":"drag","index":1}') is None   # unknown verb
+    assert _parse_action('{"action":"drag","index":1}') is None   # drag with no target
     assert _parse_action('{"action":"click"}') is None  # no index
     # press_key is whitelisted keys ONLY — Enter is a submit gesture, refused.
     assert _parse_action('{"action":"press_key","key":"Enter"}') is None
@@ -1203,13 +1883,13 @@ async def test_a_stale_redirect_marker_never_fires(monkeypatch):
 # and (c) an exhausted "more" counts as a failure instead of spinning.
 
 class PromptRecordingProvider(FakeProvider):
-    def __init__(self, responses):
-        super().__init__(responses)
-        self.prompts: list[str] = []
+    """Kept only as a name — FakeProvider records prompts itself now.
 
-    async def chat(self, messages, temperature=0.7, max_tokens=None):
-        self.prompts.append(messages[0].content)
-        return await super().chat(messages, temperature, max_tokens)
+    It gained that when a defect turned out to be "the model was never shown the
+    data" (2026-07-26), which no call-count assertion can see. Overriding `chat`
+    to record as well appended every prompt TWICE, so `prompts[1]` became a copy
+    of `prompts[0]` and the paging assertion below silently compared the wrong
+    window."""
 
 
 def _long_page(target_index=80, n=80):
@@ -1258,8 +1938,10 @@ async def test_more_with_every_element_shown_counts_as_a_failure():
     outcome = await run_browse(FakeSession(page), "open the only link", provider)
 
     assert outcome.success is False
-    assert "failed" in outcome.error
     assert page.acted == []  # nothing was ever touched
+    # Names what was actually exhausted — the element list — not "several actions
+    # failed", which is untrue here: no action was ever attempted.
+    assert "already shown" in outcome.error
 
 
 def test_parse_action_accepts_more():
@@ -1613,16 +2295,34 @@ async def test_act_gates_a_non_search_get_form_submit():
 
 
 async def test_act_allows_the_approved_action_on_resume():
-    """After the user's yes, the resumed browse carries action_approved=True and
-    the gate stands down so the one approved gesture can fire (the READ backstop
-    lets it through; the run_browse hand-off that stopped it is skipped upstream)."""
+    """After the user's yes, the resumed browse carries the PERMIT for that exact
+    control and the backstop lets it through (the run_browse hand-off that stopped
+    it is skipped upstream)."""
     page = ScriptedPage([_page([_el(1, role="button", name="Send")])])
     session = FakeSession(page)
     obs = _form_obs(form_member=True, form_submit=True, form_method="POST")
+    action = {"action": "click", "index": 1}
+    permit = browser_loop.gesture_fingerprint(
+        action, obs.index_map()[1], obs.url
+    )
     ok, _ = await browser_loop._act(
-        session, obs, {"action": "click", "index": 1}, action_approved=True
+        session, obs, action, approved_gesture=permit
     )
     assert ok is True
+
+
+async def test_act_refuses_a_DIFFERENT_gesture_than_the_one_approved():
+    """THE POINT of a fingerprint. A permit for one control does not authorise
+    another — the boolean it replaced authorised every gesture in the run."""
+    page = ScriptedPage([_page([_el(1, role="button", name="Send")])])
+    session = FakeSession(page)
+    obs = _form_obs(form_member=True, form_submit=True, form_method="POST")
+    ok, note = await browser_loop._act(
+        session, obs, {"action": "click", "index": 1},
+        approved_gesture="a-permit-for-something-else",
+    )
+    assert ok is False
+    assert "without your approval" in note
 
 
 async def test_act_gates_a_js_send_button_by_label():
@@ -1712,8 +2412,8 @@ async def test_run_browse_pauses_for_approval_before_a_send():
 
 
 async def test_run_browse_performs_the_action_once_approved():
-    """With action_approved=True (the resume after the user's yes) the gate stands
-    down and the one approved gesture fires — fill + Enter."""
+    """With the PERMIT for that gesture (the resume after the user's yes) the gate
+    stands down and the one approved gesture fires — fill + Enter."""
     page = ScriptedPage([
         _page(
             [_el(1, role="textbox", name="Write a message",
@@ -1728,13 +2428,115 @@ async def test_run_browse_performs_the_action_once_approved():
         '{"action":"type","index":1,"text":"hi anas","submit":true}',
         '{"action":"done","reason":"the message was sent"}',
     ])
+    # The permit the pause would have handed back: the same control, same site.
+    element = browser_loop.dom_observe.Element(
+        index=1, role="textbox", name="Write a message"
+    )
+    permit = browser_loop.gesture_fingerprint(
+        {"action": "type", "submit": True}, element,
+        "https://linkedin.com/messaging/thread/new/",
+    )
     outcome = await browser_loop.run_browse(
-        session, "message anas hi", provider, action_approved=True
+        session, "message anas hi", provider, approved_gesture=permit
     )
     assert outcome.action_approval_required is False
     assert outcome.success is True
     kinds = [a[2] for a in page.acted]
     assert "fill" in kinds and "press" in kinds
+
+
+async def test_a_permit_for_one_gesture_does_not_authorise_a_second():
+    """ONE APPROVAL, ONE GESTURE. The permit is spent when it fires, so a SECOND
+    world-acting gesture in the same run pauses again — even the identical one.
+    Under the boolean this replaced, a yes to "send this message" also authorised
+    whatever the loop chose next."""
+    page = ScriptedPage([
+        _page([_el(1, role="button", name="Send",
+                   form={"submit": True, "method": "POST"})],
+              url="https://site.test/a"),
+        _page([_el(1, role="button", name="Send",
+                   form={"submit": True, "method": "POST"})],
+              url="https://site.test/a"),
+    ])
+    session = FakeSession(page)
+    provider = FakeProvider([
+        '{"action":"click","index":1}',      # the approved one — fires
+        '{"action":"click","index":1}',      # a second act — must pause
+    ])
+    element = browser_loop.dom_observe.Element(index=1, role="button", name="Send")
+    permit = browser_loop.gesture_fingerprint(
+        {"action": "click"}, element, "https://site.test/a"
+    )
+
+    outcome = await browser_loop.run_browse(
+        session, "send it", provider, approved_gesture=permit
+    )
+
+    assert outcome.action_approval_required is True     # paused on the SECOND
+    assert len([a for a in page.acted if a[2] == "click"]) == 1   # acted once
+
+
+async def test_a_performed_gesture_is_recorded_for_the_audit():
+    """A mutation that cannot be found in the audit trail is not auditable, and
+    every other write in this codebase is. The outcome names what it did."""
+    page = ScriptedPage([
+        _page([_el(1, role="button", name="Send",
+                   form={"submit": True, "method": "POST"})],
+              url="https://site.test/a"),
+        _page([_el(1, role="link", name="Sent")], url="https://site.test/done"),
+    ])
+    session = FakeSession(page)
+    provider = FakeProvider([
+        '{"action":"click","index":1}',
+        '{"action":"done","reason":"sent"}',
+    ])
+    element = browser_loop.dom_observe.Element(index=1, role="button", name="Send")
+    permit = browser_loop.gesture_fingerprint(
+        {"action": "click"}, element, "https://site.test/a"
+    )
+
+    outcome = await browser_loop.run_browse(
+        session, "send it", provider, approved_gesture=permit
+    )
+
+    assert outcome.success is True
+    assert "Send" in outcome.performed_gesture or "click" in outcome.performed_gesture
+
+
+async def test_a_read_only_run_records_no_performed_gesture():
+    """Empty on the overwhelming majority of runs — a READ browse acts on nothing,
+    and the audit field must not imply otherwise."""
+    page = ScriptedPage([_page([_el(1, role="link", name="Somewhere", href="/x")])])
+    provider = FakeProvider(['{"action":"done","reason":"just looked"}'])
+
+    outcome = await browser_loop.run_browse(FakeSession(page), "just look", provider)
+
+    assert outcome.success is True
+    assert outcome.performed_gesture == ""
+
+
+async def test_a_permit_does_not_travel_to_another_site():
+    """The host is in the fingerprint, so an approval on one site cannot authorise
+    the same-looking control on another."""
+    element = browser_loop.dom_observe.Element(index=1, role="button", name="Send")
+    here = browser_loop.gesture_fingerprint(
+        {"action": "click"}, element, "https://linkedin.com/x"
+    )
+    there = browser_loop.gesture_fingerprint(
+        {"action": "click"}, element, "https://evil.test/x"
+    )
+    assert here != there
+
+
+async def test_the_fingerprint_ignores_the_element_index():
+    """Indices are re-assigned every observation, so an index-keyed permit would
+    authorise whatever happened to be third on the page next time."""
+    a = browser_loop.dom_observe.Element(index=1, role="button", name="Send")
+    b = browser_loop.dom_observe.Element(index=47, role="button", name="Send")
+    url = "https://site.test/"
+    assert browser_loop.gesture_fingerprint({"action": "click"}, a, url) == (
+        browser_loop.gesture_fingerprint({"action": "click"}, b, url)
+    )
 
 
 async def test_commit_submit_gates_on_an_unsolved_embedded_widget():
@@ -1959,7 +2761,9 @@ async def test_vision_is_the_primary_decision_channel():
     provider = FakeProvider(['{"action":"click","index":1}'])   # must stay unread
     vision = FakeVision(['{"action":"done","reason":"ok"}'])
 
-    outcome = await run_browse(session, "just look", provider, vision=vision)
+    outcome = await run_browse(
+        session, "just look", provider, vision=vision, vision_first=True
+    )
 
     assert outcome.success is True
     assert vision.calls == 1
@@ -1981,13 +2785,85 @@ async def test_a_vision_point_maps_to_an_element_through_the_index_contract():
         '{"action":"done","reason":"ok"}',
     ])
 
-    outcome = await run_browse(session, "click the icon", provider, vision=vision)
+    outcome = await run_browse(
+        session, "click the icon", provider, vision=vision, vision_first=True
+    )
 
     assert outcome.success is True
     assert vision.calls == 2
     # The vision-located click hit element 1 THROUGH the index contract (the fake
     # handle records a click with the real index — a point never clicks directly).
     assert any(k == "click" and idx == 1 for (_i, idx, k, v) in session.page.acted)
+
+
+# ------------------------------------------------------ the DOM-first posture
+# THE DEFAULT since 2026-07-26, reversing the 2026-07-21 vision-first decision on
+# measured grounds: vision spent up to 12s per step waiting on cooling keys and
+# returned "unusable", while the DOM channel did all the real work. So vision is
+# consulted only where the DOM genuinely cannot help.
+async def test_dom_first_does_not_consult_vision_on_a_healthy_page():
+    """The saving. A page with actionable elements is the DOM's job; a configured
+    vision provider sits idle and costs neither a screenshot nor a call."""
+    session = FakeSession(VisionPage([_vpage([_vel(1, (0, 0, 100, 40), name="Go")])]))
+    provider = FakeProvider(['{"action":"done","reason":"ok"}'])
+    vision = FakeVision(['{"action":"done","reason":"vision"}'])   # must stay unread
+
+    outcome = await run_browse(session, "just look", provider, vision=vision)
+
+    assert outcome.success is True
+    assert provider.calls == 1
+    assert vision.calls == 0
+    assert outcome.vision_calls == 0
+
+
+async def test_dom_first_escalates_to_vision_when_the_text_channel_cannot_decide():
+    """Vision earns its call exactly where DOM failed — the evidence_resolver
+    escalation shape, applied to perception. The text provider returns junk twice
+    (its own reply plus the one retry), then vision answers and the run completes."""
+    session = FakeSession(VisionPage([_vpage([_vel(1, (0, 0, 100, 40), name="Go")])]))
+    provider = FakeProvider(["not json", "still not json"])
+    vision = FakeVision(['{"action":"done","reason":"vision saw it"}'])
+
+    outcome = await run_browse(session, "just look", provider, vision=vision)
+
+    assert outcome.success is True
+    assert provider.calls == 2      # tried, and retried
+    assert vision.calls == 1        # then escalated
+    assert outcome.vision_calls == 1
+
+
+async def test_dom_first_uses_vision_immediately_on_a_page_with_no_elements():
+    """A canvas or pure-image UI: the DOM has nothing to offer, so waiting for the
+    text channel to fail first would just spend a call to learn that."""
+    session = FakeSession(VisionPage([_vpage([])]))
+    provider = FakeProvider(['{"action":"done","reason":"text"}'])
+    vision = FakeVision(['{"action":"done","reason":"vision"}'])
+
+    outcome = await run_browse(session, "look at the canvas", provider, vision=vision)
+
+    assert outcome.success is True
+    assert vision.calls == 1
+    assert provider.calls == 0
+
+
+async def test_vision_calls_are_hard_capped_per_run():
+    """A ceiling that did not exist before: vision was bounded only by a 12s
+    timeout and a 2-strike FAILURE breaker, so a provider answering slowly but
+    USABLY could be consulted on all 25 steps — minutes nobody asked for. The
+    breaker never fires here precisely because every reply is usable."""
+    page = VisionPage([_vpage([_vel(1, (0, 0, 100, 40), name="Go")])])
+    session = FakeSession(page)
+    provider = FakeProvider(['{"action":"done","reason":"ok"}'])
+    vision = FakeVision(['{"action":"scroll","direction":"down"}'] * 40)
+
+    outcome = await run_browse(
+        session, "look around", provider, vision=vision, vision_first=True,
+        max_actions=browser_loop.MAX_VISION_CALLS + 4,
+    )
+
+    assert vision.calls == browser_loop.MAX_VISION_CALLS
+    assert outcome.vision_calls == browser_loop.MAX_VISION_CALLS
+    assert provider.calls >= 1      # the text channel carried the rest
 
 
 async def test_vision_off_stays_dom_only_and_stops():
@@ -2011,7 +2887,9 @@ async def test_a_vision_failure_falls_back_to_the_text_provider_in_the_same_step
     provider = FakeProvider(['{"action":"done","reason":"ok"}'])
     vision = FakeVision(["not json at all"])
 
-    outcome = await run_browse(session, "just look", provider, vision=vision)
+    outcome = await run_browse(
+        session, "just look", provider, vision=vision, vision_first=True
+    )
 
     assert outcome.success is True
     assert vision.calls == 1               # tried first...
@@ -2036,7 +2914,9 @@ async def test_vision_circuit_breaker_stops_retrying_a_dead_provider():
     ])
     vision = FakeVision(["junk"] * 10)      # a dead key never returns an action
 
-    outcome = await run_browse(session, "look around", provider, vision=vision)
+    outcome = await run_browse(
+        session, "look around", provider, vision=vision, vision_first=True
+    )
 
     assert outcome.success is True
     # tripped after the limit — the later steps never paid the doomed call
@@ -2049,7 +2929,7 @@ async def test_a_vision_point_over_no_element_never_fabricates_a_click():
     is unusable and the step falls to the text provider; with that also junk,
     the loop stops honestly. Nothing is ever acted on."""
     session = FakeSession(VisionPage([_vpage([_vel(1, (400, 400, 100, 100), name="")])]))
-    provider = FakeProvider(["not json"])
+    provider = FakeProvider(["not json", "still not json"])  # incl. the one retry
     vision = FakeVision(['{"action":"click","x":0.9,"y":0.9}'])  # (900,900) — outside the box
 
     outcome = await run_browse(session, "stuck", provider, vision=vision)
@@ -2079,3 +2959,952 @@ async def test_new_motion_and_element_actions_execute():
 
     assert outcome.success is True
     assert any(k == "select" for (_i, _idx, k, _v) in session.page.acted)
+
+
+# -------------------------------------- filter/facet surfacing (the daraz.pk fix)
+# A chrome-heavy marketplace buries its filter controls below the ~80-element
+# render window; observe() DID stamp them, so the fix surfaces them from the FULL
+# list by their true index. These pin: the intent detector, that a buried filter
+# control is surfaced (and a plain media goal surfaces nothing), the goal-specific
+# ranking, that the block carries the TRUE stamped index, and the end-to-end wiring
+# into the decision prompt + the guidance append.
+
+def _filler(n, start=1):
+    """n navigation-chrome links whose names share NO filter vocabulary — they
+    fill the render window (like a marketplace header/rail) so a control after
+    them lands OUTSIDE it. Long names so ~120 of them exceed the 6000-char budget."""
+    return [
+        browser_loop.dom_observe.Element(
+            index=start + i, role="link",
+            name=f"Navigation menu item number {start + i} placeholder link",
+        )
+        for i in range(n)
+    ]
+
+
+def test_wants_filtering_fires_on_a_filter_goal_not_a_media_goal():
+    wf = browser_loop._wants_filtering
+    assert wf("on daraz.pk find items with price under 10000")
+    assert wf("show me the cheapest phones")
+    assert wf("sort the results by price low to high")
+    assert wf("filter by Samsung brand and 4 star rating")
+    assert wf("laptops under Rs. 50000")
+    # media / plain-search goals must stay OFF (guidance + block never fire)
+    assert not wf("play the latest episode of one piece on anikoto.cz")
+    assert not wf("search jane by the long faces on youtube")
+    assert not wf("open my linkedin profile")
+
+
+def test_relevant_controls_surfaces_a_buried_filter_control():
+    """A price filter stamped at index ~201 (well past the render window) is pulled
+    from the full list and surfaced — the model can act on it by index without ever
+    asking for "more"."""
+    els = _filler(200) + [
+        browser_loop.dom_observe.Element(index=201, role="input", name="Min price"),
+        browser_loop.dom_observe.Element(index=202, role="input", name="Max price"),
+        browser_loop.dom_observe.Element(index=203, role="button", name="Apply filter"),
+    ]
+    obs = _obs(els, url="https://www.daraz.pk/catalog/?q=phones")
+    # the filler really does fill the window, so the price controls are outside it
+    _, end = browser_loop.dom_observe.visible_span(obs, 0)
+    assert end < 201
+    got = browser_loop._relevant_controls("find phones under 10000", obs)
+    got_idx = {e.index for e in got}
+    assert {201, 202, 203} <= got_idx
+    # nav chrome (no filter vocabulary) is never surfaced
+    assert all(e.index >= 201 for e in got)
+
+
+def test_relevant_controls_empty_for_a_plain_media_goal():
+    """No filter intent → nothing surfaced, even on a huge page with filter-shaped
+    controls: the block and guidance must never fire for a play/watch goal."""
+    els = _filler(200) + [
+        browser_loop.dom_observe.Element(index=201, role="input", name="Min price"),
+    ]
+    obs = _obs(els)
+    assert browser_loop._relevant_controls("play jane by the long faces", obs) == []
+
+
+def test_relevant_controls_ranks_the_goal_specific_facet_first():
+    """Goal-word overlap outranks a generic filter-vocabulary hit: 'sort by price'
+    ranks a Sort control above an unrelated Brand filter."""
+    els = _filler(200) + [
+        browser_loop.dom_observe.Element(index=201, role="link", name="Brand filter"),
+        browser_loop.dom_observe.Element(index=202, role="combobox", name="Sort by price"),
+    ]
+    obs = _obs(els)
+    got = browser_loop._relevant_controls("sort the phones by price", obs)
+    assert got[0].index == 202  # the Sort control the goal named comes first
+
+
+def test_relevant_block_carries_the_true_stamped_index():
+    """The rendered block reuses Element.render(), so a surfaced control shows its
+    real index — exactly what the model answers with."""
+    control = browser_loop.dom_observe.Element(index=207, role="input", name="Max price")
+    block = browser_loop._relevant_block([control])
+    assert "RELEVANT CONTROLS" in block
+    assert "[207]" in block and "Max price" in block
+    assert browser_loop._relevant_block([]) == ""
+
+
+class _RecordingProvider(FakeProvider):
+    """Captures the last decision prompt so we can assert what the model saw."""
+
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.last_prompt = ""
+
+    async def chat(self, messages, temperature=0.7, max_tokens=None):
+        self.last_prompt = " ".join(getattr(m, "content", "") for m in messages)
+        return await super().chat(messages, temperature=temperature, max_tokens=max_tokens)
+
+
+async def test_filter_goal_injects_relevant_controls_and_guidance_into_the_prompt():
+    """End to end: a filter goal on a page with a buried price control makes the
+    decision prompt carry BOTH the RELEVANT CONTROLS block (with the true index)
+    and the filter guidance — no search box, so the fast path defers and _decide
+    runs. A plain media goal gets neither."""
+    els = (
+        [_el(i, role="link", name=f"Navigation menu item number {i} placeholder link")
+         for i in range(1, 201)]
+        + [_el(201, role="input", name="Min price"),
+           _el(202, role="input", name="Max price"),
+           _el(203, role="button", name="Apply filter")]
+    )
+    page = ScriptedPage([_page(els, url="https://www.daraz.pk/catalog/?q=phones")])
+    session = FakeSession(page)
+    provider = _RecordingProvider(['{"action":"done","reason":"filtered"}'])
+
+    await run_browse(session, "on daraz.pk find phones under 10000", provider)
+
+    assert provider.calls == 1  # no search box → fast path deferred to the model
+    assert "RELEVANT CONTROLS" in provider.last_prompt
+    assert "[201]" in provider.last_prompt  # the buried Min-price control, by index
+    assert "slider you can only drag" in provider.last_prompt  # guidance
+
+    # A plain media goal on the SAME page gets neither block nor guidance.
+    page2 = ScriptedPage([_page(els, url="https://www.daraz.pk/catalog/?q=phones")])
+    prov2 = _RecordingProvider(['{"action":"done","reason":"ok"}'])
+    await run_browse(FakeSession(page2), "play a phone review video", prov2)
+    assert "RELEVANT CONTROLS" not in prov2.last_prompt
+    assert "slider you can only drag" not in prov2.last_prompt
+
+
+# ============================================================================
+# STRUCTURED EXTRACTION + working memory (Skyvern/Atlas parity, DOM-only)
+# ----------------------------------------------------------------------------
+# `extract` reads structured data off the current page into working memory the
+# loop carries across steps and returns in the outcome — the missing half of
+# "add the highest-rated item under 10k to the cart" (gather → compare → act)
+# and of list/research goals. Strictly READ (one LLM call, touches nothing).
+# ============================================================================
+
+
+def _text_obs(page_text, url="https://shop.test/"):
+    return browser_loop.dom_observe.Observation(
+        observation_id="o", url=url, title="", element_total=0,
+        elements=[], page_text=page_text, text_truncated=False,
+    )
+
+
+def test_parse_action_accepts_extract_with_and_without_fields():
+    a = _parse_action('{"action":"extract","fields":["name","price","rating"]}')
+    assert a == {"action": "extract", "fields": ["name", "price", "rating"]}
+    # No fields → an empty list (the extractor picks the page's key fields).
+    b = _parse_action('{"action":"extract"}')
+    assert b == {"action": "extract", "fields": []}
+    # Junk fields are dropped; the field count is bounded.
+    c = _parse_action('{"action":"extract","fields":["a","",null,"b"]}')
+    assert c == {"action": "extract", "fields": ["a", "b"]}
+
+
+def test_coerce_record_keeps_scalars_stringifies_nesting_drops_null():
+    rec = _coerce_record(
+        {"name": "Phone A", "price": 100, "in_stock": True, "meta": {"x": 1}, "gap": None, "": "z"}
+    )
+    assert rec["name"] == "Phone A"
+    assert rec["price"] == 100
+    assert rec["in_stock"] is True
+    assert isinstance(rec["meta"], str)        # nested → stringified
+    assert "gap" not in rec                     # null dropped
+    assert "" not in rec                        # blank key dropped
+    assert _coerce_record("not a dict") is None
+    assert _coerce_record({"gap": None}) is None  # nothing usable → None
+
+
+def test_extract_what_uses_fields_or_a_default():
+    assert "name, price" in _extract_what(["name", "price"])
+    assert "products" in _extract_what([])       # default names likely items
+
+
+async def test_extract_data_pulls_records_from_the_page():
+    obs = _text_obs("Phone A — $100 — 4.5 stars\nPhone B — $200 — 4.8 stars")
+    provider = FakeProvider(['[{"name":"Phone A","price":"$100","rating":"4.5"},'
+                             '{"name":"Phone B","price":"$200","rating":"4.8"}]'])
+    records, note = await _extract_data(obs, ["name", "price", "rating"], provider)
+    assert note == ""
+    assert records == [
+        {"name": "Phone A", "price": "$100", "rating": "4.5"},
+        {"name": "Phone B", "price": "$200", "rating": "4.8"},
+    ]
+    assert provider.calls == 1
+
+
+async def test_extract_data_no_page_text_makes_no_call():
+    provider = FakeProvider(['[{"x":1}]'])
+    records, note = await _extract_data(_text_obs(""), [], provider)
+    assert records == []
+    assert provider.calls == 0          # nothing to read → never bothers the LLM
+    assert "no readable text" in note
+
+
+# --------------------------------------------------------- structural-first
+# THE LIVE DEFECT (2026-07-26): on daraz.pk's real results page `extract` returned
+# ZERO records three times running and the run died reporting "the page didn't
+# respond". The page had responded; the extractor was reading a 4000-char prose
+# prefix (header/nav/filters) while the 158 product cards sat in the ELEMENT LIST
+# it never looked at. app/browser/extract.py reads that list in code — so a grid
+# now costs no LLM call at all, and cannot be fabricated.
+def _grid_obs(url="https://www.daraz.pk/catalog/?q=yonex"):
+    def card(name, href):
+        return browser_loop.dom_observe.Element(
+            index=len(cards) + 1, role="item", name=name[:120], name_full=name, href=href
+        )
+
+    cards = []
+    for name, href in (
+        ("Yonex Astrox 99 Pro Badminton Racket Rs. 24,999 4.7 (128)", "/p/astrox"),
+        ("Yonex Nanoflare 001 Feel Racket Rs. 8,499 4.2 (31)", "/p/nanoflare"),
+        ("Yonex Arcsaber 11 Pro Racket Rs. 41,500 4.9 (12)", "/p/arc11"),
+    ):
+        cards.append(card(name, href))
+    return browser_loop.dom_observe.Observation(
+        observation_id="o", url=url, title="Buy Yonex badminton racket Online",
+        element_total=len(cards), elements=cards,
+        page_text="Daraz nav, categories, filters — and no products.",
+        text_truncated=True,
+        text_full="Daraz nav, categories, filters — and no products.",
+    )
+
+
+async def test_extract_reads_a_results_grid_with_no_llm_call_at_all():
+    provider = FakeProvider(['[{"never":"used"}]'])
+    records, note = await _extract_data(_grid_obs(), ["name", "price"], provider)
+    assert provider.calls == 0            # the whole point: the grid is read in code
+    assert note == ""
+    assert records == [
+        {"name": "Yonex Astrox 99 Pro Badminton Racket", "price": "Rs. 24,999"},
+        {"name": "Yonex Nanoflare 001 Feel Racket", "price": "Rs. 8,499"},
+        {"name": "Yonex Arcsaber 11 Pro Racket", "price": "Rs. 41,500"},
+    ]
+
+
+async def test_a_field_the_structural_reader_cannot_parse_still_asks_the_llm():
+    """`seller` is not something a text pattern can find, so the LLM runs — the
+    structural rows exist but do not answer the question that was asked."""
+    provider = FakeProvider(['[{"name":"Astrox","price":"Rs. 24,999","seller":"YonexPK"}]'])
+    records, _ = await _extract_data(_grid_obs(), ["name", "price", "seller"], provider)
+    assert provider.calls == 1
+    assert records == [{"name": "Astrox", "price": "Rs. 24,999", "seller": "YonexPK"}]
+
+
+async def test_structural_rows_survive_an_llm_path_that_finds_nothing():
+    """Evidence is not a deletion — the same rule the truncated-array salvage and
+    the browse tool's own failure path follow. Real rows beat reporting nothing."""
+    records, note = await _extract_data(
+        _grid_obs(), ["name", "price", "seller"], FakeProvider(["not json at all"])
+    )
+    assert note == ""
+    assert [r["price"] for r in records] == ["Rs. 24,999", "Rs. 8,499", "Rs. 41,500"]
+
+
+async def test_the_llm_path_is_shown_the_element_list_and_the_full_prose():
+    """The other half of the defect: even when the LLM path runs, it used to see
+    only the prompt-clipped prose. It now sees the items AND the whole text."""
+    obs = browser_loop.dom_observe.Observation(
+        observation_id="o", url="https://shop.test/", title="",
+        element_total=1,
+        elements=[browser_loop.dom_observe.Element(
+            index=1, role="item", name="Widget", name_full="Widget Deluxe Rs. 100"
+        )],
+        page_text="CLIPPED PROSE", text_truncated=True,
+        text_full="CLIPPED PROSE plus THE REST OF THE PAGE",
+    )
+    provider = FakeProvider(['[{"seller":"x"}]'])
+    await _extract_data(obs, ["seller"], provider)
+    prompt = provider.prompts[-1]
+    assert "Widget Deluxe Rs. 100" in prompt      # the element list, un-clipped
+    assert "THE REST OF THE PAGE" in prompt       # the prose past the prompt budget
+
+
+async def test_extract_data_junk_reply_is_a_clean_empty():
+    obs = _text_obs("some content")
+    records, note = await _extract_data(obs, [], FakeProvider(["not json at all"]))
+    assert records == []
+    assert note                          # a note, not a crash
+
+
+async def test_extract_data_caps_the_record_count():
+    obs = _text_obs("lots of rows")
+    big = "[" + ",".join(f'{{"n":{i}}}' for i in range(_EXTRACT_MAX_RECORDS + 20)) + "]"
+    records, _ = await _extract_data(obs, [], FakeProvider([big]))
+    assert len(records) == _EXTRACT_MAX_RECORDS
+
+
+def test_memory_block_renders_gathered_items_and_is_empty_when_none():
+    assert _memory_block([]) == ""
+    block = _memory_block([{"name": "A", "price": "$1"}, {"name": "B", "price": "$2"}])
+    assert "DATA YOU HAVE GATHERED (2 item(s)" in block
+    assert "name: A, price: $1" in block
+    assert "name: B, price: $2" in block
+
+
+async def test_extract_gathers_into_the_outcome_and_working_memory():
+    """End to end: the model extracts, then finishes. The gathered records reach
+    outcome.extracted; the second decision prompt carries the working-memory
+    block so the model can compare before finishing."""
+    page = ScriptedPage([{
+        "url": "https://shop.test/phones", "title": "Phones",
+        "elements": [_el(1, role="link", name="Phone A"), _el(2, role="link", name="Phone B")],
+        "total": 2,
+        "text": "Phone A $100 4.5 stars\nPhone B $200 4.8 stars",
+    }])
+    provider = _RecordingProvider([
+        '{"action":"extract","fields":["name","price"]}',       # decide #1
+        '[{"name":"Phone A","price":"$100"},{"name":"Phone B","price":"$200"}]',  # the extract
+        '{"action":"done","reason":"compared them"}',           # decide #2
+    ])
+    outcome = await run_browse(FakeSession(page), "list the phones on shop.test with prices", provider)
+
+    assert outcome.success
+    assert outcome.extracted == [
+        {"name": "Phone A", "price": "$100"},
+        {"name": "Phone B", "price": "$200"},
+    ]
+    # decide #1 + the extract call + decide #2 = 3 provider calls.
+    assert provider.calls == 3
+    # The FINAL decision prompt saw the gathered data (working memory).
+    assert "DATA YOU HAVE GATHERED" in provider.last_prompt
+    assert "Phone A" in provider.last_prompt
+
+
+# ---------------------------------------- the page-quality gate (2026-07-26)
+#
+# THE LIVE DEFECT. The loop handed the model whatever the observer returned and
+# asked what to do next. Live, that meant asking about daraz.pk's results page
+# reporting ZERO elements, and about eBay's 2-element Imperva bot wall titled
+# "Pardon Our Interruption…" — which detect_challenge missed entirely, because
+# its vendor list was Cloudflare-shaped. The model shrugged at the wall, and the
+# whole browse died on the shrug.
+#
+# What KIND of page this is, is knowable in code. Deciding it first costs
+# nothing and is what stops a decision being spent on a page that has no answer.
+def test_assess_page_reads_a_bot_wall():
+    """The eBay page, frozen. Structural (tiny) AND vendor prose — both required."""
+    wall = browser_loop.dom_observe.Observation(
+        observation_id="o", url="https://www.ebay.com/sch/i.html", title="Pardon Our Interruption...",
+        element_total=2, elements=[], text_truncated=False,
+        page_text=(
+            "Pardon Our Interruption. As you were browsing, something about your "
+            "browser made us think you were a bot. Reference #18.91"
+        ),
+    )
+    assert browser_loop.assess_page(wall) == "interstitial"
+    assert browser_loop.detect_challenge(wall) is not None
+
+
+def test_a_real_page_that_merely_mentions_a_wall_word_is_not_a_wall():
+    """The conjunction is what makes reading page prose acceptable here: a real
+    page can say anything, and only a STRUCTURALLY tiny one is ever tested."""
+    article = browser_loop.dom_observe.Observation(
+        observation_id="o", url="https://news.test/a", title="How DataDome works",
+        element_total=40, elements=[], text_truncated=False,
+        page_text="Pardon our interruption " + ("real article body. " * 200),
+    )
+    assert browser_loop.assess_page(article) == "ready"
+    assert browser_loop.detect_challenge(article) is None
+
+
+def test_assess_page_distinguishes_empty_from_thin_from_ready():
+    def obs(total, text=""):
+        return browser_loop.dom_observe.Observation(
+            observation_id="o", url="https://x.test/", title="T",
+            element_total=total, elements=[], page_text=text, text_truncated=False,
+        )
+
+    assert browser_loop.assess_page(obs(0)) == "empty"
+    assert browser_loop.assess_page(obs(2)) == "thin"
+    assert browser_loop.assess_page(obs(30)) == "ready"
+
+
+async def test_an_empty_page_is_re_read_before_a_decision_is_spent():
+    """THE daraz.pk STEP. A fully-navigated results page observed with ZERO
+    elements. Looking again costs a second; asking the model about nothing costs
+    a step, an LLM call, and usually the run."""
+    pages = ScriptedPage([
+        _page([], url="https://www.daraz.pk/catalog/?q=racket", title="Rackets"),
+        _page([_el(1, role="link", name="Yonex Astrox")],
+              url="https://www.daraz.pk/catalog/?q=racket", title="Rackets"),
+    ])
+    provider = FakeProvider(['{"action":"done","reason":"found it"}'])
+
+    outcome = await run_browse(FakeSession(pages), "find rackets", provider)
+
+    assert outcome.success is True
+    # ONE decision: the empty observation never reached the model.
+    assert provider.calls == 1
+
+
+async def test_a_thin_page_is_NOT_re_read():
+    """Deliberately narrow. A 1-2 element page is an ordinary shape — a redirect
+    stub, a bare search box, a 'continue' page — and 57 tests in this suite use
+    single-element pages, which is a fair sample of how normal that is. Only
+    ZERO is unambiguous enough to spend time on."""
+    page = ScriptedPage([_page([_el(1, role="link", name="Continue")])])
+    provider = FakeProvider(['{"action":"done","reason":"ok"}'])
+
+    outcome = await run_browse(FakeSession(page), "continue", provider)
+
+    assert outcome.success is True
+    assert provider.calls == 1
+
+
+async def test_re_reading_an_empty_page_is_bounded():
+    """A page that is genuinely empty costs a couple of seconds, not the run."""
+    pages = ScriptedPage([_page([], url="https://void.test/", title="V")])
+    provider = FakeProvider(['{"action":"done","reason":"nothing here"}'])
+
+    outcome = await run_browse(FakeSession(pages), "look", provider)
+
+    # It gave up re-reading and asked the model, which is the honest end state.
+    assert provider.calls == 1
+    assert outcome is not None
+
+
+# ------------------------------------------- the 16-extract spin (2026-07-26)
+#
+# THE LIVE DEFECT. On eBay's real results page the model emitted the IDENTICAL
+# {'action': 'extract', 'fields': ['name','price','shipping']} on sixteen
+# consecutive steps, burning the whole 25-action budget and five minutes of wall
+# clock. Nothing stopped it. The reason was PLACEMENT, not policy: both guards
+# lived ~200 lines below, and `extract` (like `more`) `continue`s before reaching
+# either — so it was structurally exempt from the machinery meant to bound it.
+# It also reset consecutive_failures unconditionally, scoring a read that
+# returned NOTHING as a success, so the failure cap could not fire either.
+#
+# The decision prompt already said "do not repeat an action that did not change
+# the page". It was ignored sixteen times. A rule with nothing to check it is a
+# suggestion.
+async def test_a_repeated_extract_on_an_unchanged_page_is_refused():
+    """THE INCIDENT, frozen. Sixteen identical extracts must not cost sixteen
+    steps."""
+    page = ScriptedPage([{
+        "url": "https://www.ebay.com/sch/i.html?_nkw=racket", "title": "Rackets",
+        "elements": [_el(1, role="link", name="Yonex Astrox 88D")],
+        "total": 1,
+        "text": "Yonex Astrox 88D Pro $94.00 Free shipping",
+    }])
+    # Alternating: a decision, then the extraction reply it triggers.
+    script = []
+    for _ in range(16):
+        script.append('{"action":"extract","fields":["name","price","shipping"]}')
+        script.append('[{"name":"Yonex Astrox 88D","price":"$94.00"}]')
+    provider = FakeProvider(script)
+
+    outcome = await run_browse(
+        FakeSession(page), "extract the listings and say which is cheapest", provider
+    )
+
+    assert outcome.success is False
+    # It stopped WELL short of the 16 the live run spent. Each extract costs two
+    # provider calls (decide + extract), so the old behaviour was 32.
+    assert provider.calls < 14, f"still spinning: {provider.calls} provider calls"
+    # And the evidence it DID gather survives — that is the salvage contract.
+    assert outcome.extracted
+
+
+async def test_a_refused_extract_tells_the_model_why():
+    """Refusing beats stopping only if the model is TOLD. The refusal lands in
+    `history`, which is rendered into the next decision prompt, so the model can
+    route around a dead end instead of re-choosing it."""
+    page = ScriptedPage([{
+        "url": "https://shop.test/x", "title": "Shop",
+        "elements": [_el(1, role="link", name="A")],
+        "total": 1, "text": "A $1",
+    }])
+    provider = _RecordingProvider([
+        '{"action":"extract","fields":["name"]}', '[{"name":"A"}]',
+        '{"action":"extract","fields":["name"]}', '[{"name":"A"}]',
+        '{"action":"extract","fields":["name"]}', '[{"name":"A"}]',
+        '{"action":"done","reason":"got it"}',
+    ])
+    await run_browse(FakeSession(page), "list the items", provider)
+
+    assert "refused" in provider.last_prompt
+    assert "already extracted this exact page" in provider.last_prompt
+
+
+async def test_two_different_extractions_are_not_the_same_action():
+    """The signature is keyed on the FIELDS, so asking for different data is not
+    a repeat. Sorted, so field order alone is never a difference."""
+    page = _page([_el(1, name="A")])
+    obs = browser_loop.dom_observe.Observation(
+        observation_id="o", url="https://x.test/", title="T", element_total=0,
+        elements=[], page_text="", text_truncated=False,
+    )
+    a = browser_loop._action_signature({"action": "extract", "fields": ["name", "price"]}, obs)
+    b = browser_loop._action_signature({"action": "extract", "fields": ["price", "name"]}, obs)
+    c = browser_loop._action_signature({"action": "extract", "fields": ["rating"]}, obs)
+    assert a == b, "field ORDER is not a difference"
+    assert a != c, "different fields are a different action"
+
+
+async def test_an_extract_that_returns_nothing_counts_as_a_failure():
+    """A read that gathered NOTHING used to reset the failure counter, scoring
+    it as a success — so no number of fruitless reads could ever trip the cap."""
+    page = ScriptedPage([{
+        "url": "https://empty.test/", "title": "Empty",
+        "elements": [_el(1, name="A"), _el(2, name="B")],
+        "total": 2, "text": "nothing structured here at all",
+    }])
+    # Each extract returns an empty array. Vary the fields so the REPEAT guard
+    # is not what stops it — the failure counter must be.
+    provider = FakeProvider([
+        '{"action":"extract","fields":["name"]}', '[]',
+        '{"action":"extract","fields":["price"]}', '[]',
+        '{"action":"extract","fields":["rating"]}', '[]',
+        '{"action":"extract","fields":["seller"]}', '[]',
+    ])
+    outcome = await run_browse(FakeSession(page), "extract the items", provider)
+
+    assert outcome.success is False
+    assert outcome.extracted == []
+    # And the message names the layer that FAILED. It used to say "several actions
+    # in a row failed on this page" / "the page didn't respond" — which is how the
+    # 2026-07-26 investigation was sent to the browser while the reader was the
+    # thing that was blind. A stop must be self-diagnosing.
+    assert "read this page" in outcome.error
+    assert "element list" in outcome.error
+    assert "didn't respond" not in outcome.error
+
+
+async def test_a_page_that_read_empty_is_not_offered_the_read_again():
+    """STEER, don't just count. The repeat guard refuses a duplicate extract — but
+    only AFTER it happens, and each attempt is a real LLM call (~15s live). The
+    daraz run spent three of them re-reading a page that had already answered
+    "nothing". The model cannot choose what it is not shown, so the capability is
+    withheld for that page fingerprint."""
+    page = ScriptedPage([{
+        "url": "https://empty.test/", "title": "Empty",
+        "elements": [_el(1, role="link", name="somewhere else", href="/x")],
+        "total": 1, "text": "no items at all on this page",
+    }])
+    provider = PromptRecordingProvider([
+        '{"action":"extract","fields":["name"]}', "[]",
+        '{"action":"done","reason":"nothing here"}',
+    ])
+
+    await run_browse(FakeSession(page), "extract the items", provider)
+
+    # First decision was offered the read; the one after the empty read was not.
+    assert '"action": "extract"' in provider.prompts[0]
+    assert '"action": "extract"' not in provider.prompts[-1]
+
+
+async def test_a_CHANGED_page_gets_the_read_back():
+    """The withholding is keyed on the page fingerprint, not the run — page 2 of a
+    listing is a genuinely new place to read."""
+    page = ScriptedPage([
+        {"url": "https://shop.test/p1", "title": "Page 1",
+         "elements": [_el(1, role="link", name="next page", href="/p2")],
+         "total": 1, "text": "page one has nothing structured"},
+        {"url": "https://shop.test/p2", "title": "Page 2",
+         "elements": [_el(1, role="item", name="Widget One Deluxe Rs. 100"),
+                      _el(2, role="item", name="Widget Two Deluxe Rs. 200")],
+         "total": 2, "text": "page two"},
+    ])
+    provider = PromptRecordingProvider([
+        '{"action":"extract","fields":["name"]}', "[]",
+        '{"action":"click","index":1}',
+        '{"action":"extract","fields":["name","price"]}',
+        '{"action":"done","reason":"got them"}',
+    ])
+
+    outcome = await run_browse(FakeSession(page), "extract the widgets", provider)
+
+    assert '"action": "extract"' in provider.prompts[-1]     # offered again on page 2
+    assert len(outcome.extracted) == 2                        # and it worked
+
+
+async def test_the_same_action_on_a_CHANGED_page_is_not_a_repeat():
+    """The guard is scoped to a page FINGERPRINT — extracting page 1 then page 2
+    of a listing is normal work, not a spin."""
+    pages = ScriptedPage([
+        {"url": "https://shop.test/p1", "title": "Page 1",
+         "elements": [_el(1, role="link", name="Next", href="/p2")],
+         "total": 1, "text": "Phone A $100"},
+        {"url": "https://shop.test/p2", "title": "Page 2",
+         "elements": [_el(1, role="link", name="Prev", href="/p1")],
+         "total": 1, "text": "Phone B $200"},
+    ])
+    provider = FakeProvider([
+        '{"action":"extract","fields":["name","price"]}', '[{"name":"Phone A"}]',
+        '{"action":"click","index":1}',
+        '{"action":"extract","fields":["name","price"]}', '[{"name":"Phone B"}]',
+        '{"action":"done","reason":"both pages"}',
+    ])
+    outcome = await run_browse(FakeSession(pages), "list every phone", provider)
+
+    assert outcome.success is True, f"a legitimate second extract was refused: {outcome.error}"
+    assert len(outcome.extracted) == 2
+
+
+def test_the_fingerprint_ignores_a_ticking_counter():
+    """Prose length is BUCKETED, not exact. A live clock or price ticker would
+    otherwise move the hash every step and silently disable the guard on exactly
+    the busy commercial pages that need it."""
+    def obs_with(text):
+        return browser_loop.dom_observe.Observation(
+            observation_id="o", url="https://x.test/", title="T", element_total=0,
+            elements=[], page_text=text, text_truncated=False,
+        )
+
+    base = "x" * 1000
+    assert browser_loop._page_fingerprint(obs_with(base)) == \
+        browser_loop._page_fingerprint(obs_with(base + "12:04:31"))
+    # A real content change still moves it.
+    assert browser_loop._page_fingerprint(obs_with(base)) != \
+        browser_loop._page_fingerprint(obs_with(base + "y" * 500))
+
+
+async def test_extract_action_offered_in_read_not_commit_mode():
+    """The extract action + its rule appear in a read-mode decision prompt and are
+    absent in commit mode (a commit task fills a specific form, it does not
+    gather)."""
+    page = ScriptedPage([_page(
+        [_el(1, role="link", name="A result link"), _el(2, role="button", name="Open")],
+        url="https://shop.test/",
+    )])
+    prov = _RecordingProvider(['{"action":"done","reason":"ok"}'])
+    await run_browse(FakeSession(page), "find something on shop.test", prov)
+    assert '"action": "extract"' in prov.last_prompt
+
+    page2 = ScriptedPage([_page(
+        [_el(1, role="textbox", name="Name"), _el(2, role="button", name="Submit",
+             form={"method": "POST", "submit": True, "search": False})],
+        url="https://shop.test/contact",
+    )])
+    prov2 = _RecordingProvider(['{"action":"done","reason":"ok"}'])
+    await run_browse(FakeSession(page2), "fill the contact form on shop.test", prov2, commit=True)
+    assert '"action": "extract"' not in prov2.last_prompt
+
+
+# ----------------------------------------------------- drag / range-slider (#2)
+# The one gesture the vocabulary lacked and vision could not add (vision LOCATES
+# a point for a click; there is no drag). Two forms: slide a range-slider handle
+# to a fraction of its track, or drop one element onto another. Read-safe (its
+# request is governed by the interceptor like a click), so it needs no approval;
+# a drag over a verification widget is refused like any other touch.
+def test_parse_action_accepts_drag_forms():
+    assert _parse_action('{"action":"drag","index":2,"to_fraction":0.3}') == {
+        "action": "drag", "index": 2, "axis": "x", "to_fraction": 0.3
+    }
+    assert _parse_action('{"action":"drag","index":2,"to_index":5}') == {
+        "action": "drag", "index": 2, "axis": "x", "to_index": 5
+    }
+    assert _parse_action('{"action":"drag","index":2,"to_fraction":0.9,"axis":"y"}') == {
+        "action": "drag", "index": 2, "axis": "y", "to_fraction": 0.9
+    }
+    # to_index wins when both are present (dropping onto an element is explicit).
+    assert _parse_action('{"action":"drag","index":2,"to_index":5,"to_fraction":0.3}')["to_index"] == 5
+    # a percentage-style fraction normalizes through _as_frac (30 → 0.3).
+    assert _parse_action('{"action":"drag","index":1,"to_fraction":30}')["to_fraction"] == 0.3
+    # missing target / bad index → None (the loop stops honestly).
+    assert _parse_action('{"action":"drag","index":1}') is None
+    assert _parse_action('{"action":"drag","to_fraction":0.5}') is None
+    assert _parse_action('{"action":"drag","index":"x","to_fraction":0.5}') is None
+
+
+class _DragRecordingSession(FakeSession):
+    def __init__(self, page):
+        super().__init__(page)
+        self.dragged = []
+
+    async def drag(self, obs, index, *, to_index=None, to_fraction=None, axis="x"):
+        self.dragged.append((index, to_index, to_fraction, axis))
+        return True, ""
+
+
+def _drag_obs(*, challenge=None):
+    from app.core import dom_observe
+
+    return dom_observe.Observation(
+        observation_id="o", url="https://shop.test/catalog", title="",
+        elements=[
+            dom_observe.Element(index=1, role="slider", name="Min price", rect=(120, 410, 20, 40)),
+            dom_observe.Element(index=2, role="listitem", name="Item", rect=(600, 200, 120, 40)),
+        ],
+        element_total=2, page_text="", text_truncated=False, challenge=challenge,
+    )
+
+
+async def test_act_drag_to_fraction_delegates_to_the_session():
+    session = _DragRecordingSession(ScriptedPage([_page([_el(1)])]))
+    ok, note = await browser_loop._act(
+        session, _drag_obs(), {"action": "drag", "index": 1, "to_fraction": 0.4, "axis": "x"}
+    )
+    assert ok and note == ""
+    assert session.dragged == [(1, None, 0.4, "x")]
+
+
+async def test_act_drag_to_index_passes_both_endpoints():
+    session = _DragRecordingSession(ScriptedPage([_page([_el(1), _el(2)])]))
+    ok, _ = await browser_loop._act(
+        session, _drag_obs(), {"action": "drag", "index": 1, "to_index": 2, "axis": "x"}
+    )
+    assert ok and session.dragged == [(1, 2, None, "x")]
+
+
+async def test_act_refuses_a_drag_over_a_challenge_zone():
+    """The NO-TOUCH backstop covers drag too — a handle overlapping a
+    verification widget's box is never dragged, and the session is never asked."""
+    session = _DragRecordingSession(ScriptedPage([_page([_el(1)])]))
+    obs = _drag_obs(challenge=_embedded_challenge())  # zone (100,400,304,78) overlaps [1]
+    ok, note = await browser_loop._act(
+        session, obs, {"action": "drag", "index": 1, "to_fraction": 0.5}
+    )
+    assert ok is False and "verification widget" in note
+    assert session.dragged == []
+
+
+async def test_drag_target_index_off_page_is_refused():
+    """A drag whose DROP target is not a listed element is refused at decode —
+    the loop stops rather than dropping onto whatever happens to be there."""
+    page = ScriptedPage([_page([_el(1, role="listitem", name="Item")], url="https://shop.test/")])
+    provider = _RecordingProvider(['{"action":"drag","index":1,"to_index":99}'])
+    outcome = await run_browse(FakeSession(page), "rearrange the items on shop.test", provider)
+    assert outcome.success is False
+    assert "safe next action" in (outcome.error or "")
+
+
+async def test_drag_action_offered_in_read_not_commit_mode():
+    page = ScriptedPage([_page([_el(1, role="slider", name="Price")], url="https://shop.test/")])
+    prov = _RecordingProvider(['{"action":"done","reason":"ok"}'])
+    await run_browse(FakeSession(page), "narrow the results on shop.test", prov)
+    assert '"action": "drag"' in prov.last_prompt
+
+    page2 = ScriptedPage([_page(
+        [_el(1, role="textbox", name="Name"), _el(2, role="button", name="Submit",
+             form={"method": "POST", "submit": True, "search": False})],
+        url="https://shop.test/contact",
+    )])
+    prov2 = _RecordingProvider(['{"action":"done","reason":"ok"}'])
+    await run_browse(FakeSession(page2), "fill the contact form on shop.test", prov2, commit=True)
+    assert '"action": "drag"' not in prov2.last_prompt
+
+
+# --------------------------- session.drag geometry (the real mouse-drag method)
+class _FakeMouse:
+    def __init__(self):
+        self.events = []
+
+    async def move(self, x, y, steps=1):
+        self.events.append(("move", round(x, 1), round(y, 1), steps))
+
+    async def down(self):
+        self.events.append(("down",))
+
+    async def up(self):
+        self.events.append(("up",))
+
+
+class _FakeDragPage:
+    def __init__(self):
+        self.mouse = _FakeMouse()
+
+
+class _FakeDragHandle:
+    def __init__(self, box, track=None):
+        self._box = box
+        self._track = track
+
+    async def bounding_box(self):
+        return self._box
+
+    async def evaluate(self, js):
+        return self._track
+
+
+class _DragSelf:
+    def __init__(self, page):
+        self.page = page
+
+    async def settle(self):
+        pass
+
+
+async def test_session_drag_to_fraction_slides_along_the_track(monkeypatch):
+    from app.core import dom_observe
+
+    handle = _FakeDragHandle(
+        box={"x": 100, "y": 50, "width": 20, "height": 20},
+        track={"x": 100, "y": 55, "w": 200, "h": 10},
+    )
+
+    async def fake_resolve(page, obs, index):
+        return handle
+
+    monkeypatch.setattr(dom_observe, "resolve", fake_resolve)
+    page = _FakeDragPage()
+    ok, note = await browser_session.BrowserSession.drag(
+        _DragSelf(page), _drag_obs(), 1, to_fraction=0.5, axis="x"
+    )
+    assert ok and note == ""
+    # target x = 100 + 0.5*200 = 200; y stays the handle's own center (50 + 10).
+    assert ("move", 200.0, 60.0, 12) in page.mouse.events
+    assert ("down",) in page.mouse.events and ("up",) in page.mouse.events
+    # a real down→move→up ordering
+    kinds = [e[0] for e in page.mouse.events]
+    assert kinds.index("down") < kinds.index("up")
+
+
+async def test_session_drag_to_fraction_on_the_y_axis(monkeypatch):
+    from app.core import dom_observe
+
+    handle = _FakeDragHandle(
+        box={"x": 100, "y": 50, "width": 20, "height": 20},
+        track={"x": 90, "y": 0, "w": 40, "h": 400},
+    )
+    monkeypatch.setattr(dom_observe, "resolve", lambda p, o, i: _await(handle))
+    page = _FakeDragPage()
+    ok, _ = await browser_session.BrowserSession.drag(
+        _DragSelf(page), _drag_obs(), 1, to_fraction=0.25, axis="y"
+    )
+    assert ok
+    # target y = 0 + 0.25*400 = 100; x stays the handle center (100 + 10).
+    assert ("move", 110.0, 100.0, 12) in page.mouse.events
+
+
+async def test_session_drag_without_a_track_fails_honestly(monkeypatch):
+    """A drag-only slider whose track can't be located is refused with an honest
+    note — never slid to a made-up position."""
+    from app.core import dom_observe
+
+    handle = _FakeDragHandle(box={"x": 100, "y": 50, "width": 20, "height": 20}, track=None)
+    monkeypatch.setattr(dom_observe, "resolve", lambda p, o, i: _await(handle))
+    page = _FakeDragPage()
+    ok, note = await browser_session.BrowserSession.drag(
+        _DragSelf(page), _drag_obs(), 1, to_fraction=0.5
+    )
+    assert ok is False and "track" in note
+    assert page.mouse.events == []  # nothing was dragged
+
+
+async def test_session_drag_to_index_uses_both_boxes(monkeypatch):
+    from app.core import dom_observe
+
+    src = _FakeDragHandle(box={"x": 100, "y": 100, "width": 20, "height": 20})
+    dst = _FakeDragHandle(box={"x": 400, "y": 300, "width": 40, "height": 40})
+
+    async def fake_resolve(page, obs, index):
+        return src if index == 1 else dst
+
+    monkeypatch.setattr(dom_observe, "resolve", fake_resolve)
+    page = _FakeDragPage()
+    ok, _ = await browser_session.BrowserSession.drag(
+        _DragSelf(page), _drag_obs(), 1, to_index=2
+    )
+    assert ok
+    # source center (110,110) → drop-target center (420,320).
+    assert ("move", 110.0, 110.0, 1) in page.mouse.events
+    assert ("move", 420.0, 320.0, 12) in page.mouse.events
+
+
+def _await(value):
+    async def _coro(*a, **k):
+        return value
+    return _coro()
+
+
+# ------------------------------- truncated extraction salvage (2026-07-26)
+#
+# THE LIVE DEFECT. daraz.pk's real results page carries ~13 products across 4000
+# chars of prose. The extraction reply did not fit in max_tokens, so it was cut
+# before its closing bracket — and the parser, finding no `]`, threw away the
+# ENTIRE array and reported "no structured data was found on the page" for a page
+# that plainly had it. Measured end to end: 0 records before, 10 after.
+def test_close_truncated_array_keeps_every_complete_object():
+    f = browser_loop._close_truncated_array
+    assert f('[{"a":1},{"a":2},{"a":') == '[{"a":1},{"a":2}]'
+    assert f('[{"a":1}') == '[{"a":1}]'
+
+
+def test_close_truncated_array_is_string_aware():
+    """A brace INSIDE a value must never be read as the end of an object, or the
+    salvage would happily produce invalid JSON from valid data."""
+    f = browser_loop._close_truncated_array
+    assert f('[{"n":"a}b"},{"n":"c') == '[{"n":"a}b"}]'
+    assert f('[{"n":"x\\"y"},{') == '[{"n":"x\\"y"}]'
+
+
+def test_close_truncated_array_gives_up_when_nothing_completed():
+    """Nothing finished ⇒ nothing to salvage. Returning a bare '[]' would dress a
+    total failure up as an empty page."""
+    f = browser_loop._close_truncated_array
+    assert f('[{') is None
+    assert f('[') is None
+
+
+def test_the_salvaged_prefix_is_valid_json():
+    import json
+
+    salvaged = browser_loop._close_truncated_array('[{"a":1},{"b":"}"},{"c":')
+    assert json.loads(salvaged) == [{"a": 1}, {"b": "}"}]
+
+
+async def test_a_truncated_extraction_reply_still_yields_records():
+    """End to end through _extract_data: the reply is cut mid-array, and the
+    records that did arrive must survive."""
+    obs = browser_loop.dom_observe.Observation(
+        observation_id="o", url="https://shop.test/x", title="Shop",
+        element_total=20, elements=[], text_truncated=True,
+        page_text="Phone A Rs. 100 Phone B Rs. 200 Phone C Rs. 300",
+    )
+    cut = '[{"name":"Phone A","price":"Rs. 100"},{"name":"Phone B","price":"Rs. 200"},{"name":"Pho'
+    provider = FakeProvider([cut])
+
+    records, note = await browser_loop._extract_data(obs, ["name", "price"], provider)
+
+    assert len(records) == 2, f"the salvage dropped everything: {records}"
+    assert records[0]["name"] == "Phone A"
+    assert records[1]["price"] == "Rs. 200"
+    assert note == ""
+
+
+# ===================== an optional sign-in offer is decided ONCE PER SITE
+# 2026-07-26: auth_seen holds URLs and the gate tested `obs.url not in auth_seen`,
+# but a storefront offers an account in its header on EVERY page — so answering
+# "continue as guest" on /search bought nothing the moment the loop opened
+# /products/... Live that cost two identical interrupts on one add-to-cart.
+def test_auth_offer_is_not_re_asked_on_another_page_of_the_same_site():
+    from app.browser.loop import _auth_site_decided
+
+    seen = {"https://shop.test/search?q=perfume"}
+    assert _auth_site_decided("https://shop.test/products/janan-sport", seen) is True
+    assert _auth_site_decided("https://www.shop.test/cart", seen) is True   # subdomain
+
+
+def test_auth_offer_is_still_asked_for_a_different_site():
+    from app.browser.loop import _auth_site_decided
+
+    seen = {"https://shop.test/search"}
+    assert _auth_site_decided("https://other.test/apply", seen) is False
+    assert _auth_site_decided("https://shop.test.evil.test/x", seen) is False
+
+
+def test_auth_site_decided_falls_back_to_exact_membership_on_junk():
+    from app.browser.loop import _auth_site_decided
+
+    assert _auth_site_decided("not-a-url", {"not-a-url"}) is True
+    assert _auth_site_decided("not-a-url", {"https://shop.test/x"}) is False
+    assert _auth_site_decided("https://shop.test/x", set()) is False

@@ -47,6 +47,18 @@ remedy got copied verbatim into user-facing prose a dozen times (the
 _missing_target leak), so these say what was cut and stop talking.
 
 _STEP_RESULT_CAPS["browse_page"] in rendering.py must move with these numbers.
+
+A PROMPT budget is not a CAPTURE budget (2026-07-26)
+----------------------------------------------------
+Those two budgets above bound what the DECISION MODEL READS. They used to bound
+what left the page as well, which quietly made every later reader blind to the
+same ceiling — see CAPTURE vs RENDER at the constants. The Observation now
+carries `text_full` (the prose as captured) and `Element.name_full` (the name
+before the prompt clip) alongside the rendered `page_text`/`name`. Both are CODE
+data, exactly like `rect` and `frame_id`: `render()` does not touch them, so the
+prompt, the action signature and the page fingerprint are unchanged. Anything
+that needs the whole page — `browser.extract` above all — reads the full fields;
+anything building a prompt keeps reading the clipped ones.
 """
 from __future__ import annotations
 
@@ -63,8 +75,37 @@ _NAME_MAX = 120            # one element's accessible name
 _HREF_MAX = 100
 _VALUE_MAX = 80
 
+# CAPTURE vs RENDER (2026-07-26) — they were the SAME number, and that was a bug
+# with a measured cost. `_PAGE_TEXT_BUDGET` is a PROMPT budget: how much prose the
+# decision model should read. It was also doing duty as a CAPTURE limit (the text
+# was clipped the moment it left the page), so nothing downstream could ever see
+# past it — `browser_loop._extract_data` reads `page_text` and clips it to its own
+# 9000-char ceiling, a ceiling it could never reach. Live on daraz.pk's real
+# results page: the first 4000 chars of body.innerText are header, nav, categories
+# and filters, so `extract` returned ZERO records three times running on a page
+# holding 158 product cards, and the run died reporting a page problem.
+#
+# So capture is now generous and render stays exactly as tight as it was. The
+# prompt is byte-for-byte unchanged; only code that asks for `text_full` sees more.
+_PAGE_TEXT_CAPTURE = 24000  # chars kept on the Observation for code to read
+
+# An element's name is clipped for the PROMPT (_NAME_MAX) — but a results-grid card
+# carries its title, price and rating inside one element's innerText, and cutting
+# that at 120 chars is how the data went missing. `name_full` keeps what the page
+# gave us (the in-page clip, _JS_NAME_MAX) for extraction; `name` is untouched, so
+# the rendered list, the dedupe signature and the page fingerprint do not move.
+_JS_NAME_MAX = 200         # must match the clip() in _EXTRACT_JS's nameOf()
+_NAME_FULL_MAX = 240
+
 _OBS_ATTR = "data-jarvis-obs"
 _IDX_ATTR = "data-jarvis-idx"
+
+# CROSS-FRAME OBSERVATION (2026-07-26). Bounded so a page full of ad iframes
+# cannot turn one observation into thirty CDP round-trips, and so a frame cannot
+# crowd the top document out of the element budget.
+_MAX_FRAMES = 6
+_FRAME_MIN_AREA = 60_000     # css px² ≈ 300x200 — a content frame, not a beacon
+_FRAME_ELEMENT_CAP = 40      # per frame
 
 
 class StaleObservation(RuntimeError):
@@ -93,6 +134,24 @@ class Element:
     form_submit: bool = False       # this element IS the form's submit control
     form_method: str = ""           # the form's method, uppercased ("" unknown)
     form_search: bool = False       # search-shaped form: submitting is reading
+    # WHICH DOCUMENT this element lives in (2026-07-26). "" = the top page; any
+    # other value identifies a child frame. Like `rect`, these are CODE data and
+    # are NOT rendered into the prompt, so the element budget is unchanged.
+    #
+    # `frame_id` is how resolve() knows which document to look in. `frame_url` is
+    # the base a relative href must be joined against — the loop used to join
+    # every href to the TOP page's URL, which for a frame element resolves to a
+    # different address entirely.
+    frame_id: str = ""
+    frame_url: str = ""
+    # The element's name BEFORE the prompt clip (see _NAME_FULL_MAX). CODE data
+    # like `rect`/`frame_id` — never rendered, so the element budget, the action
+    # signature and the page fingerprint are all unaffected. Read by
+    # browser.extract, which needs a product card's whole text (title + price +
+    # rating live in one card's innerText). Defaults empty so every fake element
+    # in the suite, and any older observation shape, stays valid — callers use
+    # `name_full or name`.
+    name_full: str = ""
 
     def render(self) -> str:
         line = f'[{self.index}] {self.role} "{self.name}"' if self.name else f"[{self.index}] {self.role}"
@@ -114,6 +173,12 @@ class Observation:
     element_total: int
     page_text: str
     text_truncated: bool
+    # The page's prose as CAPTURED (up to _PAGE_TEXT_CAPTURE), where `page_text`
+    # is the same prose clipped to the PROMPT budget. Defaulted so every fake
+    # Observation in the suite stays valid; readers use `text_full or page_text`.
+    # This exists because extraction was structurally unable to see past the
+    # prompt budget — see CAPTURE vs RENDER above.
+    text_full: str = ""
     # The page's viewport in CSS pixels (width, height). Lets the 15.3 vision
     # fallback convert a FRACTIONAL point (0..1, independent of screenshot
     # downscale) into the CSS-pixel space the element rects live in. (0, 0) when
@@ -298,7 +363,13 @@ _CHALLENGE_PROBE_JS = """
 # or disabled control is not actionable, and listing it spends budget to hand the
 # model a move it cannot make.
 _EXTRACT_JS = """
-(obsId) => {
+(arg) => {
+  // Argument shape is backward-tolerant on purpose: a bare string is the obsId
+  // (every pre-2026-07-26 caller, and every fake page in the suite that ignores
+  // its arguments entirely), while {obsId, base} carries an index BASE so a
+  // child frame's indices continue the top document's instead of restarting at 1.
+  const obsId = (arg && arg.obsId) || arg;
+  const base = (arg && arg.base) || 0;
   const SELECTOR = [
     'a[href]', 'button', 'input', 'select', 'textarea', 'summary',
     '[role=button]', '[role=link]', '[role=textbox]', '[role=searchbox]',
@@ -306,6 +377,28 @@ _EXTRACT_JS = """
     '[role=menuitem]', '[role=option]', '[contenteditable=""]',
     '[contenteditable=true]'
   ].join(',');
+
+  // TIER 1 — the WIDE net (2026-07-26). The strict selector above lists only
+  // semantic controls, and a modern results grid frequently has none: daraz.pk's
+  // search results are <div> cards wired to a JS router, so a fully-rendered page
+  // was observed as ZERO elements and the model was asked what to click on
+  // nothing. This tier is what makes such a page addressable. It engages ONLY
+  // when the strict pass comes back thin (see WIDE_THRESHOLD), so an ordinary
+  // page's element list is byte-for-byte what it was before.
+  const WIDE = [
+    '[onclick]', '[tabindex]:not([tabindex="-1"])',
+    '[role=listitem]', '[role=article]', '[role=gridcell]', '[role=treeitem]',
+    '[data-testid]', '[data-test]', '[data-qa]', '[data-item-id]', '[data-sku]',
+    'article',
+    'li[class*=card]', 'li[class*=item]', 'li[class*=product]',
+    'div[class*=card]', 'div[class*=item]', 'div[class*=product]',
+    'div[class*=tile]', 'div[class*=result]'
+  ].join(',');
+
+  const WIDE_THRESHOLD = 8;   // strict hits below this ⇒ engage the wide tier
+  const WIDE_MAX = 60;        // and never list more than this many of them
+  const SCAN_CAP = 40000;     // nodes visited
+  const HIT_CAP = 600;        // candidates collected
 
   const clip = (s, n) => {
     s = (s == null ? '' : String(s)).replace(/\\s+/g, ' ').trim();
@@ -360,26 +453,208 @@ _EXTRACT_JS = """
     r.top < z.y + z.h && r.top + r.height > z.y
   );
 
+  // OCCLUSION (2026-07-26). visible() answers "is this painted", never "can it
+  // actually be reached" — so an element under a cookie banner or a sticky modal
+  // was listed, the click landed on the banner, and the step was spent for
+  // nothing. The wide tier below would have multiplied those. Fails OPEN when
+  // the answer is unknowable (off-screen), because a false negative here HIDES a
+  // real control, which is the worse error.
+  // SHADOW RETARGETING, and it is not a detail — it silently hid every shadow
+  // element the first time this was written. document.elementFromPoint on the
+  // OUTER document retargets a hit inside a shadow tree to the HOST, and
+  // Node.contains does not cross shadow boundaries, so `host.contains(inner)` is
+  // false and every shadow control read as occluded by its own host. Caught by
+  // the real-browser fixture on its first run; unreachable by any string test.
+  //
+  // Two corrections: hit-test in the element's OWN root (ShadowRoot has its own
+  // elementFromPoint, which sees inside), and accept a hit that is one of el's
+  // ancestor hosts.
+  const unoccluded = (el, r) => {
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    if (cx < 0 || cy < 0 || cx > innerWidth || cy > innerHeight) return true;
+    let top = null;
+    let root = null;
+    try {
+      root = el.getRootNode ? el.getRootNode() : document;
+      const from = (root && root.elementFromPoint) ? root : document;
+      top = from.elementFromPoint(cx, cy);
+    } catch (e) { return true; }
+    if (!top || top === el) return true;
+    if (el.contains(top) || top.contains(el)) return true;
+    // Walk el's chain of shadow hosts: a hit reported as any of them is the
+    // retargeting artefact, not an overlay.
+    let node = root;
+    for (let i = 0; i < 4 && node && node.host; i++) {
+      if (node.host === top || top.contains(node.host)) return true;
+      node = node.host.getRootNode ? node.host.getRootNode() : null;
+    }
+    return false;
+  };
+
+  const eligible = (el) => {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input' && (el.getAttribute('type') || '').toLowerCase() === 'hidden') return false;
+    if (el.disabled) return false;
+    if (el.getAttribute('aria-hidden') === 'true') return false;
+    if (!visible(el)) return false;
+    const r = el.getBoundingClientRect();
+    if (inChallengeZone(r)) return false;
+    if (!unoccluded(el, r)) return false;
+    return true;
+  };
+
+  // A wide candidate has to earn its budget line. Four rules:
+  //   1. NO CONTAINERS — a card <div> wrapping a listed <a> is dropped in favour
+  //      of the <a>, which carries an href and therefore routes to the loop's
+  //      GET fast path instead of a synthetic click.
+  //   2. It must have a NAME. "[12] div" costs budget and is unactionable.
+  //   3. Box sanity — big enough to be a target, not a full-page wrapper that
+  //      merely happens to carry cursor:pointer.
+  //   4. Everything eligible() already rejects.
+  const POINTERY = (el, tag) => {
+    if (tag !== 'div' && tag !== 'li' && tag !== 'span' && tag !== 'section') return false;
+    // Lazily, and only for these tags: forcing style resolution on every node of
+    // a 40k-node page is a multi-second stall.
+    try { return getComputedStyle(el).cursor === 'pointer'; } catch (e) { return false; }
+  };
+
   document.querySelectorAll('[' + 'data-jarvis-obs' + ']').forEach((el) => {
     el.removeAttribute('data-jarvis-obs');
     el.removeAttribute('data-jarvis-idx');
   });
 
+  // THE WALK. One explicit-stack descent in DOCUMENT ORDER through the light DOM
+  // and every OPEN shadow root. querySelectorAll does not pierce shadow roots at
+  // all, so a page built from web components (Lit/Stencil/Polymer, and much of
+  // modern retail) reported zero elements no matter how well it had rendered.
+  // Shadow children are pushed LAST so they pop FIRST — immediately after their
+  // host, which is where they visually belong.
+  //
+  // attachShadow({mode:'closed'}) yields null here and is unreachable by any
+  // JavaScript, ours or Playwright's. That is a real, permanent limit.
+  // ELIGIBILITY IS APPLIED **DURING** THE WALK, and that is not a micro-
+  // optimisation — it is the difference between seeing a page and not.
+  //
+  // The first cut collected up to HIT_CAP raw selector matches and filtered
+  // afterwards. Measured on daraz.pk's real results page (2026-07-26): 1055
+  // strict matches, of which only 200 are VISIBLE — the other 855 are collapsed
+  // mega-menu panels sitting early in document order. The cap was therefore
+  // spent almost entirely on invisible nav chrome before the walk ever reached a
+  // product, and a page with 200 usable controls was observed as ELEVEN.
+  //
+  // A budget must bound useful OUTPUT, not wasted scanning. SCAN_CAP is what
+  // bounds the work.
+  const strictOk = [];
+  const wide = [];
+  const pointerOnly = new Set();
+  const stack = [document.documentElement || document.body];
+  let seen = 0;
+  while (stack.length && (strictOk.length + wide.length) < HIT_CAP && seen < SCAN_CAP) {
+    const el = stack.pop();
+    if (!el || !el.tagName) continue;
+    seen++;
+    // ONE GATE, deliberately. Classify first, then admit through a SINGLE
+    // eligible() call — so there is exactly one place an element can enter a
+    // candidate list, and the CAPTCHA no-touch guarantee (and every other
+    // eligibility rule) cannot be bypassed by a tier added later. A test pins
+    // that this stays single.
+    try {
+      let tier = -1;
+      if (el.matches(SELECTOR)) tier = 0;
+      else if (el.matches(WIDE)) tier = 1;
+      else if (POINTERY(el, el.tagName.toLowerCase())) tier = 2;
+      if (tier >= 0 && eligible(el)) {
+        if (tier === 0) {
+          strictOk.push(el);
+        } else {
+          wide.push(el);
+          if (tier === 2) pointerOnly.add(el);   // an INHERITED style, not markup
+        }
+      }
+    } catch (e) {}
+    const kids = el.children || [];
+    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    if (el.shadowRoot) {
+      const sk = el.shadowRoot.children || [];
+      for (let i = sk.length - 1; i >= 0; i--) stack.push(sk[i]);
+    }
+  }
+  let listed = strictOk;
+  if (strictOk.length < WIDE_THRESHOLD) {
+    const keep = [];
+    for (const el of wide) {
+      if (keep.length >= WIDE_MAX) break;
+      // eligible() already ran during the walk — see the note there.
+      if (!clip(nameOf(el), 120)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 24 || r.height < 16) continue;
+      if (r.width * r.height > 0.6 * innerWidth * innerHeight) continue;
+
+      // NESTING. Both directions are wrong in different situations, and which
+      // one to prefer is decided by HOW the candidate matched. Both cases were
+      // measured, not reasoned:
+      //
+      //   1. Wrapping a STRICT hit → drop, keep the control. It carries an href
+      //      and routes to the loop's GET fast path instead of a synthetic click.
+      //
+      //   2. Matched by an INHERITED pointer cursor, inside another such match →
+      //      keep the OUTER. `cursor: pointer` inherits, so a pointer-styled
+      //      card hands the identical signal to every div inside it: live, one
+      //      product card became four entries (card + title + price + rating).
+      //      The card is the click target; its text lines are not.
+      //
+      //   3. Matched by MARKUP, wrapping another markup match → keep the INNER.
+      //      A grid's `<div class="results">` matches `div[class*=result]` just
+      //      as its `<div class="product-card">` children match `div[class*=card]`,
+      //      and preferring the outer there swallows every card into one
+      //      unclickable wrapper (measured: 3 cards became 1 wrapper).
+      //
+      // The principle: an inheritance ARTEFACT points outward to its origin, and
+      // explicit markup points inward to the more specific thing.
+      let nested = false;
+      for (const other of strictOk) {
+        if (el !== other && el.contains(other)) { nested = true; break; }
+      }
+      if (nested) continue;
+      if (pointerOnly.has(el)) {
+        for (const kept of keep) {
+          if (kept !== el && kept.contains(el)) { nested = true; break; }
+        }
+      } else {
+        for (const other of wide) {
+          if (other !== el && !pointerOnly.has(other) && el.contains(other)) {
+            nested = true;
+            break;
+          }
+        }
+      }
+      if (nested) continue;
+      keep.push(el);
+    }
+    // Re-sort into document order so indices read down the page, not
+    // strict-then-wide. compareDocumentPosition handles shadow boundaries.
+    listed = strictOk.concat(keep).sort((a, b) => {
+      const rel = a.compareDocumentPosition(b);
+      if (rel & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+      if (rel & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+      return 0;
+    });
+  }
+
   const out = [];
   let idx = 0;
   let total = 0;
-  for (const el of document.querySelectorAll(SELECTOR)) {
+  const wideSet = new Set(wide);
+  for (const el of listed) {
     const tag = el.tagName.toLowerCase();
-    if (tag === 'input' && (el.getAttribute('type') || '').toLowerCase() === 'hidden') continue;
-    if (el.disabled) continue;
-    if (el.getAttribute('aria-hidden') === 'true') continue;
-    if (!visible(el)) continue;
-    if (inChallengeZone(el.getBoundingClientRect())) continue;
     total++;
     idx++;
     el.setAttribute('data-jarvis-obs', obsId);
-    el.setAttribute('data-jarvis-idx', String(idx));
-    const role = roleOf(el);
+    el.setAttribute('data-jarvis-idx', String(base + idx));
+    // A wide-tier hit renders as 'item', not its tag name: "[12] item 'Yonex
+    // Astrox — Rs 8,499'" tells the model this is a card it can open, where
+    // "[12] div" tells it nothing and spends the same budget.
+    const role = wideSet.has(el) ? 'item' : roleOf(el);
     // A password field's VALUE is never read — not clipped, not redacted-with-
     // a-hint, simply never taken. Jarvis does not handle credentials (14.4).
     const value = (role === 'password') ? '' : clip(el.value || '', 80);
@@ -433,7 +708,7 @@ _EXTRACT_JS = """
       }
     } catch (e) {}
     out.push({
-      index: idx,
+      index: base + idx,
       role: role,
       name: clip(nameOf(el), 120),
       value: value,
@@ -456,43 +731,184 @@ _EXTRACT_JS = """
 """
 
 
+def _elements_of(
+    raw: dict,
+    *,
+    frame_id: str = "",
+    frame_url: str = "",
+    dx: float = 0.0,
+    dy: float = 0.0,
+) -> list[Element]:
+    """The JS element payload → Element objects, with rects translated into
+    TOP-PAGE viewport coordinates.
+
+    The translation is mandatory, not cosmetic. A frame element's
+    getBoundingClientRect() is relative to its OWN viewport, while
+    overlay_marks() draws set-of-marks badges in top-page coordinates and
+    resolve_point_to_index() maps vision points in the same space. Skipping dx/dy
+    would put every frame element's badge in the wrong place and silently feed
+    the vision model a mislabelled screenshot — a corruption with no error."""
+    out = []
+    for item in (raw.get("elements") or []):
+        if not isinstance(item, dict):
+            continue
+        x, y, w, h = _rect_of(item.get("rect"))
+        raw_name = str(item.get("name") or "")
+        out.append(
+            Element(
+                index=int(item.get("index", 0)),
+                role=str(item.get("role") or "element"),
+                name=raw_name[:_NAME_MAX],
+                name_full=raw_name[:_NAME_FULL_MAX],
+                value=str(item.get("value") or "")[:_VALUE_MAX],
+                href=str(item.get("href") or "")[:_HREF_MAX],
+                rect=(x + dx, y + dy, w, h),
+                frame_id=frame_id,
+                frame_url=frame_url,
+                **_form_of(item.get("form")),
+            )
+        )
+    return out
+
+
+async def _worthwhile_frames(page: Any) -> list[tuple[str, Any, dict]]:
+    """Child frames big enough to hold real content, with their offsets.
+
+    GEOMETRIC selection, deliberately not thinness-based: a substantial content
+    frame on an otherwise-rich page (a checkout widget, a booking calendar, an
+    embedded player's controls) must still be read. Tracking pixels, 1x1 beacons,
+    about:blank stubs and ad slots below the area floor are all skipped.
+
+    On an ordinary page this costs ZERO extra evaluate() round-trips, because no
+    frame passes the filter. A page object without `frames` (every fake in the
+    suite) yields [] and the caller takes exactly its pre-frame path."""
+    frames = list(getattr(page, "frames", None) or [])
+    if not frames:
+        return []
+    main = getattr(page, "main_frame", None)
+    out: list[tuple[str, Any, dict]] = []
+    for i, frame in enumerate(frames):
+        if frame is main or len(out) >= _MAX_FRAMES:
+            continue
+        url = str(getattr(frame, "url", "") or "")
+        if not url.startswith(("http://", "https://")):
+            continue
+        try:
+            handle = await frame.frame_element()
+            box = await handle.bounding_box()
+        except Exception:
+            continue
+        if not box or (box.get("width", 0) * box.get("height", 0)) < _FRAME_MIN_AREA:
+            continue
+        out.append((f"{i}:{url[:200]}", frame, box))
+    return out
+
+
+def _merge_challenge(
+    base: Optional[dict], frame_probe: Any, box: dict
+) -> Optional[dict]:
+    """Union a frame's challenge ZONES into the top-page probe, translated.
+
+    ⚠️ NON-NEGOTIABLE, and the reason is a hole this phase would otherwise punch
+    in the 15.4 never-touch rule. The top document's probe descends only into
+    SAME-ORIGIN subframes (a cross-origin contentDocument throws), but Playwright's
+    frame.evaluate works cross-origin — so the moment frames are walked, a CAPTCHA
+    widget living in a cross-origin frame becomes listable and clickable by an
+    agent that must never touch one. Its zones have to come up with it.
+
+    `blocking` is deliberately NOT propagated: a challenge INSIDE a frame is an
+    embedded widget from the page's point of view, and promoting it would make
+    every page carrying a reCAPTCHA read as a full-page interstitial."""
+    if not isinstance(frame_probe, dict):
+        return base
+    zones = frame_probe.get("zones")
+    if not isinstance(zones, list) or not zones:
+        return base
+    dx = float(box.get("x", 0) or 0)
+    dy = float(box.get("y", 0) or 0)
+    moved = []
+    for zone in zones:
+        if not isinstance(zone, dict):
+            continue
+        try:
+            moved.append({
+                "x": float(zone.get("x", 0) or 0) + dx,
+                "y": float(zone.get("y", 0) or 0) + dy,
+                "w": float(zone.get("w", 0) or 0),
+                "h": float(zone.get("h", 0) or 0),
+            })
+        except (TypeError, ValueError):
+            continue
+    if not moved:
+        return base
+    merged = dict(base) if isinstance(base, dict) else {
+        "kind": frame_probe.get("kind") or "CAPTCHA",
+        "mode": "embedded",
+        "blocking": False,
+        "solved": frame_probe.get("solved", False),
+    }
+    merged["zones"] = list(merged.get("zones") or []) + moved
+    return merged
+
+
 async def observe(page: Any) -> Observation:
     """Snapshot one page. Best-effort about the prose (a page with no body text
-    is normal), strict about the elements (they are what the loop acts on)."""
+    is normal), strict about the elements (they are what the loop acts on).
+
+    Reads the top document, then any child FRAME big enough to hold real content
+    (2026-07-26). Frames are where checkout forms, booking widgets and embedded
+    players live; before this they were simply invisible, and a page whose whole
+    purpose sat inside one read as empty."""
     observation_id = uuid.uuid4().hex[:12]
-    raw = await page.evaluate(_EXTRACT_JS, observation_id)
+    raw = await page.evaluate(_EXTRACT_JS, {"obsId": observation_id, "base": 0})
     if not isinstance(raw, dict):
         raise RuntimeError(f"page observation returned {type(raw).__name__}, expected an object")
 
-    elements = [
-        Element(
-            index=int(item.get("index", 0)),
-            role=str(item.get("role") or "element"),
-            name=str(item.get("name") or "")[:_NAME_MAX],
-            value=str(item.get("value") or "")[:_VALUE_MAX],
-            href=str(item.get("href") or "")[:_HREF_MAX],
-            rect=_rect_of(item.get("rect")),
-            **_form_of(item.get("form")),
-        )
-        for item in (raw.get("elements") or [])
-        if isinstance(item, dict)
-    ]
+    elements = _elements_of(raw)
+    total = int(raw.get("total") or len(elements))
+    challenge = raw.get("challenge") if isinstance(raw.get("challenge"), dict) else None
 
-    text = str(raw.get("text") or "").strip()
-    truncated = len(text) > _PAGE_TEXT_BUDGET
-    if truncated:
-        text = text[:_PAGE_TEXT_BUDGET]
+    for frame_id, frame, box in await _worthwhile_frames(page):
+        try:
+            sub = await frame.evaluate(
+                _EXTRACT_JS, {"obsId": observation_id, "base": total}
+            )
+        except Exception as exc:
+            # A frame that navigated, or a cross-origin one that refuses — normal,
+            # never fatal. The top document's observation stands on its own.
+            logger.debug(f"frame observe skipped ({frame_id[:60]}): {type(exc).__name__}: {exc}")
+            continue
+        if not isinstance(sub, dict):
+            continue
+        got = _elements_of(
+            sub,
+            frame_id=frame_id,
+            frame_url=str(getattr(frame, "url", "") or ""),
+            dx=float(box.get("x", 0) or 0),
+            dy=float(box.get("y", 0) or 0),
+        )[:_FRAME_ELEMENT_CAP]
+        elements.extend(got)
+        total += len(got)
+        challenge = _merge_challenge(challenge, sub.get("challenge"), box)
+
+    # CAPTURE generously, RENDER tightly. `truncated` keeps its old meaning — it
+    # is the RENDER marker ("… (truncated)" in the prompt), so it must still be
+    # true whenever the prompt shows less than the page had.
+    full = str(raw.get("text") or "").strip()[:_PAGE_TEXT_CAPTURE]
+    truncated = len(full) > _PAGE_TEXT_BUDGET
+    text = full[:_PAGE_TEXT_BUDGET] if truncated else full
 
     return Observation(
         observation_id=observation_id,
         url=str(raw.get("url") or page.url or ""),
         title=str(raw.get("title") or ""),
         elements=elements,
-        element_total=int(raw.get("total") or len(elements)),
+        element_total=total,
         page_text=text,
         text_truncated=truncated,
+        text_full=full,
         viewport=_viewport_of(raw.get("viewport")),
-        challenge=(raw.get("challenge") if isinstance(raw.get("challenge"), dict) else None),
+        challenge=challenge,
     )
 
 
@@ -542,13 +958,57 @@ async def resolve(page: Any, observation: Observation, index: int) -> Any:
     are gone with the old document, so this raises rather than clicking whatever
     happens to be third on the new page. See the index contract."""
     selector = f'[{_OBS_ATTR}="{observation.observation_id}"][{_IDX_ATTR}="{int(index)}"]'
+    # The top document FIRST, always. Playwright's CSS engine pierces OPEN shadow
+    # roots for free, so this arm covers the light DOM and shadow DOM together —
+    # which is why the 2026-07-26 shadow work needed no change here at all. It is
+    # also the only arm any fake page in the suite ever reaches.
     handle = await page.query_selector(selector)
-    if handle is None:
-        raise StaleObservation(
-            f"Element [{index}] is no longer on the page — it changed since it "
-            f"was read. Look at the page again before acting on it."
-        )
-    return handle
+    if handle is not None:
+        return handle
+
+    # Then the frame this index was STAMPED in (2026-07-26). Only that frame: an
+    # index means one element in one document, and searching every frame for a
+    # matching stamp would be exactly the "click whatever happens to be third"
+    # failure the index contract exists to prevent. A frame that navigated away
+    # has taken its attributes with it, so this resolves to nothing and the
+    # staleness promise holds in precisely the same structural way.
+    element = observation.index_map().get(int(index))
+    frame_key = getattr(element, "frame_id", "") if element is not None else ""
+    if frame_key:
+        frame = _find_frame(page, frame_key)
+        if frame is not None:
+            try:
+                handle = await frame.query_selector(selector)
+            except Exception as exc:
+                logger.debug(f"frame resolve failed: {type(exc).__name__}: {exc}")
+                handle = None
+            if handle is not None:
+                return handle
+
+    raise StaleObservation(
+        f"Element [{index}] is no longer on the page — it changed since it "
+        f"was read. Look at the page again before acting on it."
+    )
+
+
+def _find_frame(page: Any, frame_key: str) -> Any:
+    """The frame a `frame_id` names, or None. Matched on URL first and ordinal
+    only as a fallback: frames get re-ordered, and an ordinal that has drifted
+    would hand back the wrong document — which is worse than an honest
+    StaleObservation."""
+    frames = list(getattr(page, "frames", None) or [])
+    if not frames:
+        return None
+    ordinal, _, url = frame_key.partition(":")
+    if url:
+        for frame in frames:
+            if str(getattr(frame, "url", "") or "")[:200] == url:
+                return frame
+    try:
+        idx = int(ordinal)
+    except (TypeError, ValueError):
+        return None
+    return frames[idx] if 0 <= idx < len(frames) else None
 
 
 # ------------------------------------------------------------------- render

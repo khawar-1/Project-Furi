@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.agent_registry import agent_for_key
 from app.agents.task_runner import request_task_cancel
 from app.core.dependencies import get_db
 from app.db.models import Task, utc_iso
@@ -43,6 +44,9 @@ def _serialize(task: Task) -> dict:
         "session_id": task.session_id,
         "goal": task.goal,
         "status": task.status,
+        # Which domain agent owns this task, plus its human name for the UI.
+        "domain": task.domain,
+        "agent": agent_for_key(task.domain).display_name,
         "plan_id": task.plan_id,
         "plan": plan,
         "message": task.message,

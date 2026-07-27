@@ -188,6 +188,21 @@ def _hermetic_secrets():
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_browse_trace(tmp_path_factory):
+    """run_browse writes a JSONL trace per run, and its default directory is the
+    user's real ~/.jarvis/logs/browse. Every loop test would otherwise leave files
+    there — and the retention sweep would delete the user's real traces to make
+    room for the suite's. Point it at a scratch dir; a test that wants to READ a
+    trace sets its own path on top."""
+    from app.browser import trace as browse_trace
+
+    original = browse_trace.TRACE_DIR
+    browse_trace.TRACE_DIR = tmp_path_factory.mktemp("browse-trace")
+    yield
+    browse_trace.TRACE_DIR = original
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_browser():
     """browser_tools' default paths go to the REAL internet (Tavily, then the
     DuckDuckGo scrapers, then any URL a plan names). Both factories default to

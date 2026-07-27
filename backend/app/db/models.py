@@ -359,6 +359,11 @@ class Task(Base):
     goal: Mapped[str] = mapped_column(Text, nullable=False)
     # running | awaiting_approval | awaiting_choice | completed | failed | cancelled
     status: Mapped[str] = mapped_column(String(24), default="running", index=True)
+    # The domain agent that owns this task (the boss+agents model): file /
+    # email / calendar / research / browser / general. Used by the Agents panel,
+    # progress queries, and telemetry. Nullable for rows created before the
+    # column existed.
+    domain: Mapped[Optional[str]] = mapped_column(String(24), nullable=True, index=True)
     plan_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     plan_payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # AgentPlan JSON snapshot
     message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # final user-facing outcome
