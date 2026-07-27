@@ -54,6 +54,9 @@ TRACE_DIR: Optional[Path] = Path.home() / ".jarvis" / "logs" / "browse"
 _MAX_LINES = 300          # a run is capped at 25 actions; this is generous slack
 _MAX_STR = 400            # any single string field
 _KEEP_FILES = 60          # newest runs kept; older trace files are swept
+# Distinct phase names bankable within one step. A bound, not an expectation —
+# the loop marks four, and a bug that invented names must not grow the payload.
+_MAX_PHASES = 12
 
 
 class BrowseTrace:
@@ -66,6 +69,8 @@ class BrowseTrace:
         self._lines = 0
         self._path: Optional[Path] = None
         self._step_started = self.started
+        self._phase_started = self.started
+        self._phases: dict[str, int] = {}
         try:
             directory = TRACE_DIR
             if directory is None:
@@ -91,6 +96,39 @@ class BrowseTrace:
         """Called when a step begins, so `step()` can report its own duration
         rather than the whole run's."""
         self._step_started = time.perf_counter()
+        self._phase_started = self._step_started
+        self._phases = {}
+
+    def mark_phase(self, name: str) -> None:
+        """Bank the time since the previous mark under `name`, for the next
+        `step()` line to carry as `<name>_ms`.
+
+        WHY (2026-07-27). A step's `ms` covered settle + observe + decide + act
+        together, so a run that spent 151s reaching one decision was a single
+        opaque number: the record could not say whether the page was slow, the
+        reader was slow, or the provider was. Root-causing it took correlating
+        three log files, and the answer — that the whole box was contended, not
+        the browser — was reachable only by noticing that an unrelated
+        `search_files` had also taken 12s. Four fields make that a glance.
+
+        Re-marking a name ACCUMULATES (settle is marked again when the
+        page-quality gate re-looks), so a phase entered twice reads as its total
+        rather than only its last visit. Never raises, and it only ever reads
+        `perf_counter` — never the `monotonic` clock the loop's deadline uses
+        (see the module docstring: an observer that changes what it observes is
+        worse than no observer)."""
+        try:
+            now = time.perf_counter()
+            key = f"{name}_ms"
+            if key in self._phases or len(self._phases) < _MAX_PHASES:
+                self._phases[key] = self._phases.get(key, 0) + int(
+                    (now - self._phase_started) * 1000
+                )
+            # Advance regardless, so an over-cap name costs its own time only and
+            # never leaks into the next phase's measurement.
+            self._phase_started = now
+        except Exception as exc:  # noqa: BLE001 — tracing never breaks a run
+            logger.debug(f"browse trace phase: {type(exc).__name__}: {exc}")
 
     def step(
         self,
@@ -111,6 +149,10 @@ class BrowseTrace:
             "i": index,
             "ms": _ms(self._step_started),
         }
+        # Phases banked since the last line — so the DECISION line carries
+        # settle/observe/decide and the RESULT line carries act, rather than both
+        # repeating the same breakdown.
+        payload.update(self._phases)
         if observation is not None:
             payload["url"] = _clip(str(getattr(observation, "url", "") or ""))
             payload["title"] = _clip(str(getattr(observation, "title", "") or ""), 120)
@@ -129,6 +171,8 @@ class BrowseTrace:
         if records:
             payload["records"] = int(records)
         self._write(payload)
+        self._phases = {}
+        self._phase_started = time.perf_counter()
 
     def finish(
         self,

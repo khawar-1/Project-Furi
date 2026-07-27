@@ -2433,3 +2433,343 @@ async def test_wait_for_commit_times_out_quietly_when_nothing_posts(fake_browser
 async def test_wait_for_commit_without_an_arm_never_raises(fake_browser):
     session = await _session(allowlist={"example.com"})
     assert await session.wait_for_commit(timeout=0.1) is False
+
+
+# ======================================================================
+# THE INTERCEPTION TAX — we drive Fetch ourselves so the cache stays on
+# ======================================================================
+# Registering ANY Playwright route makes its driver pair `Fetch.enable` with
+# `Network.setCacheDisabled: true` for the whole session
+# (chromium/crNetworkManager.js). The cache is then OFF — every image, script,
+# stylesheet and font re-downloaded on every navigation, while the agent loop
+# navigates repeatedly around one site.
+#
+# MEASURED on books.toscrape.com, second (warm) load:
+#     A  Playwright route only ................................ 2.14s
+#     B  Playwright route + our own setCacheDisabled(false) .... 2.83s
+#     C  no Playwright route, our own Fetch.enable ............. 0.07s
+# B is why this is not a one-liner: `cacheDisabled` is per-session state and
+# Chromium takes the OR across attached sessions, so a second session saying
+# "false" can never overrule Playwright's "true". Owning Fetch is the only way.
+#
+# The patterns we request are IDENTICAL to Playwright's, and _intercept is
+# untouched — every rule test above still drives it directly, which is the point:
+# this changed the TRANSPORT, not the guard.
+class FakeCdpSession:
+    """A CDP session that answers Page.getFrameTree and records what was sent —
+    and can deliver a Fetch.requestPaused the way Chromium would."""
+
+    def __init__(self, page, main_frame_id="MAIN"):
+        self.page = page
+        self.sent = []
+        self.handlers = {}
+        self.main_frame_id = main_frame_id
+
+    def on(self, event, handler):
+        self.handlers[event] = handler
+
+    async def send(self, method, params=None):
+        self.sent.append((method, dict(params or {})))
+        if method == "Page.getFrameTree":
+            return {"frameTree": {"frame": {"id": self.main_frame_id}}}
+        return {}
+
+    @property
+    def methods(self):
+        return [method for method, _ in self.sent]
+
+    async def fire(self, *, url, method="GET", resource_type="Image",
+                   frame_id="MAIN", request_id="R1"):
+        """Deliver one paused request and return the verdict Chromium would see."""
+        self.handlers["Fetch.requestPaused"](
+            {
+                "requestId": request_id,
+                "request": {"url": url, "method": method},
+                "resourceType": resource_type,
+                "frameId": frame_id,
+            }
+        )
+        for _ in range(200):                       # let the scheduled guard run
+            for name, params in self.sent:
+                if params.get("requestId") != request_id:
+                    continue
+                if name == "Fetch.continueRequest":
+                    return "continue"
+                if name == "Fetch.failRequest":
+                    return f"abort:{params.get('errorReason')}"
+            await asyncio.sleep(0.005)
+        return None
+
+
+class FakeContextBrowser(FakeBrowser):
+    """The REAL _RealBrowser's shape: route/unroute on the CONTEXT, and the
+    ability to open a raw CDP session. FakeBrowser models neither, which is why
+    the bugs below survived 2400 green tests."""
+
+    def __init__(self, page=None):
+        super().__init__(page)
+        self.routes = []
+        self.unroute_calls = []
+        self.cdp_sessions = []
+        self.main_frame_id = "MAIN"
+
+    async def route(self, pattern, handler):
+        self.routes.append((pattern, handler))
+
+    async def unroute(self, pattern, handler=None):
+        self.unroute_calls.append((pattern, handler))
+
+    async def new_cdp_session(self, page):
+        cdp = FakeCdpSession(page, self.main_frame_id)
+        self.cdp_sessions.append(cdp)
+        return cdp
+
+
+@pytest.fixture
+def context_browser(monkeypatch):
+    browser = FakeContextBrowser()
+    monkeypatch.setattr(browser_session, "BROWSER_FACTORY", lambda: browser)
+    return browser
+
+
+async def test_interception_is_installed_over_our_own_cdp_fetch(context_browser):
+    """The whole speed fix in one assertion: no Playwright route is registered,
+    so nothing disables Chromium's cache — and Fetch is enabled with exactly the
+    patterns Playwright would have asked for, so coverage is unchanged."""
+    session = await BrowserSession.open({"example.com"})
+    assert context_browser.routes == [], "a Playwright route would disable the cache"
+    cdp = context_browser.cdp_sessions[0]
+    assert ("Fetch.enable", {
+        "patterns": [{"urlPattern": "*", "requestStage": "Request"}]
+    }) in cdp.sent
+    assert session.stats.http_cache_on is True
+    assert session.stats.as_dict()["http_cache_on"] is True
+
+
+async def test_a_paused_request_flows_through_the_guard(context_browser):
+    """The adapter end to end: a real Fetch.requestPaused shape reaches
+    _intercept and comes back as a Chromium verdict."""
+    session = await BrowserSession.open({"example.com"})
+    cdp = context_browser.cdp_sessions[0]
+    assert await cdp.fire(url="https://example.com/logo.png") == "continue"
+    assert session.stats.total_requests == 1
+
+
+async def test_an_aborted_request_uses_the_reason_playwright_used(context_browser):
+    """`Failed` is what Playwright's own route.abort() sends, so a blocked
+    request looks to the page exactly as it did before this change."""
+    await BrowserSession.open({"example.com"})
+    cdp = context_browser.cdp_sessions[0]
+    verdict = await cdp.fire(
+        url="https://doubleclick.net/ad.js", request_id="AD"
+    )
+    assert verdict == "abort:Failed"
+
+
+async def test_the_adapter_tells_a_main_frame_navigation_from_an_iframes(
+    context_browser,
+):
+    """Rule 3 is 'main-frame navigation only'. The adapter must judge that from
+    the CDP frame id — an iframe document to an off-allowlist origin is ordinary
+    page content and must still load, or nothing renders."""
+    await BrowserSession.open({"example.com"})
+    cdp = context_browser.cdp_sessions[0]
+    # top-level navigation off the allowlist → refused
+    assert await cdp.fire(
+        url="https://attacker.com/", resource_type="Document",
+        frame_id="MAIN", request_id="TOP",
+    ) == "abort:Failed"
+    # the same document inside a SUBFRAME → allowed through
+    assert await cdp.fire(
+        url="https://attacker.com/", resource_type="Document",
+        frame_id="CHILD", request_id="SUB",
+    ) == "continue"
+
+
+async def test_without_a_main_frame_id_it_refuses_the_fast_path(context_browser):
+    """FAIL SAFE, and the reason this is not just 'try CDP'. Rule 3 needs to
+    know which frame is top-level; an adapter that cannot tell would fail OPEN.
+    So an unknown frame tree falls back to the slower Playwright route rather
+    than running a quietly weaker guard."""
+    context_browser.main_frame_id = ""
+    session = await BrowserSession.open({"example.com"})
+    assert context_browser.routes, "should have fallen back to Playwright routing"
+    assert session.stats.http_cache_on is False
+
+
+async def test_a_handle_without_cdp_falls_back_to_playwright_routing(fake_browser):
+    """Every fake in this suite, and any Playwright version without a CDP
+    session. The guard is installed the old way and the summary says the cache
+    is still disabled rather than claiming a fix that did not happen."""
+    session = await _session()
+    assert session.stats.http_cache_on is False
+    assert fake_browser.page.routes, "no interceptor was installed at all"
+
+
+async def test_the_fast_path_relaxes_no_rule(context_browser, monkeypatch):
+    """THE SAFETY PROPERTY, pinned. Changing the transport must buy nothing past
+    the guard. If this goes green while one of these is broken, a speed fix has
+    become a hole."""
+    monkeypatch.setattr(browser_session, "_host_is_blocked", lambda h: h == "localhost")
+    browser_session.reset_host_cache()
+    session = await BrowserSession.open({"example.com"})
+    assert session.stats.http_cache_on is True
+    cdp = context_browser.cdp_sessions[0]
+
+    # Rule 1 — an unapproved form-POST navigation.
+    assert await cdp.fire(
+        url="https://example.com/api", method="POST",
+        resource_type="Document", request_id="R1",
+    ) == "abort:Failed"
+    # Rule 2 — SSRF, on a non-allowlisted host.
+    assert await cdp.fire(url="http://localhost:8000/x", request_id="R2") == "abort:Failed"
+    # Rule 3 — an off-allowlist main-frame navigation.
+    assert await cdp.fire(
+        url="https://attacker.com/", resource_type="Document", request_id="R3",
+    ) == "abort:Failed"
+    # ...and an ordinary first-party read still flows.
+    assert await cdp.fire(url="https://example.com/logo.png", request_id="R4") == "continue"
+
+
+async def test_a_followed_popup_gets_its_own_guarded_target(context_browser):
+    """A new tab is a new TARGET, so it needs its own Fetch session or it would
+    be driven un-guarded — the popup is where job boards put the application."""
+    session = await BrowserSession.open({"example.com"})
+    popup = FakePage(url="https://example.com/apply")
+    await session._adopt_new_page(popup)
+    assert [c.page for c in context_browser.cdp_sessions] == [
+        context_browser.page,
+        popup,
+    ]
+    assert await context_browser.cdp_sessions[1].fire(
+        url="https://attacker.com/", resource_type="Document", request_id="P1"
+    ) == "abort:Failed"
+
+
+async def test_playback_lifts_the_interceptor_by_disabling_fetch(context_browser):
+    """The hand-off must actually stop intercepting, or the user's own window
+    keeps paying the tax the hand-off exists to remove."""
+    session = await BrowserSession.open({"youtube.com"})
+    await session.enter_playback_mode(reload=False)
+    assert "Fetch.disable" in context_browser.cdp_sessions[0].methods
+    assert session.page.unroute_calls == []
+
+
+async def test_playback_lifts_a_context_route_at_the_context(context_browser):
+    """THE SILENT BUG, frozen (found 2026-07-27), on the fallback path. The route
+    is installed on the CONTEXT, and Playwright's page.unroute filters only that
+    PAGE's own route list — so the old `self.page.unroute(...)` matched nothing,
+    returned successfully, and logged 'interception LIFTED for playback
+    (full-speed window)' about a window that was still fully intercepted. The
+    2026-07-18 "the net is very slow in your profile" fix had therefore never
+    once run in production."""
+    context_browser.main_frame_id = ""          # force the Playwright-route path
+    session = await BrowserSession.open({"youtube.com"})
+    await session.enter_playback_mode(reload=False)
+    assert context_browser.unroute_calls == [("**/*", session._intercept)]
+    assert session.page.unroute_calls == []      # never at the wrong level
+
+
+async def test_playback_never_claims_a_lift_it_could_not_perform(context_browser):
+    """A no-op that reports success is worse than a failure, because nothing
+    ever looks at it again. When the route is on the context and the handle
+    cannot reach it, the honest DEGRADED path must run — and it must not fall
+    back to the page, whose empty route list would 'succeed' meaninglessly."""
+    context_browser.main_frame_id = ""
+    context_browser.unroute = None
+    session = await BrowserSession.open({"youtube.com"})
+    await session.enter_playback_mode(reload=False)   # must not raise
+    assert session.page.unroute_calls == []
+    # The degraded fallback still relaxes Rule 1, so the player keeps working.
+    assert session._read_only is False
+    assert (
+        await _verdict(
+            session, url="https://youtube.com/api", method="POST", navigation=True
+        )
+        == "continue"
+    )
+
+
+async def test_goto_resolves_each_host_once_through_the_cached_guard(
+    fake_browser, monkeypatch
+):
+    """goto used to call the SYNCHRONOUS _validate_url, whose SSRF check does a
+    blocking socket.getaddrinfo — on the single browser loop, which is also the
+    loop that answers every request paused in Chromium. Same rule, same helper,
+    now reached through the interceptor's process-global cache and single
+    flight, so a second navigation to a known host costs a dict lookup."""
+    seen = []
+
+    def _probe(host):
+        seen.append(host)
+        return False
+
+    monkeypatch.setattr(browser_session, "_host_is_blocked", _probe)
+    browser_session.reset_host_cache()
+    session = await _session(allowlist={"example.com"})
+    await session.goto("https://example.com/a")
+    await session.goto("https://example.com/b")
+    assert seen == ["example.com"]
+
+
+async def test_goto_still_refuses_a_private_address_through_the_cache(
+    fake_browser, monkeypatch
+):
+    """The guard is unchanged — only where it resolves moved."""
+    monkeypatch.setattr(browser_session, "_host_is_blocked", lambda h: h == "internal")
+    browser_session.reset_host_cache()
+    session = await _session(allowlist={"internal"})
+    with pytest.raises(BrowserBlocked, match="local/private"):
+        await session.goto("http://internal/admin")
+
+
+async def test_a_refused_offsite_hop_still_offers_the_origin_pause(context_browser):
+    """THE REGRESSION THIS CHANGE ALMOST SHIPPED, frozen. Playwright's route
+    handlers do NOT re-fire on redirect hops — `_verify_landing` is what judged
+    an off-site 302, and it records `last_redirect_offsite` so the loop can offer
+    an APPROVABLE origin pause (a legit Apply flow redirecting to an ATS is
+    approvable; an ad is deniable). Driving Fetch ourselves DOES fire per hop, so
+    Rule 3 now aborts the redirect before it can land — and MEASURED on a real
+    youtu.be -> youtube.com 302, that silently lost the pause and left a dead
+    navigation. Rule 3 must record the destination itself."""
+    session = await BrowserSession.open({"youtu.be"})
+    cdp = context_browser.cdp_sessions[0]
+    assert await cdp.fire(
+        url="https://www.youtube.com/watch?v=x",
+        resource_type="Document",
+        request_id="HOP",
+    ) == "abort:Failed"
+    assert session.last_redirect_offsite == {
+        "host": "www.youtube.com",
+        "url": "https://www.youtube.com/watch?v=x",
+    }
+
+
+async def test_a_refused_redirect_is_reported_in_our_words_not_chromiums(fake_browser):
+    """Chromium reports a refused navigation as a bare `net::ERR_FAILED` — its
+    words for OUR decision. The counter moving across the goto is what tells us
+    the guard caused it, and the wording matches `_verify_landing` exactly so the
+    loop cannot tell which layer caught the same event."""
+
+    async def _refuse_after_blocking(url, **kwargs):
+        session.stats.blocked_navigations += 1        # what the interceptor did
+        session.last_redirect_offsite = {"host": "www.youtube.com", "url": url}
+        raise RuntimeError("net::ERR_FAILED at https://youtu.be/x")
+
+    session = await _session(allowlist={"youtu.be"})
+    fake_browser.page.goto = _refuse_after_blocking
+    with pytest.raises(BrowserBlocked, match="redirected to 'www.youtube.com'"):
+        await session.goto("https://youtu.be/x")
+
+
+async def test_a_real_network_failure_is_still_reported_as_one(fake_browser):
+    """The counter is what separates the two — an ERR_FAILED with no refusal
+    behind it must not be dressed up as a policy decision."""
+
+    async def _dead(url, **kwargs):
+        raise RuntimeError("net::ERR_CONNECTION_REFUSED at https://example.com")
+
+    session = await _session(allowlist={"example.com"})
+    fake_browser.page.goto = _dead
+    with pytest.raises(browser_session.BrowserUnreachable, match="refused the connection"):
+        await session.goto("https://example.com/x")

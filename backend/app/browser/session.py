@@ -129,7 +129,11 @@ from urllib.parse import urlparse
 from loguru import logger
 
 from app.browser import registry as _held
-from app.tools.browser_tools import _host_is_blocked, _validate_url
+from app.tools.browser_tools import (
+    _host_is_blocked,
+    blocked_host_error,
+    parse_web_url,
+)
 
 # --------------------------------------------------------------------- limits
 BROWSER_PROFILE_DIR = Path.home() / ".jarvis" / "browser"
@@ -535,7 +539,101 @@ _BENIGN_ROUTE_ERRORS = (
     "request context disposed",
     "request is already routed",
     "response has been already",
+    # The CDP equivalents (see the _CdpRoute adapter): a request already
+    # continued/failed, or one whose page went away, no longer has a valid
+    # interception id. Same benign shape, same swallow.
+    "invalid interceptionid",
+    "invalid interception id",
+    "invalid request id",
+    "session closed",
 )
+
+
+# ------------------------------------------------- CDP interception adapters
+# WHY WE DRIVE Fetch OURSELVES (2026-07-27, MEASURED). Registering ANY Playwright
+# route makes its driver pair `Fetch.enable` with `Network.setCacheDisabled: true`
+# for the whole session (chromium/crNetworkManager.js). The cache is then OFF —
+# every image, script, stylesheet and font re-downloaded on every navigation,
+# while the agent loop navigates repeatedly around one site.
+#
+# Three configurations were measured on books.toscrape.com, second (warm) load:
+#     A  Playwright route only ................................ 2.14s
+#     B  Playwright route + our own setCacheDisabled(false) .... 2.83s
+#     C  no Playwright route, our own Fetch.enable ............. 0.07s
+# B is the point: `cacheDisabled` is per-session state and Chromium takes the OR
+# across attached sessions, so a second session saying "false" can never overrule
+# Playwright's "true". The cache comes back only if Playwright's interception is
+# never enabled — which means owning Fetch ourselves.
+#
+# The patterns we ask for are IDENTICAL to Playwright's (`*`, requestStage
+# Request), so coverage of the page target is unchanged; these adapters simply
+# present a CDP event in the shape `_intercept` already reads, which is why every
+# rule — and every test that pins one — is untouched by this change.
+class _CdpFrame:
+    """A frame identity that compares the way `_is_main_frame_navigation` needs:
+    by CDP frame id."""
+
+    __slots__ = ("id", "page")
+
+    def __init__(self, frame_id: str, owner: Any = None) -> None:
+        self.id = frame_id
+        self.page = owner
+
+    def __eq__(self, other: Any) -> bool:
+        return isinstance(other, _CdpFrame) and other.id == self.id
+
+    def __hash__(self) -> int:
+        return hash(self.id)
+
+
+class _CdpPage:
+    """Just enough page for `frame.page.main_frame`."""
+
+    __slots__ = ("main_frame",)
+
+    def __init__(self, main_frame: _CdpFrame) -> None:
+        self.main_frame = main_frame
+
+
+class _CdpRequest:
+    """A Fetch.requestPaused event in Playwright-request shape."""
+
+    __slots__ = ("url", "method", "frame", "_document")
+
+    def __init__(self, event: dict, main_frame_id: str) -> None:
+        request = event.get("request") or {}
+        self.url = str(request.get("url") or "")
+        self.method = str(request.get("method") or "GET")
+        # CDP names the top-level document load "Document"; Playwright's
+        # is_navigation_request() is true for exactly that class of request.
+        self._document = str(event.get("resourceType") or "") == "Document"
+        main = _CdpFrame(main_frame_id)
+        self.frame = _CdpFrame(str(event.get("frameId") or ""), _CdpPage(main))
+
+    def is_navigation_request(self) -> bool:
+        return self._document
+
+
+class _CdpRoute:
+    """A Fetch.requestPaused event in Playwright-route shape: exactly one of
+    continue_/abort, once. `abort` uses Chromium's `Failed` reason, which is what
+    Playwright's own default `route.abort()` sends — so a blocked request looks
+    to the page precisely as it did before."""
+
+    __slots__ = ("request", "_cdp", "_id")
+
+    def __init__(self, cdp: Any, event: dict, main_frame_id: str) -> None:
+        self._cdp = cdp
+        self._id = event.get("requestId")
+        self.request = _CdpRequest(event, main_frame_id)
+
+    async def continue_(self) -> None:
+        await self._cdp.send("Fetch.continueRequest", {"requestId": self._id})
+
+    async def abort(self) -> None:
+        await self._cdp.send(
+            "Fetch.failRequest", {"requestId": self._id, "errorReason": "Failed"}
+        )
 
 # Chromium builds to try, in order. Real Google Chrome is preferred FIRST
 # (user request, 2026-07-17: "on my chrome browser, not microsoft edge"): a user
@@ -991,6 +1089,26 @@ class _RealBrowser:
         attached the route to it."""
         await self._context.route(pattern, handler)
 
+    async def unroute(self, pattern: str, handler: Callable[..., Any]) -> None:
+        """Remove the interceptor AT THE LEVEL IT WAS INSTALLED — the context.
+
+        This exists because its absence was a silent bug (found 2026-07-27).
+        `enter_playback_mode` called `page.unroute(...)`, and Playwright's
+        page-level unroute filters only that page's OWN route list; a
+        context-level handler is not in it, so the call found nothing, returned
+        successfully, and we logged "interception LIFTED for playback
+        (full-speed window)" about a window that was still fully intercepted
+        with its HTTP cache disabled. A no-op that reports success is worse than
+        a failure, because nothing ever looks at it again."""
+        await self._context.unroute(pattern, handler)
+
+    async def new_cdp_session(self, page: Any) -> Any:
+        """A raw CDP session on one page's target — how we drive the Fetch domain
+        ourselves instead of registering a Playwright route, which would disable
+        Chromium's HTTP cache session-wide (see
+        BrowserSession._install_cdp_interception)."""
+        return await self._context.new_cdp_session(page)
+
     def on_page(self, callback: Callable[[Any], None]) -> None:
         """Wire a listener for every NEW page opened in this context — popups and
         target=_blank tabs included. Lets BrowserSession follow a click that opens
@@ -1331,6 +1449,12 @@ class InterceptStats:
     # budget — a heavy site observed mid-build, which is a fact worth having in
     # the log when reading back what the loop saw.
     slow_navigations: int = 0
+    # True when interception was installed over our own CDP Fetch, which is the
+    # only arrangement that leaves Chromium's HTTP cache ON (Playwright's route
+    # disables it session-wide — see the _CdpRoute adapters). In the close
+    # summary because a silent fall back to the slow path costs multiples on
+    # every repeat page load, and "it got slow again" is not a diagnosis.
+    http_cache_on: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1345,6 +1469,7 @@ class InterceptStats:
             "ssrf_checks": self.ssrf_checks,
             "settle_seconds": round(self.settle_seconds, 2),
             "slow_navigations": self.slow_navigations,
+            "http_cache_on": self.http_cache_on,
         }
 
 
@@ -1474,6 +1599,14 @@ class BrowserSession:
         # gets (a legit "Apply" flow redirecting to an ATS is approvable; an ad
         # is deniable). {host, url} or None; consumed by the loop.
         self.last_redirect_offsite: Optional[dict[str, str]] = None
+        # Raw CDP sessions driving Fetch ourselves (see _install_cdp_interception)
+        # — one per page target. Held, not detached: a detached session's Fetch
+        # domain goes away and the guard with it. `_inflight` keeps a strong
+        # reference to each in-flight guard task, because a dropped task is a
+        # paused request nobody ever answers, which hangs the page.
+        self._cdp_sessions: list[Any] = []
+        self._cdp_routed = False
+        self._inflight: set[Any] = set()
 
     # ------------------------------------------------------------ lifecycle
     @classmethod
@@ -1487,17 +1620,7 @@ class BrowserSession:
         try:
             page = await browser.new_page()
             session = cls(browser, page, origins)
-            # CONTEXT-level interception when the handle supports it (the real
-            # path): a popup is then guarded from its very FIRST request —
-            # page-level routing left the popup's initial document navigation
-            # un-intercepted until _adopt_new_page caught up. Page-level stays
-            # the fallback for fakes that only model page.route.
-            ctx_route = getattr(browser, "route", None)
-            if callable(ctx_route):
-                await ctx_route("**/*", session._intercept)
-                session._context_routed = True
-            else:
-                await page.route("**/*", session._intercept)
+            await session._install_interception(page)
             session._refuse_downloads(page)
             # Follow popups / new tabs. Many job boards (WeWorkRemotely, live
             # 2026-07-18) open the application — or a CAPTCHA — in a NEW TAB, and
@@ -1525,7 +1648,8 @@ class BrowserSession:
                 f"requests={s.total_requests} ssrf_checks={s.ssrf_checks} "
                 f"settle={s.settle_seconds:.1f}s blocked_mut={s.blocked_mutations} "
                 f"blocked_host={s.blocked_hosts} blocked_nav={s.blocked_navigations} "
-                f"blocked_ads={s.blocked_ads} commits={s.allowed_commits}"
+                f"blocked_ads={s.blocked_ads} commits={s.allowed_commits} "
+                f"cache={'on' if s.http_cache_on else 'DISABLED'}"
             )
         except Exception:
             pass
@@ -1539,6 +1663,105 @@ class BrowserSession:
 
     async def __aexit__(self, *_exc: Any) -> None:
         await self.close()
+
+    async def _install_interception(self, page: Any) -> None:
+        """Put the interceptor on `page` by the fastest route that still enforces
+        every rule, and record which path won.
+
+        PREFERRED — our own CDP `Fetch.enable`, because Playwright's route would
+        also disable Chromium's HTTP cache for the whole session (see the
+        _CdpRoute adapters above for the measurement). Same patterns Playwright
+        asks for, so the page target's coverage is identical.
+
+        FALLBACK — Playwright routing, context-level when the handle supports it
+        so a popup is guarded from its very first request. Taken whenever the CDP
+        path cannot be fully established, which is the point: we only go fast
+        when we can enforce the rules exactly, never by relaxing one."""
+        if await self._install_cdp_interception(page):
+            return
+        ctx_route = getattr(self._browser, "route", None)
+        if callable(ctx_route):
+            await ctx_route("**/*", self._intercept)
+            self._context_routed = True
+        else:
+            await page.route("**/*", self._intercept)
+
+    async def _install_cdp_interception(self, page: Any) -> bool:
+        """Drive Fetch ourselves on this page's target. True when fully armed.
+
+        Establishes the MAIN FRAME ID first and refuses the whole path without
+        it: Rule 3 is "main-frame navigation only", and an adapter that cannot
+        tell a top-level document from an iframe's would fail OPEN — a silently
+        weaker guard is not an acceptable price for speed, so an unknown frame
+        tree simply falls back to Playwright routing.
+
+        Best-effort and never raises (the _harden_profile discipline): any
+        failure returns False and the caller installs the slower guard."""
+        opener = getattr(self._browser, "new_cdp_session", None)
+        if not callable(opener):
+            return False
+        try:
+            cdp = await opener(page)
+            tree = await cdp.send("Page.getFrameTree")
+            main_frame_id = str(
+                ((tree or {}).get("frameTree") or {}).get("frame", {}).get("id") or ""
+            )
+            if not main_frame_id:
+                raise RuntimeError("no main frame id — cannot judge Rule 3")
+
+            def _paused(event: dict) -> None:
+                # CDP events dispatch synchronously on the browser loop; the
+                # guard is async, so schedule it and keep a strong reference
+                # (a dropped task is a request that never gets answered, and an
+                # unanswered Fetch pause hangs the page).
+                try:
+                    task = asyncio.ensure_future(
+                        self._intercept(_CdpRoute(cdp, event, main_frame_id))
+                    )
+                    self._inflight.add(task)
+                    task.add_done_callback(self._inflight.discard)
+                except Exception as exc:
+                    logger.debug(f"cdp intercept schedule: {type(exc).__name__}: {exc}")
+
+            cdp.on("Fetch.requestPaused", _paused)
+            await cdp.send(
+                "Fetch.enable",
+                {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]},
+            )
+            self._cdp_sessions.append(cdp)
+            self._cdp_routed = True
+            self.stats.http_cache_on = True
+            return True
+        except Exception as exc:
+            logger.debug(f"cdp interception unavailable: {type(exc).__name__}: {exc}")
+            return False
+
+    async def _unroute_intercept(self) -> None:
+        """Remove the interceptor from WHEREVER open() installed it — context on
+        the real path, page on the fallback path and in the suite's fakes.
+
+        RAISES rather than no-opping when the route is on the context and the
+        handle cannot reach it. That is the whole point: the previous code could
+        not fail, so it reported a lift it had not performed, and the caller's
+        honest "DEGRADED fallback" warning never fired in production."""
+        # Both can be true: if the CDP path worked for the first page but not for
+        # an adopted popup, that popup fell back to a context route. Lift each
+        # one that is actually installed, or playback stays half-intercepted.
+        if self._cdp_routed:
+            for cdp in self._cdp_sessions:
+                await cdp.send("Fetch.disable")
+            if not self._context_routed:
+                return
+        if self._context_routed:
+            unroute = getattr(self._browser, "unroute", None)
+            if not callable(unroute):
+                raise RuntimeError(
+                    "the interceptor is installed on the context and this browser "
+                    "handle cannot unroute it"
+                )
+            await unroute("**/*", self._intercept)
+            return
+        await self.page.unroute("**/*", self._intercept)
 
     # ------------------------------------------------------------ the guard
     def origin_allowed(self, host: Optional[str]) -> bool:
@@ -1679,6 +1902,18 @@ class BrowserSession:
             # gating subresources by origin means the page never renders).
             if self._is_main_frame_navigation(request) and not self.origin_allowed(host):
                 self.stats.blocked_navigations += 1
+                # RECORD WHERE IT TRIED TO GO, exactly as _verify_landing does on
+                # the landing path. Driving Fetch ourselves fires on redirect
+                # HOPS, which Playwright's route handlers do not — so this branch
+                # now catches off-site redirects that used to be judged after
+                # they landed. Without this the refusal is a dead end: the loop
+                # reads this field to offer the user the SAME origin-approval
+                # pause an off-site link gets (a legitimate "Apply" flow
+                # redirecting to an ATS is approvable; an ad is deniable).
+                # MEASURED 2026-07-27: a youtu.be -> youtube.com 302 lost that
+                # pause entirely until this line existed.
+                if host:
+                    self.last_redirect_offsite = {"host": host, "url": url}
                 logger.info(f"browser: aborted navigation to {host} — not allowlisted")
                 await self._safe_route(route.abort)
                 return
@@ -1748,9 +1983,11 @@ class BrowserSession:
                     return
         except Exception as exc:
             logger.debug(f"popup opener check: {type(exc).__name__}: {exc}")
+        # A new tab is a new TARGET, so it needs its own guard whichever path we
+        # are on — a CDP session of its own, or (context-routed) nothing further.
         if not getattr(self, "_context_routed", False):
             try:
-                await page.route("**/*", self._intercept)
+                await self._install_interception(page)
             except Exception as exc:
                 logger.debug(f"adopt popup route: {type(exc).__name__}: {exc}")
         self._refuse_downloads(page)
@@ -1785,10 +2022,27 @@ class BrowserSession:
             logger.debug(f"download hook: {type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------ navigation
+    async def _validate_url_cached(self, url: str) -> tuple[Optional[str], Optional[str]]:
+        """_validate_url's exact checks, with the DNS half off the event loop.
+
+        _validate_url is synchronous and its SSRF guard calls socket.getaddrinfo,
+        so EVERY navigation froze the single browser loop for a full DNS
+        resolution — and with a route installed, every request paused in Chromium
+        is waiting on that same loop to resume it. Same rule and the same
+        _host_is_blocked, reached through the interceptor's process-global cache
+        and single-flight (so a host seen once costs a dict lookup)."""
+        target, host, error = parse_web_url(url)
+        if error:
+            return None, error
+        if host and await _host_blocked_cached(host):
+            return None, blocked_host_error(host)
+        return target, None
+
     async def goto(self, url: str) -> str:
         """Navigate and return the final URL. Raises BrowserBlocked with a
         code-authored reason when the guard refuses."""
-        target, error = _validate_url(url)   # http/https + SSRF, shared with read_webpage
+        # http/https + SSRF — the same rule read_webpage obeys, off the loop.
+        target, error = await self._validate_url_cached(url)
         if error:
             raise BrowserBlocked(error)
 
@@ -1804,6 +2058,17 @@ class BrowserSession:
         # second. A GET is safe to reissue; bounded to exactly one retry. A
         # network error (bad cert, DNS, refused) is NEVER retried — retrying a
         # site that cannot be reached just spends the budget twice.
+        # Our own Rule 3 refusals during this navigation are told apart from a
+        # real network failure by watching the counter across the call. A
+        # server-side redirect to an off-allowlist origin is aborted by the
+        # interceptor, and Chromium then reports a bare `net::ERR_FAILED` — which
+        # is Chromium's words for OUR decision. MEASURED 2026-07-27: the
+        # Playwright-route path blocked the same redirect and landed silently on
+        # `chrome-error://chromewebdata/` instead, so neither surfacing said what
+        # had actually happened. (It also falsifies the standing comment that
+        # "Playwright route handlers never re-fire on redirect hops" — that arm
+        # recorded blocked_nav=1 too.)
+        refusals_before = self.stats.blocked_navigations
         try:
             await self.page.goto(target, wait_until="commit", timeout=NAV_COMMIT_MS)
         except _NAV_TIMEOUT_ERRORS:
@@ -1820,6 +2085,15 @@ class BrowserSession:
                     raise BrowserUnreachable(f"Couldn't load {host or target}: {reason}.") from exc2
                 raise
         except Exception as exc:
+            if self.stats.blocked_navigations > refusals_before:
+                # Same wording _verify_landing raises, because it is the same
+                # event judged one hop earlier — the loop should not be able to
+                # tell which layer caught it.
+                off = (self.last_redirect_offsite or {}).get("host") or "another site"
+                raise BrowserBlocked(
+                    f"The page redirected to '{off}', which this task is not "
+                    "allowed to visit."
+                ) from exc
             reason = _network_error_kind(exc)
             if reason:
                 raise BrowserUnreachable(f"Couldn't load {host or target}: {reason}.") from exc
@@ -2353,7 +2627,15 @@ class BrowserSession:
         an unroute or reload failure must never break the already-open window."""
         self._read_only = False
         try:
-            await self.page.unroute("**/*", self._intercept)
+            # UNROUTE AT THE LEVEL IT WAS INSTALLED. On the real path the route is
+            # installed on the CONTEXT (see BrowserSession.open), and Playwright's
+            # page.unroute filters only that page's own route list — so the old
+            # `self.page.unroute(...)` here found nothing, SUCCEEDED, and logged
+            # the line below about a window that was still fully intercepted. The
+            # 2026-07-18 "the net is very slow in your profile" fix has therefore
+            # never actually run in production (found 2026-07-27). Page-level
+            # stays the fallback for the page-routed path and for fakes.
+            await self._unroute_intercept()
             # Layer C (2026-07-19): make it grep-able which path won, since media
             # being slow means the interceptor was NOT lifted (the degraded branch).
             logger.info("browser: interception LIFTED for playback (full-speed window)")

@@ -2739,6 +2739,17 @@ The old `app/core/browser_*` and `app/agents/browser_*` paths are `sys.modules`
 self-replacement shims (~100 test monkeypatches target them; Phase 8 of the refactor
 deliberately did not delete them).
 
+**Interception is driven over our OWN CDP `Fetch`, not a Playwright route**
+(2026-07-27, see the speed round below). `session._install_cdp_interception` opens
+a CDP session per page target and enables Fetch with the exact patterns Playwright
+would have asked for; `_CdpRoute`/`_CdpRequest` present each `Fetch.requestPaused`
+in the shape `_intercept` already reads, so every rule and every test that pins one
+is unchanged. Registering a Playwright route instead would disable Chromium's HTTP
+cache session-wide. Playwright routing remains the automatic FALLBACK whenever the
+CDP path cannot be fully established — including when the main frame id is unknown,
+because Rule 3 is main-frame-only and an adapter that cannot tell a top-level
+document from an iframe's would fail open.
+
 **Safety, as shipped.** NOT "non-GET is aborted" — that changed in refactor Phase 4
 so SPAs could render at all. Page traffic FLOWS; what is gated is what the AGENT
 does:
@@ -2977,3 +2988,117 @@ runs, three distinct defects, and the reported cause was never verified.
   approved …"), which is the difference between a diagnosable gap and a false
   claim. **Live acceptance of the cart flow is still pending** — the hermetic suite
   is the gate met.
+
+### One route registration was turning Chromium's cache off (2026-07-27)
+Live report: *"websites in jarvis's chrome load 100x slower than in a normal
+browser."* Three prior rounds had tuned this stack for speed (2026-07-19 the
+per-request tax, 2026-07-23 the event-driven `settle()`, 2026-07-26 the measured
+budgets) and every one of them tuned OUR code. The cost none of them looked at was
+the one Playwright imposes on Chromium UNDERNEATH us.
+- **ROOT CAUSE, read out of the installed driver.** `session.py` registered
+  `context.route("**/*")` for the life of every session. In Playwright 1.48's
+  `chromium/crNetworkManager.js::_updateProtocolRequestInterceptionForSession`, ANY
+  route makes the driver send **`Network.setCacheDisabled: true`** alongside
+  `Fetch.enable`. Not "our requests bypass the cache" — the cache is OFF, so every
+  image, stylesheet, font and script is re-downloaded on every navigation, and the
+  agent loop navigates repeatedly around one site. Nothing in the codebase noted it.
+- **⚠️ THE OBVIOUS FIX DOES NOT WORK, AND MEASURING IS THE ONLY REASON WE KNOW.**
+  The first cut opened a second CDP session and sent `setCacheDisabled: false`
+  after the route. It SUCCEEDED, logged `cache=on`, and changed nothing: repeat-load
+  speedup stayed at 1.87x. `cacheDisabled` is per-session state and Chromium takes
+  the **OR** across attached sessions, so a second session saying "false" can never
+  overrule Playwright's "true". Had the log line been trusted instead of the clock,
+  this would have shipped as a fix that did nothing. Measured on
+  books.toscrape.com, second (warm) load: **A** Playwright route only 2.14s · **B**
+  route + our `setCacheDisabled(false)` 2.83s · **C** no route, our own
+  `Fetch.enable` **0.07s**.
+- **THE FIX — own the Fetch domain** (`_install_cdp_interception` + the
+  `_CdpRoute`/`_CdpRequest`/`_CdpFrame` adapters). We ask Chromium for the IDENTICAL
+  patterns Playwright would (`urlPattern:"*"`, `requestStage:"Request"`) and present
+  each `Fetch.requestPaused` in the shape `_intercept` already reads. **`_intercept`
+  is untouched**, which is the whole design: this changed the TRANSPORT, not the
+  guard, so all ~175 rule tests still drive it directly and still pass. Abort uses
+  `errorReason: "Failed"` — what Playwright's own `route.abort()` sends — so a
+  blocked request looks to the page exactly as before. Playwright routing stays the
+  automatic fallback, taken whenever CDP cannot be fully established: notably an
+  unknown main frame id REFUSES the fast path, because Rule 3 is main-frame-only and
+  an adapter that cannot tell a top-level document from an iframe's would fail OPEN.
+  We only go fast when every rule can still be enforced exactly.
+- **COVERAGE WAS MEASURED, NOT ASSUMED.** Playwright attaches interception to every
+  session it auto-attaches, including out-of-process iframe targets; ours is on the
+  page target, so "we now see less" was the obvious worry. Measured on daraz.pk +
+  ebay.com + Wikipedia with the cache disabled in both arms so the counts compare:
+  **playwright-route 297 requests fielded / 298 page events; cdp-fetch 304 / 296.**
+  No coverage loss — Chromium delivers the page's whole frame tree to the page
+  target's session.
+- **MEASURED RESULT** (`scripts/browse_speed.py`, six real sites, each loaded twice
+  per arm against an un-intercepted control on the same profile): median repeat-load
+  slowdown **3.3x → 0.9x** (at parity with, or faster than, a normal browser), and
+  the cache tell — repeat load as a multiple of first load — **1.87x → 6.85x**
+  against the control's 3.84x. books.toscrape.com 2.12s → **0.09s**; Wikipedia 1.96s
+  → 0.61s; daraz.pk 3.85s → 2.88s. First (cold) loads were already at parity before
+  this round, which is why the per-request Python work was NOT the problem.
+- **The playback lift had never once run** (found while reading the same code).
+  `enter_playback_mode` called `self.page.unroute(...)` while the route was installed
+  on the CONTEXT, and Playwright's `page.unroute` filters only that page's own route
+  list — so it matched nothing, SUCCEEDED, and logged *"interception LIFTED for
+  playback (full-speed window)"* about a window that was still fully intercepted.
+  The 2026-07-18 "the net is very slow in your profile, normal in mine" fix was
+  therefore never in force. `_unroute_intercept` now lifts at the level the route was
+  installed (CDP `Fetch.disable`, else the context, else the page) and RAISES rather
+  than no-opping when it cannot — a no-op that reports success is worse than a
+  failure, because nothing ever looks at it again.
+- **Also fixed, both loop-blocking rather than per-request:** `_downscale_jpeg` ran
+  Pillow synchronously on the single browser loop (now `asyncio.to_thread`) — while
+  it ran, no paused request could be answered; and `goto` called the SYNCHRONOUS
+  `_validate_url`, whose SSRF guard does a blocking `getaddrinfo`, on that same loop
+  (now the cached, single-flighted `_host_blocked_cached`, via a new shared
+  `browser_tools.parse_web_url` so the two paths cannot drift).
+- **⚠️ THE ONE REAL REGRESSION IT ALMOST SHIPPED — off-site redirects.** Playwright
+  route handlers do NOT re-fire on redirect hops, which is precisely why
+  `_verify_landing` exists: it judges the LANDING, backs the page out, and records
+  `last_redirect_offsite` so the loop can offer an APPROVABLE origin pause (the
+  2026-07-19 WWR ad incident — a legit "Apply" redirecting to an ATS is approvable,
+  an ad is deniable). Driving Fetch ourselves DOES fire per hop, so Rule 3 began
+  aborting the redirect before it could land — killing that pause and leaving a
+  dead `net::ERR_FAILED`. **The hermetic fakes cannot model a redirect, so no test
+  caught this; a live A/B probe did.** Note the first probe run was INCONCLUSIVE
+  (the redirector simply did not redirect) and read like "no difference" — the
+  second, on a real `youtu.be`→`youtube.com` 302, showed the loss. Fix: Rule 3
+  records `last_redirect_offsite` itself when it aborts a main-frame navigation,
+  and `goto` maps a refusal-during-navigation (detected by its own counter moving,
+  since Chromium reports OUR decision as a bare `ERR_FAILED`) to the SAME wording
+  `_verify_landing` raises — the loop cannot tell which layer caught it. Verified
+  live: both arms now yield an identical message and identical
+  `last_redirect_offsite`, and the CDP path catches it a hop EARLIER, never
+  loading the off-site page at all.
+- **DELIBERATELY NOT DONE, on evidence.** Swapping `route.continue_()` for
+  `route.fallback()` was in the plan; reading `_impl/_network.py` shows `fallback()`
+  just defers to the next handler and, with none, ends at the same `continue` channel
+  call — it is not cheaper. Making `_is_ad_host` O(1) was also planned and dropped:
+  cold loads already matched the control, so per-request Python work is not a
+  bottleneck and the churn buys nothing.
+- **Measurement shipped with the fix, because three rounds of tuning left no way to
+  re-measure page load.** NEW `scripts/browse_speed.py` (the browse_bench.py pattern:
+  Selector event loop, warm driver, reclaim between arms, JSON to `bench-results/`)
+  A/Bs the real `BrowserSession` against an un-intercepted control on the same
+  profile, loading each URL twice — the second load is the whole signal, because a
+  working cache makes it fast and a disabled one cannot. And `trace.py` gained
+  `mark_phase()` so a step line now carries `settle_ms`/`observe_ms`/`decide_ms`/
+  `act_ms` instead of one opaque `ms`: a 2026-07-27 run spent 151s reaching a single
+  decision and root-causing it needed three log files (the answer was machine-wide
+  contention, not the browser).
+- Tests: `test_browser_session.py` (+14 — Fetch enabled with Playwright's own
+  patterns and NO route registered; a paused request flows through the guard; abort
+  reason parity; the adapter tells a main-frame navigation from an iframe's; an
+  unknown frame id refuses the fast path; a handle without CDP falls back; the fast
+  path relaxes no rule; a popup gets its own guarded target; playback disables Fetch;
+  the context-level unroute; no false lift claim; goto resolves each host once; a
+  refused off-site hop still records `last_redirect_offsite`; a refusal reads in our
+  words while a real network failure still reads as one),
+  `test_browser_trace.py` (+6 — phases land on the line that follows them, a phase
+  entered twice accumulates, a new step starts clean, names are bounded, never
+  raises, and it still never reads the deadline's clock).
+- **Gates met:** full suite green; `scripts/browse_bench.py` **6/6 scored tasks
+  passed** (previous best 5/6) with the navigation-heavy books-toscrape task
+  71.3s → 28.1s and the median 32.1s → 28.1s.

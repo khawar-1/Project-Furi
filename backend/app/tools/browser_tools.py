@@ -253,23 +253,44 @@ def _host_is_blocked(host: str) -> bool:
     return any(_ip_blocked(info[4][0]) for info in infos)
 
 
-def _validate_url(raw: str) -> tuple[Optional[str], Optional[str]]:
-    """(normalized_url, None) or (None, error). http/https only; SSRF-guarded."""
+def parse_web_url(raw: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """The NO-DNS half of _validate_url: (normalized_url, host, None) or
+    (None, None, error). Split out so a caller that must not block its event
+    loop can run these cheap checks synchronously and resolve the host through
+    an async cache instead (BrowserSession._validate_url_cached) — shared, never
+    copied, so the two paths cannot drift apart."""
     text = (raw or "").strip()
     if not text:
-        return None, "A URL is required."
+        return None, None, "A URL is required."
     if "://" not in text:
         text = "https://" + text  # bare "example.com/x" → https
     parsed = urlparse(text)
     if parsed.scheme not in ("http", "https"):
-        return None, f"Only http/https URLs are supported — got scheme '{parsed.scheme or '?'}'."
-    if not parsed.hostname:
-        return None, f"'{raw}' is not a valid URL (no host)."
-    if _host_is_blocked(parsed.hostname):
-        return None, (
-            f"Refusing to fetch '{parsed.hostname}': local/private network "
-            f"addresses are blocked."
+        return None, None, (
+            f"Only http/https URLs are supported — got scheme '{parsed.scheme or '?'}'."
         )
+    if not parsed.hostname:
+        return None, None, f"'{raw}' is not a valid URL (no host)."
+    return text, parsed.hostname, None
+
+
+def blocked_host_error(host: str) -> str:
+    """The one wording for a refused private/local address, so every caller of
+    the SSRF guard reports it identically."""
+    return (
+        f"Refusing to fetch '{host}': local/private network addresses are blocked."
+    )
+
+
+def _validate_url(raw: str) -> tuple[Optional[str], Optional[str]]:
+    """(normalized_url, None) or (None, error). http/https only; SSRF-guarded.
+    Synchronous, and _host_is_blocked resolves DNS — so this must not be called
+    from the browser event loop (see BrowserSession._validate_url_cached)."""
+    text, host, error = parse_web_url(raw)
+    if error:
+        return None, error
+    if _host_is_blocked(host or ""):
+        return None, blocked_host_error(host or "")
     return text, None
 
 

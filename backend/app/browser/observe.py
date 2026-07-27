@@ -62,6 +62,7 @@ anything building a prompt keeps reading the clipped ones.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -1283,13 +1284,19 @@ async def capture_screenshot(
         return None
     if not raw:
         return None
-    return _downscale_jpeg(bytes(raw), max_dim)
+    # OFF THE BROWSER LOOP. Pillow decode+resize+encode is synchronous CPU work,
+    # and the browser runtime is ONE loop on ONE thread that also resumes every
+    # request paused by the interceptor — so doing it inline stalls the page's
+    # own network while we shrink a picture of it. A thread costs nothing here
+    # (the GIL is released inside Pillow's C code).
+    return await asyncio.to_thread(_downscale_jpeg, bytes(raw), max_dim)
 
 
 def _downscale_jpeg(data: bytes, max_dim: int) -> bytes:
     """Shrink a JPEG so its longer edge ≤ max_dim, via a lazy Pillow import.
     Returns the original bytes unchanged when Pillow is absent or already small —
-    the capture is best-effort, so a missing optional dep never fails it."""
+    the capture is best-effort, so a missing optional dep never fails it.
+    Synchronous by design; callers run it in a thread (see capture_screenshot)."""
     try:
         import io
 

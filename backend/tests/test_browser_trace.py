@@ -19,6 +19,7 @@ that most needs a trace is the one that failed), and above all that it can never
 affect the run it is watching.
 """
 import json
+import time
 
 import pytest
 
@@ -213,6 +214,97 @@ async def test_the_trace_does_not_read_the_clock_the_deadline_uses(monkeypatch):
     trace.step(index=0, result="ok")
     trace.finish(success=True, steps=1)
     assert calls["n"] == 0, "the trace read the loop's deadline clock"
+
+
+# --------------------------------------------------------------- step phases
+# WHY (2026-07-27). A step's `ms` covered settle + observe + decide + act
+# together, so a run that spent 151s reaching ONE decision was a single opaque
+# number and root-causing it meant correlating three log files. Four fields make
+# it a glance — and the answer that time (the whole machine was contended, not
+# the browser) was only reachable by noticing an unrelated search_files had also
+# taken 12s.
+def _phase_lines(trace):
+    return [json.loads(line) for line in trace.path.read_text("utf-8").splitlines()]
+
+
+def test_phases_are_reported_on_the_line_that_follows_them(trace_dir):
+    """The DECISION line carries settle/observe/decide; the RESULT line carries
+    act. Repeating the same breakdown on both would double-count the step."""
+    trace = browse_trace.BrowseTrace("goal", commit=False)
+    trace.mark_step_start()
+    trace.mark_phase("settle")
+    trace.mark_phase("observe")
+    trace.mark_phase("decide")
+    trace.step(index=0, action={"action": "click"}, source="dom")
+    trace.mark_phase("act")
+    trace.step(index=0, result="ok")
+
+    decision, result = _phase_lines(trace)[1], _phase_lines(trace)[2]
+    assert {"settle_ms", "observe_ms", "decide_ms"} <= set(decision)
+    assert "act_ms" not in decision
+    assert "act_ms" in result
+    assert "settle_ms" not in result
+
+
+def test_a_phase_entered_twice_accumulates(trace_dir):
+    """settle is marked again when the page-quality gate re-looks, so a phase
+    visited twice must read as its total rather than only its last visit."""
+    trace = browse_trace.BrowseTrace("goal", commit=False)
+    trace.mark_step_start()
+    time.sleep(0.02)
+    trace.mark_phase("settle")
+    first = _pending(trace)["settle_ms"]
+    time.sleep(0.02)
+    trace.mark_phase("settle")
+    assert _pending(trace)["settle_ms"] >= first + 15
+
+
+def _pending(trace):
+    return dict(trace._phases)
+
+
+def test_a_new_step_starts_from_a_clean_slate(trace_dir):
+    trace = browse_trace.BrowseTrace("goal", commit=False)
+    trace.mark_step_start()
+    trace.mark_phase("settle")
+    trace.mark_step_start()
+    assert _pending(trace) == {}
+
+
+def test_phase_names_are_bounded(trace_dir):
+    """A bound, not an expectation — the loop marks four, and a bug that
+    invented names must not be able to grow the payload."""
+    trace = browse_trace.BrowseTrace("goal", commit=False)
+    trace.mark_step_start()
+    for i in range(browse_trace._MAX_PHASES + 20):
+        trace.mark_phase(f"p{i}")
+    assert len(_pending(trace)) == browse_trace._MAX_PHASES
+
+
+def test_marking_a_phase_never_raises(trace_dir, monkeypatch):
+    """The narration rule: an observer must never be able to end a run."""
+    trace = browse_trace.BrowseTrace("goal", commit=False)
+    trace.mark_step_start()
+    monkeypatch.setattr(trace, "_phases", None)   # any internal breakage
+    trace.mark_phase("settle")                     # must not raise
+
+
+def test_phase_timing_never_reads_the_loops_deadline_clock(trace_dir, monkeypatch):
+    """The same regression the module docstring records, extended to the new
+    call: mark_phase must use perf_counter, never monotonic."""
+    calls = {"n": 0}
+    real = time.monotonic
+
+    def counting_monotonic():
+        calls["n"] += 1
+        return real()
+
+    monkeypatch.setattr(time, "monotonic", counting_monotonic)
+    trace = browse_trace.BrowseTrace("goal", commit=False)
+    trace.mark_step_start()
+    trace.mark_phase("settle")
+    trace.step(index=0, result="ok")
+    assert calls["n"] == 0
 
 
 # ------------------------------------------------------------------- bounds

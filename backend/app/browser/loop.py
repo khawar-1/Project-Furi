@@ -3293,6 +3293,7 @@ async def run_browse(
                 llm_calls=llm_calls, vision_calls=vision_calls,
             )
         await session.settle()
+        run_trace.mark_phase("settle")
         # PIPELINED CAPTURE (Phase 6): when the marked screenshot is needed THIS
         # step, capture the base viewport CONCURRENTLY with the DOM observe — two
         # independent CDP reads whose round-trip + encode overlap instead of
@@ -3312,6 +3313,7 @@ async def run_browse(
         else:
             base_shot = None
             obs = await dom_observe.observe(session.page)
+        run_trace.mark_phase("observe")
         if obs.url != paged_url:
             element_skip = 0
             paged_url = obs.url
@@ -3662,6 +3664,10 @@ async def run_browse(
             f"browse step {step}: '{obs.title[:40]}' ({obs.element_total} elements)"
             f"{challenge_note} [{decided_by}] → {action}"
         )
+        # Everything since the observation — the page-quality gate, any re-look,
+        # the fast paths, and the model call itself — is how the next action got
+        # chosen, so it banks as one number against the channel that decided it.
+        run_trace.mark_phase("decide")
         run_trace.step(
             index=step, observation=obs, action=action, source=decided_by
         )
@@ -3821,6 +3827,7 @@ async def run_browse(
                 if room > 0:
                     extracted.extend(records[:room])
                 history.append(f"- extracted {len(records)} item(s) from this page")
+                run_trace.mark_phase("act")
                 run_trace.step(index=step, result="extracted", records=len(records))
                 consecutive_failures = 0
             else:
@@ -3834,6 +3841,7 @@ async def run_browse(
                 )
                 last_failure = _read_failure(action, note)
                 logger.info(f"browse: {last_failure}")
+                run_trace.mark_phase("act")
                 run_trace.step(index=step, result="extracted-nothing", note=last_failure)
                 # This page has nothing readable on it. Stop OFFERING the read
                 # rather than waiting for the repeat guard to refuse two more.
@@ -4010,6 +4018,7 @@ async def run_browse(
                         f"browse: performing the ONE approved gesture (step {step}) "
                         f"— {performed}"
                     )
+                    run_trace.mark_phase("act")
                     run_trace.step(
                         index=step, result="approved-gesture", note=performed
                     )
@@ -4117,6 +4126,7 @@ async def run_browse(
             session, obs, act_action, commit=commit, approved_gesture=approved_gesture
         )
         history.append(_history_line(action, obs, ok, note))
+        run_trace.mark_phase("act")
         run_trace.step(index=step, result="ok" if ok else "failed", note=note)
 
         # REDIRECT OFF-SITE HAND-OFF (2026-07-19, the WWR-ad incident): the

@@ -1,0 +1,221 @@
+{
+  "when": "2026-07-27_14-28-09",
+  "loads": [
+    {
+      "url": "https://example.com",
+      "arm": "control",
+      "first": {
+        "commit_s": 0.8,
+        "complete_s": 0.84,
+        "completed": true,
+        "requests": 1,
+        "error": ""
+      },
+      "second": {
+        "commit_s": 0.03,
+        "complete_s": 0.06,
+        "completed": true,
+        "requests": 1,
+        "error": ""
+      }
+    },
+    {
+      "url": "https://books.toscrape.com",
+      "arm": "control",
+      "first": {
+        "commit_s": 3.04,
+        "complete_s": 4.89,
+        "completed": true,
+        "requests": 31,
+        "error": ""
+      },
+      "second": {
+        "commit_s": 0.03,
+        "complete_s": 0.09,
+        "completed": true,
+        "requests": 31,
+        "error": ""
+      }
+    },
+    {
+      "url": "https://quotes.toscrape.com",
+      "arm": "control",
+      "first": {
+        "commit_s": 1.5,
+        "complete_s": 2.59,
+        "completed": true,
+        "requests": 5,
+        "error": ""
+      },
+      "second": {
+        "commit_s": 0.33,
+        "complete_s": 0.67,
+        "completed": true,
+        "requests": 5,
+        "error": ""
+      }
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Chromium_(web_browser)",
+      "arm": "control",
+      "first": {
+        "commit_s": 0.94,
+        "complete_s": 3.75,
+        "completed": true,
+        "requests": 33,
+        "error": ""
+      },
+      "second": {
+        "commit_s": 0.31,
+        "complete_s": 0.59,
+        "completed": true,
+        "requests": 43,
+        "error": ""
+      }
+    },
+    {
+      "url": "https://www.daraz.pk",
+      "arm": "control",
+      "first": {
+        "commit_s": 0.84,
+        "complete_s": 7.46,
+        "completed": true,
+        "requests": 169,
+        "error": ""
+      },
+      "second": {
+        "commit_s": 0.39,
+        "complete_s": 2.62,
+        "completed": true,
+        "requests": 164,
+        "error": ""
+      }
+    },
+    {
+      "url": "https://www.ebay.com",
+      "arm": "control",
+      "first": {
+        "commit_s": 1.1,
+        "complete_s": 5.97,
+        "completed": true,
+        "requests": 78,
+        "error": ""
+      },
+      "second": {
+        "commit_s": 0.57,
+        "complete_s": 1.38,
+        "completed": true,
+        "requests": 73,
+        "error": ""
+      }
+    },
+    {
+      "url": "https://example.com",
+      "arm": "jarvis",
+      "first": {
+        "commit_s": 0.7,
+        "complete_s": 0.74,
+        "completed": true,
+        "requests": 1,
+        "error": ""
+      },
+      "second": {
+        "commit_s": 0.24,
+        "complete_s": 0.26,
+        "completed": true,
+        "requests": 1,
+        "error": ""
+      }
+    },
+    {
+      "url": "https://books.toscrape.com",
+      "arm": "jarvis",
+      "first": {
+        "commit_s": 1.56,
+        "complete_s": 3.21,
+        "completed": true,
+        "requests": 31,
+        "error": ""
+      },
+      "second": {
+        "commit_s": 0.4,
+        "complete_s": 2.12,
+        "completed": true,
+        "requests": 31,
+        "error": ""
+      }
+    },
+    {
+      "url": "https://quotes.toscrape.com",
+      "arm": "jarvis",
+      "first": {
+        "commit_s": 0.46,
+        "complete_s": 1.41,
+        "completed": true,
+        "requests": 5,
+        "error": ""
+      },
+      "second": {
+        "commit_s": 0.31,
+        "complete_s": 1.01,
+        "completed": true,
+        "requests": 5,
+        "error": ""
+      }
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Chromium_(web_browser)",
+      "arm": "jarvis",
+      "first": {
+        "commit_s": 0.9,
+        "complete_s": 3.89,
+        "completed": true,
+        "requests": 43,
+        "error": ""
+      },
+      "second": {
+        "commit_s": 0.31,
+        "complete_s": 1.96,
+        "completed": true,
+        "requests": 43,
+        "error": ""
+      }
+    },
+    {
+      "url": "https://www.daraz.pk",
+      "arm": "jarvis",
+      "first": {
+        "commit_s": 0.83,
+        "complete_s": 7.19,
+        "completed": true,
+        "requests": 164,
+        "error": ""
+      },
+      "second": {
+        "commit_s": 0.43,
+        "complete_s": 3.85,
+        "completed": true,
+        "requests": 159,
+        "error": ""
+      }
+    },
+    {
+      "url": "https://www.ebay.com",
+      "arm": "jarvis",
+      "first": {
+        "commit_s": 1.28,
+        "complete_s": 3.82,
+        "completed": true,
+        "requests": 77,
+        "error": ""
+      },
+      "second": {
+        "commit_s": 0.62,
+        "complete_s": 2.21,
+        "completed": true,
+        "requests": 69,
+        "error": ""
+      }
+    }
+  ]
+}
