@@ -112,6 +112,30 @@ def test_search_results_rendered_grouped_by_folder():
     assert "No matches found." in none
 
 
+def test_empty_search_names_where_it_looked():
+    """An empty result that does not say WHERE it looked is undiagnosable.
+    Live 2026-07-30: "move all the pdf files from downloads" searched the empty
+    C:\\Users\\DELL\\Downloads while 85 PDFs sat in D:\\Downloads, and the
+    outcome read as a flat "you have no PDFs" — neither the user nor the revise
+    LLM could see which Downloads had been searched. The roots are in the
+    tool's own output; report them."""
+    text = completed_results_text(completed_plan(
+        done_step("search_files", {
+            "matches": [], "count": 0, "truncated": False,
+            "searched_in": ["C:\\Users\\DELL\\Downloads"],
+        })
+    ))
+    assert "No matches found in `C:\\Users\\DELL\\Downloads`." in text
+
+    multi = completed_results_text(completed_plan(
+        done_step("search_files", {
+            "matches": [], "count": 0,
+            "searched_in": ["C:\\a", "D:\\b"],
+        })
+    ))
+    assert "`C:\\a`" in multi and "`D:\\b`" in multi
+
+
 def test_read_file_content_and_command_stdout_shown():
     text = completed_results_text(completed_plan(
         done_step("read_file", {"path": "C:\\n.txt", "content": "the real notes"}),
@@ -391,7 +415,11 @@ def test_aggregates_survive_the_step_cap_on_huge_listings():
     text = completed_results_text(completed_plan(done_step("search_files", {
         "matches": matches, "count": len(matches),
     })))
-    assert "(truncated)" in text  # the cap did fire on this listing
+    assert "(clipped for length)" in text  # the cap did fire on this listing
+    # ...and it must NOT say "truncated": that word is reserved for a tool
+    # reporting it did not fetch everything (2026-07-29 — a clip marker on a
+    # COMPLETE result was read back as data loss and derailed the plan).
+    assert "truncated" not in text
     assert "Largest: the-biggest-file-of-all.pdf (99.0 MB)" in text
     assert "Newest: the-biggest-file-of-all.pdf (modified 2026-07-12)" in text
     assert text.index("Largest:") < text.index("In `D:\\dl`")  # answer first

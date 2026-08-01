@@ -231,6 +231,33 @@ def _hermetic_browser():
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_did_you_mean():
+    """The "did you mean…?" lookup (2026-08-01) searches the web AND resolves
+    DNS for every candidate before offering it. Its search seam already lands on
+    the refuser above, but the RESOLVER is a real getaddrinfo — a network call
+    from a suite that must not make any, and one whose answer depends on whoever
+    happens to own a domain today.
+
+    Refuse both explicitly. suggest_sites is best-effort by design, so a refusal
+    degrades to "no suggestions" — which is the pre-feature behaviour, i.e. the
+    safe default for every test that does not opt in. Tests that exercise the
+    lookup inject their own pair."""
+    from app.browser import did_you_mean
+
+    async def _refuse_search(query: str, limit: int):
+        raise RuntimeError(f"test tried a real site-suggestion search: {query!r}")
+
+    async def _refuse_resolve(host: str):
+        raise RuntimeError(f"test tried to resolve a real host: {host!r}")
+
+    did_you_mean.SEARCH_FACTORY = _refuse_search
+    did_you_mean.RESOLVER_FACTORY = _refuse_resolve
+    yield
+    did_you_mean.SEARCH_FACTORY = None
+    did_you_mean.RESOLVER_FACTORY = None
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_browser_session():
     """browser_session's default factory LAUNCHES A REAL CHROMIUM against the
     user's own ~/.jarvis/browser profile — a visible window, on their machine,

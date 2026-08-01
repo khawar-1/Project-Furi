@@ -205,6 +205,14 @@ class CommitDiscovery:
     auth_offer_signup: bool = False
     auth_offer_site: str = ""
     auth_offer_url: str = ""
+    # The named domain has no DNS record at all (2026-08-01) — NXDOMAIN only,
+    # never a cert/refused/timeout failure, which all mean the domain exists.
+    # Voice mishears proper nouns ("junaidjamshed.com" -> "junitjamsheed.com"),
+    # so the planner searches for what the user may have meant and asks; it
+    # never navigates to a domain the user did not name. See browser/
+    # did_you_mean.py for why suggesting is not the same as guessing.
+    site_unresolved: bool = False
+    unresolved_host: str = ""
 
 
 async def _load_vision_config():
@@ -370,6 +378,7 @@ async def discover(
     from app.agents import browser_loop
     from app.core import browser_runtime, browser_session
     from app.core.browser_session import (
+        UNREACHABLE_DNS,
         BrowserBlocked,
         BrowserSession,
         BrowserUnavailable,
@@ -504,6 +513,19 @@ async def discover(
             # "blocked": nothing was refused by policy, the site simply is not
             # there. Reported plainly; never a licence to try a neighbouring
             # domain the user never named.
+            #
+            # ONE exception, and it is a QUESTION rather than a guess
+            # (2026-08-01): when the failure is NXDOMAIN the named address does
+            # not exist, which — since voice became an input path — usually means
+            # it was misheard. Flag it so the planner can ask "did you mean…?"
+            # with verified options. Any other class means the domain EXISTS and
+            # the site is having a problem, where an alternative would be noise.
+            if getattr(exc, "kind", "") == UNREACHABLE_DNS:
+                host = getattr(exc, "host", "") or _normalize_origin(start_url)
+                _trace_pre_loop_failure(session, goal, str(exc))
+                return CommitDiscovery(
+                    site_unresolved=True, unresolved_host=host, error=str(exc)
+                )
             _trace_pre_loop_failure(session, goal, str(exc))
             return CommitDiscovery(error=str(exc))
         except BrowserBlocked as exc:

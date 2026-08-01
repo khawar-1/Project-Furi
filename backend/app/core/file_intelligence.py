@@ -39,7 +39,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import ActivityLog
 
 # Tools whose SUCCESSFUL runs reveal a destination folder the user chose.
-_DESTINATION_TOOLS = ("create_file", "move_file", "rename_file")
+# move_files counts ONCE per call, not once per file: a habit is a DECISION,
+# one approval is one decision, and counting 85 would let a single bulk move
+# permanently dominate the ranking.
+_DESTINATION_TOOLS = ("create_file", "move_file", "rename_file", "move_files")
 
 # Never suggest Jarvis's own trash as a place to save things.
 _TRASH_DIR = Path.home() / ".jarvis" / "trash"
@@ -66,6 +69,13 @@ def _loads(raw: Optional[str]) -> Optional[dict]:
     except (ValueError, TypeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _folder(path: Any) -> Optional[str]:
+    """The value AS the folder (no .parent) — for tools whose destination is
+    required to be a directory."""
+    text = str(path or "").strip()
+    return text or None
 
 
 def _parent(path: Any) -> Optional[str]:
@@ -102,6 +112,17 @@ def _destination_folder(
         # Fallback only: `destination` may be the folder itself or a full path;
         # the parent is the best guess when no result is available.
         return _parent(params.get("destination")) if params else None
+    if tool_name == "move_files":
+        # NOT _parent(): move_files REQUIRES its destination to be an existing
+        # folder, so the destination IS the learned folder. (move_file needs
+        # the parent because its destination may be a full target path — that
+        # asymmetry is why this is a branch of its own.) The parameter is a
+        # reliable fallback here: _sanitize_params caps values at 300 chars,
+        # which a folder path survives, while the batch RESULT is clipped by
+        # _summarize_result and often will not parse.
+        if result and result.get("destination"):
+            return _folder(result["destination"])
+        return _folder(params.get("destination")) if params else None
     if tool_name == "rename_file":
         if result and result.get("renamed_to"):
             return _parent(result["renamed_to"])

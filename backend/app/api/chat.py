@@ -548,6 +548,21 @@ async def chat_stream(
         timer.log()
         return routine_response
 
+    # --- 2026-07-29: task continuation (app/api/continuation_router.py). Runs
+    # between routines and tasks. A short correction right after a task settled
+    # ("look again", "that's not all of them") re-runs the ORIGINAL goal with
+    # the correction attached, instead of falling into chat (which cannot act)
+    # or drafting a new plan whose goal is literally "look again" — which
+    # silently disarms every guard that keys on the goal string.
+    from app.api.continuation_router import maybe_handle_continuation
+    with timer.stage("continuation_route"):
+        continuation_response = await maybe_handle_continuation(
+            request=request, session_id=session_id, db=db, provider=provider
+        )
+    if continuation_response is not None:
+        timer.log()
+        return continuation_response
+
     # --- Phase 3: task-request routing (app/api/task_router.py). Returns a
     # response ONLY for confirmed task requests; None (the overwhelmingly
     # common case — the deterministic gate makes no LLM call) continues into

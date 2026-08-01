@@ -145,6 +145,14 @@ class AgentPlan(BaseModel):
     # left memory) and is fair to audit. Empty = the goal had one reading, or
     # we could not tell — both mean "leave the summary's own judgement alone".
     primary_reading: str = ""
+    # A replanner looked at the executed results and declared the goal already
+    # met ("goal_accomplished": true with an empty revision). SERIALIZED for
+    # the same reason as primary_reading: a verdict this plan acted on.
+    # It is what lets a plan complete honestly while still CARRYING a failed
+    # step — the one case planner._unrouted_failure's positional test cannot
+    # see, because when nothing more needs doing, nothing runs after the
+    # failure. Defaulted, so plans parked before this field deserialize.
+    goal_accomplished: bool = False
     # The domain agent that owns this plan (the boss+agents model): "file" /
     # "email" / "calendar" / "research" / "browser" / "general". SERIALIZED
     # (unlike the planner inputs above) so a paused task's resume rebuilds the
@@ -176,6 +184,19 @@ class AgentPlan(BaseModel):
     # start_url so the resumed run opens the page the user just approved.
     # SERIALIZED beside pending_origin_approval; defaulted for old payloads.
     pending_origin_url: Optional[str] = None
+    # The address the user NAMED that turned out not to exist (2026-08-01) —
+    # set when a browse pauses on "did you mean…?" and cleared when answered —
+    # and the verified alternatives that pause offered. Both SERIALIZED beside
+    # the other pending_* markers (the pause PARKS the plan, so an excluded
+    # field would lose the question's own options across the round trip and the
+    # answer could not be matched against anything). Defaulted for old payloads.
+    pending_site_correction: Optional[str] = None
+    pending_site_candidates: list[str] = Field(default_factory=list)
+    # How many "did you mean…?" pauses this plan has spent (cap
+    # _MAX_SITE_CORRECTIONS). SERIALIZED for the browse_handoffs reason: the ask
+    # parks the plan, so a counter that did not survive the park would let a
+    # correction chain restart from zero on every resume and never terminate.
+    site_corrections: int = 0
     # A world-acting gesture (send / post / submit / upload / like / follow /
     # delete / buy…) a READ browse loop reached and STOPPED at (2026-07-22): an
     # action on a live site is NEVER performed without the user's yes. Holds the
@@ -249,6 +270,15 @@ class AgentPlan(BaseModel):
     # (2026-07-19). Bounded by _MAX_BROWSE_HANDOFFS. SERIALIZED so it survives
     # each park/resume; defaulted for old payloads.
     browse_handoffs: int = 0
+    # STRUCTURAL same-named-folder hand-offs made so far ("there are 2 folders
+    # named 'Downloads' — which one?"). Counted SEPARATELY from questions_asked
+    # for the browse_handoffs reason turned around: a MUTATING step must never
+    # lose its turn to three LLM clarifications and then move 85 files into the
+    # wrong drive, which is exactly what happened on 2026-08-01 (there, because
+    # the guard never ran at all). Bounded by _MAX_FOLDER_HANDOFFS. SERIALIZED
+    # — the ask PARKS the plan, so the counter has to survive the round trip;
+    # defaulted for old payloads.
+    folder_handoffs: int = 0
     # Pages (by URL) on which the user has already decided the sign-in offer —
     # so a commit browse asks AT MOST once per distinct page (the "every time it
     # sees one" setting means every distinct page, not every observation, or the

@@ -23,6 +23,17 @@ httpx==0.26.0
 # Vector Database
 qdrant-client==1.7.3
 
+# Deterministic fuzzy string matching. UNDECLARED UNTIL 2026-08-01 and load-
+# bearing since Phase 2: app/memory/engine.py imports it AT MODULE LEVEL for the
+# contact identity resolution (resolve_identity / MIN_SCORE = 81), so a clean
+# `pip install -r requirements.txt` produced a backend that could not import the
+# memory engine at all. Nothing pulls it in transitively — verified, no installed
+# distribution declares it — so it had been surviving on a manual install in this
+# one venv. Also used by the browse "did you mean…?" site suggester
+# (app/browser/did_you_mean.py, whose SIMILARITY_FLOOR is calibrated against
+# fuzz.ratio) and referenced in task_router's routing notes.
+rapidfuzz==3.14.5
+
 # Local embeddings (app/memory/embedder.py — BAAI/bge-small-en-v1.5, 384 dims)
 fastembed==0.8.0
 

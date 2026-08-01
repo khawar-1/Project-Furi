@@ -23,6 +23,18 @@ results — the same data the revise LLM would have been shown:
   a fresh signature, so every write/destructive action the user approves
   names its exact real path. A search/list that found NOTHING expands to
   zero steps — honestly "nothing to do", never a failure.
+- ...UNLESS there are many, in which case move_file/delete_file become ONE
+  move_files/delete_files step carrying the explicit list (2026-07-29). One
+  step per file cannot express bulk work AT ALL: with MAX_PLAN_STEPS=30 an
+  85-PDF move blew the cap, this module returned None, the step failed with
+  "still contain unresolved 'PENDING:' placeholders", and the plan reported
+  "Done — 2 step(s) completed" having moved nothing. The batch step keeps
+  every property the per-file form had — fresh signature, the real paths in
+  its parameters, the same structural approval gate — and removes the
+  ceiling. A bulk MUTATION additionally defaults to the searched folder's OWN
+  files (partition_by_depth) and refuses a source search that hit its result
+  cap, because acting on a knowingly partial set and reporting success is the
+  same defect wearing different clothes.
 - A folder parameter (search_files directory, list_directory path,
   run_command working_directory) substitutes when the completed results pin
   exactly ONE candidate: a single folder whose name appears in the
@@ -47,6 +59,7 @@ the goal's own words outrank a filter the model invented (the same
 goal-fidelity rule the planner's scope guard enforces on drafted steps —
 long-term memory is data, and data must never narrow the user's request).
 """
+import os
 import re
 from pathlib import PurePath
 from typing import Any, Optional
@@ -54,6 +67,7 @@ from typing import Any, Optional
 from loguru import logger
 
 from app.agents.schemas import AgentPlan, PlanStep, StepStatus
+from app.core.base_tool import PermissionLevel
 
 _PLACEHOLDER_MARK = "PENDING:"
 
@@ -66,6 +80,63 @@ _FILE_PARAMS = {
     "move_file": "source",
     "execute_script": "script_path",
 }
+
+# Bulk file work is ONE step, not N (2026-07-29). A per-file template whose
+# pool is larger than this becomes a single batch step carrying the explicit
+# list. The threshold is a product decision with a name, deliberately NOT
+# `max_new`: keying the plan's SHAPE on a cap that moves with plan length made
+# 27 files render as 27 approval rows and 29 as one, on a boundary nobody
+# chose. Below it, per-file steps keep their individual narration ticks.
+BATCH_EXPAND_MAX = 8
+
+# Per-file template → (batch tool, its list parameter). rename_file has NO
+# batch form by design (every rename needs its own new_name) and read_file has
+# none either (85 file bodies would blow every rendering cap).
+_BATCH_TOOLS = {
+    "move_file": ("move_files", "sources"),
+    "delete_file": ("delete_files", "paths"),
+}
+
+# The batch tools' own list parameters — for when the LLM drafts move_files
+# directly with a PENDING placeholder instead of the singular form.
+_LIST_PARAMS = {"move_files": "sources", "delete_files": "paths"}
+
+def _mutates(tool: str) -> bool:
+    """Does this template CHANGE the filesystem? Two rules ride on the answer:
+    a truncated source search is refused (acting on a knowingly partial set and
+    reporting success is the defect this module exists to remove), and the pool
+    defaults to the searched folder's OWN files rather than everything nested
+    beneath it.
+
+    ⚠️ READ FROM THE REGISTRY, never a hand-kept name list. This was a literal
+    list — `{"move_file", "delete_file", "rename_file"}` — and it silently
+    omitted the PLURAL tools, so both rules switched off for exactly the shape
+    the same round's rule 4 had just started telling the planner to draft.
+    Live 2026-07-30: "move all the pdf files from downloads" drafted
+    `move_files(sources="PENDING: …")`, `_fill_list` ran a pool with no
+    partition, and all 85 PDFs moved — including 8 out of subfolders, one from
+    inside a source repo's `frontend/src/Assets`. The guard applied to the
+    shape the planner used BEFORE the change and not to the one it encourages
+    AFTER, which is why the end-to-end test (drafted the singular form) passed
+    while the real run did not. The registry already owns permission levels —
+    the same reason `_batch_step` reads them there instead of copying them.
+
+    Unknown tool → treat as a mutation: the strict rules are the safe default.
+
+    Promoted to `registry.mutates` on 2026-08-01, when folder_resolver became
+    the second caller — one fact, one home, for exactly the reason above.
+    """
+    from app.tools.registry import mutates  # runtime import — no cycle
+
+    return mutates(tool)
+
+# The user asking for depth explicitly. Their own words outrank the top-level
+# default, exactly as `extension_grounded` lets the goal outrank a filter.
+_RECURSIVE_CUE_RE = re.compile(
+    r"\b(?:sub[- ]?folders?|sub[- ]?director(?:y|ies)|recursive(?:ly)?|nested|"
+    r"everywhere|all the way down|includ\w*\s+sub\w+)\b",
+    re.IGNORECASE,
+)
 
 # Single-folder parameters: substituted only when the completed results
 # identify exactly one candidate.
@@ -227,21 +298,78 @@ def _concrete_step(
     )
 
 
-def _expand_files(
+def _searched_roots(step: PlanStep) -> list[str]:
+    """The folders a completed search actually looked in — its own output, not
+    a guess. list_directory reports one `path`; search_files reports every root."""
+    output = step.result.output if step.result else None
+    if not isinstance(output, dict):
+        return []
+    if step.tool == "search_files":
+        return [str(r) for r in (output.get("searched_in") or []) if r]
+    if step.tool == "list_directory" and output.get("path"):
+        return [str(output["path"])]
+    return []
+
+
+def _normkey(path: str) -> str:
+    return os.path.normcase(os.path.normpath(path))
+
+
+def partition_by_depth(
+    pool: list[str], roots: list[str]
+) -> tuple[list[str], list[str]]:
+    """(files directly inside a searched root, files nested deeper).
+
+    search_files recurses to unlimited depth, which is right for FINDING and
+    wrong as a default for MUTATING: of the 85 PDFs the 2026-07-29 run matched
+    under D:\\Downloads, 8 lived in subfolders — one of them inside a source
+    repo's `frontend/src/Assets`. Moving those out would have broken a project
+    the user never mentioned. "The PDFs in Downloads" means the ones in
+    Downloads; anything deeper is a separate, explicit ask.
+
+    With no roots to compare against nothing is nested — the caller keeps the
+    whole pool rather than inventing a boundary."""
+    if not roots:
+        return list(pool), []
+    root_keys = {_normkey(r) for r in roots}
+    top: list[str] = []
+    nested: list[str] = []
+    for p in pool:
+        (top if _normkey(str(PurePath(p).parent)) in root_keys else nested).append(p)
+    return top, nested
+
+
+def _file_pool(
     plan: AgentPlan,
     template: PlanStep,
     key: str,
     completed: list[PlanStep],
-    max_new: int,
-) -> Optional[list[PlanStep]]:
+    grounding: str = "",
+) -> tuple[Optional[list[str]], list[str]]:
+    """(paths the template should act on, paths deliberately left out).
+
+    `None` means "not resolvable in code" — the caller falls back to the LLM
+    replan path. `[]` means the source genuinely found nothing, which is an
+    outcome rather than a failure. Shared by the per-file and batch branches so
+    the goal-fidelity rules cannot drift between them."""
     source = next((s for s in reversed(completed) if paths_from_step(s)[0]), None)
     if source is None:
         # No completed step produced any file. If a search/list DID run and
         # found nothing, "each found file" is honestly zero steps — the plan
         # has nothing to do, which is an outcome, not a failure.
         if any(s.tool in ("search_files", "list_directory") for s in completed):
-            return []
-        return None  # nothing to draw from — the LLM replan path decides
+            return [], []
+        return None, []  # nothing to draw from — the LLM replan path decides
+
+    # A source that hit its own result cap describes only PART of what is
+    # there. Expanding a mutation over it would move/delete a subset and
+    # report success — silently, and on the destructive path. Refuse; the
+    # replan sees the "(more exist — the list was truncated)" line the
+    # renderer already emits and can re-scope.
+    output = source.result.output if source.result else None
+    mutates = _mutates(template.tool)
+    if mutates and isinstance(output, dict) and output.get("truncated"):
+        return None, []
 
     pool = paths_from_step(source)[0]
     placeholder_text = str(template.parameters.get(key) or "")
@@ -256,12 +384,149 @@ def _expand_files(
             p for p in pool if PurePath(p).suffix.lstrip(".").lower() in exts
         ]
         if not filtered:
-            return None  # the filter matches nothing found — ambiguous, ask the LLM
+            return None, []  # the filter matches nothing found — ask the LLM
         pool = filtered
+
+    deferred: list[str] = []
+    if mutates:
+        corpus = " ".join(
+            [plan.goal or "", grounding or "", " ".join(plan.user_answers or [])]
+        )
+        if not _RECURSIVE_CUE_RE.search(corpus):
+            top, nested = partition_by_depth(pool, _searched_roots(source))
+            # Narrowing to nothing is worse than the default: a search that
+            # returned only nested files was scoped that way on purpose.
+            if top:
+                pool, deferred = top, nested
+    return pool, deferred
+
+
+def _human_bytes(total: int) -> str:
+    value = float(total)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _total_bytes(paths: list[str]) -> int:
+    total = 0
+    for p in paths:
+        try:
+            total += os.path.getsize(p)
+        except OSError:
+            pass
+    return total
+
+
+def _describe_batch(
+    tool: str, paths: list[str], destination: str, deferred: list[str]
+) -> str:
+    """The batch step's description — code-authored, like action_detail, so the
+    LLM can never soften what is about to happen. It carries the counts, the
+    size, and what was deliberately LEFT OUT, because `_step_action_detail`
+    must stay a pure (tool, params) render and cannot touch the disk."""
+    total = _total_bytes(paths)
+    # Omit the size rather than claim "0 B" when nothing could be stat'd.
+    what = f"{len(paths)} file(s)" + (f" ({_human_bytes(total)})" if total else "")
+    if tool == "move_files":
+        head = f"Move {what} into {destination}"
+    else:
+        head = f"Delete {what} (each backed up to the trash first)"
+    if not deferred:
+        return head
+    folders = sorted({str(PurePath(p).parent) for p in deferred})
+    shown = ", ".join(folders[:2]) + (
+        f" and {len(folders) - 2} more" if len(folders) > 2 else ""
+    )
+    return (
+        f"{head} — {len(deferred)} more sit inside subfolders ({shown}) and are "
+        f"NOT included; ask me to add them if you want them too"
+    )
+
+
+def _batch_step(
+    template: PlanStep,
+    tool: str,
+    list_key: str,
+    single_key: str,
+    paths: list[str],
+    deferred: list[str],
+) -> PlanStep:
+    """One step carrying the explicit file list, in place of N per-file steps.
+
+    Fresh id ⇒ fresh signature, so an approval given to the PENDING form
+    covers nothing — the same guarantee `_concrete_step` provides. The
+    permission level comes from the REGISTRY, never copied from the template:
+    `schemas.py` puts that trust boundary in the registry, and a copy would
+    silently under-classify a batch tool the day one is reclassified."""
+    from app.agents.planner import _step_action_detail  # runtime import — no cycle
+    from app.tools.registry import registry             # ditto
+
+    spec = registry.get(tool)
+    level = spec.permission_level if spec is not None else template.permission_level
+    # Scalars FIRST, the list LAST: planner._missing_target walks
+    # parameters.values() in insertion order, so a missing `destination` must
+    # be the path-like candidate it finds — not the first of 85 sources.
+    parameters: dict[str, Any] = {
+        k: v for k, v in template.parameters.items() if k != single_key
+    }
+    parameters[list_key] = list(paths)
+    destination = str(parameters.get("destination") or "")
+    return PlanStep(
+        description=_describe_batch(tool, paths, destination, deferred),
+        tool=tool,
+        parameters=parameters,
+        permission_level=level,
+        requires_approval=level != PermissionLevel.READ,
+        action_detail=_step_action_detail(tool, parameters),
+    )
+
+
+def _expand_files(
+    plan: AgentPlan,
+    template: PlanStep,
+    key: str,
+    completed: list[PlanStep],
+    max_new: int,
+    grounding: str = "",
+) -> Optional[list[PlanStep]]:
+    pool, deferred = _file_pool(plan, template, key, completed, grounding)
+    if not pool:
+        return pool  # None → LLM path; [] → nothing to do (an outcome)
+
+    # Batch when there are many, and ALSO whenever files were deliberately
+    # left out: the exclusion needs one legible contract to be stated on, and
+    # per-file steps have nowhere to say it.
+    batch = _BATCH_TOOLS.get(template.tool)
+    if batch is not None and (len(pool) > BATCH_EXPAND_MAX or deferred):
+        return [_batch_step(template, batch[0], batch[1], key, pool, deferred)]
 
     if len(pool) > max_new:
         return None  # would blow the plan-size cap — let the replan explain
     return [_concrete_step(template, key, path) for path in pool]
+
+
+def _fill_list(
+    plan: AgentPlan,
+    template: PlanStep,
+    key: str,
+    completed: list[PlanStep],
+    grounding: str = "",
+) -> Optional[list[PlanStep]]:
+    """The LLM drafted the batch tool itself with a PENDING list. Same pool,
+    same rules — only the shape of the step it lands in differs.
+
+    "Same rules" was FALSE until 2026-07-30: the mutation rules keyed on a
+    hand-listed set of SINGULAR tool names, so arriving here with `move_files`
+    skipped both the top-level partition and the truncated-source refusal. It
+    is true now because `_mutates` reads the registry (see its docstring), and
+    it is the reason this path must never re-acquire a name list of its own."""
+    pool, deferred = _file_pool(plan, template, key, completed, grounding)
+    if not pool:
+        return pool  # None → LLM path; [] → nothing to do (an outcome)
+    return [_batch_step(template, template.tool, key, key, pool, deferred)]
 
 
 def _substitute_folder(
@@ -475,25 +740,64 @@ def _substitute_event_id(
     return [_concrete_step(template, key, str(pick["id"]), description=desc)]
 
 
-def resolve(plan: AgentPlan, index: int, max_new: int) -> Optional[list[PlanStep]]:
+def _placeholder_list_key(template: PlanStep) -> Optional[str]:
+    """The batch tool's list parameter when it holds ONLY placeholder text —
+    `move_files(sources=["PENDING: the pdf paths"])`.
+
+    This shape is invisible to `_string_placeholder_keys` and vetoed by
+    `_nested_placeholder`, which is why an LLM-drafted batch step would
+    otherwise fail with the very error this module exists to prevent. The veto
+    is bypassed for THIS recognized shape only: every element must be
+    placeholder text, so a list mixing real paths with a placeholder stays
+    ambiguous and still goes to the LLM."""
+    key = _LIST_PARAMS.get(template.tool)
+    if key is None:
+        return None
+    value = template.parameters.get(key)
+    if isinstance(value, str) and _PLACEHOLDER_MARK in value.upper():
+        return key
+    if (
+        isinstance(value, list)
+        and value
+        and all(
+            isinstance(v, str) and _PLACEHOLDER_MARK in v.upper() for v in value
+        )
+    ):
+        return key
+    return None
+
+
+def resolve(
+    plan: AgentPlan, index: int, max_new: int, grounding: str = ""
+) -> Optional[list[PlanStep]]:
     """Replacement steps for plan.steps[index] (a step carrying a PENDING
     placeholder), derived purely from completed step results:
       [step, ...] — concrete step(s); splice them in and keep executing
       []          — the placeholder's source found nothing; nothing to do
       None        — not resolvable in code; the LLM replan path takes over
     Never raises: resolution is best-effort and must never break execution.
+
+    `grounding` is the user's own words beyond the goal (conversation), read
+    ONLY to honour an explicit "include subfolders" — never to widen scope on
+    its own.
     """
     try:
         template = plan.steps[index]
+        completed = [
+            s for s in plan.steps[:index] if s.status == StepStatus.COMPLETED
+        ]
+        # A batch tool whose list parameter is pure placeholder text — checked
+        # before the single-string rules, which cannot see this shape.
+        list_key = _placeholder_list_key(template)
+        if list_key is not None:
+            return _fill_list(plan, template, list_key, completed, grounding)
+
         keys = _string_placeholder_keys(template.parameters)
         if len(keys) != 1 or _nested_placeholder(template.parameters):
             return None
         key = keys[0]
-        completed = [
-            s for s in plan.steps[:index] if s.status == StepStatus.COMPLETED
-        ]
         if _FILE_PARAMS.get(template.tool) == key:
-            return _expand_files(plan, template, key, completed, max_new)
+            return _expand_files(plan, template, key, completed, max_new, grounding)
         if _DIR_PARAMS.get(template.tool) == key:
             return _substitute_folder(template, key, completed)
         if _EMAIL_TO_PARAMS.get(template.tool) == key:

@@ -55,6 +55,7 @@ class Handoff(str, Enum):
     COMMIT = "commit"                    # form contract awaiting approval
     NEXT_COMMIT = "next_commit"          # multi-commit: next form ready
     WINDOW_EXPIRED = "window_expired"    # a resume found its held window gone
+    SITE_UNRESOLVED = "site_unresolved"  # the named domain does not exist
 
 
 @dataclass(frozen=True)
@@ -130,10 +131,19 @@ def _wall_reason(wall_kind: str) -> Handoff:
 
 def handoff_from_outcome(outcome: Any) -> Optional[HandoffPayload]:
     """Derive the payload a BrowseOutcome's flags encode, or None when the run
-    simply ended. Precedence mirrors the planner's dispatch order (fill →
-    auth offer → wall → challenge → origin → action → commit) so flag-probing
-    call sites and payload consumers can never disagree about which pause
-    wins."""
+    simply ended. Precedence mirrors the planner's dispatch order (unresolved
+    site → fill → auth offer → wall → challenge → origin → action → commit) so
+    flag-probing call sites and payload consumers can never disagree about which
+    pause wins."""
+    # FIRST, because it is the only reason that means nothing else happened at
+    # all: the address named has no DNS record, so there was never a page to
+    # hit a wall, a challenge, or a form on. Every other flag would be stale.
+    if getattr(outcome, "site_unresolved", False):
+        return HandoffPayload(
+            reason=Handoff.SITE_UNRESOLVED,
+            site=str(getattr(outcome, "unresolved_host", "") or ""),
+            url=str(getattr(outcome, "url", "") or ""),
+        )
     if getattr(outcome, "fill_required", False):
         return HandoffPayload(
             reason=Handoff.FILL_FIELD,

@@ -320,39 +320,62 @@ _READY_JS = """() => {
   };
 }"""
 
-# Chromium net-error markers that mean the site could not be reached AT ALL, and
-# the plain-language reason for each. A slow page is not in this list — that is
-# the whole point of the readiness poll. Neither is a policy refusal, which is
-# BrowserBlocked. These are the cases where retrying the same URL is pointless
-# and the honest move is to say so and let the planner choose another source.
-_UNREACHABLE_MARKERS: tuple[tuple[str, str], ...] = (
-    ("err_cert_", "its HTTPS certificate isn't valid"),
-    ("err_ssl_", "its secure connection failed"),
-    ("err_bad_ssl_", "its secure connection failed"),
-    ("err_name_not_resolved", "that address doesn't resolve"),
-    ("err_name_resolution_failed", "that address doesn't resolve"),
-    ("err_connection_refused", "it refused the connection"),
-    ("err_connection_reset", "the connection was reset"),
-    ("err_connection_closed", "the connection was closed"),
-    ("err_connection_timed_out", "it didn't answer"),
-    ("err_connection_failed", "the connection failed"),
-    ("err_address_unreachable", "it is unreachable"),
-    ("err_empty_response", "it returned nothing"),
-    ("err_internet_disconnected", "there's no internet connection"),
-    ("err_proxy_connection_failed", "the proxy connection failed"),
+# Chromium net-error markers that mean the site could not be reached AT ALL: the
+# plain-language reason for each, plus a machine-readable CLASS.
+#
+# A slow page is not in this list — that is the whole point of the readiness
+# poll. Neither is a policy refusal, which is BrowserBlocked. These are the cases
+# where retrying the same URL is pointless and the honest move is to say so and
+# let the planner choose another source.
+#
+# WHY THE CLASS EXISTS, and why only "dns" is acted on (2026-08-01). Voice is a
+# first-class input now, and STT cannot spell a proper noun it has never heard —
+# live, "junaidjamshed.com" was transcribed "junitjamsheed.com" and the whole
+# task died on a domain that simply does not exist. That is a QUESTION worth
+# asking ("did you mean…?"), and it is knowable only for NXDOMAIN:
+#
+#   dns       nothing answers to this NAME. The user may have named the wrong
+#             one — the only class where suggesting an alternative makes sense.
+#   cert /    the domain EXISTS and answered; the user named it correctly and
+#   refused / the site is having a problem. Offering a neighbouring domain here
+#   timeout   would be noise at best and a typosquat invitation at worst.
+#   offline   OUR network is down. Every candidate lookup would fail too, and
+#             the honest report is "no internet" — never a spelling suggestion.
+#
+# The class is matched on the ERR_ token like the prose is, so the two can never
+# disagree about which failure a message describes.
+_UNREACHABLE_MARKERS: tuple[tuple[str, str, str], ...] = (
+    ("err_cert_", "its HTTPS certificate isn't valid", "cert"),
+    ("err_ssl_", "its secure connection failed", "cert"),
+    ("err_bad_ssl_", "its secure connection failed", "cert"),
+    ("err_name_not_resolved", "that address doesn't resolve", "dns"),
+    ("err_name_resolution_failed", "that address doesn't resolve", "dns"),
+    ("err_connection_refused", "it refused the connection", "refused"),
+    ("err_connection_reset", "the connection was reset", "refused"),
+    ("err_connection_closed", "the connection was closed", "refused"),
+    ("err_connection_timed_out", "it didn't answer", "timeout"),
+    ("err_connection_failed", "the connection failed", "refused"),
+    ("err_address_unreachable", "it is unreachable", "refused"),
+    ("err_empty_response", "it returned nothing", "refused"),
+    ("err_internet_disconnected", "there's no internet connection", "offline"),
+    ("err_proxy_connection_failed", "the proxy connection failed", "offline"),
 )
 
+# The one class that licenses a "did you mean…?" question. Named so the rule is
+# greppable from every consumer instead of a bare == "dns" in four places.
+UNREACHABLE_DNS = "dns"
 
-def _network_error_kind(exc: BaseException) -> str:
-    """The plain-language reason for a Chromium net error, or "" when the
-    exception is not one. Matched on the ERR_ token, which Chromium puts in the
-    message verbatim — the marker is stable across Playwright versions in a way
-    the surrounding prose is not."""
+
+def _network_error(exc: BaseException) -> tuple[str, str]:
+    """(plain-language reason, class) for a Chromium net error, or ("", "") when
+    the exception is not one. Matched on the ERR_ token, which Chromium puts in
+    the message verbatim — the marker is stable across Playwright versions in a
+    way the surrounding prose is not."""
     text = str(exc).lower()
-    for marker, reason in _UNREACHABLE_MARKERS:
+    for marker, reason, kind in _UNREACHABLE_MARKERS:
         if marker in text:
-            return reason
-    return ""
+            return reason, kind
+    return "", ""
 
 # ~/.jarvis/browser is a SINGLE persistent profile: at most one live Chromium may
 # hold it. A Chromium keeps the OS single-instance lock for a short moment after
@@ -943,7 +966,23 @@ class BrowserUnreachable(RuntimeError):
         would route around the exfiltration bound the whole browse stack rests
         on. The honest move is to report which site failed and why, and let the
         planner ask or choose another source.
+
+    `kind` (2026-08-01) is the machine-readable class from _UNREACHABLE_MARKERS —
+    "dns" | "cert" | "refused" | "timeout" | "offline" | "". It exists so a
+    consumer can tell "no such NAME" from "that site is having a problem"
+    WITHOUT re-reading our own prose. It does not relax the rule above by one
+    inch: a "dns" failure still licenses no guess, only a QUESTION whose options
+    the user has to pick from (planner._site_correction_question). Suggesting is
+    not visiting; the user's answer is what grounds the origin.
+
+    `host` is the site that failed, so a consumer never has to parse it back out
+    of the message.
     """
+
+    def __init__(self, message: str, *, kind: str = "", host: str = "") -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.host = host
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -2077,12 +2116,18 @@ class BrowserSession:
                 await self.page.goto(target, wait_until="commit", timeout=NAV_COMMIT_MS)
             except _NAV_TIMEOUT_ERRORS as exc2:
                 raise BrowserUnreachable(
-                    f"Couldn't load {host or target}: it didn't respond in time."
+                    f"Couldn't load {host or target}: it didn't respond in time.",
+                    kind="timeout",
+                    host=host or "",
                 ) from exc2
             except Exception as exc2:
-                reason = _network_error_kind(exc2)
+                reason, kind = _network_error(exc2)
                 if reason:
-                    raise BrowserUnreachable(f"Couldn't load {host or target}: {reason}.") from exc2
+                    raise BrowserUnreachable(
+                        f"Couldn't load {host or target}: {reason}.",
+                        kind=kind,
+                        host=host or "",
+                    ) from exc2
                 raise
         except Exception as exc:
             if self.stats.blocked_navigations > refusals_before:
@@ -2094,9 +2139,13 @@ class BrowserSession:
                     f"The page redirected to '{off}', which this task is not "
                     "allowed to visit."
                 ) from exc
-            reason = _network_error_kind(exc)
+            reason, kind = _network_error(exc)
             if reason:
-                raise BrowserUnreachable(f"Couldn't load {host or target}: {reason}.") from exc
+                raise BrowserUnreachable(
+                    f"Couldn't load {host or target}: {reason}.",
+                    kind=kind,
+                    host=host or "",
+                ) from exc
             raise
 
         # PHASE B — readiness. Bytes are arriving; wait for something to act on.

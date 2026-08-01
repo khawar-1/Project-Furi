@@ -1,13 +1,23 @@
 """
 Jarvis OS — File Tools (Phase 3, Part 2)
-Six single-action tools over the local filesystem:
+Tools over the local filesystem:
 
   search_files    READ         find files/folders by name, extension, date, size
   read_file       READ         read a text file's contents
   list_directory  READ         list a directory's entries
   move_file       WRITE        move a file to a new location
+  move_files      WRITE        move MANY files into one folder (batch)
   rename_file     WRITE        rename a file or folder in place
   delete_file     DESTRUCTIVE  delete a single file (backed up to trash first)
+  delete_files    DESTRUCTIVE  delete MANY files (batch, each backed up first)
+
+The batch pair exists because bulk work was structurally unplannable
+(2026-07-29): one step per file against a 30-step plan cap meant "move all
+85 PDFs" could not be expressed, and the plan reported success having moved
+nothing. A batch tool loops the SAME single-file primitive (_move_one /
+_delete_one) as its singular twin, so no safety property is re-implemented,
+and the explicit path list lives in the step's parameters — which is what
+binds the approval to those exact files.
 
 Safety model (enforced here, before any filesystem access):
 - Paths are expanded (~, env vars) and resolved to absolute; a relative path
@@ -30,10 +40,22 @@ from app.tools.registry import register_tool
 
 # ------------------------------------------------------------------ limits
 READ_MAX_BYTES = 1_048_576  # 1 MB cap for read_file
-SEARCH_MAX_RESULTS = 100
+# Raised 100 → 1000 (2026-07-29). At 100 a folder holding 150 PDFs answered
+# "all the PDFs" with 100 of them and `truncated: true`, and every consumer
+# treated that as the whole set — a bulk move would have moved two thirds and
+# reported success. The real bound on a search is SEARCH_MAX_SCANNED; this cap
+# only exists to keep a result payload sane, and it must stay <= BATCH_MAX_FILES
+# so a full search result is always actionable in one batch step (test-pinned).
+SEARCH_MAX_RESULTS = 1000
 SEARCH_MAX_SCANNED = 100_000  # hard bound on entries visited per search (all roots combined)
 SEARCH_MAX_ROOTS = 8  # max directories per multi-root search
 LIST_MAX_ENTRIES = 500
+# Files per move_files / delete_files call — a bulk operation is a bounded
+# one, never an unbounded one. INVARIANT: >= SEARCH_MAX_RESULTS, so a full
+# search result is always actionable in ONE batch step (the same "keep the
+# downstream cap above what the upstream can emit" discipline
+# rendering._STEP_RESULT_CAPS documents). A test pins it.
+BATCH_MAX_FILES = 1000
 
 # Directory names never descended into during search (lowercase)
 _SKIP_DIR_NAMES = {"appdata", "node_modules", "__pycache__", "venv", ".git"}
@@ -185,6 +207,115 @@ def _ok(tool: "BaseTool", output: Any) -> ToolResult:
     )
 
 
+# --------------------------------------------------- single-file primitives
+# The ONE implementation of each mutation. Both the singular tool and its
+# batch twin call these, so the never-overwrite / trash-first / no-directory
+# guarantees can never drift apart between "move one" and "move eighty-five".
+# Each returns (payload, None) on success or (None, error) on failure — the
+# caller decides whether a failure ends the call (singular) or is collected
+# and reported alongside the successes (batch).
+
+def _move_one(source: Path, destination: Path) -> tuple[Optional[dict], Optional[str]]:
+    if not source.exists():
+        return None, f"Source not found: '{source}'"
+    if source.is_dir():
+        return None, f"'{source}' is a directory — only single files are moved"
+    # An existing directory as destination means "move into it"
+    target = destination / source.name if destination.is_dir() else destination
+    if target.exists():
+        return None, f"Refusing to overwrite existing file: '{target}'"
+    if not target.parent.exists():
+        return None, f"Destination folder does not exist: '{target.parent}'"
+    try:
+        shutil.move(str(source), str(target))
+    except OSError as e:
+        return None, f"Could not move '{source}': {e}"
+    return {"moved_from": str(source), "moved_to": str(target)}, None
+
+
+def _delete_one(path: Path) -> tuple[Optional[dict], Optional[str]]:
+    if not path.exists():
+        return None, f"File not found: '{path}'"
+    if path.is_dir():
+        return None, f"'{path}' is a directory — only single files are deleted"
+    size = path.stat().st_size
+    # Safety net: the file is MOVED to the trash, never unlinked outright.
+    # If the backup cannot be made, the delete does not happen at all.
+    backup = _trash_target(path.name)
+    try:
+        TRASH_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(backup))
+    except OSError as e:
+        return None, f"Could not back up '{path}' to the trash before deleting: {e}"
+    return {
+        "deleted": str(path),
+        "size_bytes": size,
+        "backed_up_to": str(backup),
+    }, None
+
+
+# ------------------------------------------------------------ batch plumbing
+
+def _coerce_path_list(value: Any) -> tuple[list[str], Optional[str]]:
+    """(paths, error) for a batch parameter. A bare string is accepted as a
+    one-item list — a model that writes the singular form is not punished for
+    it — but anything else is refused rather than guessed at."""
+    if isinstance(value, str):
+        text = value.strip()
+        return ([text], None) if text else ([], "No files were given")
+    if not isinstance(value, list):
+        return [], "Expected a list of file paths"
+    # Dedupe preserving order: a repeated path would otherwise produce a
+    # confusing second "Source not found" for a file we just moved ourselves.
+    paths: list[str] = []
+    seen: set[str] = set()
+    for v in value:
+        text = str(v or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            paths.append(text)
+    if not paths:
+        return [], "No files were given"
+    if len(paths) > BATCH_MAX_FILES:
+        # REFUSE, never truncate. Silently acting on part of a destructive
+        # batch and reporting success is the defect this whole change exists
+        # to remove.
+        return [], (
+            f"{len(paths)} files is more than the {BATCH_MAX_FILES}-file limit "
+            f"for one batch — narrow the selection (by folder, date, or size) "
+            f"and run it in parts"
+        )
+    return paths, None
+
+
+def _run_batch(raw_paths: list[str], operate) -> tuple[list[dict], list[dict], int]:
+    """Apply a single-file primitive across a list, collecting BOTH halves.
+
+    A failure is recorded and the batch CONTINUES: a bulk operation that
+    stops dead on file 12 of 85 leaves the user in a state nobody chose, and
+    rolling the first 11 back is more dangerous than the truth. The caller
+    reports what moved and what did not, naming every failure."""
+    done: list[dict] = []
+    failed: list[dict] = []
+    total = 0
+    for raw in raw_paths:
+        try:
+            path = _resolve_path(raw)
+        except ValueError as e:
+            failed.append({"path": str(raw), "error": str(e)})
+            continue
+        if reason := _blocked_reason(path):
+            failed.append({"path": str(path), "error": reason})
+            continue
+        payload, error = operate(path)
+        if error or payload is None:
+            failed.append({"path": str(path), "error": error or "Unknown failure"})
+            continue
+        done.append(payload)
+        total += int(payload.get("size_bytes") or 0)
+    return done, failed, total
+
+
 # ============================================================== READ tools
 
 @register_tool
@@ -277,26 +408,34 @@ class SearchFilesTool(BaseTool):
         scanned = 0
         truncated = False
 
-        def consider(full: Path, name: str, is_dir: bool) -> bool:
-            """Append the entry when it passes every filter. True = stop."""
+        def consider(entry: os.DirEntry, is_dir: bool) -> bool:
+            """Append the entry when it passes every filter. True = stop.
+
+            The stat comes from the DirEntry, which on Windows is served out
+            of the directory enumeration the scan already paid for — the old
+            `Path.stat()` here was a fresh syscall per candidate and was most
+            of the 26.9s a real Downloads search took (2026-07-29). Symlinks
+            are still FOLLOWED for the filter stat, matching the previous
+            behaviour exactly; only the descend decision below refuses to."""
             nonlocal scanned, truncated
             scanned += 1
             if scanned > SEARCH_MAX_SCANNED:
                 truncated = True
                 return True
+            name = entry.name
             lower = name.lower()
             if query and query not in lower:
                 return False
             if file_type and (is_dir or not lower.endswith(f".{file_type}")):
                 return False  # the extension filter never matches folders
             try:
-                stat = full.stat()
+                stat = entry.stat()
             except OSError:
                 return False
             if not filters.matches(stat, is_dir):
                 return False
             matches.append({
-                "path": str(full),
+                "path": entry.path,
                 "type": "folder" if is_dir else "file",
                 "size_bytes": None if is_dir else stat.st_size,
                 "created": _created_iso(stat),
@@ -310,25 +449,50 @@ class SearchFilesTool(BaseTool):
         for root in roots:
             if truncated:
                 break
-            for dirpath, dirnames, filenames in os.walk(root):
-                base = Path(dirpath)
-                # Prune hidden, known-noise, and protected system directories
-                dirnames[:] = [
-                    d for d in dirnames
-                    if not d.startswith(".")
-                    and d.lower() not in _SKIP_DIR_NAMES
-                    and (base / d) not in _PROTECTED
-                ]
+            # Depth-first, pre-order — the os.walk(topdown=True) traversal this
+            # replaced, so which entries a truncated search returns does not
+            # change. Reversed pushes keep sibling order.
+            stack: list[Path] = [root]
+            while stack and not truncated:
+                current = stack.pop()
+                try:
+                    with os.scandir(current) as it:
+                        entries = list(it)
+                except OSError:
+                    continue  # unreadable directory — os.walk swallowed these
+                                # too (onerror=None); one locked folder must
+                                # never kill a search that otherwise works
+                subdirs: list[os.DirEntry] = []
+                files: list[os.DirEntry] = []
+                for entry in entries:
+                    try:
+                        # follow_symlinks=False for the DESCEND decision only,
+                        # matching os.walk(followlinks=False): a junction
+                        # pointing at an ancestor would otherwise walk forever.
+                        if entry.is_dir(follow_symlinks=False):
+                            name = entry.name
+                            if (
+                                name.startswith(".")
+                                or name.lower() in _SKIP_DIR_NAMES
+                                or Path(entry.path) in _PROTECTED
+                            ):
+                                continue  # pruned, exactly as before
+                            subdirs.append(entry)
+                        else:
+                            files.append(entry)
+                    except OSError:
+                        continue
                 if include_folders:
-                    for dirname in dirnames:
-                        if consider(base / dirname, dirname, is_dir=True):
+                    for entry in subdirs:
+                        if consider(entry, is_dir=True):
                             break
                 if not truncated:
-                    for filename in filenames:
-                        if consider(base / filename, filename, is_dir=False):
+                    for entry in files:
+                        if consider(entry, is_dir=False):
                             break
                 if truncated:
                     break
+                stack.extend(Path(e.path) for e in reversed(subdirs))
         return _ok(self, {
             "matches": matches,
             "count": len(matches),
@@ -581,18 +745,8 @@ class MoveFileTool(BaseTool):
         return await asyncio.to_thread(self._move, source, destination)
 
     def _move(self, source: Path, destination: Path) -> ToolResult:
-        if not source.exists():
-            return _fail(self, f"Source not found: '{source}'")
-        if source.is_dir():
-            return _fail(self, f"'{source}' is a directory — move_file only moves single files")
-        # An existing directory as destination means "move into it"
-        target = destination / source.name if destination.is_dir() else destination
-        if target.exists():
-            return _fail(self, f"Refusing to overwrite existing file: '{target}'")
-        if not target.parent.exists():
-            return _fail(self, f"Destination folder does not exist: '{target.parent}'")
-        shutil.move(str(source), str(target))
-        return _ok(self, {"moved_from": str(source), "moved_to": str(target)})
+        payload, error = _move_one(source, destination)
+        return _fail(self, error) if error else _ok(self, payload)
 
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
@@ -608,6 +762,116 @@ class MoveFileTool(BaseTool):
                     "destination": {"type": "string", "description": "Target folder or full target path"},
                 },
                 "required": ["source", "destination"],
+            },
+            permission_level=self.permission_level,
+        )
+
+
+@register_tool
+class MoveFilesTool(BaseTool):
+    """Move MANY files into one folder as a single approved action.
+
+    Why this exists (live failure 2026-07-29): "move all the PDFs in Downloads
+    into this folder" used to become one move_file step PER FILE, which a
+    30-step plan cap turned into a hard ~28-file ceiling — an 85-file move
+    could not be planned at all, and the plan reported success having moved
+    nothing. One step carrying the explicit list has no such ceiling, and the
+    approval binds to that exact list (it is in the parameters, so it is in
+    the step's signature) — the user still approves concrete, named files."""
+
+    @property
+    def name(self) -> str:
+        return "move_files"
+
+    @property
+    def permission_level(self) -> PermissionLevel:
+        return PermissionLevel.WRITE
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        sources, error = _coerce_path_list(kwargs.get("sources"))
+        if error:
+            return _fail(self, error)
+        try:
+            destination = _resolve_path(kwargs.get("destination"))
+        except ValueError as e:
+            return _fail(self, str(e))
+        if reason := _blocked_reason(destination):
+            return _fail(self, reason)
+        if not destination.exists():
+            return _fail(
+                self,
+                f"Destination folder does not exist: '{destination}' — "
+                f"create it first with create_folder",
+            )
+        if not destination.is_dir():
+            return _fail(
+                self,
+                f"'{destination}' is a FILE, not a folder — moving several "
+                f"files needs a destination folder",
+            )
+        return await asyncio.to_thread(self._move_all, sources, destination)
+
+    def _move_all(self, sources: list[str], destination: Path) -> ToolResult:
+        def operate(path: Path) -> tuple[Optional[dict], Optional[str]]:
+            try:
+                size = path.stat().st_size if path.is_file() else 0
+            except OSError:
+                size = 0
+            payload, error = _move_one(path, destination)
+            if payload is not None:
+                payload["size_bytes"] = size
+            return payload, error
+
+        moved, failed, total = _run_batch(sources, operate)
+        # SCALARS FIRST — load-bearing, not style. The ActivityLog row stores
+        # json.dumps(output) clipped at registry._RESULT_SUMMARY_MAX_LEN, so
+        # the counts and destination must be serialized before the long lists
+        # or the audit record of a bulk move says nothing at all.
+        output = {
+            "moved_count": len(moved),
+            "failed_count": len(failed),
+            "destination": str(destination),
+            "total_bytes": total,
+            "moved": moved,
+            "failed": failed,
+        }
+        if not moved:
+            # Carry the record even on total failure: a failed step with
+            # structured output still renders (rendering._render_step), so the
+            # user reads WHICH files failed and why, not just "it failed".
+            first = failed[0]["error"] if failed else "nothing to move"
+            return ToolResult(
+                success=False,
+                output=output,
+                error=f"No files were moved — all {len(failed)} failed. First: {first}",
+                permission_level=self.permission_level,
+            )
+        return _ok(self, output)
+
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description=(
+                "Move MANY files into one folder in a single step. Use this "
+                "whenever more than one file is being moved (e.g. 'move all the "
+                "PDFs in Downloads into that folder') — never one move_file step "
+                "per file. Pass the paths as a list; a 'PENDING: ...' placeholder "
+                "on 'sources' is filled in code from an earlier search's results. "
+                "The destination must be an existing folder. Never overwrites: a "
+                "file whose name is already taken is reported as failed and the "
+                "rest still move."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "sources": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Files to move (full paths)",
+                    },
+                    "destination": {"type": "string", "description": "Existing target folder"},
+                },
+                "required": ["sources", "destination"],
             },
             permission_level=self.permission_level,
         )
@@ -703,24 +967,8 @@ class DeleteFileTool(BaseTool):
         return await asyncio.to_thread(self._delete, path)
 
     def _delete(self, path: Path) -> ToolResult:
-        if not path.exists():
-            return _fail(self, f"File not found: '{path}'")
-        if path.is_dir():
-            return _fail(self, f"'{path}' is a directory — delete_file only deletes single files")
-        size = path.stat().st_size
-        # Safety net: the file is MOVED to the trash, never unlinked outright.
-        # If the backup cannot be made, the delete does not happen at all.
-        backup = _trash_target(path.name)
-        try:
-            TRASH_DIR.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(path), str(backup))
-        except OSError as e:
-            return _fail(self, f"Could not back up '{path}' to the trash before deleting: {e}")
-        return _ok(self, {
-            "deleted": str(path),
-            "size_bytes": size,
-            "backed_up_to": str(backup),
-        })
+        payload, error = _delete_one(path)
+        return _fail(self, error) if error else _ok(self, payload)
 
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
@@ -736,6 +984,77 @@ class DeleteFileTool(BaseTool):
                     "path": {"type": "string", "description": "File to delete permanently"},
                 },
                 "required": ["path"],
+            },
+            permission_level=self.permission_level,
+        )
+
+
+@register_tool
+class DeleteFilesTool(BaseTool):
+    """Delete MANY files as a single approved action — the batch twin of
+    delete_file, and the destructive sibling of move_files.
+
+    Every file still goes to the trash FIRST, one at a time, through the same
+    _delete_one primitive delete_file uses: a file whose backup cannot be made
+    is not deleted, and it is reported rather than skipped silently."""
+
+    @property
+    def name(self) -> str:
+        return "delete_files"
+
+    @property
+    def permission_level(self) -> PermissionLevel:
+        return PermissionLevel.DESTRUCTIVE
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        paths, error = _coerce_path_list(kwargs.get("paths"))
+        if error:
+            return _fail(self, error)
+        return await asyncio.to_thread(self._delete_all, paths)
+
+    def _delete_all(self, paths: list[str]) -> ToolResult:
+        deleted, failed, total = _run_batch(paths, _delete_one)
+        # Scalars first — see MoveFilesTool._move_all.
+        output = {
+            "deleted_count": len(deleted),
+            "failed_count": len(failed),
+            "total_bytes": total,
+            "trash": str(TRASH_DIR),
+            "deleted": deleted,
+            "failed": failed,
+        }
+        if not deleted:
+            first = failed[0]["error"] if failed else "nothing to delete"
+            return ToolResult(
+                success=False,
+                output=output,
+                error=f"No files were deleted — all {len(failed)} failed. First: {first}",
+                permission_level=self.permission_level,
+            )
+        return _ok(self, output)
+
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description=(
+                "Delete MANY files in a single step. Use this whenever more "
+                "than one file is being deleted (e.g. 'delete all the .tmp "
+                "files in that folder') — never one delete_file step per file. "
+                "Pass the paths as a list; a 'PENDING: ...' placeholder on "
+                "'paths' is filled in code from an earlier search's results. "
+                f"Every file is moved to Jarvis's trash ({TRASH_DIR}) first, so "
+                "it can be recovered by hand. Directories are refused."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Files to delete (full paths)",
+                    },
+                },
+                "required": ["paths"],
             },
             permission_level=self.permission_level,
         )

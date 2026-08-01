@@ -10,6 +10,7 @@ the runner would be circular).
 """
 import json
 from pathlib import PurePath
+from typing import Optional
 
 from app.agents.schemas import AgentPlan, PlanStatus, StepStatus
 
@@ -69,10 +70,36 @@ def _step_cap(tool: str) -> int:
 
 
 def _clip(text: str, cap: int) -> str:
-    return text if len(text) <= cap else text[:cap] + "… (truncated)"
+    """Mark a cut — but do NOT call it "truncated".
+
+    In this codebase `truncated` is a FACT ABOUT THE WORLD that tools report
+    on their own results: the search hit its cap, there is more out there we
+    did not fetch. A render clip is something else entirely — OUR display
+    budget running out over a result we hold in full. Using one word for both
+    let the record lie: on 2026-07-29 a complete 85-file search was clipped
+    here, the revise LLM read "(truncated)", and told the user "the search
+    returned a truncated list. I can see these 8 files" — then asked whether
+    to search again and the plan died on it. Real source truncation is still
+    reported, separately and only when true, by _fmt_search_files."""
+    return text if len(text) <= cap else text[:cap] + "… (clipped for length)"
 
 
-def _fair_shares(rendered: list[str]) -> list[int]:
+def fair_shares(rendered: list[str], total: int = _RESULTS_TOTAL_CAP) -> list[int]:
+    """Public seam over `_fair_shares` for callers with their own budget (the
+    planner's revise prompt already carries the tool catalog, memory,
+    conversation and 22 rules, so it cannot afford the full results cap).
+    The default reproduces `_fair_shares` exactly."""
+    return _fair_shares(rendered, total)
+
+
+def render_step_result(step) -> Optional[str]:
+    """Public seam over `_render_step`: one step's real output as readable
+    text, or None when there is nothing to show. Used by the planner so the
+    revise LLM reads the SAME code-authored rendering the summary LLM does."""
+    return _render_step(step)
+
+
+def _fair_shares(rendered: list[str], total: int = _RESULTS_TOTAL_CAP) -> list[int]:
     """Split _RESULTS_TOTAL_CAP across N rendered step blocks so that POSITION
     NEVER DETERMINES SURVIVAL.
 
@@ -90,7 +117,7 @@ def _fair_shares(rendered: list[str]) -> list[int]:
     n = len(rendered)
     if n == 0:
         return []
-    share = max(_RESULTS_TOTAL_CAP // n, _MIN_STEP_SHARE)
+    share = max(total // n, _MIN_STEP_SHARE)
     shares = [share] * n
     # One redistribution pass: the under-budget steps hand their slack to the
     # over-budget ones, split evenly among them.
@@ -196,6 +223,16 @@ def _fmt_list_directory(output: dict) -> str:
 def _fmt_search_files(output: dict) -> str:
     matches = output.get("matches") or []
     if not matches:
+        # A bare "No matches found." is undiagnosable: it does not say WHERE it
+        # looked, and the searched roots are sitting right there in the tool's
+        # own output. Live 2026-07-30 — "move all the pdf files from downloads"
+        # searched the empty C:\Users\DELL\Downloads while 85 PDFs sat in
+        # D:\Downloads; neither the user reading the outcome nor the revise LLM
+        # planning the next step could see which Downloads had been searched,
+        # so an obviously-wrong result read as a plain "you have no PDFs".
+        roots = [str(r).strip() for r in (output.get("searched_in") or []) if str(r).strip()]
+        if roots:
+            return f"No matches found in {_names([f'`{r}`' for r in roots])}."
         return "No matches found."
     # Group by parent folder — repeating "D:\Downloads\" 52 times buries the
     # names the user actually asked for.
@@ -348,8 +385,25 @@ def _action_line(row: dict) -> str:
         except ValueError:
             when = time_str
 
-    phrase = _ACTION_LINE_KEYS.get(tool)
-    if phrase:
+    if tool in ("move_files", "delete_files"):
+        # A batch's params carry a long path LIST, which _render_action clips
+        # into an unreadable call string. Answer plan rule 19 ("which files did
+        # you move today?") with the counts the result actually reports.
+        count = result_data.get(
+            "moved_count" if tool == "move_files" else "deleted_count"
+        )
+        n = count if isinstance(count, int) else len(params.get(
+            "sources" if tool == "move_files" else "paths"
+        ) or [])
+        if tool == "move_files":
+            dest = str(result_data.get("destination") or params.get("destination") or "?")
+            text = f"moved {n} file(s) → `{dest}`"
+        else:
+            text = f"deleted {n} file(s) (to the trash)"
+        failed = result_data.get("failed_count")
+        if isinstance(failed, int) and failed:
+            text += f", {failed} failed"
+    elif phrase := _ACTION_LINE_KEYS.get(tool):
         verb, first_key, second_key = phrase
         first = str(params.get(first_key) or "?")
         text = f"{verb} `{first}`"
@@ -708,9 +762,45 @@ def _fmt_lookup_contact(output: dict) -> str:
     return f"No saved contact matches '{output.get('name', '?')}'."
 
 
+def _fmt_batch_files(output: dict) -> str:
+    """A bulk move/delete outcome, grounded in the tool's own per-file record.
+
+    BOTH halves are always reported. A partial batch is the normal case (a
+    name collision, a locked file), and "moved 84 of 85" with the one failure
+    NAMED is the whole point — a bulk action that quietly did less than it
+    said is the defect this feature was built to remove."""
+    moved = output.get("moved")
+    if isinstance(moved, list):
+        done, verb, where = moved, "Moved", output.get("destination")
+        names = [PurePath(str(m.get("moved_to") or "")).name for m in done]
+        head = f"{verb} {len(done)} file(s)" + (f" into `{where}`" if where else "")
+    else:
+        done = output.get("deleted") or []
+        names = [PurePath(str(d.get("deleted") or "")).name for d in done]
+        head = f"Deleted {len(done)} file(s) (recoverable from the trash)"
+    total = output.get("total_bytes")
+    if isinstance(total, int) and total:
+        head += f" — {_human_size(total)}"
+    lines = [head]
+    if names:
+        lines.append(f"- {_names([n for n in names if n])}")
+    failed = output.get("failed") or []
+    if failed:
+        lines.append(f"- {len(failed)} could NOT be done:")
+        for item in failed[:_MAX_NAMES]:
+            lines.append(
+                f"  - `{item.get('path')}` — {item.get('error')}"
+            )
+        if len(failed) > _MAX_NAMES:
+            lines.append(f"  - … and {len(failed) - _MAX_NAMES} more")
+    return "\n".join(lines)
+
+
 _RESULT_FORMATTERS = {
     "list_directory": _fmt_list_directory,
     "search_files": _fmt_search_files,
+    "move_files": _fmt_batch_files,
+    "delete_files": _fmt_batch_files,
     "semantic_file_search": _fmt_semantic_file_search,
     "read_file": _fmt_read_file,
     "run_command": _fmt_shell,

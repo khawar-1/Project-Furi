@@ -118,7 +118,8 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
     tools = {t["name"]: t for t in response.json()}
     assert set(tools) == {
         "search_files", "read_file", "list_directory",
-        "move_file", "rename_file", "delete_file", "create_folder",
+        "move_file", "move_files", "rename_file", "delete_file", "delete_files",
+        "create_folder",
         "create_file", "run_command", "execute_script",
         "recall_memory", "lookup_contact", "recall_actions",
         "semantic_file_search",
@@ -135,6 +136,10 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
     assert tools["create_file"]["permission_level"] == "write"
     assert tools["create_folder"]["permission_level"] == "write"
     assert tools["delete_file"]["permission_level"] == "destructive"
+    # The batch twins must carry the SAME level as their singular form — a
+    # bulk delete is no less destructive for being one step.
+    assert tools["move_files"]["permission_level"] == "write"
+    assert tools["delete_files"]["permission_level"] == "destructive"
     # Phase 5 Part 3: reading mail is read, drafting is a reversible write,
     # anything that leaves the machine is destructive.
     assert tools["search_emails"]["permission_level"] == "read"

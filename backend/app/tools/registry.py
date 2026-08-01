@@ -76,6 +76,29 @@ def register_tool(cls: type[BaseTool]) -> type[BaseTool]:
     return cls
 
 
+def mutates(tool: str) -> bool:
+    """Does calling this tool CHANGE anything? Read from the REGISTRY, never a
+    hand-kept name list — the registry already owns permission levels, and
+    every copy of that fact drifts.
+
+    Callers whose rules key on the answer: placeholder_resolver (a truncated
+    source search is refused for a mutation, and its pool defaults to the
+    searched folder's OWN files) and folder_resolver (an ambiguous folder gets
+    the structural hand-off budget instead of the LLM clarification cap).
+
+    ⚠️ This lives here, and not next to either caller, because of 2026-07-30:
+    it WAS a literal set — `{"move_file", "delete_file", "rename_file"}` — that
+    silently omitted the PLURAL tools, so both of the first caller's rules
+    switched off for exactly the shape the same round's rule 4 had just started
+    telling the planner to draft, and 85 PDFs moved with no partition. A second
+    copy in a second module is the same bug waiting for its own incident.
+
+    Unknown tool → treat as a mutation: the strict rules are the safe default.
+    """
+    spec = registry.get(tool)
+    return spec is None or spec.permission_level != PermissionLevel.READ
+
+
 def _sanitize_params(params: dict[str, Any]) -> dict[str, Any]:
     """Cap long values (e.g. file content) so the audit row stays readable."""
     out: dict[str, Any] = {}

@@ -65,8 +65,8 @@ def _spec(key: str, name: str, label: Optional[str], extra: set[str], persona: s
 AGENTS: dict[str, AgentSpec] = {
     "file": _spec(
         "file", "File agent", "TASK",
-        {"move_file", "rename_file", "create_folder", "create_file",
-         "delete_file", "run_command", "execute_script"},
+        {"move_file", "move_files", "rename_file", "create_folder", "create_file",
+         "delete_file", "delete_files", "run_command", "execute_script"},
         "You are Jarvis's file & system agent: you work with the user's files, "
         "folders, and terminal. Stay within file/system work; use your read "
         "tools to locate things before you change them.",

@@ -140,6 +140,7 @@ async def start_task(
     memory: str = "",
     provider: Optional[LLMProvider] = None,
     agent: Optional[AgentSpec] = None,
+    user_answers: Optional[list[str]] = None,
 ) -> Task:
     """Persist the Task row FIRST (row-before-work, like create_reminder),
     then start planning/executing in the background. The caller's provider is
@@ -153,7 +154,9 @@ async def start_task(
     await db.commit()
     await db.refresh(task)
     logger.info(f"Background task {task.id} [{agent.key}] started: '{goal[:80]}'")
-    _spawn(task.id, _run_new(task.id, goal, session_id, conversation, memory, provider, agent))
+    _spawn(task.id, _run_new(
+        task.id, goal, session_id, conversation, memory, provider, agent, user_answers,
+    ))
     return task
 
 
@@ -233,6 +236,7 @@ async def _run_new(
     memory: str,
     provider: Optional[LLMProvider],
     agent: Optional[AgentSpec] = None,
+    user_answers: Optional[list[str]] = None,
 ) -> None:
     async with _session_factory()() as db:
         task = await db.get(Task, task_id)
@@ -246,7 +250,7 @@ async def _run_new(
                 cancel_check=lambda: cancel_requested(task_id),
                 agent=agent or GENERAL,
             )
-            plan = await planner.start(goal)
+            plan = await planner.start(goal, user_answers=user_answers)
             await _settle(db, task, plan)
         except Exception as e:
             logger.error(f"Background task {task_id} crashed while planning: {e}")

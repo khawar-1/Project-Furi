@@ -88,9 +88,18 @@ async def _open_start_url(session, start_url: str):
 
     SITE UNREACHABLE — bad certificate, DNS, refused connection. Reported
     honestly, naming the site and the reason, so the planner can ask the user or
-    pick another source. Never an alternate-domain guess.
+    pick another source. Never an alternate-domain guess. When the class is
+    NXDOMAIN specifically (2026-08-01), the address does not exist at all, which
+    since voice became an input path usually means it was misheard — so it is
+    additionally flagged `site_unresolved` and the planner ASKS "did you mean…?"
+    with verified options. Asking is not guessing: the user's answer is what
+    grounds the origin.
     """
-    from app.browser.session import BrowserBlocked, BrowserUnreachable
+    from app.browser.session import (
+        UNREACHABLE_DNS,
+        BrowserBlocked,
+        BrowserUnreachable,
+    )
 
     try:
         await session.goto(start_url)
@@ -112,6 +121,20 @@ async def _open_start_url(session, start_url: str):
         output = _empty_browse_output(start_url, str(exc))
         output["site_unreachable"] = True
         output["unreachable_url"] = start_url
+        if getattr(exc, "kind", "") == UNREACHABLE_DNS:
+            from app.tools.browser_tools import normalize_url
+
+            host = getattr(exc, "host", "")
+            if not host:
+                try:
+                    from urllib.parse import urlparse
+
+                    host = (urlparse(normalize_url(start_url)).hostname or "").lower()
+                except Exception:
+                    host = ""
+            if host:
+                output["site_unresolved"] = True
+                output["unresolved_host"] = host
         logger.info(f"browse: start URL unreachable — {exc}")
         return output
 

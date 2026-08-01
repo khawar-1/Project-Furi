@@ -122,10 +122,12 @@ from app.agents import (
     placeholder_resolver,
     question_gate,
     reading_enumerator,
+    rendering,
 )
 from app.agents.agent_registry import GENERAL, AgentSpec
 from app.agents.cancellation import apply_cancellation, log_cancellation
 from app.agents.narration import narrate_step
+from app.browser import did_you_mean, publicsuffix
 from app.browser import state as browse_state
 from app.agents.schemas import (
     AgentPlan,
@@ -163,7 +165,29 @@ _MAX_BROWSE_HANDOFFS = 25
 # hand-off window can bank a clearance cookie between tries) before the honest
 # stop. The evidence_resolver "bounded, terminal, non-spinning" discipline.
 _MAX_CHALLENGE_PAUSES = 2
-_RESULT_TRUNC = 1200  # chars of a step result shown to the revise LLM
+# How many times a plan may stop to ask WHICH same-named folder was meant
+# (folder_resolver). Separate from MAX_QUESTIONS for the _MAX_BROWSE_HANDOFFS
+# reason inverted: this is a structural question code already knows the answers
+# to, and a MUTATING step that loses its turn to three LLM clarifications runs
+# on a guessed drive — the 2026-08-01 incident's outcome, reached by a different
+# road. Small, because a plan touching four distinct ambiguous folders is not a
+# plan; bounded at all, because unbounded is how you spin.
+_MAX_FOLDER_HANDOFFS = 4
+# How many times a plan may stop to ask "did you mean <site>?" after a named
+# domain failed to resolve (2026-08-01). Deliberately tiny. The first correction
+# is the one that matters — a misheard proper noun, asked once, answered once.
+# If the CORRECTED site also fails to resolve, a second ask is a courtesy; a
+# third means we are chaining guesses off guesses, which is how a pause loop
+# starts. The evidence_resolver "bounded, terminal, non-spinning" discipline,
+# and the reason this cannot become the pathology _MAX_BROWSE_HANDOFFS = 25
+# would otherwise permit.
+_MAX_SITE_CORRECTIONS = 2
+_RESULT_TRUNC = 1200  # chars of a step ERROR shown to the revise LLM
+_ACTION_DETAIL_MAX_PATHS = 20  # paths listed verbatim on a batch approval card
+# Chars of RESULTS in the revise prompt, split fairly across executed steps.
+# Lower than rendering's 20000 because this prompt also carries the tool
+# catalog, memory, conversation and the full rule list.
+_REVISE_RESULTS_TOTAL_CAP = 8000
 
 _PLACEHOLDER_MARK = "PENDING:"
 
@@ -262,12 +286,12 @@ _PLAN_RULES = """RULES:
 1. Use ONLY the tools listed above, with their exact names; parameters must follow each tool's JSON schema.
 2. Put information-gathering (read-level) steps BEFORE any step that creates, modifies, or deletes something.
 3. For a parameter value you cannot know until an earlier step has run (e.g. the file paths a search will find), use the placeholder string "PENDING: <what is needed>". NEVER guess concrete paths you have not seen. A file or folder the user names WITHOUT a full path is not a known path either — unless the conversation or memory states where it is, search_files for it first (include_folders=true for a folder) and feed later steps via "PENDING: ..." placeholders.
-4. Every delete_file / move_file / rename_file step must target exactly ONE file. "All X files" becomes one step per file once the search results are known.
+4. ONE file per step for delete_file / move_file / rename_file. When the goal covers MANY files ("move all the PDFs in Downloads into that folder", "delete every .tmp file in there"), do NOT write one step per file and do NOT guess how many there are: draft the read step that finds them, then ONE move_files / delete_files step whose list parameter ("sources" / "paths") is a single "PENDING: <what is needed>" placeholder. Code fills that list with exactly what the read found, and the approval card names every file. rename_file has no batch form (each rename needs its own new_name), so a multi-file rename does stay one step per file.
 5. Keep the plan minimal — no redundant steps, at most 30 steps.
 6. Write each description as one short sentence a non-technical user understands, stating exactly WHAT will happen and to WHICH files or folders (e.g. "Delete report-draft.docx from the Desktop", never just "Clean up files"). For run_command / execute_script, the description must say what the command will actually do to the system.
 7. If the goal cannot be achieved with these tools, return {"steps": [], "unachievable_reason": "<short explanation>"}.
 8. ALWAYS prefer the dedicated tools over run_command / execute_script: listing, searching (by name/metadata — for finding files by their CONTENT or meaning use semantic_file_search, rule 17), and reading files (including their sizes, creation and modified times) must use list_directory / search_files / read_file. run_command counts as a destructive step the user has to approve — use it ONLY when no dedicated tool can do the job. A question ABOUT the results — how many there are, which is the largest / smallest, the total size, the newest / oldest — is answered from the search_files / list_directory results themselves (every match carries its size and dates); do NOT add a run_command (or any extra step) to count, measure, or compare files a search already returned. Often a single search_files step is the whole plan.
-9. NEVER delete, move, rename, or create files or folders through run_command / execute_script — always use delete_file / move_file / rename_file / create_file / create_folder. Creating a FOLDER is create_folder ONLY — create_file makes a text FILE (a 0-byte create_file is never a folder, and files created "inside" it will fail). delete_file backs the file up to a recoverable trash; a shell delete is unrecoverable and will not be approved.
+9. NEVER delete, move, rename, or create files or folders through run_command / execute_script — always use delete_file / delete_files / move_file / move_files / rename_file / create_file / create_folder. Creating a FOLDER is create_folder ONLY — create_file makes a text FILE (a 0-byte create_file is never a folder, and files created "inside" it will fail). delete_file backs the file up to a recoverable trash; a shell delete is unrecoverable and will not be approved.
 10. Every date parameter must be ISO format YYYY-MM-DD. Convert the user's wording using the current date in CONTEXT ("after july 1" with no year → the current year; "last week" → concrete dates). If the user's date is genuinely ambiguous (e.g. "03/04/2026" could be March 4 or April 3), ask via a question (rule 11) — never guess. Date and size filtering must be done with search_files parameters (created_after, min_size, ...), never by eyeballing results.
 11. Ask the user via "question" (see the output shape) when you cannot proceed correctly without their input: several files/folders match a name and only one should be acted on, an ambiguous date format, or a vague target ("that file") the conversation does not resolve. Put the concrete candidates in "options" (full paths). Options must be REAL values you have seen in the conversation, memory, or an executed step's results — NEVER invent a path as an option (invented paths are rejected in code). If you do not know where something is, that is not a question — search_files for it (rule 3). NEVER ask the user where a file or folder is or for its full path: a real search is run in code against every question and a question the search can answer is rejected. NEVER pick one of several matches yourself for a move/rename/delete step. Do NOT ask when the goal already covers all matches ("read all of them", "delete every .tmp file") or when only one candidate exists.
 12. When the goal refers to a person by name or to something Jarvis may remember ("the folder I always use", "the project I told you about"), and LONG-TERM MEMORY above does not already answer it, add a lookup_contact / recall_memory step instead of guessing. If lookup_contact reports the name is ambiguous, ask the user via a question (rule 11) with the candidate names as options.
@@ -387,6 +411,10 @@ def _pending_steps_json(plan: AgentPlan) -> str:
 
 
 def _executed_steps_json(plan: AgentPlan) -> str:
+    """Raw executed-step rows. This is the GROUNDING corpus (_scope_violation
+    and friends read the user-facing words back out of it) and is never shown
+    to a model — so it keeps the raw parameters and untruncated output. What
+    the revise LLM reads is `_executed_steps_readable` below."""
     rows: list[dict] = []
     for s in plan.steps:
         if s.status == StepStatus.PENDING:
@@ -400,9 +428,59 @@ def _executed_steps_json(plan: AgentPlan) -> str:
         if s.result is not None:
             row["success"] = s.result.success
             if s.result.output is not None:
-                row["output"] = _truncate(json.dumps(s.result.output, default=str))
+                row["output"] = json.dumps(s.result.output, default=str)
             if s.result.error:
-                row["error"] = _truncate(s.result.error, 400)
+                row["error"] = s.result.error
+        rows.append(row)
+    return json.dumps(rows, indent=1, default=str)
+
+
+def _clip_result(text: str, cap: int, output: Any) -> str:
+    """Clip a step result for a prompt, saying ONLY what is true about the cut.
+
+    The old marker was a bare "… (truncated)" appended by `_truncate`, and on
+    2026-07-29 it was appended to a search result that had found all 85 files
+    and reported `truncated: false`. The model read the marker, told the user
+    "the search returned a truncated list. I can see these 8 files", asked
+    whether to search again, and the plan died there. A clip is OUR budget
+    running out; source truncation is a fact about the world. Conflating them
+    let the record lie in code — the same defect class as the 2026-07-16 web
+    fabrication, in the file domain."""
+    if len(text) <= cap:
+        return text
+    total = output.get("count") if isinstance(output, dict) else None
+    if isinstance(total, int):
+        return (
+            f"{text[:cap]}\n… (shown here in part to fit this prompt — the step "
+            f"found {total} result(s) in total, and every one of them is "
+            f"available to later steps)"
+        )
+    return f"{text[:cap]}\n… (shown here in part to fit this prompt)"
+
+
+def _executed_steps_readable(plan: AgentPlan) -> str:
+    """The executed record AS THE REVISE LLM SEES IT: each result rendered by
+    the same code-authored per-tool formatters the summary LLM has had since
+    2026-07-10 (`_fmt_search_files` gives a count, the Largest/Smallest/Newest
+    aggregate, and paths grouped by folder), with the budget split fairly so
+    position never decides whose results survive."""
+    executed = [s for s in plan.steps if s.status != StepStatus.PENDING]
+    rendered = [rendering.render_step_result(s) or "" for s in executed]
+    shares = rendering.fair_shares(rendered, total=_REVISE_RESULTS_TOTAL_CAP)
+    rows: list[dict] = []
+    for step, body, share in zip(executed, rendered, shares):
+        row: dict[str, Any] = {
+            "description": step.description,
+            "tool": step.tool,
+            "parameters": step.parameters,
+            "status": step.status.value,
+        }
+        if step.result is not None:
+            row["success"] = step.result.success
+            if body:
+                row["result"] = _clip_result(body, share, step.result.output)
+            if step.result.error:
+                row["error"] = _truncate(step.result.error, 400)
         rows.append(row)
     return json.dumps(rows, indent=1, default=str)
 
@@ -437,7 +515,9 @@ def _build_reflect_prompt(
         "- Remove unnecessary or duplicate steps.\n"
         "- Fix wrong tool names and parameters that do not match the tool schemas.\n"
         "- Ensure read-level steps come before modifying steps.\n"
-        "- Ensure every delete/move/rename step targets exactly one file.\n"
+        "- Ensure a single-file delete/move/rename step targets exactly one "
+        "file, and that work covering MANY files is ONE move_files/delete_files "
+        "step with a PENDING list — never one step per file.\n"
         "If the plan is already correct, return it UNCHANGED.",
         *_persona_block(persona),
         "AVAILABLE TOOLS (JSON schemas):\n" + _tools_json(tools),
@@ -480,7 +560,7 @@ def _build_revise_prompt(
         *_folders_block(folders),
         *_conversation_block(conversation),
         "USER GOAL:\n" + plan.goal,
-        "STEPS ALREADY EXECUTED (with results):\n" + _executed_steps_json(plan),
+        "STEPS ALREADY EXECUTED (with results):\n" + _executed_steps_readable(plan),
     ]
     if plan.user_answers:
         parts.append(
@@ -608,6 +688,26 @@ def _step_action_detail(tool: str, params: dict[str, Any]) -> Optional[str]:
             "is sent"
         )
 
+    if tool in ("move_files", "delete_files"):
+        # The full contract for a bulk action, the send_email rule applied to
+        # files: the exact paths, one per line (85 Windows paths comma-joined
+        # is unreadable), clipped BY ITEM so a path is never cut in half.
+        # Deliberately no sizes here — this function is pure (tool, params)
+        # and is called at draft time and in unit tests with paths that need
+        # not exist; the size total is on the step's code-authored description.
+        paths = params.get("sources" if tool == "move_files" else "paths") or []
+        if isinstance(paths, str):
+            paths = [paths]
+        shown = [f"  {q}" for q in paths[:_ACTION_DETAIL_MAX_PATHS]]
+        if len(paths) > _ACTION_DETAIL_MAX_PATHS:
+            shown.append(f"  … and {len(paths) - _ACTION_DETAIL_MAX_PATHS} more")
+        head = (
+            f"move {len(paths)} file(s) → {p('destination')}"
+            if tool == "move_files"
+            else f"delete {len(paths)} file(s) → moved to trash (~/.jarvis/trash)"
+        )
+        return "\n".join([head, *shown])
+
     if tool == "run_command":
         cwd = p("working_directory")
         return f"$ {p('command')}" + (f"   (in {cwd})" if cwd else "")
@@ -684,12 +784,22 @@ _MUST_EXIST_PARAMS = {
     "run_command": "working_directory",  # optional param — empty is skipped
 }
 
+# The batch twins carry a LIST where their singular form carries one path.
+# Kept in a SEPARATE map, because the single-string code path would stringify
+# the whole list ("['C:\\a.pdf', ...]"), resolve THAT under HOME, find it
+# missing, and fail every batch step before the user ever sees it.
+_MUST_EXIST_LIST_PARAMS = {
+    "move_files": "sources",
+    "delete_files": "paths",
+}
+
 # Parameters whose PARENT folder must exist: the path itself is being created
 # (create_file) or is where a file is headed (move_file destination — which
 # may itself be an existing folder, so the path OR its parent must exist).
 _PARENT_MUST_EXIST_PARAMS = {
     "create_file": "path",
     "move_file": "destination",
+    "move_files": "destination",
 }
 
 
@@ -724,6 +834,32 @@ def _nonexistent_path_error(tool: str, params: dict[str, Any]) -> Optional[str]:
         path = value_of(key)
         if path is not None and not path.exists():
             return _guess_error(str(path))
+
+    key = _MUST_EXIST_LIST_PARAMS.get(tool)
+    if key is not None:
+        raw_list = params.get(key)
+        if isinstance(raw_list, list) and raw_list:
+            missing: list[str] = []
+            found = 0
+            for raw in raw_list:
+                text = str(raw or "").strip()
+                if not text or _PLACEHOLDER_MARK in text.upper():
+                    continue
+                try:
+                    resolved = _resolve_path(text)
+                except ValueError:
+                    continue
+                if resolved.exists():
+                    found += 1
+                else:
+                    missing.append(str(resolved))
+            # Fail ONLY when nothing in the list exists — that is the
+            # wholly-invented list this guard is for. A single file that
+            # vanished between the search and the approval must not sink a
+            # batch of 85: the tool reports it as a named per-file failure,
+            # which is the honest outcome and the one the user can act on.
+            if missing and found == 0:
+                return _guess_error(missing[0])
 
     key = _PARENT_MUST_EXIST_PARAMS.get(tool)
     if key is not None:
@@ -941,12 +1077,14 @@ def _scope_violation(steps: list[PlanStep], goal: str, grounding: str) -> Option
             query = str(s.parameters.get("query") or "").strip()
             if _EXTENSION_QUERY_RE.match(query):
                 exts.add(query.lstrip("*.").lower())
-        for value in s.parameters.values():
-            if isinstance(value, str) and _PLACEHOLDER_MARK in value.upper():
-                exts.update(
-                    e.lower()
-                    for e in placeholder_resolver.EXT_TOKEN_RE.findall(value)
-                )
+        # Recurse into lists/dicts, not just top-level strings: the batch file
+        # tools carry their targets in a LIST parameter, so a placeholder that
+        # narrows to an invented extension ("PENDING: the .txt paths") would
+        # otherwise be invisible to this guard the moment move_files is used.
+        for value in _placeholder_strings(s.parameters):
+            exts.update(
+                e.lower() for e in placeholder_resolver.EXT_TOKEN_RE.findall(value)
+            )
         ungrounded = sorted(
             e for e in exts
             if e and not placeholder_resolver.extension_grounded(e, corpus)
@@ -1588,6 +1726,25 @@ def _browse_origin_approval_signal(step: PlanStep, result: ToolResult) -> Option
     return None
 
 
+def _browse_site_unresolved_signal(step: PlanStep, result: ToolResult) -> Optional[dict]:
+    """The structured 'the address you named does not exist' signal a READ browse
+    step returns (2026-08-01). NXDOMAIN only — the tool sets this flag solely for
+    BrowserUnreachable's "dns" class, so a cert failure or a refused connection
+    (both of which mean the domain EXISTS) never reaches the "did you mean…?"
+    pause. Code-owned and narrow, like its siblings: only the browse tool, only
+    its explicit flag; page text never reaches this decision. None = the address
+    was fine, or it failed some other way.
+
+    browse_commit discovery raises the same reason through
+    CommitDiscovery.site_unresolved, and both land on the ONE dispatcher."""
+    if step.tool != _BROWSE_TOOL:
+        return None
+    out = result.output if result is not None else None
+    if isinstance(out, dict) and out.get("site_unresolved") and out.get("unresolved_host"):
+        return out
+    return None
+
+
 def _browse_action_approval_signal(step: PlanStep, result: ToolResult) -> Optional[dict]:
     """The structured 'a world-acting gesture needs the user's yes' signal a
     READ browse step returns (2026-07-22): the loop reached a send/post/submit/
@@ -1895,6 +2052,76 @@ def _stamp_approved_start_url(plan: AgentPlan, origin: str, url: str) -> bool:
         return False
 
 
+def _apply_site_correction(plan: AgentPlan, wrong_host: str, right_host: str) -> bool:
+    """Re-point every pending browse step from the address that does not exist
+    to the one the user just confirmed. Returns True when a step was changed.
+
+    ⚠️ THIS MUST BE DONE IN CODE, and it is the whole reason this hand-off
+    re-enters EXECUTE instead of REVISE. The goal STRING still says
+    "Go to junitjamsheed.com …" — the typo is baked into the text every planner
+    prompt is built from. Asking the revise LLM to re-draft would hand it the
+    misspelling as the most authoritative-looking thing in its context, and the
+    2026-07-12 folder_resolver lesson is exactly this: the model was trusted to
+    carry a user's answer into the next draft, kept the original value, and the
+    guard that had stood down let it run. Enforce, never trust.
+
+    Four things move together, because a browse checks three of them and the
+    user reads the fourth:
+      - start_url  (where the loop opens)
+      - allowed_origins (what the interceptor permits)
+      - plan.approved_origins (what _browse_grounding accepts, so a LATER replan
+        can still reach the site — revise drops and re-drafts pending steps, so
+        an origin that lives only on the step does not survive one)
+      - step.description — the LLM-authored sentence on the APPROVAL CARD, which
+        quotes the address from draft time. LIVE 2026-08-01: after a correct
+        re-point the card read "Open junitjamsheed.com, find …" above a contract
+        that said POST https://www.junaidjamshed.com/cart/add. The binding
+        contract (action_detail, rendered from `parameters`) was right, so this
+        was cosmetic — but it is the SAME defect as the folder round one day
+        earlier, where a substituted path left the card naming the old drive.
+        A card that names one site while acting on another is a card the user
+        cannot rely on, whichever half is authoritative.
+    """
+    wrong = browser_grounding._normalize_origin(wrong_host)
+    right = browser_grounding._normalize_origin(right_host)
+    if not right:
+        return False
+
+    if right not in plan.approved_origins:
+        plan.approved_origins.append(right)
+
+    changed = False
+    for step in plan.pending_steps():
+        if step.tool not in browser_grounding._BROWSE_TOOLS:
+            continue
+        # A step already carrying a commit contract is approval-bound; re-aiming
+        # it would change what the user approved. It cannot happen here (the
+        # navigation died before any form was read) but the invariant is
+        # enforced, not assumed — the stamp_start_url rule.
+        if browse_state.commit_contract(step.parameters) is not None:
+            continue
+        if browse_state.stamp_start_url(step.parameters, f"https://{right}/"):
+            changed = True
+        raw = step.parameters.get("allowed_origins")
+        current = [raw] if isinstance(raw, str) else [str(o) for o in (raw or [])]
+        rebuilt = [
+            o for o in current
+            if browser_grounding._normalize_origin(o) not in (wrong, right)
+        ]
+        rebuilt.append(right)
+        step.parameters["allowed_origins"] = rebuilt
+        # The card's prose, made to agree with the card's contract. Case- and
+        # www-insensitive, because the draft may have written it either way.
+        if wrong and step.description:
+            step.description = re.sub(
+                rf"(?:www\.)?{re.escape(wrong)}", right, step.description, flags=re.IGNORECASE
+            )
+        changed = True
+    if changed:
+        logger.info(f"site corrected: {wrong or '?'} → {right}; resuming the browse there")
+    return changed
+
+
 def _fill_wall_question(field: str) -> PlanQuestion:
     """Code-derived pause text when a form needs a value not in the autofill
     profile or the user's words (15.2). Reuses the AWAITING_CHOICE machinery:
@@ -1912,6 +2139,92 @@ def _fill_wall_question(field: str) -> PlanQuestion:
         ),
         options=[],
     )
+
+
+def _site_correction_question(typed_host: str, suggestions: list) -> PlanQuestion:
+    """Code-derived pause text when the site the user named does not exist
+    (2026-08-01): "junitjamsheed.com doesn't exist — did you mean
+    junaidjamshed.com?" with the alternatives as clickable options.
+
+    THE OPTIONS ARE VERIFIED, NEVER INVENTED. did_you_mean.suggest_sites has
+    already resolved every host offered here (the _validated_question rule — an
+    option written as a concrete thing must exist, or the user clicks a
+    fabricated fact and the plan dies on it). Answering with one of them is the
+    USER naming a site, which is what grounds it — Jarvis never navigates to a
+    domain it merely inferred. The last option is an explicit decline, so
+    "none of these" is one click rather than a Cancel.
+
+    `kind` tags the UI, consistent with the other browse hand-offs."""
+    host = (typed_host or "that address").strip() or "that address"
+    names = [s.host for s in suggestions]
+    if len(names) == 1:
+        lead = f"Did you mean **{names[0]}**?"
+    else:
+        joined = ", ".join(names[:-1]) + f" or {names[-1]}"
+        lead = f"Did you mean {joined}?"
+    text = (
+        f"'{host}' doesn't exist — nothing answers to that address, so I "
+        f"couldn't open it. {lead} I'll only go to a site you confirm, so tell "
+        f"me which one (or type the correct address yourself)."
+    )
+    return PlanQuestion(
+        text=text,
+        options=[*names, "No — none of these"],
+        kind="site_correction",
+    )
+
+
+# "no", "none", "neither", "none of these", "no thanks" — an explicit decline.
+# The negative lookahead lets a reply that STARTS with a refusal but carries a
+# domain of its own ("no, it's nordstrom.com") fall through to the domain
+# branch, where the user is naming a site rather than declining one.
+_DECLINE_SITE_RE = re.compile(
+    r"^\s*(?:no|none|neither|nope|nah|cancel|stop)\b(?!.*\.[a-z]{2,24}\b)",
+    re.IGNORECASE,
+)
+
+
+def _match_site_choice(answer: str, offered: list[str]) -> str:
+    """The user's reply to a "did you mean…?" pause -> the host to use, or ""
+    to stop. Decided HERE, in code, and FAIL-CLOSED — the origin-approval rule,
+    for the same reason: this is what widens where a browse may go.
+
+    Three ways to say yes, in precedence order:
+      1. They wrote a DOMAIN ("actually it's junaidjamshed.com.pk"). That is the
+         user naming a site in their own words — the strongest grounding there
+         is, stronger than any option we offered — so it wins even when it is
+         not on the list. It still has to look like a real hostname.
+      2. They clicked / typed one of the offered hosts.
+      3. Exactly one host was offered and they simply said yes. With several
+         offered, "yes" answers nothing and is not treated as a choice.
+    Anything else — "no", a question, silence-shaped noise — returns "".
+    """
+    text = (answer or "").strip().lower()
+    if not text:
+        return ""
+    hosts = [h.lower() for h in offered if h]
+
+    # An explicit decline beats everything: "no, none of these" contains no
+    # domain and must never fall through to the single-suggestion yes branch.
+    if _DECLINE_SITE_RE.match(text):
+        return ""
+
+    # 1. a domain written in the reply
+    for match in browser_grounding._DOMAIN_RE.findall(text):
+        host = browser_grounding._normalize_origin(match)
+        if host and "." in host:
+            return host
+
+    # 2. one of the offered hosts named without its TLD ("junaidjamshed")
+    for host in hosts:
+        name = publicsuffix.registrable_name(host)
+        if name and re.search(rf"\b{re.escape(name)}\b", text):
+            return host
+
+    # 3. a bare yes, only when there is exactly one thing it could mean
+    if len(hosts) == 1 and _AFFIRMATIVE_RE.match(text):
+        return hosts[0]
+    return ""
 
 
 def _auth_offer_question(info: dict) -> PlanQuestion:
@@ -2001,6 +2314,30 @@ def _enrich_event_action_detail(plan: AgentPlan, step: PlanStep) -> None:
         step.action_detail = (f"{base}\n{line}" if base else line)
 
 
+def _apply_folder_substitution(step: PlanStep, res) -> None:
+    """Rewrite a step's folder parameter to the copy code resolved — AND the two
+    texts that quote it.
+
+    ⚠️ The rewrite used to be the one line `step.parameters[key] = ...`, which
+    was invisible while the guard only ever saw READ steps. It stops being
+    invisible the moment a move destination can be substituted: `action_detail`
+    IS the approval contract and `description` is code-authored text that
+    embeds the path verbatim — `placeholder_resolver._describe_batch` produced
+    the 2026-08-01 incident's literal "Move 85 file(s) (181.9 MB) into
+    C:\\Users\\DELL\\Downloads". Leaving either stale would show the user one
+    drive on the card and move the files to another, which is a worse failure
+    than the one this module exists to prevent.
+
+    action_detail is REGENERATED (a pure (tool, params) render); description is
+    a guarded textual swap, because rebuilding it needs the on-disk sizes and
+    the deferred-file list that only the placeholder resolver had."""
+    old = str(step.parameters.get(res.key) or "")
+    step.parameters[res.key] = res.value
+    step.action_detail = _step_action_detail(step.tool, step.parameters)
+    if old and step.description and old in step.description:
+        step.description = step.description.replace(old, res.value)
+
+
 def _drop_completed_duplicates(
     steps: list[PlanStep], completed_signatures: set[str]
 ) -> tuple[list[PlanStep], Optional[str]]:
@@ -2044,6 +2381,57 @@ def _drop_completed_duplicates(
 
 
 # ============================================================== placeholders
+
+def _placeholder_strings(value: Any) -> list[str]:
+    """Every PENDING-carrying string anywhere in a parameter tree — including
+    inside lists, which is where the batch file tools keep their targets."""
+    if isinstance(value, str):
+        return [value] if _PLACEHOLDER_MARK in value.upper() else []
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _placeholder_strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _placeholder_strings(v)]
+    return []
+
+
+def _unrouted_failure(plan: AgentPlan) -> Optional[PlanStep]:
+    """The FAILED step the plan never routed around, or None.
+
+    A plan MAY legitimately complete carrying a failed step: "a failed step
+    stays FAILED and the remaining steps are replanned AROUND it". The test
+    for "routed around" is positional and exact rather than heuristic —
+    `_revise_node` replaces the pending TAIL (`plan.steps = executed + steps`),
+    so replacement steps are always appended AFTER the failure. A COMPLETED
+    step after it therefore means a revision did the work another way; nothing
+    after it means the goal simply did not get done.
+
+    Two exclusions:
+    - `auto_escalated` steps are opportunistic evidence reads that
+      `_execute_node` deliberately continues past (the goal never depended on
+      them). Letting a 403'd extra read fail an otherwise-good plan would
+      re-import the entire cost `evidence_resolver` exists to avoid.
+    - SKIPPED does not count as routing around: a zero-match skip AFTER a
+      failure is the failure cascading, not the goal being met another way.
+
+    And a replanner that explicitly declared the goal accomplished by the
+    executed results overrides the positional test entirely (see
+    `plan.goal_accomplished`).
+    """
+    if plan.goal_accomplished:
+        return None
+    last_completed = -1
+    for i, step in enumerate(plan.steps):
+        if step.status == StepStatus.COMPLETED:
+            last_completed = i
+    for i, step in enumerate(plan.steps):
+        if (
+            step.status == StepStatus.FAILED
+            and not getattr(step, "auto_escalated", False)
+            and i > last_completed
+        ):
+            return step
+    return None
+
 
 def _has_placeholder(value: Any) -> bool:
     """True when any string inside the parameters still carries 'PENDING:'."""
@@ -2269,9 +2657,18 @@ class AgentPlanner:
 
     # ---------------------------------------------------------- entry points
 
-    async def start(self, goal: str) -> AgentPlan:
+    async def start(
+        self, goal: str, user_answers: Optional[list[str]] = None
+    ) -> AgentPlan:
         """Plan a goal. Returns a COMPLETED plan (READ-only goals run through),
-        an AWAITING_APPROVAL plan, or a FAILED plan with an explanation."""
+        an AWAITING_APPROVAL plan, or a FAILED plan with an explanation.
+
+        `user_answers` seeds the plan with words the user has ALREADY said
+        about this goal — used by the continuation router, which re-runs an
+        earlier goal carrying the correction that prompted the re-run ("that's
+        not all of them"). They are authoritative planner input, and the guards
+        that read them (`_scope_violation`, `folder_resolver`) stay armed
+        because the goal itself is the original one, not the correction."""
         await self._load_folder_signal()
         await self._load_fill_profile()
         plan = AgentPlan(
@@ -2280,6 +2677,7 @@ class AgentPlanner:
             conversation=self.conversation,
             memory_context=self.memory,
             agent_key=self.agent.key,
+            user_answers=list(user_answers or []),
         )
         if not plan.goal:
             plan.status = PlanStatus.FAILED
@@ -2380,6 +2778,47 @@ class AgentPlanner:
         pending_auth = getattr(plan, "pending_auth_offer", None)
         if pending_auth is not None:
             return await self._handle_auth_offer_answer(plan, pending_auth, answer)
+
+        # "Did you mean…?" hand-off (2026-08-01): the site the user named does
+        # not exist and we offered verified alternatives. Decide HERE, in code —
+        # this widens where a browse may go, so it is FAIL-CLOSED exactly like
+        # the origin approval below. What makes it SOUND rather than a guess is
+        # that the user's reply IS the grounding: `answer` was appended to
+        # plan.user_answers at the top of this method, so a domain they typed is
+        # already in the corpus ground_origins reads, and a host they picked from
+        # the list is added to approved_origins — the same mechanism a "yes" to
+        # an off-site origin uses. Jarvis never navigates to a domain it merely
+        # inferred from a search.
+        pending_site = getattr(plan, "pending_site_correction", None)
+        if pending_site:
+            plan.pending_site_correction = None
+            offered = list(getattr(plan, "pending_site_candidates", None) or [])
+            plan.pending_site_candidates = []
+            chosen = _match_site_choice(answer, offered)
+            if chosen:
+                # Re-enter EXECUTE directly rather than REVISE. Not an
+                # optimization — the goal string still contains the misheard
+                # address, so a revise round would be handed the typo as the
+                # most authoritative text in its prompt (see
+                # _apply_site_correction).
+                if _apply_site_correction(plan, pending_site, chosen):
+                    self._note_expired_window(plan)
+                    plan.status = PlanStatus.EXECUTING
+                    state = await self._graph.ainvoke(self._initial_state(plan, set()))
+                    return state["plan"]
+                # Nothing to re-point (no pending browse step) — fall through to
+                # the ordinary revise path, where the answer is authoritative.
+            else:
+                for step in plan.pending_steps():
+                    step.status = StepStatus.SKIPPED
+                plan.status = PlanStatus.CANCELLED
+                plan.message = (
+                    f"Understood — I won't guess which site you meant. "
+                    f"'{pending_site}' doesn't exist, so nothing was opened. "
+                    "Tell me the correct address and I'll go straight there."
+                )
+                logger.info(f"user declined every suggested site for '{pending_site}'")
+                return plan
 
         # Off-site navigation hand-off (2026-07-18): if a page-derived origin was
         # awaiting the user's yes/no, decide it HERE, in code — a security-
@@ -2626,6 +3065,20 @@ class AgentPlanner:
         )
 
     @staticmethod
+    def _pause_on_folder_handoff(plan: AgentPlan, question: PlanQuestion) -> None:
+        """Pause to ask WHICH same-named folder was meant. Counted against the
+        separate _MAX_FOLDER_HANDOFFS budget, NOT the MAX_QUESTIONS
+        clarification cap — see that constant. Code already holds the verified
+        answers here; this is a disambiguation, not a question the model asked."""
+        plan.question = question
+        plan.status = PlanStatus.AWAITING_CHOICE
+        plan.folder_handoffs += 1
+        logger.info(
+            f"Plan paused on a folder disambiguation "
+            f"({plan.folder_handoffs}/{_MAX_FOLDER_HANDOFFS}): '{question.text[:80]}'"
+        )
+
+    @staticmethod
     def _pause_on_browse_handoff(plan: AgentPlan, question: PlanQuestion) -> None:
         """Pause on a STRUCTURAL browse hand-off (missing form value / optional
         sign-in offer / off-site origin approval / challenge). Counted against
@@ -2756,7 +3209,37 @@ class AgentPlanner:
         if plan.browse_handoffs >= _MAX_BROWSE_HANDOFFS:
             return False
 
-        if reason is browse_state.Handoff.FILL_FIELD:
+        if reason is browse_state.Handoff.SITE_UNRESOLVED:
+            # The address the user named has no DNS record. Look up what they
+            # may have meant and ASK — never navigate to an inferred domain
+            # (browser/did_you_mean.py explains why suggesting is not guessing).
+            #
+            # Returning False here is a FEATURE, not a shortfall: it means the
+            # step keeps its own honest "that address doesn't resolve" failure
+            # and the plan behaves exactly as it did before this existed. Every
+            # exit below is that same fall-through, so nothing that used to work
+            # can regress on a bad search or a spent budget.
+            if plan.site_corrections >= _MAX_SITE_CORRECTIONS:
+                logger.info(
+                    "site-correction budget spent — failing honestly instead of "
+                    "chaining another guess"
+                )
+                return False
+            typed = payload.site or ""
+            if not typed:
+                return False
+            try:
+                suggestions = await did_you_mean.suggest_sites(typed)
+            except Exception as exc:  # belt: the lookup is optional, the plan is not
+                logger.warning(f"site suggestion lookup failed (non-critical): {exc}")
+                return False
+            if not suggestions:
+                return False
+            plan.site_corrections += 1
+            plan.pending_site_correction = typed
+            plan.pending_site_candidates = [s.host for s in suggestions]
+            question = _site_correction_question(typed, suggestions)
+        elif reason is browse_state.Handoff.FILL_FIELD:
             plan.pending_fill_field = payload.field or ""
             question = _fill_wall_question(payload.field)
         elif reason is browse_state.Handoff.AUTH_OFFER:
@@ -3057,7 +3540,10 @@ class AgentPlanner:
             # ambiguous placeholder still falls into the replan loop.
             if _has_placeholder(step.parameters):
                 replacement = placeholder_resolver.resolve(
-                    plan, idx, max_new=MAX_PLAN_STEPS - len(plan.steps) + 1
+                    plan,
+                    idx,
+                    max_new=MAX_PLAN_STEPS - len(plan.steps) + 1,
+                    grounding=self.conversation or "",
                 )
                 if replacement is not None:
                     if replacement:
@@ -3092,30 +3578,51 @@ class AgentPlanner:
                 pause = "failed_step"
                 break
 
-            # Same-named folder disambiguation (2026-07-12): a well-known
-            # folder the user named without a drive ("downloads") may exist on
-            # several drives. Before a read step scopes itself to the DEFAULT
-            # home copy, probe the drives; two or more matches pause the plan so
-            # the user picks the real one (rather than silently searching the
-            # wrong Downloads and reporting nothing), exactly one non-home match
-            # fixes the guessed path in code. Read-level and best-effort.
+            # Same-named folder disambiguation (2026-07-12, widened to writes
+            # 2026-08-01): a folder the user named without a drive
+            # ("downloads") may exist on several drives. Before a step operates
+            # INSIDE the DEFAULT home copy, probe the drives; two or more
+            # matches pause the plan so the user picks the real one (rather
+            # than silently searching — or MOVING 85 FILES INTO — the wrong
+            # Downloads), exactly one non-home match fixes the guessed path in
+            # code. Runs BEFORE the approval gate below, always, so the choice
+            # is made before the card is drawn. Best-effort.
             folder_choice = folder_resolver.detect(step, plan.goal, plan.user_answers)
             if folder_choice is not None:
                 if folder_choice.action == "substitute":
                     # Either the only existing copy, or the copy the user's
                     # own words explicitly chose (a picked option is enforced
                     # here in code — never left to the revise LLM to honor).
-                    step.parameters[folder_choice.key] = folder_choice.paths[0]
+                    _apply_folder_substitution(step, folder_choice)
                     logger.info(
                         f"Folder '{folder_choice.name}' resolved in code to "
-                        f"{folder_choice.paths[0]}"
+                        f"{folder_choice.value}"
                     )
+                elif folder_choice.mutating:
+                    # A WRITE never runs on a guessed drive while it still has
+                    # a hand-off left: this is the branch whose absence moved
+                    # 85 PDFs to the wrong Downloads on 2026-08-01.
+                    if plan.folder_handoffs < _MAX_FOLDER_HANDOFFS:
+                        self._pause_on_folder_handoff(
+                            plan, folder_resolver.build_question(folder_choice)
+                        )
+                        return {"plan": plan, "pause_reason": None}
+                    # Budget spent (a plan touching 4 ambiguous folders). Run,
+                    # but never let the card imply the choice was unambiguous.
+                    # Idempotent: a step can re-enter this loop across replans,
+                    # and the note must not stack up (_enrich_event_action_detail).
+                    note = folder_resolver.ambiguity_note(folder_choice)
+                    base = step.action_detail or ""
+                    if note not in base:
+                        step.action_detail = f"{base}\n{note}" if base else note
                 elif plan.questions_asked < MAX_QUESTIONS:
                     self._pause_on_question(
                         plan, folder_resolver.build_question(folder_choice)
                     )
                     return {"plan": plan, "pause_reason": None}
-                # question budget exhausted → fall through, search the home copy
+                # A READ with the question budget exhausted falls through and
+                # searches the home copy — it reports nothing, it destroys
+                # nothing. Deliberately unchanged.
 
             # COMMIT discovery (14.5): a browse_commit step whose form has not
             # been read yet runs a READ-mode discovery pass FIRST — drive to the
@@ -3222,6 +3729,7 @@ class AgentPlanner:
             # return (budget spent) falls through to the ordinary failed-step
             # path — the structured-pause ToolResult is unsuccessful by design.
             for signal in (
+                _browse_site_unresolved_signal(step, result),
                 _browse_login_signal(step, result),
                 _browse_challenge_signal(step, result),
                 _browse_origin_approval_signal(step, result),
@@ -3395,18 +3903,32 @@ class AgentPlanner:
             # allow_empty gate in _revise_node (live bug 2026-07-13: a 0-step
             # plan reported COMPLETED and the summary LLM invented results
             # for it).
-            if any(
+            if not any(
                 s.status in (StepStatus.COMPLETED, StepStatus.SKIPPED)
                 for s in plan.steps
             ):
-                plan.status = PlanStatus.COMPLETED
-            else:
                 plan.status = PlanStatus.FAILED
                 plan.message = plan.message or (
                     "I couldn't turn this into a runnable plan — no step was "
                     "ever executed, so nothing was done. Please rephrase the "
                     "request (exact paths help)."
                 )
+            elif (unrouted := _unrouted_failure(plan)) is not None:
+                # Something ran, but a step FAILED and nothing after it
+                # succeeded — the failure was never routed around. Live bug
+                # 2026-07-29: the move step failed on an unresolved
+                # placeholder, and because the search and the mkdir before it
+                # had completed, the plan reported "Done — 2 step(s)
+                # completed" having moved zero files. "Did anything run?" is
+                # not the same question as "did the goal get done".
+                plan.status = PlanStatus.FAILED
+                reason = (unrouted.result.error or "").strip() if unrouted.result else ""
+                plan.message = (
+                    f"Step '{unrouted.description}' failed and nothing after it "
+                    f"succeeded" + (f": {reason}" if reason else ".")
+                )
+            else:
+                plan.status = PlanStatus.COMPLETED
         return {"plan": plan, "pause_reason": pause}
 
     async def _revise_node(self, state: AgentState) -> dict:
@@ -3423,36 +3945,52 @@ class AgentPlanner:
             await log_cancellation(self.db, plan)
             return {"plan": plan, "pause_reason": None}
 
-        is_failure = state.get("pause_reason") == "failed_step"
+        # `pause_failure` is "execution just broke on a step" — it alone drives
+        # the replan BUDGET, because only a real execution failure should spend
+        # one. `is_failure` is the broader "this plan is carrying an unrouted
+        # failure", which also covers the ANSWER path: `answer()` re-enters at
+        # revise with no pause_reason, so a plan whose write step had failed
+        # used to be treated as a best-effort "refinement" and, when the
+        # revision came back unusable, silently kept the plan as-is and
+        # reported success (live bug 2026-07-29). Splitting the two is what
+        # lets an answered question replan the failure WITHOUT immediately
+        # tripping the replan cap on a plan the user just replied to.
+        pause_failure = state.get("pause_reason") == "failed_step"
         replan_count = state.get("replan_count", 0)
-        failed_step: Optional[PlanStep] = None
+        failed_step: Optional[PlanStep] = (
+            next((s for s in reversed(plan.steps) if s.status == StepStatus.FAILED), None)
+            if pause_failure
+            else _unrouted_failure(plan)
+        )
+        is_failure = pause_failure or failed_step is not None
 
         if is_failure:
-            failed_step = next(
-                (s for s in reversed(plan.steps) if s.status == StepStatus.FAILED), None
-            )
             failed_desc = failed_step.description if failed_step else "a step"
             failed_error = (
                 failed_step.result.error if failed_step and failed_step.result else ""
             )
-            if replan_count >= MAX_REPLANS:
-                # Ask-not-fail: a not-found target is the user's to resolve —
-                # pause on a question (which owns the session's next message)
-                # rather than dead-ending into the stateless chat path.
-                question = await self._fallback_question(plan, failed_step)
-                if question is not None:
-                    self._pause_on_question(plan, question)
-                    return {
-                        "plan": plan, "revised": True,
-                        "replan_count": replan_count, "pause_reason": None,
-                    }
-                plan.status = PlanStatus.FAILED
-                plan.message = (
-                    f"Gave up after {MAX_REPLANS} replan attempts. "
-                    f"Last failure: '{failed_desc}' — {failed_error}"
-                )
-                return {"plan": plan, "pause_reason": None}
-            replan_count += 1
+            # The replan BUDGET is spent only by a real execution failure. An
+            # answered question re-entering here must never trip the cap and
+            # give up on a plan the user just replied to.
+            if pause_failure:
+                if replan_count >= MAX_REPLANS:
+                    # Ask-not-fail: a not-found target is the user's to resolve
+                    # — pause on a question (which owns the session's next
+                    # message) rather than dead-ending into the chat path.
+                    question = await self._fallback_question(plan, failed_step)
+                    if question is not None:
+                        self._pause_on_question(plan, question)
+                        return {
+                            "plan": plan, "revised": True,
+                            "replan_count": replan_count, "pause_reason": None,
+                        }
+                    plan.status = PlanStatus.FAILED
+                    plan.message = (
+                        f"Gave up after {MAX_REPLANS} replan attempts. "
+                        f"Last failure: '{failed_desc}' — {failed_error}"
+                    )
+                    return {"plan": plan, "pause_reason": None}
+                replan_count += 1
 
         # Every failed step's exact signature, so the revision structurally
         # cannot re-issue a call that is already known to fail (the prompt
@@ -3594,6 +4132,15 @@ class AgentPlanner:
         plan.steps = executed + steps
         if not steps and reason:
             plan.message = reason  # e.g. "no matching files found" → completes
+        if accomplished:
+            # The replanner looked at the executed results and declared the
+            # goal met. That IS routing around a failed step — by judging it
+            # irrelevant — and it is the one form the positional test in
+            # _unrouted_failure cannot see (nothing runs after the failure
+            # because nothing NEEDS to). Recording it keeps the 2026-07-21
+            # fix intact: a plan carrying "The goal has been fully
+            # accomplished" must not then report FAILED.
+            plan.goal_accomplished = True
         plan.status = PlanStatus.EXECUTING
         logger.info(
             f"Plan revised ({'replan' if is_failure else 'refine'}): "

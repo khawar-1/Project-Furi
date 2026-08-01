@@ -1954,6 +1954,500 @@ derived on demand — no new table, no scheduler job, nothing that can act.
   normalization, limit, existing-only filter, formatter, and the planner
   surfacing/absence of the block).
 
+### Bulk file work, honest completion, and task continuation (2026-07-29)
+Live: *"hey create a folder 'pddf2' on desktop and move all the pdf files that are
+in the downloads in that folder"*. Jarvis created the folder, searched, found 85
+PDFs, and reported **"Done — 2 step(s) completed"** having moved **zero files** —
+then the user asked it to look again and hit a dead end. Root-caused from
+`~/.jarvis/logs/backend.log` + the `tasks.plan_payload` row, five defects:
+
+- **⚠️ BULK FILE WORK WAS STRUCTURALLY UNPLANNABLE.** Plan rule 4 said *"Every
+  delete_file / move_file / rename_file step must target exactly ONE file"*, so
+  `placeholder_resolver._expand_files` expanded a `PENDING` template into one step
+  per file — capped at `MAX_PLAN_STEPS - len(plan.steps) + 1` = **28**. 85 > 28, so
+  it `return None`d, the step failed *"still contain unresolved 'PENDING:'
+  placeholders"*, and **every bulk file operation in the product over ~28 items
+  dead-ended**. Even under the cap it was wrong: 500 files would mean 500 approval
+  rows. The browser domain had already solved exactly this (**RULE 22**: "this is
+  STILL ONE browse_commit step — set max_commits … Do NOT split a 'find N and
+  apply to each' goal into a separate search step plus one commit per item",
+  backed by `_collapse_browse_apply`); the file domain never got it.
+  **FIX:** NEW `move_files` (WRITE) / `delete_files` (DESTRUCTIVE) in
+  `file_tools.py`, each looping the SAME single-file primitive its singular twin
+  uses (`_move_one` / `_delete_one`, extracted so never-overwrite and
+  trash-first-or-refuse cannot drift between "move one" and "move eighty-five").
+  Partial failure is normal and **never rolled back** — a bulk op that stops dead
+  on file 12 of 85 leaves a state nobody chose, so both halves are reported and
+  every failure is NAMED. `BATCH_MAX_FILES = 1000` refuses rather than truncates,
+  with a test pinning `>= SEARCH_MAX_RESULTS`.
+  **The conversion is in CODE, not a prompt** (`_BATCH_TOOLS` in
+  placeholder_resolver): a pool over `BATCH_EXPAND_MAX = 8` becomes ONE batch step
+  carrying the explicit list. It had to be — this codebase has measured a prompt
+  rule with no comparator at ZERO three separate times ("a rule with nothing to
+  check it is a suggestion"), so the fix cannot depend on the planner choosing the
+  new tool. Rule 4 was rewritten anyway as the belt. `_LIST_PARAMS` +
+  `_placeholder_list_key` also handle the LLM drafting `move_files(sources=
+  ["PENDING: …"])` directly — a shape `_string_placeholder_keys` cannot see and
+  `_nested_placeholder` vetoed, i.e. one that used to fail with the incident's
+  exact error. The veto is bypassed only for an ALL-placeholder list.
+- **APPROVAL IS UNCHANGED, and that is the point.** `planner.py:2343` —
+  `signatures = {s.signature() for s in plan.pending_steps()}` — one approval
+  *already* covered every pending step, so 20 expanded per-file rows were one yes.
+  A batch step is **granularity-equivalent**: same single yes, same complete list,
+  rendered as one legible contract. The list lives in `parameters`, so
+  `signature()` binds approval to those exact files; `_step_action_detail` renders
+  the full contract (count, destination, paths one per line, clipped BY ITEM);
+  `registry.execute_tool`'s gate is untouched. `_batch_step` reads permission from
+  the **registry**, never copying the template — `schemas.py` puts that trust
+  boundary in the registry, and a copy would silently under-classify a batch tool
+  the day one is reclassified.
+- **BULK MUTATION DEFAULTS TO THE FOLDER'S OWN FILES** (`partition_by_depth`,
+  owner's call). Of the 85 PDFs, 77 were direct children; 8 were nested — one
+  inside a source repo at `Musanif-main\…\frontend\src\Assets`. Recursion is right
+  for FINDING and wrong as a default for MUTATING: moving those out would have
+  broken a project the user never mentioned. Roots come from the search step's own
+  `searched_in`. The user's own words override (`_RECURSIVE_CUE_RE` over goal +
+  conversation + answers — the `extension_grounded` rule), an all-nested pool is
+  never narrowed to nothing, and the exclusion is NAMED in the step's code-authored
+  description. **A truncated source search now refuses to become a bulk write at
+  all** — and that guard was needed for the per-file path too, where it was a LIVE
+  bug: `paths_from_step` never looked at `truncated`, so a capped search expanded
+  into deletes over a subset and completed "successfully".
+- **"DID ANYTHING RUN?" IS NOT "DID THE GOAL GET DONE".** `planner.py:3398` set
+  COMPLETED if ANY step completed, so a FAILED write rode along as "Done".
+  `_unrouted_failure` is the precise test, not a heuristic: `_revise_node` replaces
+  the pending TAIL (`plan.steps = executed + steps`), so replacements are always
+  appended AFTER a failure — **a COMPLETED step after it means the replan routed
+  around it**, nothing after it means the goal did not get done. Two exclusions,
+  both regressions caught by the suite: `auto_escalated` steps (evidence_resolver
+  continues past them on purpose) and `plan.goal_accomplished` (NEW serialized
+  field — a replanner declaring the executed results sufficient IS routing around
+  the failure, and it is the one case a positional test cannot see because nothing
+  needs to run after it; this is the 2026-07-21 fix, which a naive rule breaks).
+  **D2b:** `answer()` re-enters revise with no `pause_reason`, so a plan carrying a
+  failed write was treated as a best-effort "refinement" and, on an unusable
+  revision, silently kept the plan and reported success. `pause_failure` (budget)
+  is now split from `is_failure` (prompt + unusable-output branch), so an answered
+  question replans the failure WITHOUT tripping the replan cap on a plan the user
+  just replied to.
+- **THE RECORD LIED, IN CODE — again.** `_executed_steps_json` fed the revise LLM
+  `json.dumps(output)[:1200]` plus the literal `"… (truncated)"`. The 14,158-char
+  result of a search that found **everything** (`truncated: false`) became 8 of 85
+  files under a truncation marker, and the model faithfully reported *"the search
+  returned a truncated list. I can see these 8 files"*, asked whether to search
+  again, and the plan died there. Same defect class as the 2026-07-16 FIFA
+  fabrication, in the file domain, and `rendering.py` had held the cure since
+  2026-07-10 — the SUMMARY LLM never sees raw JSON, but the REVISE LLM did. Split
+  in two: `_executed_steps_readable` (the prompt) renders through
+  `rendering.render_step_result` with `fair_shares` so position never decides
+  survival, while `_executed_steps_json` stays raw for the **grounding corpus** —
+  `_scope_violation` reads user-facing words back out of it, and `_render_step`'s
+  `"Done: {description}"` for write steps would drop real paths out of it and start
+  rejecting legitimate revisions. And `rendering._clip` no longer says
+  **"truncated"** at all: in this codebase that word is a FACT ABOUT THE WORLD a
+  tool reports about its own results, and using it for "our display budget ran out"
+  is the conflation that caused this. It now says `(clipped for length)`; real
+  source truncation is still reported, separately and only when true, by
+  `_fmt_search_files`.
+- **"I asked it to look again, but then it failed."** There was NO way to continue
+  a settled task. A short correction either missed the task gate (`looks_like_task`
+  needs a domain noun; `is_action_followup` caps at 8 words) and fell into chat,
+  which cannot act — or it passed and drafted a brand-new plan whose goal was
+  literally *"look again"*, which **silently disarms two guards that key on the
+  goal STRING**: `folder_resolver.detect` bails at `_named_in_words` (the
+  C:\Downloads-vs-D:\Downloads disambiguation stops firing) and `_scope_violation`
+  bails at `UNIVERSAL_FILES_RE`. NEW `app/api/continuation_router.py` (the
+  reminder/routine pattern, hooked between routines and tasks) re-runs the
+  **ORIGINAL** goal with the correction as an authoritative `user_answer` and the
+  previous run's real results as a data-never-instructions PRIOR RESULTS block —
+  so the guards stay armed and the correction still steers. No new table (`Task`
+  already has goal/session/status/finished_at/plan_payload); no LLM call; TTL
+  20 min; `running`/`paused` tasks are excluded (they own their own channels);
+  it defers to open questions like every sibling. It goes through `start_task`, so
+  the plan is RE-DERIVED and the approval gate re-applies — continuation is
+  auto-PLAN, never auto-WRITE (the Routine principle).
+- **Search speed, measured not assumed.** `_search` now walks with `os.scandir`
+  (DirEntry.stat() is served from the directory enumeration; `follow_symlinks=False`
+  for the DESCEND decision only, so a junction cannot loop forever, and `OSError` is
+  swallowed exactly as `os.walk(onerror=None)` did). **MEASURED on the real
+  D:\Downloads: 57ms → 43ms (1.3x).** The incident's **26.9s was cold-cache disk
+  I/O, not our loop** — scandir halves the syscalls per entry, which is where
+  cold-cache cost lives, but the honest number here is 1.3x warm and no cold-cache
+  measurement was taken. `SEARCH_MAX_RESULTS` 100 → 1000 is the real correctness
+  lever: at 100, a folder holding 150 PDFs answered "all the PDFs" with 100 and a
+  `truncated` flag every consumer ignored.
+- Also: `agent_registry` file agent gains both tools (else the file agent never
+  sees them); `_MUST_EXIST_LIST_PARAMS` is a SEPARATE map because the single-string
+  guard would stringify the whole list, resolve THAT under HOME and fail every
+  batch before approval — it now fails only when NO path exists (a wholly invented
+  list), since one file vanishing between search and approval is the tool's honest
+  per-file report; `_scope_violation` recurses into lists (batch tools otherwise
+  open a narrowing hole); `file_intelligence` learns from `move_files` using the
+  destination itself, not its parent (move_files REQUIRES a folder), counting ONCE
+  per call — a habit is a decision, and one approval is one decision.
+- Tests: `test_bulk_file_ops.py` (37 — the incident frozen end-to-end through the
+  REAL planner on a real filesystem: two approval pauses, 32 top-level PDFs moved,
+  8 nested untouched), `test_continuation_router.py` (28). **2582 passing.**
+
+### An answer about one folder disarmed the guard for another (2026-07-30)
+Live, the morning after the bulk-file round: *"hey create folder 'pdff' on
+dashboard and move all the pdf files from downloads in it"* — "dashboard" was a
+typo for "desktop". Jarvis handled the typo WELL (it asked, offering the verified
+`C:\Users\DELL\Desktop` and a type-your-own option), created the folder on the
+Desktop when the user clicked — **and moved nothing**, reporting *"No matching
+files were found … nothing to do."* while 85 PDFs sat in `D:\Downloads`.
+
+- **⚠️ ROOT CAUSE: `folder_resolver._user_was_explicit` was folder-BLIND.** It
+  joined goal + every answer into ONE string and asked *"is there a drive
+  qualifier anywhere?"*. The clicked option `C:\Users\DELL\Desktop` put a `C:\`
+  into `plan.user_answers`, that matched, and the guard stood down **for
+  DOWNLOADS** — so the plan searched the empty home copy (`count: 0`, 4ms) and
+  the placeholder step was legitimately SKIPPED for having no files. Every layer
+  below behaved correctly on a premise the guard had already broken. Proven at
+  both ends before any code changed: the DB's `plan_payload` shows
+  `search_files(directory="C:\Users\DELL\Downloads") → count 0` and a SKIPPED
+  `move_files`, and a repro shows `detect(...)` returning `ask` with
+  `['C:\Users\DELL\Downloads', 'D:\Downloads']` for the same goal with NO answer
+  and `None` with the Desktop answer.
+- **THE BLAST RADIUS WAS THE WHOLE FEATURE, NOT ONE TYPO.** `_validated_question`
+  / `question_gate` deliberately offer VERIFIED CONCRETE PATHS as options, so
+  **any** clarifying question a plan asks about a path puts a drive-qualified
+  string into `user_answers` — which disarmed this guard for the rest of that
+  plan. The typo only made the question happen; nothing about it was special.
+- **The two halves of the same module already disagreed.**
+  `_explicit_folder_choice`, immediately above, is folder-aware by construction
+  (`path.name.lower() != name.lower()` → skip). `_user_was_explicit` was not, and
+  it won because it returns first. **When two predicates in one module answer
+  "was the user specific?", they must be specific about the SAME THING.**
+- **The fix is scoping, and each corpus entry is judged SEPARATELY** — joining is
+  precisely what let one text's qualifier answer for another's folder. Within an
+  entry: a CONCRETE drive-rooted path stands the guard down only when its last
+  segment IS this folder (`D:\Downloads` yes; `C:\Users\DELL\Desktop` and
+  `D:\Projects` no); a SPOKEN reference ("the one on d drive") names no folder, so
+  it is taken as a steer for the folder in question **unless that text names a
+  different well-known folder** ("the desktop one on d drive").
+- **⚠️ KEEPING THE VAGUE CASE STANDING DOWN IS LOAD-BEARING FOR TERMINATION**, and
+  a first cut that scoped everything would have broken it: the module's own
+  contract is *"either way the answer→re-plan loop terminates"*, and a vague reply
+  that no longer stands the guard down re-triggers the SAME question until
+  `MAX_QUESTIONS` is spent — after which the plan falls through and searches the
+  home copy anyway, i.e. the identical incident, slower. Tested explicitly.
+- **A second, smaller defect the same run exposed: an empty result that does not
+  say WHERE it looked is undiagnosable.** `_fmt_search_files` returned a bare
+  `"No matches found."` while the tool's own output carried `searched_in`. Neither
+  the user reading the outcome nor the REVISE LLM planning the next step could see
+  that the search had been scoped to the empty home Downloads, so an obviously
+  wrong result read as a flat "you have no PDFs". It now reads *"No matches found
+  in `C:\Users\DELL\Downloads`."* (roots item-clipped via `_names`; absent
+  `searched_in` keeps the old text, so nothing else moved).
+- **VERIFIED LIVE** (isolated :8001, scratch DB, real DeepSeek, nothing approved —
+  the plan was cancelled at the gate, no folder created, no file moved): the
+  incident goal now pauses with *"There are 2 folders named 'downloads' … which one
+  did you mean?"* offering both real paths, **and still asks after the Desktop
+  option is clicked**. Answering `D:\Downloads` lands the search on `D:\Downloads`
+  with `count: 85` — the incident's own number; answering the home copy yields 0
+  and renders *"No matches found in `C:\Users\DELL\Downloads`."*
+- **Not changed, deliberately:** the SKIPPED-step → COMPLETED semantics. Zero
+  matching files genuinely is an outcome rather than a failure, the message was
+  honest, and `_unrouted_failure` correctly did not fire (nothing FAILED). The
+  wrong thing was the search scope, and that is where the fix belongs.
+- Tests: `test_folder_resolver.py` (+5 — the incident frozen; an unrelated
+  concrete path does not disarm; the vague steer still stands down
+  (TERMINATION); a vague steer naming another folder does not; a path to THIS
+  folder still does), `test_plan_rendering.py` (+1 — an empty search names its
+  roots, single and multi). **2614 passing, 14 skipped.**
+
+### The guard applied to the shape rule 4 replaced (2026-07-30, same day)
+With the folder guard fixed, the run finally worked — and moved **85 PDFs
+including 8 out of subfolders**, one from inside a source repo
+(`D:\Downloads\Musanif-main\...\frontend\src\Assets\MusanifPublishers.pdf`).
+The user spotted it; the audit row confirmed it (`approved sources: 85`, `of
+which nested: 8`, `moved=85 failed=0`, description `Move 85 file(s) (181.9 MB)`
+with **no deferred note**). The "top-level, flag the rest" decision from
+2026-07-29 had simply never applied.
+
+- **⚠️ ROOT CAUSE: `_MUTATION_TEMPLATES` was a hand-listed set of SINGULAR tool
+  names** — `{"move_file", "delete_file", "rename_file"}`. `_file_pool` gates
+  BOTH mutation rules on membership: the top-level partition
+  (`partition_by_depth`) and the truncated-source refusal. The planner drafted
+  `move_files(sources="PENDING: …")`, so `_fill_list` ran the pool with
+  `template.tool == "move_files"` ∉ the set, and both rules silently switched
+  off. `_fill_list`'s own docstring said *"Same pool, same rules"* — it shared
+  the FUNCTION but not the RULES, and that sentence is what made the gap read
+  as intentional.
+- **⚠️ THE PREVIOUS ROUND CREATED THIS.** Rule 4 was rewritten on 2026-07-29 to
+  tell the planner *"bulk file work is ONE `move_files`/`delete_files` step with
+  a PENDING list"* — i.e. the change **steered the model onto the exact shape
+  where the guards did not apply**, while the guards stayed keyed to the shape
+  it replaced. General rule: **when you add a preferred form of an operation,
+  every predicate that keys on the old form's NAME is now a hole.** A grep for
+  the old names is part of shipping the new one.
+- **THE TEST SUITE COULD NOT SEE IT: all 37 bulk-file tests drove
+  `move_template()` (singular).** The end-to-end test passed with 32 moved / 8
+  nested untouched *because that run happened to draft the singular form* — LLM
+  nondeterminism decided whether the feature was exercised. Same shape as the
+  2026-07-17 fan-out round ("1,578 green tests could not see a whole feature
+  that had never fired"): a test that drives a shape the product no longer
+  prefers measures nothing. `move_files_template()` (both the bare-string and
+  the `["PENDING: …"]` list forms) now exists and is parameterized.
+- **THE FIX IS TO STOP KEEPING THE LIST.** `_mutates(tool)` reads the
+  **registry** — `spec.permission_level != READ` — so a new, renamed, or plural
+  file tool cannot fall outside the rules again; an unknown tool is treated as a
+  mutation (the strict rules are the safe default). This is the same reasoning
+  `_batch_step` already used for permission levels, applied one function over:
+  the registry owns this fact, and every copy of it drifts.
+- **Every new test was proven to FAIL on the old code** (`_mutates` monkeypatched
+  back to the singular set) before being accepted — a regression test that passes
+  on the broken code is not a regression test.
+- **User-visible consequence, not just a code defect:** the 8 nested PDFs were
+  really moved out of their folders. They are all recoverable (present in
+  `Desktop\pdfff2`, all four source folders still exist), but a bulk move that
+  reaches into a checked-out repo is precisely the harm the top-level default
+  exists to prevent.
+- Tests: `test_bulk_file_ops.py` (+4 — nested exclusion through the PLURAL shape
+  in both drafted forms; the truncated refusal through it; `_mutates` reads the
+  registry incl. unknown-fails-safe). **2618 passing, 14 skipped.**
+
+### The drive guard was read-only, and the cost landed on the write side (2026-08-01)
+Live: *"move all pdf files from 'pdfff2' to downloads"* → 85 PDFs moved into
+`C:\Users\DELL\Downloads`. The user meant `D:\Downloads` and was never asked.
+Root-caused at both ends before any code moved — `tasks.plan_payload` for plan
+`84cabc1b-…` holds `move_files(destination="C:\Users\DELL\Downloads", sources=[85])`
+with `question: null`, and `backend.log` 12:08–12:10 shows no
+`Folder '<name>' resolved in code` and no pause anywhere in the window.
+- **⚠️ ROOT CAUSE: `folder_resolver.detect()` WAS called on that step and returned
+  `None` on its first line.** `_DIR_KEY = {"search_files": "directory",
+  "list_directory": "path"}` — the tool map was read-only, so the drive probe
+  never ran. **Every other precondition was already satisfied**: the goal named
+  "downloads" bare (`_named_in_words` ✓), carried no drive qualifier
+  (`_user_was_explicit` → False ✓), the drafted path's parent *was* home ✓, and
+  `D:\Downloads` existed (`find_duplicate_folders` → 2 ✓). The guard would have
+  asked. It was simply never consulted for a write — **coverage exactly
+  backwards: present on the branch where being wrong finds nothing, absent from
+  the branch where being wrong relocates 85 files.** (Corroborating: those same
+  PDFs were moved *out of* `D:\Downloads` two days earlier, `activity_log`
+  `5507dc36-…`. Even the session's own history pointed at D:.)
+- **THE 2026-07-30 LESSON, ONE MODULE OVER.** That round's rule was *"when you
+  add a preferred form of an operation, every predicate that keys on the old
+  form's NAME is now a hole"*, and its remedy was to **stop keeping the list**
+  (`registry.mutates`). Here the list was of TOOLS rather than of tool names, and
+  it had simply never been revisited since the 2026-07-12 read incident that
+  created it. `_DIR_KEY` → **`_FOLDER_PARAMS`, keyed on THE FOLDER A STEP
+  OPERATES INSIDE**: `move_file`/`move_files` `destination` and `run_command`
+  `working_directory` in mode `self`, `create_file`/`create_folder` `path` in
+  mode `parent` (the parameter names something *inside* the folder, so a
+  substitution carries the basename over — `downloads/notes.txt` →
+  `D:\Downloads\notes.txt`). `create_folder(path="downloads")` itself correctly
+  does NOT ask (its parent is home) — and in `parent` mode the guard now also
+  stops `mkdir(parents=True)` silently CREATING a spurious `C:\Users\DELL\downloads`
+  when the real one is on D:.
+- **The split is by WHO AUTHORED THE PATH**, and that is the justification for
+  the asymmetry rather than a hedge. A move's destination and a create's location
+  are written by the LLM at draft time out of the user's words, with nothing on
+  disk consulted — precisely when "downloads" can mean two places. A
+  `delete_file.path` / `move_files.sources` / `read_file.path` is a CONCRETE file
+  an earlier READ returned; its folder was settled when that read ran, and
+  re-asking would interrogate the user about a choice they already made on every
+  plan whose search legitimately ran in the home copy. Those sit in
+  `_EXEMPT_PATH_PARAMS`, written down rather than implied.
+- **`test_every_path_param_is_covered_or_exempt` is the part that keeps this
+  shut.** It enumerates the REGISTRY's path-ish params and fails when one is in
+  neither map, so a new file tool is a deliberate decision instead of a silent
+  hole. **It found `read_file.path` the first time it ran** — the class of
+  oversight it exists for, caught within a minute of existing.
+- **The hardcoded six-name list stopped being the gate.** `WELL_KNOWN_FOLDERS`
+  (downloads/desktop/documents/pictures/videos/music) made the guard blind to
+  everything else, and it never carried the meaning anyway: the test one line
+  below it — `_normkey(container.parent) == _normkey(_home())` — says it exactly
+  ("this path is what you get when a bare name the user said is anchored under
+  home"). Deleting the gate cannot INVENT an ambiguity, because
+  `find_duplicate_folders` only ever reports folders that actually exist; it can
+  only surface one that is really there (*"move these to projects"* with
+  `C:\Users\DELL\projects` and `D:\projects` both present was silently wrong in
+  precisely the same way). The constant survives, renamed `_COMMON_FOLDER_NAMES`,
+  ONLY as `_user_was_explicit`'s vocabulary for spotting a vague drive steer
+  aimed at a DIFFERENT folder ("the desktop one on d drive") — so it can never be
+  mistaken for a gate again.
+- **A WRITE gets its own hand-off budget** (`_MAX_FOLDER_HANDOFFS = 4`,
+  `AgentPlan.folder_handoffs`, SERIALIZED like `browse_handoffs` because the ask
+  PARKS the plan). This is `_MAX_BROWSE_HANDOFFS`' reasoning inverted: that budget
+  exists so a real application is not failed at its third field; this one exists
+  so a mutating step never LOSES its turn to three LLM clarifications and then
+  runs on a guessed drive — the incident's outcome reached by a different road.
+  Reads still fall through when `MAX_QUESTIONS` is spent: a search reports
+  nothing, it destroys nothing. On the (near-impossible) exhausted budget the
+  write proceeds but `ambiguity_note` stamps both real paths onto the card —
+  disclosure, never permission.
+- **A latent bug that only becomes load-bearing now.** The substitute branch was
+  the single line `step.parameters[key] = …`. Invisible while the guard saw reads
+  only; a **lie on the approval card** the moment it can rewrite a destination,
+  because `action_detail` IS the contract and `description` is code-authored text
+  quoting the path verbatim — `placeholder_resolver._describe_batch` produced this
+  incident's literal `"Move 85 file(s) (181.9 MB) into C:\Users\DELL\Downloads"`.
+  `_apply_folder_substitution` now regenerates `action_detail` (a pure
+  `(tool, params)` render) and swaps the path in `description`. Showing one drive
+  and moving to another would be worse than the bug being fixed.
+- **Approval stays sound, unchanged**: `detect()` runs at the top of the step
+  pipeline and the approval gate ~90 lines below, so **the question always comes
+  before the card**. A substitution changes `step.signature()`, so a rewritten
+  destination is not in the approved set and pauses for a FRESH approval on the
+  real path. It terminates (once substituted, `resolved == chosen` and the next
+  pass is a no-op), and `_explicit_folder_choice` still ENFORCES the answered path
+  in code against a disobedient revision — the 2026-07-12 lesson, now covering
+  writes. `registry.mutates` was promoted out of `placeholder_resolver` so the
+  second caller reads the same fact rather than copying it.
+- Tests: `test_folder_resolver.py` (+12, and **every one was proven to FAIL on the
+  pre-fix code before being accepted** — the 2026-07-30 rule: the incident frozen
+  end-to-end through the real planner (pauses with both paths, `folder_handoffs=1`,
+  `questions_asked=0`, both Downloads still empty and both PDFs still in pdfff2);
+  the answered move naming D: in `action_detail` AND `description` with C: in
+  neither; `parent` mode carrying the basename; the write asking with
+  `MAX_QUESTIONS=0`; the spent-budget note; the coverage invariant).
+  **2630 passing, 14 skipped** (the 2 `test_multi_name_facts.py` failures are
+  PRE-EXISTING — verified identical on a stashed tree).
+- **VERIFIED LIVE** (isolated :8001, scratch DB, real DeepSeek, on the real
+  machine where both Downloads exist; **nothing approved** — the plan was
+  cancelled at the gate): `move all pdf files from '<scratch>' to downloads` →
+  `awaiting_choice`, *"There are 2 folders named 'downloads' … which one did you
+  mean?"* offering `C:\Users\DELL\Downloads` and `D:\Downloads`, with the
+  `move_files` step still `pending` and both PDFs still in the source. Answering
+  `D:\Downloads` → `awaiting_approval` with `destination: D:\Downloads`, the
+  description reading *"…into D:\Downloads"* and the card `move 2 file(s) →
+  D:\Downloads` — C: in neither. Log: `_pause_on_folder_handoff … (1/4)`.
+  Cancelled; nothing moved to either drive.
+
+### A misheard domain was a dead end — "did you mean…?" (2026-08-01)
+Spoken into the mic: *"Go to junaidjamshed.com and add Jhanan Sports 100 ML in
+cart."* Transcribed: *"Go to **junitjamsheed.com** …"*. Chromium answered
+ERR_NAME_NOT_RESOLVED, the step failed, both replans failed, the task died —
+and the user had to spot the typo themselves. Google, given the identical
+misspelling, puts the real site on the first screen. Root-caused at both ends:
+`backend.log` 13:16–13:18 shows `browse_commit discovery failed: Couldn't load
+junitjamsheed.com: that address doesn't resolve.` and the run's own trace
+(`~/.jarvis/logs/browse/…56b7f936474f.jsonl`) records `steps: 0, llm_calls: 0` —
+the loop never started.
+- **⚠️ VOICE MADE THIS A STRUCTURAL FAILURE MODE, NOT USER ERROR.** No speech
+  model can spell a proper noun it has never seen; "junaidjamshed" is a Pakistani
+  retail brand and is in no Whisper LM. The moment voice became a first-class
+  input (Phase 7 STT, Phase 12 wake word), "the domain in the goal is misspelled"
+  became an EXPECTED input to the browse stack — whose entire response to it was
+  a dead end. The same site had already produced a DNS-shaped incident on
+  2026-07-26; that round fixed the missing TRACE, not the missing recourse.
+- **WE SUGGEST, WE NEVER NAVIGATE — the rule that makes this safe.**
+  `grounding.py` holds the exfiltration bound: origins trace to the USER'S OWN
+  WORDS, never to page or search content. A search result IS search content, so
+  auto-correcting ("close enough, go there") would route straight around it and
+  a poisoned result could place a COMMIT flow on a site the user never named.
+  `BrowserUnreachable`'s own docstring already said a failure "is NOT an
+  invitation to guess another address" — and that is still true, because **that
+  rule bans GUESSING, not ASKING**. Asking is what the codebase already does with
+  every ambiguity it cannot resolve in code (`folder_resolver`, origin approval,
+  `lookup_contact`). The search finds the candidate; **the user grounds it** —
+  their reply lands in `plan.user_answers`, which `ground_origins` already reads,
+  so after a "yes" the origin is grounded by their own words.
+- **THE FILTER IS SIMILARITY, NOT "TAKE RESULT #1" — measured, not reasoned.**
+  On the incident's own query against the live provider, `junaidjamshed.com` came
+  back **THIRD**, behind a Wikipedia article and an Instagram profile about the
+  brand. What separates them is `rapidfuzz.ratio` against the typed registrable
+  NAME (the memory engine's `MIN_SCORE = 81` shape): junaidjamshed **84.6**,
+  junit **55.6** (the worst near-miss, a prefix coincidence), instagram 36.4,
+  wikipedia 27.3; and for other typo shapes amazn→amazon 90.9, githb→github 90.9,
+  stackoverflw→stackoverflow 96.0. `SIMILARITY_FLOOR = 70` sits between 55.6 and
+  84.6 with margin both ways, and the numbers are pinned in a test so a floor
+  change that would admit `junit.org` fails loudly. **Two INDEPENDENT signals must
+  agree**: search returned it (a real, indexed site) AND it is spelled nearly like
+  what the user said. Ordering stays SEARCH order — distance filters, rank orders,
+  because re-ordering by distance would promote a typosquat over the genuine site
+  it imitates (a squat is by construction spelled closer to the typo).
+- **AN OFFERED OPTION IS DNS-VERIFIED** (the 2026-07-10 `_validated_question`
+  rule: a draft offered two INVENTED paths, the user clicked one, the plan died on
+  it). Answering "that address doesn't resolve" with a second address that also
+  does not resolve is a fabricated clickable fact, so every candidate is resolved —
+  and SSRF-checked — before it is offered. NO LLM anywhere in the lookup: every
+  value is a slice of a search row, so `did_you_mean.py` cannot invent a domain
+  (`extract.py`'s property, applied to hostnames).
+- **ONLY NXDOMAIN QUALIFIES.** `_UNREACHABLE_MARKERS` gained a machine-readable
+  CLASS (`dns` | `cert` | `refused` | `timeout` | `offline`) and
+  `BrowserUnreachable` carries it, so a consumer never re-reads our own prose. A
+  cert error, a refusal or a timeout all mean **the domain EXISTS** and the user
+  named it correctly — a neighbouring domain there is noise at best and a
+  typosquat invitation at worst. `offline` means OUR network is down, where every
+  candidate lookup would fail anyway and the honest report is "no internet".
+- **Wiring**: NEW `app/browser/did_you_mean.py` (search → registrable domains →
+  floor → verify; injectable `SEARCH_FACTORY`/`RESOLVER_FACTORY`, autouse
+  `_hermetic_did_you_mean` so the suite never resolves a real host). NEW
+  `Handoff.SITE_UNRESOLVED`, placed FIRST in `handoff_from_outcome`'s precedence
+  because if the address has no DNS record there was never a page to hit a wall or
+  a form on and every other flag is stale. Two producers, one consumer:
+  `CommitDiscovery.site_unresolved` and the read-browse tool's own flag (which
+  finally gives the long-dead `unreachable_url` output key a purpose), both landing
+  on `_handle_browse_handoff`. **Every exit in that branch returns False**, which
+  is the fall-through to the step's own honest failure — a bad search, no
+  candidate, or a spent budget behaves exactly as the code did before this
+  existed, so nothing that worked can regress.
+- **THE RESUME IS CODE-ENFORCED, and that is not an optimization.** The GOAL
+  STRING still says "junitjamsheed.com" — the typo is baked into the text every
+  planner prompt is built from — so a revise round would be handed it as the most
+  authoritative thing in its context. That is the 2026-07-12 `folder_resolver`
+  lesson verbatim (the model was trusted to carry a user's answer into the next
+  draft, kept the original value, and the stood-down guard let it run). So
+  `_apply_site_correction` re-points `start_url`, `allowed_origins`,
+  `plan.approved_origins` (revise drops pending steps, so an origin living only on
+  the step would not survive a later replan) — and re-enters EXECUTE directly, at
+  **zero planning cost** (pinned by a call-count test).
+- **⚠️ THE LIVE RUN FOUND WHAT THE TESTS DID NOT.** After a correct re-point the
+  approval card read *"Open **junitjamsheed.com**, find …"* above a contract
+  saying `POST https://www.junaidjamshed.com/cart/add`. `description` is
+  LLM-authored at draft time and only the parameters had moved. Cosmetic —
+  `action_detail` is what binds — but the SAME defect as the folder round **one
+  day earlier**, whose own memory note says *"substituting a path must refresh
+  action_detail + description or the approval card lies"*. Fixed, and pinned by a
+  test proven to fail without it. **A card that names one site while acting on
+  another is a card the user cannot rely on, whichever half is authoritative.**
+- **Bounded**: `_MAX_SITE_CORRECTIONS = 2` (serialized `plan.site_corrections`,
+  because the ask PARKS the plan and a counter that did not survive the park would
+  restart from zero on every resume). The first correction is the one that
+  matters; a third means chaining guesses off guesses.
+- **The reply is decided IN CODE and FAIL-CLOSED** (`_match_site_choice`): a
+  domain written in the reply wins even when it is not on the list (the user
+  naming a site in their own words is the strongest grounding there is, so *"no,
+  it's actually junaidjamshed.com.pk"* is a choice, not a decline); then an
+  offered host; then a bare "yes" ONLY when exactly one was offered. Anything else
+  cancels honestly.
+- **HONEST LIMIT**: the suggestion is only as good as the search. Measured,
+  `outfiters.com.pk` → `urbanoutfitters.com` — a real, verified, plausibly-spelled
+  site that is the wrong company. That costs one declined option and never a
+  navigation, which is the whole point of bounding the damage rather than trying
+  to be right.
+- Tests: `test_did_you_mean.py` (35 — the incident frozen against the live
+  provider's REAL eight rows in their real order; search-rank-alone offers
+  Wikipedia; the 55.6/84.6 numbers pinned; no-fabrication; subdomain dedupe; the
+  dead host never offered back; rank-not-score ordering; DNS verification;
+  search-failure degradation; **a cert/refused/offline failure never suggesting**;
+  no-candidate and budget fall-through; the reply matrix; park/restore and
+  old-payload deserialization; the read-browse twin; precedence). The five
+  behaviour-change tests were each **proven to FAIL on the pre-fix code** (the
+  2026-07-30 rule), as was the approval-card one. **2665 passing, 14 skipped**
+  (the 2 `test_multi_name_facts.py` failures are PRE-EXISTING — re-verified
+  identical on a stashed tree).
+- **Found while wiring this up: `rapidfuzz` was NEVER DECLARED.**
+  `app/memory/engine.py:166` imports it AT MODULE LEVEL for the Phase 2 contact
+  identity resolution (`MIN_SCORE = 81`), and no installed distribution requires
+  it transitively — so a clean `pip install -r requirements.txt` produced a
+  backend that could not import the memory engine. Latent since Phase 2, surviving
+  on a manual install in this one venv. Now pinned in `requirements.txt`.
+- **VERIFIED LIVE** (isolated :8001, scratch DB, real DeepSeek + Tavily + real
+  Chromium; **nothing approved** — cancelled at the gate): the incident goal now
+  → `awaiting_choice`, *"'junitjamsheed.com' doesn't exist — nothing answers to
+  that address… Did you mean **junaidjamshed.com**?"*, options
+  `junaidjamshed.com` / `No — none of these`, `site_corrections: 1`, the
+  `browse_commit` step still `pending`. Answering `junaidjamshed.com` re-points it
+  to `https://junaidjamshed.com/` with `approved_origins: junaidjamshed.com`, and
+  the browse **completes the original task**: `awaiting_approval` on the real
+  add-to-cart form — `POST https://www.junaidjamshed.com/cart/add`,
+  `properties[_Charge Code]: PERFUME`, `properties[_Barcode]: PM135415-100-999-M`.
+  Cancelled; nothing was submitted.
+
 ### Timestamp serialization (API convention)
 The DB stores naive UTC (`utc_now()` in models.py). API serializers MUST use `utc_iso()` (models.py), never bare `.isoformat()`: a naive ISO string has no timezone marker, so the frontend's `new Date(iso)` reads it as LOCAL time and every displayed timestamp shifts by the machine's UTC offset (the "reminder set for 6 PM shows 1 PM" bug, fixed 2026-07-09). Applied to reminders, activity, tasks, chat messages, and schedule serializers. Extraction-derived date-semantics fields (`event_date`, `interaction_date`, `occurred_at` in contacts/episodes/memory) deliberately keep bare `.isoformat()` — they are calendar dates, not UTC moments, and marking them UTC would shift the displayed day.
 
