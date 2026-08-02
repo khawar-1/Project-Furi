@@ -49,6 +49,9 @@ class FakeSession:
         self.browse_history = []
         self.last_redirect_offsite = None
         self.closed = False
+        # Only the run that OPENED a tab may close it (2026-08-01). A freshly
+        # opened session owns its window, so False is the real default.
+        self.tab_reused = False
 
     def origin_allowed(self, host):
         if not host:
@@ -62,6 +65,14 @@ class FakeSession:
 
     async def close(self):
         self.closed = True
+
+    async def release_after_run(self):
+        """The real contract: a run closes only the tab it OPENED."""
+        if not self.tab_reused:
+            await self.close()
+
+    async def resume_agent_control(self):
+        return True
 
 
 # The eBay run, frozen: real listings extracted, then the action cap.

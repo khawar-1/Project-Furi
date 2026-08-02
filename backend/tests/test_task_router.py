@@ -600,19 +600,21 @@ def test_browse_followup_fires_only_with_a_live_window(monkeypatch):
     assert is_browse_followup("message him 'hi'") is False
 
 
-def test_browse_window_active_reflects_the_registry(monkeypatch):
+def test_browse_window_active_reflects_the_open_tabs(monkeypatch):
+    """'Is a browser window open' is now 'is any agent TAB open' (2026-08-01) —
+    the single `browse` held slot it used to read is gone, because holding ONE
+    window is exactly what stopped a second browser task having anywhere to go."""
     from app.api import task_router
-    from app.browser.registry import REGISTRIES
+    from app.browser import window as browser_window
 
-    REGISTRIES["browse"].clear_nowait()
+    browser_window.reset_for_tests()
     assert task_router._browse_window_active() is False
-    # A held session (a fake object is enough — peek only reads the slot).
-    REGISTRIES["browse"]._session = object()
-    REGISTRIES["browse"]._meta = {"url": "https://www.linkedin.com/in/anas"}
+    # A fake tab is enough — the probe only counts them.
+    browser_window.track_for_tests(object())
     try:
         assert task_router._browse_window_active() is True
     finally:
-        REGISTRIES["browse"].clear_nowait()
+        browser_window.reset_for_tests()
 
 
 async def test_followup_send_it_reaches_the_classifier(client):
@@ -1555,3 +1557,149 @@ async def test_a_failed_rescue_degrades_honestly_not_into_a_magic_word(client):
     text = streamed_text(events).lower()
     assert "ask me to search" not in text
     assert events[-1]["done"] is True
+
+
+# ================================================ bare navigation (2026-08-01)
+#
+# Live: "open junaidjamshed.com" was answered by the plain CHAT path with
+# "Understood — opening junaidjamshed.com now, sir. It's with the browser agent
+# in the background" — nothing ran, nothing opened. The gate fired correctly;
+# the CLASSIFIER answered CHAT. Measured on that exact message: CHAT/BROWSE/CHAT
+# with its real conversation, BROWSE/BROWSE/CHAT/CHAT/CHAT with a clean one, and
+# WEB/WEB/WEB with none. So it is not asked any more.
+
+@pytest.mark.parametrize("message", [
+    "open junaidjamshed.com",          # the incident
+    "open youtube",
+    "go to youtube.com",
+    "visit amazon.com",
+    "pull up amazon.com",
+    "launch youtube.com",
+    "open https://example.com",
+    "can you open youtube",
+    "open youtube please",
+    "hey jarvis, open youtube",
+    "open the junaidjamshed.com website",
+    "open youtube in the browser",
+    "open outfitters.com.pk",          # a multi-label suffix still reads as a site
+])
+def test_a_bare_navigation_instruction_is_recognised(message):
+    from app.api.task_router import _is_bare_navigation
+    assert _is_bare_navigation(message) is True
+
+
+@pytest.mark.parametrize("message", [
+    # A LOCAL APPLICATION, not a site. ground_origins grounds bare names, and
+    # "notepad" is indistinguishable from a site name — which is exactly why
+    # the rule demands a DOTTED domain. Routing these to a browser would try to
+    # navigate to a host that does not exist.
+    "open notepad",
+    "open vscode",
+    "open chrome",
+    # A FILENAME is the same SHAPE as a domain — "report.txt" grounds as an
+    # origin and its residue names only itself, so "contains a dot" would have
+    # routed a file open to the browser. Only the suffix tells them apart.
+    "open report.txt",
+    "open notes.md",
+    "open budget.xlsx",
+    "open setup.exe",
+    "open config.json",
+    "load report.pdf",
+    "open index.html",                   # not a TLD, however web-flavoured
+    # Not a site at all.
+    "open my downloads folder",
+    "open the file report.txt",
+    "open the dangers in my heart",      # a real SEARCH goal (the 2026-08-01 loop round)
+    # A site PLUS an errand — the residue names something the site is not, so
+    # the classifier still decides (and BROWSE/WEB is then a real judgement).
+    "open youtube and play lofi",
+    "open https://example.com and summarize it",
+    "go to junaidjamshed.com and add perfume to cart",
+    # Not navigation instructions at all.
+    "what is the most-viewed youtube video",
+    "who owns youtube",
+    "i opened youtube yesterday",
+    "search google for cats",
+])
+def test_a_message_that_is_not_only_navigation_is_left_to_the_classifier(message):
+    from app.api.task_router import _is_bare_navigation
+    assert _is_bare_navigation(message) is False
+
+
+async def test_bare_navigation_routes_to_the_browser_with_no_classifier_call(
+    client, monkeypatch
+):
+    """The incident, frozen. 'open junaidjamshed.com' must reach the browser
+    agent — and must do so WITHOUT asking the model, because the model does not
+    agree with itself on this message shape. chat_calls == 0 is the whole
+    thesis: there is nothing to decide, only to do."""
+    started: list[str] = []
+
+    async def _fake_start_task(db, goal, session_id, **kwargs):
+        started.append(goal)
+        return SimpleNamespace(id="t-nav", status="running")
+
+    monkeypatch.setattr("app.api.task_router.start_task", _fake_start_task)
+    # No scripted responses at all: a classifier call would raise, not silently
+    # pass, so this cannot regress into "it happened to be classified right".
+    provider = use_provider(responses=[])
+
+    events = await post_chat(client, "open junaidjamshed.com", "s-bare-nav")
+
+    assert started == ["open junaidjamshed.com"]
+    assert provider.chat_calls == 0, "the classifier must not be asked"
+    assert plan_events(events) == []          # delegated → no in-turn plan chunk
+    assert "background" in streamed_text(events).lower()
+
+
+async def test_a_navigation_goal_with_an_errand_still_goes_to_the_classifier(
+    client, monkeypatch
+):
+    """The bound on the rule above: only a message that names NOTHING but the
+    destination skips the model. 'go to X and add Y to cart' is real work and
+    keeps the ordinary path."""
+    started: list[str] = []
+
+    async def _fake_start_task(db, goal, session_id, **kwargs):
+        started.append(goal)
+        return SimpleNamespace(id="t-errand", status="running")
+
+    monkeypatch.setattr("app.api.task_router.start_task", _fake_start_task)
+    provider = use_provider(responses=["BROWSE DELEGATE"])
+
+    await post_chat(
+        client, "go to junaidjamshed.com and add perfume to cart", "s-nav-errand"
+    )
+
+    assert started, "the errand still routes"
+    assert provider.chat_calls == 1, "the classifier decided this one"
+
+
+async def test_impersonated_agent_handoff_state_is_corrected(client):
+    """Live bug 2026-08-01: on the classifier coin flip the chat LLM answered
+    'It's with the browser agent in the background; I'll confirm the moment
+    it's live.' Every existing pattern missed it — it names no hand-off VERB,
+    it asserts the finished STATE. Chat can put nothing in an agent's hands."""
+    use_provider(streams=[
+        "Understood — opening junaidjamshed.com now, sir. It's with the browser "
+        "agent in the background; I'll confirm the moment it's live."
+    ])
+    events = await post_chat(client, "and that one too", "s-imp-handoff")
+
+    text = streamed_text(events)
+    assert "Correction from the Jarvis system" in text
+    assert "confirm the moment it's live" not in text, "the fabricated tail was cut"
+
+
+def test_a_capability_offer_about_the_agent_is_not_a_fabrication():
+    """The guard's standing discipline: an OFFER is true and must survive.
+    Only the possessing phrase ('it's with the … agent') is cut."""
+    assert _SYSTEM_VOICE_RE.search(
+        "I can hand that to the browser agent if you'd like."
+    ) is None
+    assert _SYSTEM_VOICE_RE.search(
+        "It's with your agent at the agency, I believe."
+    ) is None
+    assert _SYSTEM_VOICE_RE.search(
+        "it's with the browser agent in the background"
+    ) is not None

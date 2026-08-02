@@ -129,6 +129,8 @@ from urllib.parse import urlparse
 from loguru import logger
 
 from app.browser import registry as _held
+from app.browser import window as _window
+from app.browser.publicsuffix import registrable
 from app.tools.browser_tools import (
     _host_is_blocked,
     blocked_host_error,
@@ -249,6 +251,13 @@ SETTLE_HARD_CAP_SECONDS = 2.0     # outer race deadline (a never-quiet page)
 # cover a handler that awaits validation/recaptcha before posting, without
 # stalling a genuinely dead form for long.
 COMMIT_WAIT_SECONDS = 6.0
+
+# The exact Fetch patterns Playwright's own routing asks Chromium for, so the
+# page target's coverage is identical to the fallback path's. ONE definition,
+# because the playback lift and the re-arm that undoes it have to agree: a
+# re-arm that enabled a narrower pattern set would silently stop guarding some
+# traffic while reporting the tab as armed.
+_FETCH_PATTERNS = [{"urlPattern": "*", "requestStage": "Request"}]
 
 # A form's declared `action` is not reliably the url its submit hits: the Rails/
 # Shopify convention is to POST the SAME path with a `.js`/`.json` representation
@@ -1577,9 +1586,26 @@ class BrowserSession:
         # at the keep_open handoff so the user's own playback window works; Rules
         # 2 & 3 stay on regardless. See the module docstring.
         self._read_only = True
-        # True when the interceptor was installed at CONTEXT level (real path)
-        # — adopted popups then need no per-page route of their own.
-        self._context_routed = False
+        # Has this tab been handed to the USER by enter_playback_mode? While
+        # True the interceptor is off and _read_only is False, so the tab is
+        # NOT drivable — resume_agent_control() must put both back first. Kept
+        # as explicit state rather than inferred from _read_only because the
+        # degraded playback branch (unroute failed) leaves the interceptor
+        # installed, and "which of the two got lifted" is not recoverable after
+        # the fact.
+        self._playback = False
+        # Did THIS run open this tab, or inherit one the user already had?
+        # Only the opener may close it — see release_after_run. Defaults False
+        # so a hand-wired session (tests, direct callers) owns and closes its
+        # own window exactly as it always did; acquire_browse_tab is the one
+        # place that sets it.
+        self.tab_reused = False
+        # Pages this session armed with a Playwright page route (the fallback
+        # path). Recorded so the playback lift can reach every one of THIS
+        # session's tabs and none of anybody else's — the interceptor used to be
+        # installed and lifted at CONTEXT level, which a shared context turns
+        # into "one tab finishing disarms the guard on all the others".
+        self._routed_pages: list[Any] = []
         # COMMIT mode (14.5): a ONE-SHOT permit for a single non-GET the user
         # explicitly approved (a form submit). arm_commit() sets (method,
         # normalized-url); the interceptor lets EXACTLY that request through once,
@@ -1646,33 +1672,49 @@ class BrowserSession:
         self._cdp_sessions: list[Any] = []
         self._cdp_routed = False
         self._inflight: set[Any] = set()
+        # MULTI-TAB bookkeeping (2026-08-01). `tab_site` is the registrable
+        # domain this tab belongs to — the key a later browse for the same site
+        # reuses it by; `tab_meta` is what it is showing (title/url/goal) for the
+        # StatusBar; `tab_used_monotonic` orders LRU eviction. Plain attributes
+        # rather than a parallel table because the session IS the tab's identity
+        # (`_adopt_new_page` swaps `page`, so a page-keyed record would go stale
+        # exactly when a tab is most active).
+        self.tab_site: str = ""
+        self.tab_meta: dict[str, str] = {}
+        self.tab_used_monotonic: float = 0.0
 
     # ------------------------------------------------------------ lifecycle
     @classmethod
     async def open(cls, allowlist: set[str]) -> "BrowserSession":
+        """Open a TAB in the shared window (app/browser/window.py).
+
+        This used to launch a whole browser — a persistent context per session —
+        which is why one profile could hold only one session and every new browse
+        first closed the old window. The context is now a singleton that outlives
+        any one session; a session is a tab in it. `window.open_tab` fills in
+        `_browser`/`page` and settles the profile lock on the launch path only.
+        """
         origins = {o for o in (_normalize_origin(a) for a in allowlist) if o}
-        # If a hand-off/media/prior session was just closed, wait out the shared
-        # profile's single-instance lock before launching, or this launch races
-        # the dying Chromium (the TargetClosedError churn, 2026-07-19).
-        await _settle_profile()
-        browser = await _launch()
+        session = cls(None, None, origins)
+        await _window.open_tab(session)
+        page = session.page
         try:
-            page = await browser.new_page()
-            session = cls(browser, page, origins)
             await session._install_interception(page)
             session._refuse_downloads(page)
-            # Follow popups / new tabs. Many job boards (WeWorkRemotely, live
-            # 2026-07-18) open the application — or a CAPTCHA — in a NEW TAB, and
-            # the loop only ever observes session.page, so an un-adopted popup is
-            # invisible: the loop keeps reading the old page and reports "no form
-            # / no CAPTCHA here" for a page it cannot see. Adopt each new tab under
-            # the SAME interceptor + allowlist. A fake browser without on_page just
-            # never fires it (the suite stays hermetic).
-            hook = getattr(browser, "on_page", None)
-            if callable(hook):
-                hook(session._on_new_page)
+            # Popups / new tabs are followed by the WINDOW's single context
+            # listener, wired when the context is launched (window._launch_context).
+            # Many job boards (WeWorkRemotely, live 2026-07-18) open the
+            # application — or a CAPTCHA — in a NEW TAB, and the loop only ever
+            # observes session.page, so an un-adopted popup is invisible. What
+            # changed is only WHO decides the tab is ours: registering a listener
+            # per session would have every session run that decision on every
+            # tab, which is how a session ends up adopting another's page.
         except Exception:
-            await _maybe_await(browser.close())
+            # Release the TAB, not the browser: other tabs may be live on this
+            # shared context, and one session failing to arm its guard must not
+            # take their windows down with it. release_tab closes the context
+            # only when this was the last tab.
+            await _window.release_tab(session)
             raise
         return session
 
@@ -1692,6 +1734,16 @@ class BrowserSession:
             )
         except Exception:
             pass
+        # OWNERSHIP (see app/browser/window.py). A session opened through
+        # BrowserSession.open is a TAB of the shared window: closing it closes
+        # its page, and the context only when it was the last tab — otherwise one
+        # finishing browse would tear down every other open tab, which is the
+        # whole behaviour this change exists to remove. A session constructed
+        # directly (tests, and any caller holding its own handle) owns that
+        # handle and closes it, exactly as it did before the window existed.
+        if _window.owns(self):
+            await _window.release_tab(self)
+            return
         try:
             await _maybe_await(self._browser.close())
         except Exception as exc:
@@ -1703,6 +1755,59 @@ class BrowserSession:
     async def __aexit__(self, *_exc: Any) -> None:
         await self.close()
 
+    async def _rearm_intercept(self) -> None:
+        """Put this session's interceptor back on every page the playback lift
+        took it off. The exact inverse of _unroute_intercept, and deliberately
+        written as its mirror: re-enable on the pages ALREADY recorded rather
+        than installing fresh ones. Calling _install_interception again would
+        open a SECOND CDP session and register a SECOND handler on the same
+        target, so every paused request would be answered twice.
+
+        RAISES on failure, for the same reason _unroute_intercept does: the
+        caller must be able to tell an armed tab from an unarmed one, and a
+        re-arm that reports success it did not achieve is how a tab ends up
+        driving an autonomous loop with Rules 1-3 off."""
+        for _page, cdp in self._cdp_sessions:
+            await cdp.send("Fetch.enable", {"patterns": _FETCH_PATTERNS})
+        for page in self._routed_pages:
+            await page.route("**/*", self._intercept)
+        if not self._cdp_sessions and not self._routed_pages:
+            await self.page.route("**/*", self._intercept)
+
+    async def resume_agent_control(self) -> bool:
+        """Take a tab back from the user and make it drivable again. True when
+        this tab is safe for a new autonomous run.
+
+        WHY THIS EXISTS (live 2026-08-01, the junaidjamshed add-to-cart): a tab
+        that had been handed to the user by enter_playback_mode was later REUSED
+        by acquire_browse_tab, which restored the allowlist and the history but
+        nothing else. The interceptor was still disabled and _read_only still
+        False, so an entire commit flow ran on that tab with Rules 1, 2 and 3
+        off — no origin allowlist, no SSRF guard, no one-shot commit permit. The
+        approved POST went out unobserved, the cart really did change, and the
+        tool reported that nothing had been sent.
+
+        Restoring _read_only is not enough on its own and restoring the route is
+        not enough on its own: the first without the second leaves a flag nobody
+        reads, the second without the first leaves Rule 1 stood down. Both, or
+        the tab is not driven."""
+        if not self._playback:
+            self._read_only = True
+            return True
+        try:
+            await self._rearm_intercept()
+        except Exception as exc:
+            logger.warning(
+                "browser: could NOT re-arm the interceptor on a tab returning "
+                f"from playback ({type(exc).__name__}: {exc}) — leaving it to "
+                "the user rather than driving it unguarded"
+            )
+            return False
+        self._read_only = True
+        self._playback = False
+        logger.info("browser: interception RE-ARMED — the tab is the agent's again")
+        return True
+
     async def _install_interception(self, page: Any) -> None:
         """Put the interceptor on `page` by the fastest route that still enforces
         every rule, and record which path won.
@@ -1710,20 +1815,30 @@ class BrowserSession:
         PREFERRED — our own CDP `Fetch.enable`, because Playwright's route would
         also disable Chromium's HTTP cache for the whole session (see the
         _CdpRoute adapters above for the measurement). Same patterns Playwright
-        asks for, so the page target's coverage is identical.
+        asks for, so the page target's coverage is identical. Already per-PAGE,
+        so it needed no change when the context became shared.
 
-        FALLBACK — Playwright routing, context-level when the handle supports it
-        so a popup is guarded from its very first request. Taken whenever the CDP
-        path cannot be fully established, which is the point: we only go fast
-        when we can enforce the rules exactly, never by relaxing one."""
+        FALLBACK — Playwright routing, PER PAGE.
+
+        ⚠️ THE FALLBACK USED TO BE CONTEXT-LEVEL, and that became unsafe the
+        moment one context held several sessions' tabs (2026-08-01): a
+        context-level handler sees EVERY tab's requests and would judge them
+        against THIS session's allowlist. Rule 3 is per-session, so that inverts
+        the origin guard in both directions — wrongly allowing a request another
+        tab's task never grounded, and wrongly aborting one it did.
+
+        The honest cost: context routing guarded a popup from its very first
+        request, and page routing cannot arm a tab that does not exist yet, so a
+        popup's opening request is unguarded for one round trip until
+        `_adopt_new_page` installs the guard. Judging another task's traffic with
+        the wrong allowlist is worse; the SSRF guard and `_verify_landing` still
+        catch where it lands; and a rule that is context-level only when one tab
+        is open is the conditional-safety shape this codebase has repeatedly had
+        to unpick."""
         if await self._install_cdp_interception(page):
             return
-        ctx_route = getattr(self._browser, "route", None)
-        if callable(ctx_route):
-            await ctx_route("**/*", self._intercept)
-            self._context_routed = True
-        else:
-            await page.route("**/*", self._intercept)
+        await page.route("**/*", self._intercept)
+        self._routed_pages.append(page)
 
     async def _install_cdp_interception(self, page: Any) -> bool:
         """Drive Fetch ourselves on this page's target. True when fully armed.
@@ -1763,11 +1878,8 @@ class BrowserSession:
                     logger.debug(f"cdp intercept schedule: {type(exc).__name__}: {exc}")
 
             cdp.on("Fetch.requestPaused", _paused)
-            await cdp.send(
-                "Fetch.enable",
-                {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]},
-            )
-            self._cdp_sessions.append(cdp)
+            await cdp.send("Fetch.enable", {"patterns": _FETCH_PATTERNS})
+            self._cdp_sessions.append((page, cdp))
             self._cdp_routed = True
             self.stats.http_cache_on = True
             return True
@@ -1776,31 +1888,31 @@ class BrowserSession:
             return False
 
     async def _unroute_intercept(self) -> None:
-        """Remove the interceptor from WHEREVER open() installed it — context on
-        the real path, page on the fallback path and in the suite's fakes.
+        """Remove this session's interceptor from every page it armed.
 
-        RAISES rather than no-opping when the route is on the context and the
-        handle cannot reach it. That is the whole point: the previous code could
-        not fail, so it reported a lift it had not performed, and the caller's
-        honest "DEGRADED fallback" warning never fired in production."""
-        # Both can be true: if the CDP path worked for the first page but not for
-        # an adopted popup, that popup fell back to a context route. Lift each
-        # one that is actually installed, or playback stays half-intercepted.
-        if self._cdp_routed:
-            for cdp in self._cdp_sessions:
-                await cdp.send("Fetch.disable")
-            if not self._context_routed:
-                return
-        if self._context_routed:
-            unroute = getattr(self._browser, "unroute", None)
-            if not callable(unroute):
-                raise RuntimeError(
-                    "the interceptor is installed on the context and this browser "
-                    "handle cannot unroute it"
-                )
-            await unroute("**/*", self._intercept)
-            return
-        await self.page.unroute("**/*", self._intercept)
+        Both paths can be in play at once: CDP may have worked for the first page
+        and not for an adopted popup, which then fell back to a page route. Lift
+        each one actually installed, or playback stays half-intercepted.
+
+        SCOPED TO THIS SESSION'S TABS, deliberately. It used to unroute at
+        CONTEXT level, which with a shared context would lift interception on
+        every OTHER live agent tab — handing a running task an unguarded browser
+        because an unrelated one finished and started playing a video. Nothing
+        here can reach another tab: `_cdp_sessions` and `_routed_pages` are this
+        session's own.
+
+        RAISES rather than no-opping when a page cannot be unrouted, so the
+        caller's honest "DEGRADED fallback" warning fires. The previous version
+        could not fail, and so reported a lift it had not performed (2026-07-27).
+        """
+        for _page, cdp in self._cdp_sessions:
+            await cdp.send("Fetch.disable")
+        for page in self._routed_pages:
+            await page.unroute("**/*", self._intercept)
+        if not self._cdp_sessions and not self._routed_pages:
+            # Nothing recorded (a hand-wired session, or a fake): fall back to the
+            # active page so the lift is still attempted rather than silently skipped.
+            await self.page.unroute("**/*", self._intercept)
 
     # ------------------------------------------------------------ the guard
     def origin_allowed(self, host: Optional[str]) -> bool:
@@ -1993,47 +2105,52 @@ class BrowserSession:
 
     # ---------------------------------------------------------- popup / new tab
     def _on_new_page(self, page: Any) -> None:
-        """Context 'page' event — a popup or target=_blank tab just opened.
-        Playwright dispatches this synchronously on the browser loop, so schedule
-        the async adopt (routing + observe-swap). Never raises into the dispatch."""
-        try:
-            asyncio.ensure_future(self._adopt_new_page(page))
-        except Exception as exc:
-            logger.debug(f"popup schedule: {type(exc).__name__}: {exc}")
+        """A popup or target=_blank tab just opened.
+
+        The listener on the shared context is the WINDOW's (one for the whole
+        window, not one per session — see window._on_context_page), so this
+        delegates to the same ownership decision rather than adopting outright.
+        A session must never adopt a tab merely because it heard about it."""
+        _window._on_context_page(page)
 
     async def _adopt_new_page(self, page: Any) -> None:
-        """Follow a popup / new tab the AGENT'S OWN interaction opened, and only
-        that: a tab whose opener is a page we drive. An unrelated popup (an ad
-        window) used to unconditionally become self.page — hijacking the loop's
-        active page mid-task — so anything else is CLOSED, not adopted. The
-        superseded tab is closed too: the loop only ever drives one page, and
-        un-closed old tabs accumulated for the life of the session. Following a
-        popup grants NO new capability — the new tab is under the same
-        interceptor (context-level from birth on the real path), SSRF guard,
-        and allowlist before the loop ever drives it. Best-effort — never
-        raises, and a fake page without opener/close just adopts as before."""
+        """Take over a new tab as this session's active page.
+
+        WHO owns a new tab is decided in ONE place — `window._owner_of_new_page`
+        — and this method is what the owner then does about it. That split
+        exists because the decision used to live here and got it wrong for a
+        shared context: a tab with no opener was adopted unconditionally, and a
+        `context.new_page()` has a null opener, so one session would seize the
+        tab another had just created and close its own page out from under its
+        run.
+
+        The superseded tab is closed: the loop drives ONE page, and un-closed old
+        tabs accumulated for the life of the session. Adoption grants NO new
+        capability — the tab gets this session's own interceptor, SSRF guard and
+        allowlist before the loop ever drives it. Best-effort throughout; a
+        popup must never break a running browse."""
+        # A new tab is a new TARGET and needs its own guard: a CDP session of its
+        # own, or a page route of its own. There is no longer a context-level
+        # route that could cover it for free.
         try:
-            get_opener = getattr(page, "opener", None)
-            if callable(get_opener):
-                opener = await _maybe_await(get_opener())
-                if opener is not None and opener is not self.page:
-                    await _maybe_await(page.close())
-                    logger.info("browser: closed an unrelated popup (not our tab's)")
-                    return
+            await self._install_interception(page)
         except Exception as exc:
-            logger.debug(f"popup opener check: {type(exc).__name__}: {exc}")
-        # A new tab is a new TARGET, so it needs its own guard whichever path we
-        # are on — a CDP session of its own, or (context-routed) nothing further.
-        if not getattr(self, "_context_routed", False):
-            try:
-                await self._install_interception(page)
-            except Exception as exc:
-                logger.debug(f"adopt popup route: {type(exc).__name__}: {exc}")
+            logger.debug(f"adopt popup route: {type(exc).__name__}: {exc}")
         self._refuse_downloads(page)
         superseded = self.page
         self.page = page
         logger.info("browser: following a new tab as the active page")
         if superseded is not None and superseded is not page:
+            # FORGET ITS GUARD HANDLES BEFORE CLOSING IT. `_unroute_intercept`
+            # walks these to lift interception at playback, and a route or CDP
+            # session belonging to a page we have closed raises there — which the
+            # caller catches as "could not lift", so a session that had followed
+            # a popup would silently take the DEGRADED path for the rest of its
+            # life. The route dies with the page; the record of it must too.
+            self._routed_pages = [p for p in self._routed_pages if p is not superseded]
+            self._cdp_sessions = [
+                (p, c) for (p, c) in self._cdp_sessions if p is not superseded
+            ]
             try:
                 await _maybe_await(superseded.close())
             except Exception as exc:
@@ -2332,6 +2449,34 @@ class BrowserSession:
         self._commit_observed = []
         self._commit_event = asyncio.Event()
         logger.info(f"browser: armed one-shot commit {self._armed_commit[0]} {url[:120]}")
+
+    def disarm_commit(self) -> None:
+        """Drop an unconsumed permit and re-lock.
+
+        The permit is one-shot, but only FIRING consumes it (see the interceptor
+        clearing it on the matching request). A submit the site never issued
+        therefore leaves it armed — which was harmless while the tab was always
+        closed immediately afterwards, and is not harmless now that a tab this
+        run did not open outlives the run. Explicit, because "the window closed"
+        was never the guarantee, only its side effect."""
+        self._armed_commit = None
+
+    async def release_after_run(self) -> None:
+        """Finish with this tab. Closes it ONLY if this run opened it.
+
+        User report 2026-08-01: an add-to-cart flow reused the tab a previous
+        "open junaidjamshed.com" task had opened, and closed it on the way out —
+        "it closed the tab, which it shouldn't have; that power should be to
+        me." Closing an inherited window is not ours to do, and it was never
+        load-bearing: what stops a submit being replayed is the one-shot permit
+        (now explicitly dropped by disarm_commit), not the window going away."""
+        if not self.tab_reused:
+            await self.close()
+            return
+        logger.info(
+            "browser: leaving the tab open — this run inherited it rather than "
+            "opening it, so closing it is the user's call"
+        )
 
     def _commit_allows(self, method: str, url: str) -> bool:
         """True only when a permit is armed AND this exact request matches it.
@@ -2675,6 +2820,10 @@ class BrowserSession:
         while read-only (now permitted) and actually play. Best-effort throughout:
         an unroute or reload failure must never break the already-open window."""
         self._read_only = False
+        # Both branches below end with the tab in the user's hands, so mark it
+        # here rather than in the success arm: the degraded branch is MORE
+        # dangerous to re-drive silently, not less.
+        self._playback = True
         try:
             # UNROUTE AT THE LEVEL IT WAS INSTALLED. On the real path the route is
             # installed on the CONTEXT (see BrowserSession.open), and Playwright's
@@ -2865,38 +3014,218 @@ def active_result_window() -> Optional[dict[str, str]]:
 # with the process (the honest outcome). A user-driven form submit in this
 # window is still gated — the Close button (StatusBar) is the exit to a normal
 # browser.
-_BROWSE = _held.REGISTRIES["browse"]
+# MULTI-TAB (2026-08-01). This was ONE slot, so a second browser task had
+# nowhere to go: it closed the held window (and the whole context with it) and
+# launched again — the Chrome-closes-and-reopens flicker, and the reason only one
+# browser task could be open at a time. Tabs now live in the shared window
+# (app/browser/window.py) and are keyed BY SITE: a follow-up about the same site
+# continues that site's tab — which is what preserves the continuity above — and
+# a different site opens a tab of its own.
+
+# The window holds at most this many agent tabs. Beyond it the least-recently-used
+# tab is closed, so a long session cannot grow an unbounded number of Chromium
+# tabs. Never applies to a tab the user is mid-something with (see _evictable).
+MAX_BROWSE_TABS = 6
 
 
-async def hold_browse_window(
-    session: "BrowserSession", *, title: str, url: str, goal: str = ""
+def browse_site_key(allowlist: set[str], start_url: str = "") -> str:
+    """The site a browse belongs to — its registrable domain.
+
+    Registrable, not host: a task that starts on `www.example.com` and one that
+    starts on `jobs.example.com` are the same site and should share a tab, and
+    `publicsuffix.registrable` is already the codebase's answer to that (it gets
+    `outfitters.com.pk` right, which `labels[-2]` did not). Empty string when
+    there is nothing to key on — such a task simply gets its own tab.
+    """
+    host = ""
+    if start_url:
+        try:
+            host = (urlparse(start_url).hostname or "").lower()
+        except Exception:
+            host = ""
+    if not host:
+        origins = sorted(o for o in (_normalize_origin(a) for a in allowlist) if o)
+        host = origins[0] if origins else ""
+    return registrable(host) if host else ""
+
+
+def _tab_site(session: "BrowserSession") -> str:
+    return getattr(session, "tab_site", "") or ""
+
+
+def _evictable(session: "BrowserSession") -> bool:
+    """A tab we may close to make room. NOT one being driven by a run, and NOT
+    one held in any registry slot — a tab awaiting a signature approval, holding
+    a CAPTCHA, part-filled behind a discovery question, playing media or showing
+    a submitted form's response is a tab the user is mid-something with, and
+    closing it can only produce "that expired"."""
+    return not _window.is_driving(session) and not _held.is_held(session)
+
+
+async def _make_room_for_a_tab() -> None:
+    """Close least-recently-used evictable tabs until there is room for one more."""
+    while _window.tab_count() >= MAX_BROWSE_TABS:
+        candidates = [s for s in _window.live_tabs() if _evictable(s)]
+        if not candidates:
+            logger.info(
+                f"browser: {_window.tab_count()} tabs open and every one is busy "
+                "— opening another rather than closing work in progress"
+            )
+            return
+        oldest = min(candidates, key=lambda s: getattr(s, "tab_used_monotonic", 0.0))
+        logger.info(
+            f"browser: closing the least-recently-used tab ({_tab_site(oldest)!r}) "
+            f"to stay within {MAX_BROWSE_TABS}"
+        )
+        await oldest.close()
+
+
+async def acquire_browse_tab(
+    allowlist: set[str], *, site: str
+) -> tuple["BrowserSession", bool]:
+    """The tab this browse should run in, as (session, reused).
+
+    Reuses the live tab for `site` when there is one — same page, real history,
+    no relaunch (the 2026-07-21 continuity property, now per site instead of
+    globally). Otherwise opens a new tab, first making room within
+    MAX_BROWSE_TABS.
+
+    A held tab may be DEAD (the user closed it by hand); that is an ordinary
+    event, so it is probed and dropped rather than failing the browse.
+
+    TWO TABS ARE NEVER REUSED, and either rule alone would have prevented the
+    2026-08-01 add-to-cart incident:
+
+    A tab HELD in a registry slot is the user's, not ours — they are watching
+    the video, reading the submitted form's response, or owe an answer to a
+    pause. `_evictable` already refuses to CLOSE such a tab to make room;
+    seizing it to drive is the same intrusion by another route, and it is how a
+    playback tab (interceptor lifted, by design) became the tab an autonomous
+    commit flow ran on.
+
+    A tab that cannot be RE-ARMED is left to the user rather than driven. This
+    is the fail-closed direction on purpose: an extra tab costs a tab, and
+    driving an unguarded one costs every guarantee in the module docstring.
+    """
+    origins = {o for o in (_normalize_origin(a) for a in allowlist) if o}
+    if site:
+        for candidate in _window.live_tabs():
+            if _tab_site(candidate) != site:
+                continue
+            if _held.is_held(candidate):
+                logger.info(
+                    f"browser: the {site!r} tab is held (the user is mid-"
+                    "something with it) — opening a fresh one"
+                )
+                break
+            try:
+                await candidate.page.evaluate("1")
+            except Exception as exc:
+                logger.info(
+                    f"browser: the {site!r} tab is gone ({type(exc).__name__}) "
+                    "— opening a fresh one"
+                )
+                await candidate.close()
+                break
+            if not await candidate.resume_agent_control():
+                break
+            # The interceptor reads session.allowlist LIVE (the origin-approval
+            # union precedent), so re-scoping this tab to THIS task's grounded
+            # origins is one write.
+            candidate.allowlist = origins
+            # Continuity is the PAGE, not the transcript: each run gets a fresh
+            # action history (stale history from an earlier task only confuses
+            # the model).
+            candidate.browse_history = []
+            candidate.last_redirect_offsite = None
+            candidate.tab_reused = True
+            note_browse_tab(candidate)
+            logger.info(
+                f"browser: reusing the {site!r} tab "
+                f"(at {str(candidate.page.url)[:120]})"
+            )
+            return candidate, True
+
+    await _make_room_for_a_tab()
+    session = await BrowserSession.open(origins)
+    session.tab_site = site
+    note_browse_tab(session)
+    return session, False
+
+
+def note_browse_tab(
+    session: "BrowserSession",
+    *,
+    title: Optional[str] = None,
+    url: Optional[str] = None,
+    goal: Optional[str] = None,
 ) -> None:
-    """Adopt a finished browse run's live session as THE persistent agent
-    window, closing any previous one. After this the caller must NOT close the
-    session — the registry owns it until take_browse_window()/
-    close_browse_window()."""
-    await _BROWSE.hold(
-        session, {"title": title or "", "url": url or "", "goal": goal or ""}
+    """Record what a tab is showing and stamp it least-recently-used. Called when
+    a tab is acquired and again when a run finishes. Cheap, sync, never raises —
+    tab bookkeeping must not be able to fail a browse."""
+    try:
+        session.tab_used_monotonic = time.monotonic()
+        meta = dict(getattr(session, "tab_meta", None) or {})
+        if title is not None:
+            meta["title"] = title or ""
+        if url is not None:
+            meta["url"] = url or ""
+        if goal is not None:
+            meta["goal"] = goal or ""
+        session.tab_meta = meta
+    except Exception as exc:
+        logger.debug(f"note_browse_tab: {type(exc).__name__}: {exc}")
+
+
+async def close_browse_window(site: str = "") -> bool:
+    """Close agent browse tabs — the one for `site`, or ALL of them when no site
+    is given. True when at least one was closed. Idempotent.
+
+    AN EXPLICIT REQUEST BEATS THE BUSY RULE, and that asymmetry is deliberate.
+    Automatic EVICTION never touches a tab the user is mid-something with,
+    because nobody asked for it and the only possible outcome is "that expired".
+    A user clicking Close (or a path that needs the profile free) DID ask: a
+    button labelled "close all tabs" that silently leaves one open is worse than
+    one that closes it, and a pending approval already reports honestly that its
+    session is gone.
+    """
+    if not site:
+        return await _window.close_all()
+    targets = [s for s in _window.live_tabs() if _tab_site(s) == site]
+    for session in targets:
+        await session.close()
+    return bool(targets)
+
+
+def active_browse_tabs() -> list[dict[str, str]]:
+    """One {site, title, url, goal, busy} per open agent tab, most recently used
+    first. Cheap, no I/O — the StatusBar/API poll it (the active_media rule)."""
+    tabs = sorted(
+        _window.live_tabs(),
+        key=lambda s: getattr(s, "tab_used_monotonic", 0.0),
+        reverse=True,
     )
-
-
-async def take_browse_window() -> Optional["BrowserSession"]:
-    """Remove and return the held agent window for REUSE by the next browse run
-    (the caller owns it now), or None — nothing held, or a restart dropped it,
-    and the caller launches fresh."""
-    return await _BROWSE.take()
-
-
-async def close_browse_window() -> bool:
-    """Close the persistent agent window and clear the slot. True when one was
-    actually closed. Idempotent — closing nothing is not an error."""
-    return await _BROWSE.discard()
+    rows: list[dict[str, str]] = []
+    for session in tabs:
+        meta = dict(getattr(session, "tab_meta", None) or {})
+        rows.append(
+            {
+                "site": _tab_site(session),
+                "title": meta.get("title", ""),
+                "url": meta.get("url", ""),
+                "goal": meta.get("goal", ""),
+                "busy": not _evictable(session),
+            }
+        )
+    return rows
 
 
 def active_browse_window() -> Optional[dict[str, str]]:
-    """{title, url, goal} for the held agent window, or None. Cheap, no I/O —
-    the StatusBar/API poll it (the active_media precedent)."""
-    return _BROWSE.peek()
+    """The most recently used agent tab's {title, url, goal}, or None. Kept so
+    the existing single-window StatusBar/API surface still reads correctly while
+    the multi-tab one lands beside it."""
+    rows = active_browse_tabs()
+    return rows[0] if rows else None
 
 
 # ---------------------------------------------------------- commit sessions
@@ -3259,9 +3588,14 @@ async def open_login_window(url: str = DEFAULT_LOGIN_URL) -> None:
     fingerprint — see CLEAN_BROWSER_LAUNCHER) and falls back to the Playwright
     window; raises BrowserUnavailable only when the fallback cannot launch either."""
     global _login_browser, _clean_login_proc
-    await stop_media()
-    await close_result_window()  # one live persistent context (the profile lock)
-    await close_browse_window()  # the held agent window holds it too
+    # A sign-in window is a SEPARATE Chrome process on the same user-data-dir, so
+    # it cannot coexist with the shared automation context however many tabs are
+    # in it. This is the one constraint multi-tab does NOT remove: signing in
+    # closes the tabs. One call covers every tab BY CONSTRUCTION — media, result
+    # window, a paused commit, a plain browse tab — where the hand-listed closes
+    # this replaces covered only the slots someone remembered.
+    await _window.close_all()
+    await stop_media_window()  # the clean media window is a subprocess, not a tab
     async with _login_lock:
         # Clean, non-automation window (2026-07-19) — strongly preferred so
         # Cloudflare Turnstile / Google don't fingerprint it and the user's
@@ -3430,12 +3764,12 @@ async def open_media_window(url: str, *, title: str = "") -> bool:
     browser, or a profile-handoff exit) — the caller reports 'not playing'
     honestly. Best-effort — never raises."""
     global _clean_media_proc, _clean_media_meta
-    # Free the single-profile lock: close the sign-in / result / held-browse
-    # windows and any prior media (session OR clean window) before launching.
+    # Free the single-profile lock: this is a separate Chrome process, so the
+    # whole shared context must go, not just some of its tabs. (The caller only
+    # takes this path when no OTHER tab is open — playing a video is not a reason
+    # to close somebody else's work; see BrowseTool's keep_open branch.)
     await close_login_window()
-    await close_result_window()
-    await close_browse_window()
-    await _MEDIA.discard()  # a prior in-place BrowserSession media session
+    await _window.close_all()
     async with _media_window_lock:
         await _close_media_window_locked()  # a prior clean media window
         await _settle_profile()
@@ -3491,3 +3825,12 @@ async def shutdown_browser_windows() -> None:
         await stop_media_window()  # the clean media window is a subprocess, not held
     except Exception as exc:
         logger.debug(f"shutdown close media window: {type(exc).__name__}: {exc}")
+    try:
+        # The shared context outlives individual sessions now, so closing every
+        # held session is no longer proof the window is down: a tab that was
+        # never held in a slot would keep the context — and the profile lock —
+        # alive past shutdown, which is the orphan that hangs the next run's
+        # launch. This is the belt that makes "no Chromium survives" true again.
+        await _window.close_all()
+    except Exception as exc:
+        logger.debug(f"shutdown close shared window: {type(exc).__name__}: {exc}")

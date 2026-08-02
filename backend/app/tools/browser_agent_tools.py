@@ -46,6 +46,7 @@ from typing import Any
 
 from loguru import logger
 
+from app.browser import window as browser_window
 from app.core import dom_observe
 from app.core.base_tool import BaseTool, PermissionLevel, ToolDefinition, ToolResult
 from app.tools.browser_tools import _fail, _ok, _partial, _validate_url
@@ -377,47 +378,30 @@ class BrowseTool(BaseTool):
             session = None
             handed_off = False
             try:
-                # SESSION CONTINUITY (2026-07-21): reuse the persistent agent
-                # window when one is held. Live testing showed every browse step
-                # of a plan launching its OWN Chrome and closing it when the step
-                # ended — step 2 relaunched at start_url and RE-DID step 1's
-                # navigation (the books.toscrape "opened the book twice" report),
-                # and the open/close cycle was the screen flicker. A reused
-                # window continues exactly where the last run left off: same
-                # page, real history (`back` works), no relaunch.
-                session = await browser_session.take_browse_window()
-                if session is not None:
-                    try:
-                        # Liveness probe — the user may have closed the window by
-                        # hand; a dead session must fall through to a fresh
-                        # launch, never fail the browse.
-                        await session.page.evaluate("1")
-                        # The interceptor reads session.allowlist LIVE (the
-                        # origin-approval-union precedent), so re-scoping the
-                        # window to THIS task's grounded origins is one write.
-                        # Same normalization BrowserSession.open applies.
-                        session.allowlist = {
-                            o for o in (_normalize_origin(a) for a in allowlist) if o
-                        }
-                        # Continuity is the PAGE, not the transcript: each browse
-                        # run gets a fresh action history/budget (stale history
-                        # from an earlier task would only confuse the model).
-                        session.browse_history = []
-                        session.last_redirect_offsite = None
-                        logger.info(
-                            "browse: reusing the held agent window "
-                            f"(at {str(session.page.url)[:120]})"
-                        )
-                    except Exception as exc:
-                        logger.info(
-                            f"browse: held window unusable ({type(exc).__name__}) "
-                            "— launching fresh"
-                        )
-                        try:
-                            await session.close()
-                        except Exception:
-                            pass
-                        session = None
+                # SESSION CONTINUITY (2026-07-21), now PER SITE (2026-08-01).
+                # Live testing showed every browse step of a plan launching its
+                # OWN Chrome and closing it when the step ended — step 2
+                # relaunched at start_url and RE-DID step 1's navigation (the
+                # books.toscrape "opened the book twice" report), and the
+                # open/close cycle was the screen flicker. A reused tab continues
+                # exactly where the last run left off: same page, real history
+                # (`back` works), no relaunch.
+                #
+                # What changed: continuity used to be ONE held window, so a
+                # browse for a different site had to close it (and the whole
+                # context with it) and start again. Tabs are keyed by site now —
+                # a follow-up about this site continues its tab, a new site opens
+                # a new one, and the other tabs stay open. Reuse, the liveness
+                # probe and the allowlist re-scope all live in acquire_browse_tab.
+                site = browser_session.browse_site_key(allowlist, start_url)
+                session, reused = await browser_session.acquire_browse_tab(
+                    allowlist, site=site
+                )
+                browser_session.note_browse_tab(session, goal=goal)
+                # A tab that opens with no opener (rel="noopener", target=_blank)
+                # belongs to whoever is ACTING — nobody else is clicking
+                # anything. Marked for the whole run, cleared in the finally.
+                browser_window.set_driving(session)
                 # THE FIRST NAVIGATION IS A HAND-OFF POINT LIKE ANY OTHER
                 # (2026-07-26). It used to be the one navigation with no recovery
                 # path: `_act` swallows BrowserBlocked mid-loop and turns a
@@ -427,7 +411,7 @@ class BrowseTool(BaseTool):
                 # to its host www.webx.pk and the run died on step one — the user
                 # was never asked a question they would have answered in a word.
                 # Now both navigations reach the same pause.
-                if session is not None:
+                if reused:
                     # Stay put when the page is already on an allowed site — the
                     # whole point of continuity ("click the top book" continues
                     # from the Travel page, not the homepage). Off-site/blank →
@@ -438,18 +422,6 @@ class BrowseTool(BaseTool):
                         if handoff is not None:
                             return handoff
                 else:
-                    # One profile = one live persistent context. A sign-in window,
-                    # a kept-open commit result window, OR a kept-open media
-                    # session (a "play on youtube" left running) on
-                    # ~/.jarvis/browser all hold the profile lock, so close every
-                    # one first (the login/browse coordination rule) or the launch
-                    # below races the lock — the TargetClosedError/Chrome-flicker
-                    # seen live 2026-07-19 when a job-search browse launched while
-                    # a YouTube tab was still playing.
-                    await browser_session.close_login_window()
-                    await browser_session.close_result_window()
-                    await browser_session.stop_media()
-                    session = await BrowserSession.open(allowlist)
                     handoff = await _open_start_url(session, start_url)
                     if handoff is not None:
                         return handoff
@@ -488,6 +460,20 @@ class BrowseTool(BaseTool):
                     "performed_gesture": outcome.performed_gesture,
                     "goal_reached": outcome.success,
                     "actions_taken": outcome.actions_taken,
+                    # The final page's PROSE, without the element list. `rendered`
+                    # is the DECISION prompt's format (observe.render's own
+                    # docstring: "the observation as the LLM sees it") — a
+                    # structural listing of every clickable thing, which is agent
+                    # scaffolding and never a report. The summary reads this
+                    # instead (live 2026-08-01: "open youtube" replied with 108
+                    # `[42] link "…" → /watch?v=…` lines and the whole homepage,
+                    # 8,609 characters).
+                    "page_text": str(outcome.final.get("page_text") or ""),
+                    # The goal asked only to BE somewhere and we got there
+                    # (loop._destination_reached). Nothing was read, so there is
+                    # nothing to report beyond arriving — the head line IS the
+                    # complete answer, exactly as it is for a media outcome.
+                    "destination_only": outcome.destination_only,
                     "blocked": outcome.blocked,
                     "playing": False,
                     "window_open": False,
@@ -558,13 +544,18 @@ class BrowseTool(BaseTool):
                     return output
 
                 # An off-site navigation hand-off (2026-07-18): the loop would
-                # leave the sites the user named for a page-derived origin. Close
-                # the agent session (nothing to keep open) and return a structured
-                # signal; the planner pauses to ask the user to approve THIS
-                # origin. Jarvis never follows a page-derived site on its own.
+                # leave the sites the user named for a page-derived origin. Return
+                # a structured signal; the planner pauses to ask the user to
+                # approve THIS origin. Jarvis never follows a page-derived site on
+                # its own.
+                # The tab STAYS (2026-08-02, with the action-approval branch
+                # below): the user is being asked about the page that is on it.
                 if outcome.origin_approval_required:
-                    await session.close()
-                    session = None  # the finally must not double-close it
+                    browser_session.note_browse_tab(
+                        session, title=output["title"], url=output["url"], goal=goal
+                    )
+                    handed_off = True
+                    output["window_open"] = True
                     output["origin_approval_required"] = True
                     output["origin_candidate"] = outcome.origin_candidate
                     output["origin_url"] = outcome.origin_url
@@ -572,15 +563,39 @@ class BrowseTool(BaseTool):
 
                 # A world-acting gesture the user must approve (2026-07-22): the
                 # READ loop STOPPED before a send / post / submit / upload / like /
-                # delete / buy. Close the session (free the single-profile lock,
-                # like the origin/login hand-offs) and return the structured
-                # signal; the planner pauses on an approval question naming the
-                # action, and on "yes" the resumed browse runs carrying THAT
-                # gesture's permit so exactly that one action can fire. Jarvis
-                # never acts on a live site without this yes.
+                # delete / buy. Return the structured signal; the planner pauses on
+                # an approval question naming the action, and on "yes" the resumed
+                # browse runs carrying THAT gesture's permit so exactly that one
+                # action can fire. Jarvis never acts on a live site without this yes.
+                #
+                # ⚠️ THE TAB STAYS OPEN (2026-08-02). This branch used to call
+                # release_after_run(), which closes any tab THIS run opened — and a
+                # run that opened its own tab always has tab_reused False, so in
+                # practice it closed the page the user was about to be asked about.
+                # Live: the storefront vanished one second before "I'm about to
+                # send … on www.junaidjamshed.com — say yes", and the resumed run
+                # had to navigate again, landing on a half-rendered page (39
+                # elements where the first load saw 121) that then failed.
+                #
+                # The 2026-08-01 reasoning for keeping a BORROWED tab — "the user
+                # is about to be asked a question about the page they are looking
+                # at" — never depended on who opened it; it reached one pause
+                # branch of four by accident of where that round was working. The
+                # old reason for closing ("free the single-profile lock") went
+                # stale with the shared window: closing ONE tab of a shared context
+                # frees no lock.
+                #
+                # Nothing is loosened. No gesture has fired (that is what the pause
+                # is FOR), the permit is one-shot and still unspent, and the tab is
+                # left with interception ON. On resume acquire_browse_tab finds it
+                # by site key and resume_agent_control() re-arms it before anything
+                # drives it — a tab is guarded before it is driven.
                 if outcome.action_approval_required:
-                    await session.close()
-                    session = None  # the finally must not double-close it
+                    browser_session.note_browse_tab(
+                        session, title=output["title"], url=output["url"], goal=goal
+                    )
+                    handed_off = True
+                    output["window_open"] = True
                     output["action_approval_required"] = True
                     output["action_description"] = outcome.action_description
                     output["action_site"] = outcome.action_site
@@ -607,8 +622,42 @@ class BrowseTool(BaseTool):
                 # work — else "you're offline", live 2026-07-17) and ensure_playing()
                 # presses play in the automation window. The media registry then owns
                 # the session; the finally must not close it.
-                if outcome.success and keep_open:
-                    if browser_session.clean_media_enabled():
+                # ⚠️ keep_open MEANS "LEAVE THE WINDOW OPEN", NOT "THIS IS MEDIA"
+                # (2026-08-01). The planner sets it for "open youtube" too, and on
+                # that goal the in-place branch below lifts Rule 1 and calls
+                # ensure_playing(), which presses .play() on any <video> — a
+                # YouTube homepage is full of preview videos. The multi-tab round
+                # made the in-place branch the common one (a clean window would
+                # close the user's other tabs), so this is the path that runs.
+                #
+                # THE GATE IS POSITIVE (goal_wants_playback), not the absence of
+                # destination_only. The first cut of this fix was the negative
+                # test alone, and it FAILED LIVE the same evening: the planner
+                # wrote "Open the junaidjamshed.com homepage so it is visible in
+                # the browser.", whose trailing clause defeats the destination
+                # reduction, so a storefront was handed over with the interceptor
+                # lifted and a banner video playing — and the NEXT task reused
+                # that unguarded tab. Lifting a safety guard has to require a
+                # reason. destination_only stays as a second, narrower refusal:
+                # a run that finished purely by ARRIVING somewhere sought nothing,
+                # so there is nothing to play even if the wording says "play".
+                wants_playback = browser_loop.goal_wants_playback(goal)
+                if (
+                    outcome.success
+                    and keep_open
+                    and wants_playback
+                    and not outcome.destination_only
+                ):
+                    # THE CLEAN WINDOW COSTS EVERY OTHER TAB (2026-08-01). It is a
+                    # separate Chrome process on the same profile, so it can only
+                    # open once the shared context is down — which would close
+                    # tabs belonging to tasks that have nothing to do with this
+                    # video. Playing something is not a reason to shut the user's
+                    # other work, so with other tabs open we take the in-place
+                    # path instead: it costs the ad-blocking extension, and keeps
+                    # every other tab alive.
+                    others_open = browser_window.tab_count() > 1
+                    if browser_session.clean_media_enabled() and not others_open:
                         final_url = output["url"]
                         await session.close()  # free the single-profile lock
                         session = None
@@ -619,6 +668,11 @@ class BrowseTool(BaseTool):
                         output["playing"] = opened
                         output["handoff"] = "clean_window" if opened else "none"
                     else:
+                        if others_open and browser_session.clean_media_enabled():
+                            logger.info(
+                                "browse: playing in place — a clean window would "
+                                f"close {browser_window.tab_count() - 1} other tab(s)"
+                            )
                         await session.enter_playback_mode()
                         await session.ensure_playing()
                         await browser_session.register_media(
@@ -637,15 +691,21 @@ class BrowseTool(BaseTool):
                     # restart closes it — the honest outcome. Exceptions and
                     # timeouts still close via the finally (a half-broken window
                     # is not worth keeping).
-                    await browser_session.hold_browse_window(
+                    browser_session.note_browse_tab(
                         session, title=output["title"], url=output["url"], goal=goal
                     )
                     handed_off = True
                     output["window_open"] = True
                 return output
             finally:
+                browser_window.set_driving(None)
                 if session is not None and not handed_off:
-                    await session.close()
+                    # An exception or a timeout still discards a window we
+                    # OPENED ("a half-broken window is not worth keeping"), but
+                    # a tab we merely borrowed goes back to the user intact —
+                    # they can close it, and a broken-looking page they can see
+                    # beats one that vanished (2026-08-01).
+                    await session.release_after_run()
                 try:
                     await provider.__aexit__(None, None, None)  # close its httpx client
                 except Exception:
@@ -666,9 +726,20 @@ class BrowseTool(BaseTool):
         except Exception:
             pass
 
+        async def _drive_browser_locked() -> dict:
+            # ONE agent run drives the browser at a time; a second background
+            # browse QUEUES behind this one and then opens its own tab. The lock
+            # is taken here, inside the coroutine that runs ON the browser loop,
+            # because an asyncio.Lock binds to the loop that first awaits it.
+            # This race is not new — run_browser never serialized — but the
+            # all-closing teardown used to hide it by turning an interleave into
+            # a destroyed browser, so the lock ships with the teardown's removal.
+            async with browser_window.driving_run():
+                return await _drive_browser()
+
         try:
             output = await browser_runtime.run_browser(
-                _drive_browser(), timeout=BROWSE_HARD_TIMEOUT
+                _drive_browser_locked(), timeout=BROWSE_HARD_TIMEOUT
             )
         except (TimeoutError, asyncio.TimeoutError):
             # The OUTER belt (browser_runtime's wait_for). A Playwright navigation
@@ -784,6 +855,22 @@ class BrowseTool(BaseTool):
                 output,
             )
 
+        # Light up the StatusBar "window open" indicator immediately (it also
+        # polls /api/browser/media to recover on reload). push() touches
+        # main-loop WebSocket objects, so it fires here — after the browser-loop
+        # work returned. Before the goal_reached check: a stuck run holds the
+        # window too (the user asked to SEE where it got stuck), and before the
+        # origin hand-off below, which returns early with its own structured
+        # output — an approval pause now leaves its tab open (2026-08-02) and the
+        # indicator must agree with the screen.
+        if output.get("window_open"):
+            from app.core.push import push
+
+            await push(
+                "browser_window",
+                {"open": True, "title": output.get("title", ""), "url": output.get("url", "")},
+            )
+
         if output.get("origin_approval_required"):
             # An off-site navigation hand-off (2026-07-18). Return a STRUCTURED
             # signal so the planner pauses on a yes/no question instead of failing
@@ -796,6 +883,7 @@ class BrowseTool(BaseTool):
                     "origin_approval_required": True,
                     "origin_candidate": host,
                     "origin_url": output.get("origin_url", ""),
+                    "window_open": bool(output.get("window_open")),
                 },
                 error=(
                     f"I need your approval to leave the sites you named and visit "
@@ -803,19 +891,6 @@ class BrowseTool(BaseTool):
                     "me to stop."
                 ),
                 permission_level=self.permission_level,
-            )
-
-        # Light up the StatusBar "window open" indicator immediately (it also
-        # polls /api/browser/media to recover on reload). push() touches
-        # main-loop WebSocket objects, so it fires here — after the browser-loop
-        # work returned. Before the goal_reached check: a stuck run holds the
-        # window too (the user asked to SEE where it got stuck).
-        if output.get("window_open"):
-            from app.core.push import push
-
-            await push(
-                "browser_window",
-                {"open": True, "title": output.get("title", ""), "url": output.get("url", "")},
             )
 
         if not output.get("goal_reached"):

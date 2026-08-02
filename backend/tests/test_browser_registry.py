@@ -149,11 +149,16 @@ async def test_reset_for_tests_clears_every_slot_without_closing():
 
 
 def test_the_expected_slots_exist():
-    """The six held-session situations the stack currently has. A rename or
-    removal here must be deliberate — session.py's domain wrappers and the
-    API/StatusBar surfaces key on these names. `browse` (2026-07-21) holds the
-    persistent agent window between browse runs, so a journey's steps reuse one
-    session and the window stays open for the user to see the result."""
+    """The held-session situations the stack currently has. A rename or removal
+    here must be deliberate — session.py's domain wrappers and the API/StatusBar
+    surfaces key on these names.
+
+    `browse` is deliberately ABSENT (2026-08-01). It held THE one agent window
+    between runs, which is precisely why a second browser task had nowhere to go:
+    it closed that window — and the whole context with it — and launched again.
+    Agent tabs live in app/browser/window.py now, keyed by site and bounded by
+    MAX_BROWSE_TABS. What a one-at-a-time slot still models correctly is a tab
+    SUSPENDED in some state, which is what remains here."""
     assert set(registry.REGISTRIES) == {
-        "media", "result_window", "commit", "challenge", "discovery", "browse",
+        "media", "result_window", "commit", "challenge", "discovery",
     }

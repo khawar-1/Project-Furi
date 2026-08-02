@@ -444,11 +444,25 @@ export const contextApi = {
 // ============================================================
 // Browser media control (Phase 14, Part 2)
 // ============================================================
+/** One open agent browser tab (2026-08-01). Several browser tasks can be open at
+ *  once; `site` is the registrable domain and the key /close-window takes. */
+export interface BrowserTab {
+  site: string;
+  title: string;
+  url: string;
+  goal: string;
+  /** Mid-something — awaiting approval, a CAPTCHA, a question, or playing. */
+  busy: boolean;
+}
+
 export interface BrowserMedia {
   playing: boolean;
   title: string;
   url: string;
-  /** A kept-open commit result window (Phase 14.6): the "File Uploaded!" page. */
+  /** Every open agent tab, most recently used first. */
+  tabs: BrowserTab[];
+  /** A kept-open commit result window (Phase 14.6): the "File Uploaded!" page.
+   *  Kept alongside `tabs` so the single-window reading stays valid. */
   window_open: boolean;
   window_title: string;
   window_url: string;
@@ -473,8 +487,12 @@ export const browserApi = {
     apiFetch<{ stopped: boolean }>('/api/browser/stop-media', { method: 'POST' }),
 
   /** Close a commit result window left open so the user could see the response. */
-  closeWindow: (): Promise<{ closed: boolean }> =>
-    apiFetch<{ closed: boolean }>('/api/browser/close-window', { method: 'POST' }),
+  /** Close one tab by site, or every tab when no site is given. */
+  closeWindow: (site?: string): Promise<{ closed: boolean; tabs: BrowserTab[] }> =>
+    apiFetch<{ closed: boolean; tabs: BrowserTab[] }>('/api/browser/close-window', {
+      method: 'POST',
+      body: JSON.stringify({ site: site ?? '' }),
+    }),
 
   /** Whether a one-time sign-in window is currently open. */
   accountStatus: (): Promise<{ login_open: boolean }> =>

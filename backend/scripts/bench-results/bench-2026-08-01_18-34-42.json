@@ -1,0 +1,27 @@
+{
+  "when": "2026-08-01_18-34-42",
+  "passed": 0,
+  "scored": 1,
+  "blocked": 0,
+  "total": 1,
+  "tasks": [
+    {
+      "id": "quotes-pagination",
+      "passed": false,
+      "seconds": 119.1,
+      "actions": 3,
+      "records": 0,
+      "url": "https://quotes.toscrape.com/page/2/",
+      "tool_success": false,
+      "error": "couldn't work out a safe next action on this page",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": false,
+          "detail": "0 records (needed 12)"
+        }
+      ],
+      "sample": []
+    }
+  ]
+}

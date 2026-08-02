@@ -97,7 +97,20 @@ _SYSTEM_VOICE_RE = re.compile(
     # not past-tense and is spared.
     r"|(?:has been|have been|been|it(?:'s| is)|that(?:'s| is)|i(?:'ve| have))\s+"
     r"(?:passed|handed|routed|forwarded|sent)\b[^\n]{0,40}?\bto (?:the )?"
-    r"(?:right |correct )?(?:system|backend|planner|agent)"
+    r"(?:right |correct |browser |domain |file |email |calendar )?"
+    r"(?:system|backend|planner|agent)"
+    # The same fabrication as a STATE claim rather than a hand-off verb (live
+    # bug 2026-08-01): "open junaidjamshed.com" fell to chat on a classifier
+    # coin flip and the LLM answered "Understood — opening junaidjamshed.com
+    # now, sir. It's with the browser agent in the background; I'll confirm the
+    # moment it's live." Nothing was with any agent; nothing ran. Every pattern
+    # above missed it because it names no hand-off verb — it asserts the
+    # finished state directly. Chat can put nothing in an agent's hands, so
+    # "it's with the … agent" is always a fabrication. Requires the possessing
+    # phrase, so a capability offer ("I can hand that to the browser agent")
+    # is spared.
+    r"|(?:it|that|this)(?:'s| is)\s+(?:now\s+)?(?:with|in the hands of)\s+(?:the\s+|our\s+)?"
+    r"(?:browser|domain|file|email|calendar|background|task)?\s*agent"
     # Browser/media action claims (live bug 2026-07-23). After a REAL browse
     # ("play ep 170 of black clover on anikoto.cz"), a short follow-up
     # correction ("i meant ep 5 of season 2 in english dub") missed every
@@ -1005,7 +1018,22 @@ async def chat_stream(
 
             # Flush whatever the look-behind was still holding. A clean stream
             # ends here, so this is the ordinary path, not an edge case.
+            #
+            # The in-loop cut above can only see text that has been EMITTED, and
+            # emission lags by _OFFER_LOOKBEHIND — so a marker in the last 64
+            # characters was never cut at all, and the whole fabricated tail
+            # shipped (found 2026-08-01 while adding the agent-hand-off pattern:
+            # "It's with the browser agent in the background; I'll confirm the
+            # moment it's live." is 130 chars, and the marker sits past the
+            # 66-char emitted prefix). Search the held-back buffer too and cut
+            # there, keeping the marker itself visible — the correction below
+            # needs a referent, which is why this guard cuts AFTER the marker
+            # rather than before it.
             if not dead_end and not impersonation and pending:
+                emitted = "".join(full_response)
+                late = _SYSTEM_VOICE_RE.search(emitted + pending)
+                if late and late.end() > len(emitted):
+                    pending = pending[: late.end() - len(emitted)]
                 full_response.append(pending)
                 yield _chunk(pending)
                 if _SYSTEM_VOICE_RE.search("".join(full_response)):

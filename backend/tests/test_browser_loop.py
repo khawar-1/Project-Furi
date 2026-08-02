@@ -3908,3 +3908,349 @@ def test_auth_site_decided_falls_back_to_exact_membership_on_junk():
     assert _auth_site_decided("not-a-url", {"not-a-url"}) is True
     assert _auth_site_decided("not-a-url", {"https://shop.test/x"}) is False
     assert _auth_site_decided("https://shop.test/x", set()) is False
+
+
+# ------------------------------------- a navigation goal is not a search goal (2026-08-01)
+# THE INCIDENT. The user said "open youtube". The planner authored the correct
+# tool call — browse(goal="Open the YouTube homepage", start_url=youtube.com,
+# keep_open=True) — and the loop, with ZERO LLM calls, typed "the YouTube
+# homepage" into YouTube's own search box, then clicked a result. keep_open
+# handed that video to the playback window, so the user watched a video start
+# playing from a goal that only asked to open a page.
+#
+# Both bad moves were code fast paths. The trace:
+#   step 0 fast-path {"action":"type","index":4,"text":"the YouTube homepage",...}
+#   step 1 fast-path {"action":"click","index":23}   on /results?search_query=...
+def _dest_obs(elements, url, title="T"):
+    return browser_loop.dom_observe.Observation(
+        observation_id="o", url=url, title=title, element_total=len(elements),
+        elements=elements, page_text="", text_truncated=False,
+    )
+
+
+def _searchbox(index=4, name="Search"):
+    return browser_loop.dom_observe.Element(index=index, role="searchbox", name=name)
+
+
+def test_the_incident_a_destination_goal_never_fast_paths_into_a_search():
+    """Frozen: the goal's own words must not become a query on the site it names."""
+    obs = _dest_obs([_searchbox()], "https://www.youtube.com/", "YouTube")
+    assert _fast_path_action("Open the YouTube homepage", obs) is None
+
+
+@pytest.mark.parametrize(
+    "goal, url",
+    [
+        # Every phrasing measured against the pre-fix code, each of which searched
+        # the destination site for its own name.
+        ("Open the YouTube homepage", "https://www.youtube.com/"),
+        ("open youtube", "https://www.youtube.com/"),
+        ("open google", "https://www.google.com/"),
+        ("pull up amazon", "https://www.amazon.com/"),
+        ("visit amazon", "https://www.amazon.com/"),
+        # The bare navigation verbs the verb-chain never stripped, so the WHOLE
+        # sentence used to be typed into the box verbatim.
+        ("go to youtube.com", "https://www.youtube.com/"),
+        ("navigate to amazon", "https://www.amazon.com/"),
+        ("head to outfitters", "https://outfitters.com.pk/"),
+        # A goal naming nothing but the place.
+        ("open the homepage", "https://www.youtube.com/"),
+        ("open the site", "https://anikoto.cz/"),
+        # A subdomain is the same destination.
+        ("open youtube", "https://m.youtube.com/"),
+    ],
+)
+def test_navigation_goals_do_not_search_the_site_for_its_own_name(goal, url):
+    obs = _dest_obs([_searchbox()], url)
+    assert _fast_path_action(goal, obs) is None
+
+
+@pytest.mark.parametrize(
+    "goal, url, expected",
+    [
+        # A real query names something the site is NOT — untouched by the guard.
+        ("search for cats on youtube", "https://www.youtube.com/", "cats"),
+        ("play jane by the long faces on youtube", "https://www.youtube.com/",
+         "jane by the long faces"),
+        ("play lofi hip hop on youtube", "https://www.youtube.com/", "lofi hip hop"),
+        # `open` is still a SEARCH verb when a title follows it — which is why
+        # deleting it from the verb list was the wrong fix.
+        ("open the dangers in my heart", "https://anikoto.cz/",
+         "the dangers in my heart"),
+        ("play ep 4 of the dangers in my heart season 2 on anikoto.cz",
+         "https://anikoto.cz/", "the dangers in my heart"),
+        # The site's name plus a real term is a query, not a destination.
+        ("open amazon deals", "https://www.amazon.com/", "amazon deals"),
+    ],
+)
+def test_real_search_goals_still_fast_path(goal, url, expected):
+    obs = _dest_obs([_searchbox()], url)
+    assert _fast_path_action(goal, obs) == {
+        "action": "type", "index": 4, "text": expected, "submit": True,
+    }
+
+
+def test_the_guard_reads_the_final_term_not_the_site_adapted_one():
+    """_fast_path_action falls back to _extract_search_term whenever `query` is
+    None, so gating inside _search_query_for would be routed around. The gate has
+    to sit on the term that is about to be typed."""
+    obs = _dest_obs([_searchbox()], "https://www.youtube.com/")
+    # An explicit site-adapted query naming only the destination is refused too.
+    assert _fast_path_action("whatever", obs, query="the youtube homepage") is None
+    # ...and a real one still fires.
+    assert _fast_path_action("whatever", obs, query="lofi hip hop") == {
+        "action": "type", "index": 4, "text": "lofi hip hop", "submit": True,
+    }
+
+
+def test_top_result_never_clicks_on_a_bare_site_name_overlap():
+    """The second half of the incident. On a YouTube results page EVERY row
+    mentions YouTube, so a 'query' of {youtube, homepage} scored 1 against an
+    arbitrary video and clicked it. The old guard was `best_score == 0 -> defer`."""
+    els = [
+        browser_loop.dom_observe.Element(
+            index=23, role="link", name="Some Unrelated Song - YouTube Music",
+            href="/watch?v=abc123",
+        ),
+    ]
+    obs = _dest_obs(
+        els, "https://www.youtube.com/results?search_query=the+YouTube+homepage"
+    )
+    assert browser_loop._top_result_action(obs, "Open the YouTube homepage") is None
+
+
+def test_top_result_still_picks_a_genuine_title_match():
+    """Regression: the humrahi/top-result path is untouched by the guard."""
+    els = [
+        browser_loop.dom_observe.Element(
+            index=7, role="link", name="Shorts", href="/watch?v=zzz"
+        ),
+        browser_loop.dom_observe.Element(
+            index=11, role="link", name="Jane - The Long Faces (Official)",
+            href="/watch?v=HydkjjDNTmY",
+        ),
+    ]
+    obs = _dest_obs(els, "https://www.youtube.com/results?search_query=jane")
+    assert browser_loop._top_result_action(
+        obs, "play jane by the long faces on youtube"
+    ) == {"action": "click", "index": 11}
+
+
+# ------------------------------------------------------- the arrival terminator
+def test_destination_reached_is_true_only_when_the_goal_is_only_a_place():
+    from app.browser.loop import _destination_reached
+
+    yt = _dest_obs([], "https://www.youtube.com/", "YouTube")
+    assert _destination_reached("Open the YouTube homepage", yt) is True
+    assert _destination_reached("open youtube", yt) is True
+    assert _destination_reached("go to youtube.com", yt) is True
+    # A goal with work left in it is NOT arrival.
+    assert _destination_reached("open youtube and find the video about rust", yt) is False
+    assert _destination_reached("play jane by the long faces on youtube", yt) is False
+    # The destination named is not where we are.
+    assert _destination_reached("open amazon", yt) is False
+    # No host to compare against -> never call it done.
+    assert _destination_reached("open youtube", _dest_obs([], "")) is False
+
+
+def test_destination_reached_declines_a_goal_it_cannot_reduce():
+    """A compose goal and a multi-clause instruction both yield no term. Silence
+    there must mean 'not arrival', never 'nothing left to do'."""
+    from app.browser.loop import _destination_reached
+
+    yt = _dest_obs([], "https://www.youtube.com/", "YouTube")
+    assert _destination_reached(
+        "open the messages area and type 'hi' but do not send it", yt
+    ) is False
+    assert _destination_reached(
+        "open youtube, then find the trailer that was posted today", yt
+    ) is False
+
+
+async def test_opening_a_site_finishes_immediately_and_costs_no_llm_call():
+    """End-to-end: the incident goal on the incident page. The run must FINISH on
+    step 0 — no search typed, no result clicked, no model call."""
+    page = ScriptedPage([
+        _page([_el(4, "searchbox", "Search")], url="https://www.youtube.com/",
+              title="YouTube"),
+    ])
+    session = FakeSession(page)
+    provider = FakeProvider([])  # any call would fall through to a canned "done"
+
+    outcome = await run_browse(
+        session, "Open the YouTube homepage", provider, keep_open=True
+    )
+
+    assert outcome.success
+    assert provider.calls == 0, "arrival is decided in code — no model call"
+    assert page.acted == [], "nothing was typed and nothing was clicked"
+    # The tool reads this to skip the media hand-off (which would lift Rule 1 and
+    # press .play() on the homepage's preview videos).
+    assert outcome.destination_only is True
+
+
+async def test_a_media_goal_is_not_marked_destination_only():
+    """Regression: the flag gates the media hand-off, so a play goal must never
+    set it — a false positive here would stop videos playing."""
+    page = ScriptedPage([
+        _page([_el(4, "searchbox", "Search")], url="https://www.youtube.com/",
+              title="YouTube"),
+        _page([], url="https://www.youtube.com/watch?v=abc", title="Jane"),
+    ])
+    outcome = await run_browse(
+        FakeSession(page), "play jane by the long faces on youtube",
+        FakeProvider([]), keep_open=True,
+    )
+    assert outcome.success
+    assert outcome.destination_only is False
+
+
+# ===========================================================================
+# DID THE GOAL ASK FOR PLAYBACK? (2026-08-01, the add-to-cart incident)
+# ===========================================================================
+# The keep_open hand-off lifts Rule 1 and presses .play(), and it was gated
+# NEGATIVELY — `keep_open and not destination_only`. A negative test over an
+# LLM-authored goal string fails OPEN, and it did, live, the same evening the
+# destination_only gate shipped.
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "play jane by the long faces on youtube",
+        "Find and play the latest episode of One Piece",
+        "go to anikoto.cz and find and play the dangers in my heart",
+        "watch the latest episode of one piece",
+        "listen to lofi on spotify",
+        "put on some jazz",
+        "stream the match on espn",
+    ],
+)
+def test_a_play_goal_asks_for_playback(goal):
+    assert browser_loop.goal_wants_playback(goal) is True
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        # The incident: the planner's own wording, which defeats the
+        # destination reduction and so opened the negative gate.
+        "Open the junaidjamshed.com homepage so it is visible in the browser.",
+        "Open the YouTube homepage",
+        "open junaidjamshed.com",
+        # THE VERB MUST LEAD. "watch" is a noun here, and both of these are
+        # shopping goals on sites that sell them.
+        "find a watch under 200 dollars on amazon",
+        "buy a watch on amazon",
+        "Find the product 'Janan Sports 100ml' on junaidjamshed.com and add it to the cart.",
+        # Word-boundary neighbours that must not read as the verb.
+        "search for a playstation 5 on daraz",
+        "open my youtube playlist",
+        "find the video player settings",
+    ],
+)
+def test_a_goal_that_never_asked_for_playback_does_not_get_it(goal):
+    assert browser_loop.goal_wants_playback(goal) is False
+
+
+# ------------------------------------ a brand that concatenates in its domain
+# THE INCIDENT (2026-08-02). "openjunetjamshed.com" was corrected to
+# junaidjamshed.com, the page loaded perfectly (121 elements) — and the loop
+# typed the goal's own words, "the Junaid Jamshed website", into the storefront's
+# SEARCH BOX. That is a world-acting gesture, so the run paused for approval on a
+# page that was already exactly where the goal asked to be.
+#
+# The subset test is right when the brand is one word and blind when it is two:
+#     "the Junaid Jamshed website" -> {junaid, jamshed}
+#     www.junaidjamshed.com        -> {junaidjamshed}
+# so it read "there is something to look for" and the fast path obliged.
+def test_the_incident_a_two_word_brand_still_names_only_its_own_site():
+    from app.browser.loop import _destination_reached, _names_only_the_destination
+
+    jj = _dest_obs([], "https://www.junaidjamshed.com/", "J. Junaid Jamshed")
+    assert _names_only_the_destination("the Junaid Jamshed website", jj.url) is True
+    assert _destination_reached("Open the Junaid Jamshed website", jj) is True
+
+
+@pytest.mark.parametrize(
+    "term,url,expected",
+    [
+        # Two words that spell one label — the incident's shape, and two others.
+        ("the Junaid Jamshed website", "https://www.junaidjamshed.com/", True),
+        ("the book depository website", "https://www.bookdepository.com/", True),
+        ("the stack overflow site", "https://stackoverflow.com/", True),
+        # One word: the subset test already decided these and still does.
+        # (These are TERMS — _extract_search_term has already taken the verb off;
+        # _destination_reached is what feeds this the goal.)
+        ("the YouTube homepage", "https://www.youtube.com/", True),
+        ("youtube", "https://www.youtube.com/", True),
+        # ⚠️ THE REGRESSIONS. A real query must stay a real query.
+        ("junaid jamshed perfume", "https://www.junaidjamshed.com/", False),
+        ("jane by the long faces", "https://www.youtube.com/", False),
+        ("cats", "https://www.youtube.com/", False),
+        ("the dangers in my heart", "https://www.youtube.com/", False),
+        # The brand names a site we are NOT on.
+        ("the Junaid Jamshed website", "https://www.daraz.pk/", False),
+        # EQUALITY, never containment: one token that happens to sit inside the
+        # label is not the label, or "open jam" would arrive at junaidjamshed.
+        ("jam", "https://www.junaidjamshed.com/", False),
+        ("shed", "https://www.junaidjamshed.com/", False),
+        # A documented limit, pinned so a change to it is deliberate: the tokens
+        # are compared against the host we are ON, and "gmail" is not how
+        # mail.google.com spells itself. Costs one model call, the safe direction.
+        ("my gmail inbox", "https://mail.google.com/", False),
+    ],
+)
+def test_the_destination_matrix(term, url, expected):
+    from app.browser.loop import _names_only_the_destination
+
+    assert _names_only_the_destination(term, url) is expected
+
+
+def test_ordered_query_tokens_agrees_with_the_set_it_orders():
+    """The two views of the same words must never disagree — one decides
+    membership, the other decides spelling."""
+    from app.browser.loop import _ordered_query_tokens, _query_tokens
+
+    for term in [
+        "the Junaid Jamshed website",
+        "junaid jamshed perfume",
+        "jane by the long faces",
+        "the YouTube homepage",
+        "",
+    ]:
+        assert set(_ordered_query_tokens(term)) == _query_tokens(term)
+        assert _ordered_query_tokens(term) == list(dict.fromkeys(_ordered_query_tokens(term)))
+
+    # And it keeps the order the domain spells them in.
+    assert _ordered_query_tokens("the Junaid Jamshed website") == ["junaid", "jamshed"]
+
+
+async def test_the_incident_a_two_word_brand_site_finishes_without_acting():
+    """THE 2026-08-02 INCIDENT, END TO END, on the incident's own page. Before
+    the concatenated-brand test, this run typed "the Junaid Jamshed website" into
+    the storefront's search box and submitted it — a world-acting gesture, so it
+    paused for approval on a page that already WAS the goal, and that pause then
+    closed the tab. The run must now FINISH on step 0."""
+    page = ScriptedPage([
+        _page(
+            [_el(9, "searchbox", "Search for products")],
+            url="https://www.junaidjamshed.com/",
+            title="J. Junaid Jamshed Official Website",
+        ),
+    ])
+    session = FakeSession(page)
+    provider = FakeProvider([])
+
+    outcome = await run_browse(
+        session, "Open the Junaid Jamshed website", provider, keep_open=True
+    )
+
+    assert outcome.success
+    assert provider.calls == 0, "arrival is decided in code — no model call"
+    assert page.acted == [], "nothing was typed into the storefront's search box"
+    assert outcome.action_approval_required is False, (
+        "no gesture, so no approval pause — the second 'options' card the user saw"
+    )
+    # And the storefront is never handed to the media path with Rule 1 lifted.
+    assert outcome.destination_only is True

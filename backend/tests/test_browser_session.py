@@ -95,12 +95,27 @@ class FakePage:
 
 
 class FakeBrowser:
+    """A persistent context. MINTS A DISTINCT PAGE PER new_page(), like the real
+    one — a fake that handed out one shared page made every multi-tab assertion
+    vacuous (two "tabs" were one object), which is exactly the test-shape
+    blindness that has let real defects through this suite before.
+
+    The FIRST new_page() still returns the page the test supplied, so every
+    single-session test that reaches for `fake_browser.page` is unaffected."""
+
     def __init__(self, page=None):
         self.page = page or FakePage()
+        self.pages = [self.page]
         self.closed = False
+        self._minted = 0
 
     async def new_page(self):
-        return self.page
+        self._minted += 1
+        if self._minted == 1:
+            return self.page
+        page = FakePage()
+        self.pages.append(page)
+        return page
 
     async def close(self):
         self.closed = True
@@ -2005,11 +2020,20 @@ class FakeBrowserWithPages(FakeBrowser):
         self.page_listener = callback
 
 
-async def test_open_registers_a_popup_follower(monkeypatch):
+async def test_the_window_registers_one_popup_follower_for_the_whole_context(
+    monkeypatch,
+):
+    """ONE listener for the window, not one per session (2026-08-01). With a
+    context per session it made no difference; sharing one, a listener per
+    session would have every session run the ownership decision on every new
+    tab — and any divergence between them is a cross-tab bug. The decision lives
+    in window._owner_of_new_page, once."""
+    from app.browser import window as browser_window
+
     browser = FakeBrowserWithPages()
     monkeypatch.setattr(browser_session, "BROWSER_FACTORY", lambda: browser)
-    session = await BrowserSession.open({"example.com"})
-    assert browser.page_listener == session._on_new_page
+    await BrowserSession.open({"example.com"})
+    assert browser.page_listener == browser_window._on_context_page
 
 
 async def test_a_popup_is_adopted_under_the_same_interceptor(fake_browser):
@@ -2053,30 +2077,109 @@ async def test_an_adopted_popup_is_still_guarded(fake_browser):
     assert session.stats.blocked_mutations == 1
 
 
+class _PopupPage(FakePage):
+    """A popup that reports an opener, the way Playwright's real one does."""
+
+    def __init__(self, opener, url="https://ads.example.net/win"):
+        super().__init__(url=url)
+        self._opener = opener
+        self.closed = False
+
+    async def opener(self):
+        return self._opener
+
+    async def close(self):
+        self.closed = True
+
+
 async def test_an_unrelated_popup_is_closed_not_adopted(fake_browser):
-    """An ad window (opener is NOT the page we drive) used to unconditionally
-    become self.page — hijacking the loop mid-task. It is now closed."""
+    """An ad window (opened by a page no tab of ours owns) used to
+    unconditionally become self.page — hijacking the loop mid-task. It is closed.
+
+    The DECISION moved to window._owner_of_new_page (2026-08-01) — a session must
+    not adopt a tab merely because it heard about it — so this drives the real
+    dispatch path rather than calling _adopt_new_page directly."""
+    from app.browser import window as browser_window
+
     session = await _session()
     original = session.page
-
-    class _PopupPage(FakePage):
-        def __init__(self, opener):
-            super().__init__(url="https://ads.example.net/win")
-            self._opener = opener
-            self.closed = False
-
-        async def opener(self):
-            return self._opener
-
-        async def close(self):
-            self.closed = True
-
     stranger = FakePage(url="https://example.com/other-tab")
     popup = _PopupPage(opener=stranger)
-    await session._adopt_new_page(popup)
+
+    await browser_window._dispatch_new_page(popup)
 
     assert popup.closed is True
     assert session.page is original          # the loop's page was never hijacked
+
+
+async def test_a_popup_from_our_own_tab_is_adopted_by_that_tab(fake_browser):
+    """The other half of the same decision: a popup our page opened is ours."""
+    from app.browser import window as browser_window
+
+    session = await _session()
+    popup = _PopupPage(opener=session.page, url="https://example.com/apply")
+
+    await browser_window._dispatch_new_page(popup)
+
+    assert session.page is popup
+    assert popup.closed is False
+
+
+async def test_a_session_never_adopts_another_sessions_tab(fake_browser, monkeypatch):
+    """⚠️ THE HAZARD A SHARED CONTEXT CREATES, frozen. `_adopt_new_page` closed a
+    popup only when `opener is not None and opener is not self.page` — and a
+    `context.new_page()` has a NULL opener, so it fell through and ADOPTED. One
+    session would have taken the tab another had just opened for itself and
+    closed its own page out from under a running task."""
+    from app.browser import window as browser_window
+
+    a = await _session()
+    b = await BrowserSession.open({"other.com"})
+    a_page, b_page = a.page, b.page
+
+    # b's brand-new tab, announced to the window with no opener.
+    await browser_window._dispatch_new_page(b_page)
+
+    assert a.page is a_page, "A must not seize B's tab"
+    assert b.page is b_page
+    assert not getattr(a_page, "closed", False), "A's own page must survive"
+
+
+async def test_a_tab_with_no_opener_goes_to_the_session_being_driven(fake_browser):
+    """rel="noopener" and target=_blank genuinely produce a NULL opener, and that
+    is the WeWorkRemotely case the popup follow exists for (2026-07-18). With
+    several tabs open, such a tab belongs to whoever is acting — nobody else is
+    clicking anything."""
+    from app.browser import window as browser_window
+
+    a = await _session()
+    b = await BrowserSession.open({"other.com"})
+    a_page = a.page
+    browser_window.set_driving(b)
+    try:
+        orphan = FakePage(url="https://other.com/apply")   # no opener attribute
+        await browser_window._dispatch_new_page(orphan)
+    finally:
+        browser_window.set_driving(None)
+
+    assert b.page is orphan, "the driving session follows the new tab"
+    assert a.page is a_page, "the idle tab is untouched"
+
+
+async def test_a_tab_with_no_opener_and_no_driver_is_left_alone(fake_browser):
+    """Rule 4: when we cannot tell whose it is, do nothing. Never close another
+    tab on a guess."""
+    from app.browser import window as browser_window
+
+    a = await _session()
+    b = await BrowserSession.open({"other.com"})
+    a_page, b_page = a.page, b.page
+
+    orphan = _PopupPage(opener=None, url="https://elsewhere.example/x")
+    await browser_window._dispatch_new_page(orphan)
+
+    assert a.page is a_page and b.page is b_page
+    assert orphan.closed is False, "an unattributable tab is left alone, not closed"
 
 
 async def test_adopting_a_tab_closes_the_superseded_one(fake_browser):
@@ -2590,10 +2693,19 @@ async def test_without_a_main_frame_id_it_refuses_the_fast_path(context_browser)
     """FAIL SAFE, and the reason this is not just 'try CDP'. Rule 3 needs to
     know which frame is top-level; an adapter that cannot tell would fail OPEN.
     So an unknown frame tree falls back to the slower Playwright route rather
-    than running a quietly weaker guard."""
+    than running a quietly weaker guard.
+
+    The fallback is PER PAGE (2026-08-01). It used to be context-level, which a
+    shared context turns into "this session's allowlist judges every other tab's
+    requests" — Rule 3 is per-session, so that inverts the origin guard both
+    ways."""
     context_browser.main_frame_id = ""
     session = await BrowserSession.open({"example.com"})
-    assert context_browser.routes, "should have fallen back to Playwright routing"
+    assert session.page.routes, "should have fallen back to Playwright routing"
+    assert context_browser.routes == [], (
+        "a context-level route would judge OTHER tabs' requests by this "
+        "session's allowlist"
+    )
     assert session.stats.http_cache_on is False
 
 
@@ -2655,31 +2767,76 @@ async def test_playback_lifts_the_interceptor_by_disabling_fetch(context_browser
     assert session.page.unroute_calls == []
 
 
-async def test_playback_lifts_a_context_route_at_the_context(context_browser):
-    """THE SILENT BUG, frozen (found 2026-07-27), on the fallback path. The route
-    is installed on the CONTEXT, and Playwright's page.unroute filters only that
-    PAGE's own route list — so the old `self.page.unroute(...)` matched nothing,
-    returned successfully, and logged 'interception LIFTED for playback
-    (full-speed window)' about a window that was still fully intercepted. The
-    2026-07-18 "the net is very slow in your profile" fix had therefore never
-    once run in production."""
+async def test_playback_lifts_the_route_on_the_page_that_was_armed(context_browser):
+    """THE SILENT BUG, frozen (found 2026-07-27): the lift must happen AT THE
+    LEVEL THE ROUTE WAS INSTALLED, or it matches nothing, returns successfully,
+    and logs 'interception LIFTED for playback' about a window that is still
+    fully intercepted.
+
+    Since 2026-08-01 that level is the PAGE, and the lift is scoped to this
+    session's own tabs — a context-level lift would disarm the guard on every
+    OTHER live agent tab because an unrelated task started playing a video."""
     context_browser.main_frame_id = ""          # force the Playwright-route path
     session = await BrowserSession.open({"youtube.com"})
     await session.enter_playback_mode(reload=False)
-    assert context_browser.unroute_calls == [("**/*", session._intercept)]
-    assert session.page.unroute_calls == []      # never at the wrong level
+    assert session.page.unroute_calls == [("**/*", session._intercept)]
+    assert context_browser.unroute_calls == [], (
+        "lifting at the context would disarm every other tab's guard"
+    )
+
+
+async def test_playback_lifts_only_this_sessions_tabs(context_browser):
+    """SAFETY. One tab finishing and handing off to the user must not leave
+    another session's running browse with an unguarded browser."""
+    context_browser.main_frame_id = ""
+    playing = await BrowserSession.open({"youtube.com"})
+    working = await BrowserSession.open({"example.com"})
+
+    await playing.enter_playback_mode(reload=False)
+
+    assert playing.page.unroute_calls, "the finished tab lifts its own guard"
+    assert working.page.unroute_calls == [], "the running tab keeps its guard"
+    assert working._read_only is True
+
+
+async def test_a_superseded_tabs_guard_handles_are_forgotten(context_browser):
+    """REGRESSION (found in review, 2026-08-01). Adopting a popup CLOSES the tab
+    it supersedes, and the route installed on that tab dies with it — but the
+    session went on holding the handle. `_unroute_intercept` walks those handles
+    at playback, a dead one raises, and the caller catches that as "could not
+    lift": a session that had ever followed a popup would silently run the
+    DEGRADED path for the rest of its life."""
+    context_browser.main_frame_id = ""      # force the page-route path
+    session = await BrowserSession.open({"example.com"})
+    original = session.page
+    popup = FakePage(url="https://example.com/apply")
+
+    await session._adopt_new_page(popup)
+
+    assert original not in session._routed_pages, "the dead tab's route is forgotten"
+    assert popup in session._routed_pages
+
+    # The lift now touches only live tabs, so it actually performs.
+    async def _dead(pattern, handler=None):
+        raise RuntimeError("Target page, context or browser has been closed")
+
+    original.unroute = _dead
+    await session.enter_playback_mode(reload=False)
+    assert popup.unroute_calls == [("**/*", session._intercept)]
 
 
 async def test_playback_never_claims_a_lift_it_could_not_perform(context_browser):
     """A no-op that reports success is worse than a failure, because nothing
-    ever looks at it again. When the route is on the context and the handle
-    cannot reach it, the honest DEGRADED path must run — and it must not fall
-    back to the page, whose empty route list would 'succeed' meaninglessly."""
+    ever looks at it again. When the route cannot be lifted, the honest DEGRADED
+    path must run rather than a silent 'success'."""
     context_browser.main_frame_id = ""
-    context_browser.unroute = None
     session = await BrowserSession.open({"youtube.com"})
+
+    async def _cannot_unroute(pattern, handler=None):
+        raise RuntimeError("this page cannot unroute")
+
+    session.page.unroute = _cannot_unroute
     await session.enter_playback_mode(reload=False)   # must not raise
-    assert session.page.unroute_calls == []
     # The degraded fallback still relaxes Rule 1, so the player keeps working.
     assert session._read_only is False
     assert (
@@ -2773,3 +2930,127 @@ async def test_a_real_network_failure_is_still_reported_as_one(fake_browser):
     fake_browser.page.goto = _dead
     with pytest.raises(browser_session.BrowserUnreachable, match="refused the connection"):
         await session.goto("https://example.com/x")
+
+
+# ===================================================================
+# A TAB COMING BACK FROM PLAYBACK (2026-08-01, the add-to-cart incident)
+# ===================================================================
+# Live chain, read out of backend.log and the run traces: "open junaidjamshed.com"
+# was handed to the user by enter_playback_mode (interceptor OFF, _read_only
+# False), and 90 seconds later an add-to-cart flow REUSED that same tab. The
+# reuse path restored the allowlist and the history and nothing else, so an
+# autonomous commit ran with Rules 1, 2 and 3 all stood down — the approved POST
+# went out unobserved, the cart really changed, and the tool reported that
+# nothing had been sent.
+
+
+async def test_a_tab_returning_from_playback_is_re_armed(context_browser):
+    """The fix in one assertion: Fetch is re-enabled with the SAME patterns and
+    read-only is restored, so the tab is guarded again before anything drives
+    it."""
+    session = await BrowserSession.open({"example.com"})
+    cdp = context_browser.cdp_sessions[0]
+
+    await session.enter_playback_mode(reload=False)
+    assert "Fetch.disable" in cdp.methods
+    assert session._read_only is False
+
+    assert await session.resume_agent_control() is True
+    assert session._read_only is True
+    enables = [p for m, p in cdp.sent if m == "Fetch.enable"]
+    assert len(enables) == 2, "the re-arm must actually re-enable Fetch"
+    assert enables[0] == enables[1], "a narrower re-arm would silently stop guarding"
+
+
+async def test_a_re_armed_tab_blocks_the_mutation_it_had_stopped_blocking(
+    context_browser,
+):
+    """Not the flag, the BEHAVIOUR. Rule 1 must really be back on: an
+    unapproved form-POST navigation dies again, which is the guarantee the
+    incident lost."""
+    session = await BrowserSession.open({"example.com"})
+    await session.enter_playback_mode(reload=False)
+    await session.resume_agent_control()
+
+    assert await _verdict(
+        session,
+        url="https://example.com/cart/add",
+        method="POST",
+        navigation=True,
+    ) == "abort"
+
+
+async def test_re_arming_does_not_double_register_the_handler(context_browser):
+    """Calling _install_interception again would open a SECOND CDP session and a
+    SECOND handler on one target, so every paused request would be answered
+    twice. The re-arm reuses what is already recorded."""
+    session = await BrowserSession.open({"example.com"})
+    await session.enter_playback_mode(reload=False)
+    await session.resume_agent_control()
+    assert len(context_browser.cdp_sessions) == 1
+    assert len(session._cdp_sessions) == 1
+
+
+async def test_a_tab_that_cannot_be_re_armed_is_not_driven(context_browser):
+    """Fail CLOSED. If the interceptor cannot be put back, the answer is "this
+    tab is not ours to drive" — never "drive it anyway"."""
+    session = await BrowserSession.open({"example.com"})
+    await session.enter_playback_mode(reload=False)
+
+    cdp = context_browser.cdp_sessions[0]
+
+    async def _dead(method, params=None):
+        raise RuntimeError("Target closed")
+
+    cdp.send = _dead
+    assert await session.resume_agent_control() is False
+    assert session._read_only is False, "a refused re-arm must not claim the tab"
+
+
+async def test_resume_is_a_cheap_no_op_on_a_tab_that_never_played(context_browser):
+    """The common path pays nothing: an ordinary tab has no interception to put
+    back, so nothing is re-sent."""
+    session = await BrowserSession.open({"example.com"})
+    before = len(context_browser.cdp_sessions[0].sent)
+    assert await session.resume_agent_control() is True
+    assert len(context_browser.cdp_sessions[0].sent) == before
+    assert session._read_only is True
+
+
+# ---------------------------------------------- closing is the user's call
+async def test_release_closes_a_tab_we_opened(context_browser):
+    """The real method, not a fake's mirror of it. A session we launched owns
+    its window and still cleans it up."""
+    session = await BrowserSession.open({"example.com"})
+    assert session.tab_reused is False
+    await session.release_after_run()
+    # Its tab is gone, and with it the last-tab context.
+    assert context_browser.closed is True
+
+
+async def test_release_leaves_a_tab_we_inherited(context_browser):
+    """User report 2026-08-01: "it closed the tab, which it shouldn't have —
+    that power should be to me." """
+    session = await BrowserSession.open({"example.com"})
+    session.tab_reused = True
+    await session.release_after_run()
+    assert context_browser.closed is False, "the user's window survives the run"
+
+
+async def test_disarm_drops_an_unconsumed_permit(context_browser):
+    """Only FIRING consumes the one-shot permit, so a submit the site never
+    issued leaves it armed. Harmless while the window always closed straight
+    afterwards; not harmless now that a borrowed tab outlives the run."""
+    session = await BrowserSession.open({"example.com"})
+    session.arm_commit("POST", "https://example.com/cart/add")
+    assert session._armed_commit is not None
+
+    session.disarm_commit()
+
+    assert session._armed_commit is None
+    assert await _verdict(
+        session,
+        url="https://example.com/cart/add",
+        method="POST",
+        navigation=True,
+    ) == "abort"

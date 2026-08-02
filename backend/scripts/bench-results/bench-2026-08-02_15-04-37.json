@@ -1,0 +1,45 @@
+{
+  "when": "2026-08-02_15-04-37",
+  "passed": 1,
+  "scored": 1,
+  "blocked": 0,
+  "total": 1,
+  "tasks": [
+    {
+      "id": "ebay-search",
+      "passed": true,
+      "seconds": 80.8,
+      "actions": 2,
+      "records": 60,
+      "url": "https://www.ebay.com/sch/i.html?_nkw=wireless+earbuds&_sacat=0&_from=R40&_trksid=m570.l1313",
+      "tool_success": false,
+      "error": "couldn't work out a safe next action on this page",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": true,
+          "detail": "60 records (needed 3)"
+        },
+        {
+          "kind": "field_present",
+          "passed": true,
+          "detail": "60/60 records carry 'price'"
+        }
+      ],
+      "sample": [
+        {
+          "name": "Shop on eBay",
+          "price": "$20.00"
+        },
+        {
+          "name": "Shop on eBay",
+          "price": "$20.00"
+        },
+        {
+          "name": "- Soundcore Sport X20 True-Wireless Sport Earbuds Ear Hook Noise Cancelling|Refurb",
+          "price": "$59.99"
+        }
+      ]
+    }
+  ]
+}

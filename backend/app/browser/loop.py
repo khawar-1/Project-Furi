@@ -101,6 +101,7 @@ from loguru import logger
 
 from app.agents import browser_grounding
 from app.browser import extract as browser_extract
+from app.browser import publicsuffix
 from app.browser import trace as browse_trace
 from app.core import dom_observe
 from app.providers.base import LLMMessage, LLMProvider
@@ -498,6 +499,16 @@ class BrowseOutcome:
     # result here; empty for a goal that never extracted. Never a grounding source.
     extracted: list = field(default_factory=list)
     blocked: dict = field(default_factory=dict)
+    # The run finished because the goal asked ONLY to be somewhere and we were
+    # there (_destination_reached) — nothing was searched, nothing was clicked.
+    # ⚠️ The tool reads this to decide the keep_open hand-off: `keep_open` means
+    # "leave the window open", NOT "this is a media goal", and the two were
+    # conflated. On a destination arrival the in-place branch would lift Rule 1
+    # and call ensure_playing(), which presses .play() on any <video> — and a
+    # YouTube homepage is full of preview videos. That is a SECOND route to the
+    # 2026-08-01 symptom ("it started playing a video I didn't ask for"), and
+    # the multi-tab round made the in-place branch the common one.
+    destination_only: bool = False
     # The loop stopped at a sign-in wall it must never pass (14.4). Not a
     # failure to replan around — the tool opens a user-driven login window and
     # the plan PAUSES (AWAITING_CHOICE) until the user signs in and says
@@ -623,9 +634,16 @@ _TRAIL_SITE_RE = re.compile(
 # second verb and returning "Find" (live 2026-07-24). The "and <verb>" link is
 # consumed ONLY when another verb actually follows, so a title's own "and" ("play
 # tom and jerry") is never touched.
+# The BARE navigation verbs were missing (2026-08-01): the "go to X and <verb>"
+# prefix below only ever consumed "go to" when another verb FOLLOWED it, so a
+# plain "go to youtube.com" was stripped of nothing and the whole sentence became
+# the search term — "go to youtube.com" typed verbatim into a search box. They
+# belong in the chain like every other verb; what makes a navigation goal safe is
+# _names_only_the_destination downstream, not withholding the strip here.
 _VERB_ALT = (
     r"(?:search(?:\s+for)?|find|look\s+up|look\s+for|play|open|watch|"
-    r"listen\s+to|put\s+on|pull\s+up)"
+    r"listen\s+to|put\s+on|pull\s+up|go\s+to|navigate\s+to|visit|head\s+to|"
+    r"take\s+me\s+to|bring\s+up)"
 )
 _LEAD_VERB_RE = re.compile(
     rf"^\s*(please\s+)?(can\s+you\s+|could\s+you\s+)?"
@@ -803,6 +821,161 @@ _QUERY_STOPWORDS = frozenset(
 )
 
 
+# ------------------------------------------------- destination goals vs search goals
+# ⚠️ A NAVIGATION GOAL IS NOT A SEARCH GOAL (2026-08-01, live). "Open the YouTube
+# homepage" typed *the goal's own words* into YouTube's search box, then
+# _top_result_action clicked a result — and keep_open handed that video to the
+# playback window. The user asked to open YouTube and got a video playing.
+#
+# The cause is in _extract_search_term's verb list: `open` and `pull up` sit next
+# to `search for`/`find`/`play`, so the verb is stripped and whatever remains is
+# called a query. What remains, for a navigation goal, IS THE DESTINATION.
+# Measured across goals: "open youtube" searched YouTube for "youtube", "open
+# google" searched Google for "google", "pull up amazon" searched Amazon for
+# "amazon". Every "open X" browse goal did this. It survived because the fast
+# path's eight live-incident guards are all about MANGLING a title — none of them
+# asks whether there is a title at all.
+#
+# ⚠️ THE TEMPTING FIX IS WRONG: dropping `open` from the verb list breaks "open
+# the dangers in my heart", a real search goal. The distinguishing fact is not
+# the VERB, it is whether the residue names ANYTHING THE PAGE IS NOT. So the test
+# is structural and needs no intent classification: reduce the residue to
+# significant tokens and compare against the host we are already on. A subset
+# means the goal named a place, not a thing to look for.
+#
+# Asymmetric by design, in the safe direction: a false "this is a destination"
+# costs ONE model call (the fast path defers and the model decides correctly); a
+# false negative costs this incident. So the comparison is deliberately generous
+# — every host label counts, not just the registrable name.
+_PLACE_WORDS = frozenset(
+    {
+        # the site itself
+        "homepage", "home", "page", "pages", "site", "website", "web", "www",
+        "com", "org", "net", "main", "front", "index",
+        # an AREA of a site — "open my gmail inbox" names a place too
+        "dashboard", "feed", "inbox", "profile", "account", "settings",
+    }
+)
+
+
+def _destination_tokens(url: str) -> set[str]:
+    """The words that merely NAME the site we are on — its host labels plus its
+    registrable name, minus generic place words. Empty when there is no host."""
+    host = (urlparse(url or "").hostname or "").lower().rstrip(".")
+    if not host:
+        return set()
+    labels = {t for t in host.split(".") if len(t) > 1}
+    name = publicsuffix.registrable_name(host)
+    if name:
+        labels.add(name)
+    return labels - _PLACE_WORDS
+
+
+def _query_tokens(term: str) -> set[str]:
+    """The words of `term` that could actually name a thing to look for — its
+    significant tokens, minus stopwords and minus words that name a place."""
+    return _title_tokens(term) - _QUERY_STOPWORDS - _PLACE_WORDS
+
+
+def _ordered_query_tokens(term: str) -> list[str]:
+    """`_query_tokens` in the order they were said, which is the order a domain
+    label spells them. Same membership, so the two can never disagree."""
+    keep = _query_tokens(term)
+    out: list[str] = []
+    for token in re.split(r"[^a-z0-9]+", (term or "").lower()):
+        if token in keep and token not in out:
+            out.append(token)
+    return out
+
+
+def _names_only_the_destination(term: str, url: str) -> bool:
+    """True when `term` names nothing beyond the page we are already on — so it
+    is a DESTINATION ("the YouTube homepage" on youtube.com, "open youtube"),
+    never a query. A term that survives this names something the site is not
+    ("jane by the long faces", "cats"), and searching for it is right.
+
+    ⚠️ A MULTI-WORD BRAND CONCATENATES IN ITS DOMAIN (2026-08-02). The subset
+    test is exactly right when the brand is one word and blind when it is two:
+
+        "the Junaid Jamshed website" -> {junaid, jamshed}
+        www.junaidjamshed.com        -> {junaidjamshed}
+        {junaid, jamshed} ⊄ {junaidjamshed}   -> "there is something to find"
+
+    Live, that verdict sent the fast path to type the goal's own words into a
+    storefront's search box, which is a world-acting gesture, which paused the
+    run for approval — on a page that was already exactly where the goal asked
+    to be. So the tokens are also compared the way the host spells them: joined,
+    in the order they were said. EQUALITY with a label, never containment — a
+    lone "jam" must not match "junaidjamshed" — and only from two tokens up,
+    since one token is what the subset test already decides.
+    """
+    tokens = _query_tokens(term)
+    if not tokens:
+        return True  # "open the homepage", "open the site" — nothing to look for
+    dest = _destination_tokens(url)
+    if not dest:
+        return False
+    if tokens <= dest:
+        return True
+    ordered = _ordered_query_tokens(term)
+    return len(ordered) > 1 and "".join(ordered) in dest
+
+
+def _destination_reached(goal: str, obs: dom_observe.Observation) -> bool:
+    """True when the goal asks only to BE somewhere and we ARE there — so it is
+    already achieved and the run is over.
+
+    The loop had exactly two "already there → done" terminators before this
+    (_is_media_watch_page and _current_episode), both media-specific. A goal
+    whose entire content is *be at this page* could not finish in code even when
+    it was satisfied the instant the page loaded — which is what left the
+    2026-08-01 run hunting for something to do on a YouTube homepage that was
+    already open. This is the general case those two are instances of.
+
+    Conservative on both sides: a goal we cannot reduce to a term at all
+    (_extract_search_term → None: a compose goal, a multi-clause instruction) is
+    never called done, and a residue naming anything the site is not
+    ("youtube and find the video about X") is not a destination goal."""
+    if not (urlparse(obs.url or "").hostname or ""):
+        return False
+    term = _extract_search_term(goal)
+    if term is None:
+        return False
+    return _names_only_the_destination(term, obs.url)
+
+
+# DID THE GOAL ASK FOR PLAYBACK? (2026-08-01, the junaidjamshed add-to-cart.)
+#
+# The keep_open hand-off lifts Rule 1 and presses .play() on the page, so the
+# question it really turns on is "was this a play/watch goal?" — and it was
+# being answered NEGATIVELY, as `keep_open and not destination_only`. A negative
+# test over an LLM-authored goal string fails OPEN: the planner wrote "Open the
+# junaidjamshed.com homepage so it is visible in the browser.", the trailing
+# clause defeated _extract_search_term (None ⇒ not a destination goal), and a
+# storefront was handed to the user with the interceptor off and a banner video
+# playing. Lifting a safety guard must require a REASON, not the absence of one.
+#
+# THE VERB MUST LEAD. Mere presence is not enough: "find a watch under $200" and
+# "buy a watch on amazon" both contain a playback word and neither asks for
+# playback. Anchoring to the leading verb chain — the same chain _LEAD_VERB_RE
+# already parses, so "Find and play X" and "go to site and find and play X"
+# still qualify — is what separates the verb from the noun. A goal we cannot
+# read as asking for playback simply keeps its window open, which is what
+# keep_open meant in the first place.
+_PLAYBACK_GOAL_RE = re.compile(
+    rf"^\s*(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?"
+    rf"(?:go\s+to\s+[\w.\-]+\s+and\s+)?"
+    rf"(?:{_VERB_ALT}\s+and\s+(?:then\s+)?)*"
+    rf"(?:play|watch|listen\s+to|put\s+on|stream|resume)\b",
+    re.IGNORECASE,
+)
+
+
+def goal_wants_playback(goal: str) -> bool:
+    """True when the goal's leading verb asks for something to be PLAYED."""
+    return bool(_PLAYBACK_GOAL_RE.match(goal or ""))
+
+
 # A YouTube VIDEO page — the play/watch destination (youtube.com/watch?v=… or a
 # youtu.be short link). Reaching one for a keep_open play goal IS arrival: the
 # clean ad-blocked window is what actually PLAYS it, so the loop must never wait on
@@ -827,7 +1000,16 @@ def _top_result_action(obs: dom_observe.Observation, goal: str) -> Optional[dict
     a results page, or when no candidate clearly matches (defer to the model)."""
     if not _YT_RESULTS_RE.search(obs.url or ""):
         return None
-    want = _title_tokens(_extract_search_term(goal) or goal) - _QUERY_STOPWORDS
+    term = _extract_search_term(goal) or goal
+    # A "query" that names only the site is not a query, and EVERY row on
+    # youtube.com/results mentions YouTube — so the overlap test below would
+    # score 1 on an arbitrary video and click it. That is the second half of the
+    # 2026-08-01 incident: the junk search became an action the user never asked
+    # for. The guard here was `best_score == 0 → defer`, and one shared token off
+    # a garbage query is not a match.
+    if _names_only_the_destination(term, obs.url):
+        return None
+    want = _query_tokens(term)
     if not want:
         return None
     best_el = None
@@ -855,6 +1037,15 @@ def _fast_path_action(
     intent phrase on a search engine."""
     term = query or _extract_search_term(goal)
     if not term:
+        return None
+    # ⚠️ The gate sits HERE, on the FINAL term, not in _search_query_for: this
+    # function falls back to _extract_search_term whenever `query` is None, so a
+    # refusal upstream would be routed around and the goal searched anyway.
+    if _names_only_the_destination(term, obs.url):
+        logger.info(
+            f"browse: goal names a destination, not a search term ({term!r}) "
+            "— no fast-path search"
+        )
         return None
     candidates = [
         e
@@ -3083,6 +3274,10 @@ def _outcome(
         # hand-off) carries the gathered data out with one change, not twenty.
         extracted=gathered,
         performed_gesture=performed,
+        # Mirrored on the session for the same reason as the two above: every
+        # return path funnels through here, so one read carries it out of all
+        # of them.
+        destination_only=bool(getattr(session, "browse_destination_only", False)),
         blocked=session.stats.as_dict() if getattr(session, "stats", None) else {},
     )
 
@@ -3472,6 +3667,24 @@ async def run_browse(
                 "reason": "On the video's page — handing it to a normal browser window to play.",
             }
             logger.info("browse: reached the media watch page → done (hand off to clean window)")
+
+        # DESTINATION REACHED → DONE (2026-08-01): the goal asks only to BE
+        # somewhere ("open youtube", "go to youtube.com", "Open the YouTube
+        # homepage") and we are there. Nothing is left to do, so finish in CODE —
+        # no LLM call, no fast-path search, no chance to invent work. The general
+        # case of the media/episode terminators above; see _destination_reached.
+        if action is None and not commit and _destination_reached(goal, obs):
+            action = {
+                "action": "done",
+                "reason": f"{obs.title or obs.url} is open — that was the whole goal.",
+            }
+            # Read back by _outcome so the tool does NOT treat this as a media
+            # run: opening a page is not asking for anything to be played.
+            try:
+                session.browse_destination_only = True
+            except Exception:  # a frozen//slotted fake — the flag is best-effort
+                pass
+            logger.info(f"browse: destination reached ({obs.url}) → done, no further action")
 
         # DETERMINISTIC EPISODE NAVIGATION (2026-07-23): the goal names a specific
         # episode and we can PROVE which URL number is the episode (the title↔URL

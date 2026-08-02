@@ -1287,6 +1287,78 @@ def _inject_approved_origins(plan: AgentPlan) -> None:
         step.parameters["allowed_origins"] = current
 
 
+def _inject_site_corrections(plan: AgentPlan) -> None:
+    """Re-point any browse step still aimed at an address this plan already
+    learned does not exist — the sibling of _inject_approved_origins, and needed
+    for the same reason one level down.
+
+    _apply_site_correction fixes the steps that are PENDING when the user
+    answers. It cannot fix a step that does not exist yet, and revise drops and
+    re-drafts pending steps from `plan.goal` — which still says the misheard
+    address, because a correction never rewrites the user's words. Worse, the
+    dead host stays permanently GROUNDED (ground_origins reads the goal), so
+    _browse_origin_violation will happily let a re-drafted step aim at it and the
+    plan asks "did you mean…?" a second time about a question already answered.
+
+    Enforce, never trust the revise LLM to carry the answer forward — the
+    2026-07-12 folder_resolver lesson. No-op when nothing has been corrected,
+    which is every ordinary plan."""
+    corrections = getattr(plan, "site_corrections_applied", None) or {}
+    if not corrections:
+        return
+    for step in plan.pending_steps():
+        if step.tool not in browser_grounding._BROWSE_TOOLS:
+            continue
+        # An approval-bound step is never re-aimed (the stamp_start_url rule):
+        # re-pointing a read contract the user already approved would change
+        # what they said yes to.
+        if browse_state.commit_contract(step.parameters) is not None:
+            continue
+        for wrong, right in corrections.items():
+            if _step_targets_host(step, wrong):
+                if _apply_one_site_correction(step, wrong, right):
+                    logger.info(
+                        f"a re-drafted step still aimed at '{wrong}' — re-pointed "
+                        f"to '{right}', the address the user confirmed"
+                    )
+
+
+def _step_targets_host(step: PlanStep, host: str) -> bool:
+    """True when a browse step's start_url or allowlist still names `host`."""
+    if not host:
+        return False
+    if browser_grounding._normalize_origin(
+        str(step.parameters.get("start_url") or "")
+    ) == host:
+        return True
+    raw = step.parameters.get("allowed_origins")
+    current = [raw] if isinstance(raw, str) else [str(o) for o in (raw or [])]
+    return any(browser_grounding._normalize_origin(o) == host for o in current)
+
+
+def _apply_one_site_correction(step: PlanStep, wrong: str, right: str) -> bool:
+    """Move one browse step off `wrong` and onto `right`: where it opens, what
+    its interceptor permits, and — because the approval card quotes the address
+    out of the LLM's own sentence — what it SAYS. A card that names one site
+    while acting on another is a card the user cannot rely on (2026-08-01)."""
+    changed = browse_state.stamp_start_url(step.parameters, f"https://{right}/")
+    raw = step.parameters.get("allowed_origins")
+    current = [raw] if isinstance(raw, str) else [str(o) for o in (raw or [])]
+    rebuilt = [
+        o for o in current
+        if browser_grounding._normalize_origin(o) not in (wrong, right)
+    ]
+    rebuilt.append(right)
+    if rebuilt != current:
+        changed = True
+    step.parameters["allowed_origins"] = rebuilt
+    if step.description:
+        step.description = re.sub(
+            rf"(?:www\.)?{re.escape(wrong)}", right, step.description, flags=re.IGNORECASE
+        )
+    return changed
+
+
 def _browse_origin_violation(steps: list[PlanStep], grounded: set[str]) -> Optional[str]:
     """Retry-feedback text when a browse step would visit a site the user never
     named — the navigation mirror of _recipient_violation. Checked on every
@@ -2089,6 +2161,13 @@ def _apply_site_correction(plan: AgentPlan, wrong_host: str, right_host: str) ->
 
     if right not in plan.approved_origins:
         plan.approved_origins.append(right)
+    # Recorded BEFORE the loop, so it holds even when there is no pending browse
+    # step to re-point (the question gate asks at DRAFT time, when the plan has
+    # no steps at all). _inject_site_corrections replays it onto every step
+    # drafted from here on — see the field's own comment for why the goal string
+    # makes that necessary.
+    if wrong and wrong != right:
+        plan.site_corrections_applied[wrong] = right
 
     changed = False
     for step in plan.pending_steps():
@@ -2100,22 +2179,11 @@ def _apply_site_correction(plan: AgentPlan, wrong_host: str, right_host: str) ->
         # enforced, not assumed — the stamp_start_url rule.
         if browse_state.commit_contract(step.parameters) is not None:
             continue
-        if browse_state.stamp_start_url(step.parameters, f"https://{right}/"):
-            changed = True
-        raw = step.parameters.get("allowed_origins")
-        current = [raw] if isinstance(raw, str) else [str(o) for o in (raw or [])]
-        rebuilt = [
-            o for o in current
-            if browser_grounding._normalize_origin(o) not in (wrong, right)
-        ]
-        rebuilt.append(right)
-        step.parameters["allowed_origins"] = rebuilt
-        # The card's prose, made to agree with the card's contract. Case- and
-        # www-insensitive, because the draft may have written it either way.
-        if wrong and step.description:
-            step.description = re.sub(
-                rf"(?:www\.)?{re.escape(wrong)}", right, step.description, flags=re.IGNORECASE
-            )
+        # ONE implementation of "move this step off wrong and onto right",
+        # shared with _inject_site_corrections. Two copies of a re-point would
+        # drift, and the half that drifts is the one that stops refreshing the
+        # approval card's prose.
+        _apply_one_site_correction(step, wrong, right)
         changed = True
     if changed:
         logger.info(f"site corrected: {wrong or '?'} → {right}; resuming the browse there")
@@ -2162,10 +2230,13 @@ def _site_correction_question(typed_host: str, suggestions: list) -> PlanQuestio
     else:
         joined = ", ".join(names[:-1]) + f" or {names[-1]}"
         lead = f"Did you mean {joined}?"
+    # The wording is true whether or not a navigation was ever attempted: this
+    # question is now also asked at DRAFT time, before any browser exists
+    # (2026-08-02), and "I couldn't open it" would be a small fiction there.
     text = (
-        f"'{host}' doesn't exist — nothing answers to that address, so I "
-        f"couldn't open it. {lead} I'll only go to a site you confirm, so tell "
-        f"me which one (or type the correct address yourself)."
+        f"'{host}' doesn't exist — nothing answers to that address, so there is "
+        f"nothing there to open. {lead} I'll only go to a site you confirm, so "
+        f"tell me which one (or type the correct address yourself)."
     )
     return PlanQuestion(
         text=text,
@@ -2225,6 +2296,111 @@ def _match_site_choice(answer: str, offered: list[str]) -> str:
     if len(hosts) == 1 and _AFFIRMATIVE_RE.match(text):
         return hosts[0]
     return ""
+
+
+async def _verified_site_question(
+    question: PlanQuestion, goal: str, attempt: int
+) -> tuple[Optional[PlanQuestion], Optional[str]]:
+    """Verify a clarifying question's ADDRESS options against DNS, and — when
+    every one of them is dead — answer the question instead of asking it.
+
+    ⚠️ THE INCIDENT (2026-08-02). Spoken "open junaidjamshed.com", transcribed
+    `openjunetjamshed.com`. At DRAFT time, before any browser existed, the model
+    asked a perfectly sensible question — "did you mean junetjamshed.com, or is
+    the site literally openjunetjamshed.com?" — and offered those two addresses
+    as clickable options. NEITHER EXISTS. The user clicked into a dead end and
+    had to work the real domain out themselves.
+
+    Two gaps met here, and both are gaps in rules that already exist:
+
+    1. `_option_is_dead_path` enforces "an option written as a concrete thing
+       must EXIST" — the 2026-07-10 rule, after a draft offered two invented
+       PATHS and the plan died on the one the user clicked. Its first line is
+       `if not _PATH_LIKE_RE.match(text): return False`, so its whole notion of
+       "concrete thing" is a filesystem path. An address is exactly as concrete
+       and exactly as checkable, and nothing checked it.
+
+    2. `did_you_mean` — search-backed, similarity-filtered, DNS-verified, and
+       MEASURED right on this very input — is wired only to a live navigation
+       NXDOMAIN. The model asked INSTEAD of drafting a browse step, so nothing
+       ever navigated, so the component that had the answer never ran. (The
+       stored plan proves it: `site_corrections: 0`.) `question_gate.self_resolve`
+       could not cover it either — its first line returns "pass" when a question
+       has more than one option, and a "did you mean A or B?" always does.
+
+    So: the same oracle, moved to the same TIME the question is asked. This is
+    `question_gate`'s own doctrine ("never ask the user something Jarvis can
+    answer with its own tools") with DNS in place of a filesystem walk, and it
+    grants nothing — a suggestion is still only OFFERED, and the user's reply is
+    still what grounds the origin.
+
+    Costs nothing on a question that offers no addresses, which is nearly all of
+    them: the first check is a regex over the options and it returns immediately.
+    """
+    hosts = [did_you_mean.option_host(o) for o in question.options]
+    if not any(hosts):
+        return question, None
+    try:
+        alive = await did_you_mean.verify_hosts(h for h in hosts if h)
+    except Exception as exc:  # belt: verification is optional, the plan is not
+        logger.warning(f"site option verification failed (non-critical): {exc}")
+        return question, None
+
+    dead = [o for o, h in zip(question.options, hosts) if h and h not in alive]
+    if not dead:
+        return question, None
+
+    if len(dead) < len([h for h in hosts if h]):
+        # Some addresses are real. Drop the fabrications and let the user choose
+        # between the truths — the _option_is_dead_path behaviour.
+        logger.warning(f"Dropped {len(dead)} unresolvable address option(s): {dead}")
+        question.options = [o for o in question.options if o not in dead]
+        return question, None
+
+    # EVERY address offered is dead. Look up what the user may actually have
+    # meant, from the address the GOAL's own words named where we can tell —
+    # the goal is the thing that was misheard, and a suggestion for a host the
+    # model invented would be a guess about a guess.
+    typed = ""
+    dead_hosts = [h for o, h in zip(question.options, hosts) if o in dead and h]
+    try:
+        grounded = {
+            browser_grounding._normalize_origin(o)
+            for o in browser_grounding.ground_origins(goal)
+        }
+        typed = next((h for h in dead_hosts if h in grounded), "")
+    except Exception:  # grounding is best-effort; a miss just costs precision
+        typed = ""
+    typed = typed or (dead_hosts[0] if dead_hosts else "")
+    suggestions = []
+    if typed:
+        try:
+            suggestions = await did_you_mean.suggest_sites(typed)
+        except Exception as exc:
+            logger.warning(f"site suggestion lookup failed (non-critical): {exc}")
+    if suggestions:
+        logger.info(
+            f"Question gate: every address offered for '{typed}' is dead — "
+            "answering with " + ", ".join(s.host for s in suggestions)
+        )
+        replacement = _site_correction_question(typed, suggestions)
+        replacement.about_host = typed
+        return replacement, None
+
+    if attempt == 1:
+        return None, (
+            "your question offered addresses that do not exist: "
+            + "; ".join(dead[:4])
+            + ". NEVER invent a web address as a question option — an option is "
+            "a clickable fact and must be a site the user named or one a search "
+            "actually returned. If the address in the goal may be misheard or "
+            "misspelled, return a browse step for it anyway: the browser reports "
+            "an unresolvable host and the user is then asked with VERIFIED "
+            "alternatives."
+        )
+    logger.warning(f"Dropped {len(dead)} unresolvable address option(s): {dead}")
+    question.options = [o for o in question.options if o not in dead]
+    return question, None
 
 
 def _auth_offer_question(info: dict) -> PlanQuestion:
@@ -2392,6 +2568,28 @@ def _placeholder_strings(value: Any) -> list[str]:
     if isinstance(value, list):
         return [s for v in value for s in _placeholder_strings(v)]
     return []
+
+
+def _unconfirmed_mutation(step: PlanStep) -> bool:
+    """Did this failed step FIRE a real-world action it could not confirm?
+
+    A replan is the right answer to "that didn't work" and the wrong answer to
+    "I don't know whether that worked". The failure the browse stack cannot rule
+    out is a submit that WAS fired and never observed: an in-page fetch is never
+    blocked, so absence of a match is not absence of a request (see
+    commit_flow._unfired_reason, which has said exactly that in words since
+    2026-07-26 while the OUTCOME still went round the replan loop). Retrying is
+    a second add-to-cart today and a second payment the day someone approves
+    one, so the plan stops and says so — the user can look at the page and
+    decide, which is the only party who can.
+
+    The flag is set by the tool, which is the only layer that knows whether the
+    form was still there; a form that had VANISHED sent nothing, and retrying
+    that is safe and stays on the ordinary replan path.
+    """
+    if step.result is None or not isinstance(step.result.output, dict):
+        return False
+    return bool(step.result.output.get("fired_unconfirmed"))
 
 
 def _unrouted_failure(plan: AgentPlan) -> Optional[PlanStep]:
@@ -3059,6 +3257,16 @@ class AgentPlanner:
         plan.question = question
         plan.status = PlanStatus.AWAITING_CHOICE
         plan.questions_asked += 1
+        if question.kind == "site_correction" and question.about_host:
+            # A "did you mean…?" the question gate answered for the model
+            # (2026-08-02). Arm the SAME deterministic reply path a
+            # navigation-time correction uses, so the answer is decided in code
+            # (_match_site_choice, fail-closed) and a decline stops honestly
+            # instead of being handed to a revise round as free text.
+            plan.pending_site_correction = question.about_host
+            plan.pending_site_candidates = [
+                o for o in question.options if did_you_mean.option_host(o)
+            ]
         logger.info(
             f"Plan paused on a clarifying question "
             f"({plan.questions_asked}/{MAX_QUESTIONS}): '{question.text[:80]}'"
@@ -3501,6 +3709,10 @@ class AgentPlanner:
         # origins into the pending browse steps' allowlists in code, so a step
         # the revise LLM just re-drafted can reach the site the user said yes to.
         _inject_approved_origins(plan)
+        # "Did you mean…?" (2026-08-02): the same enforcement for the address the
+        # user CORRECTED — a re-drafted step must not aim back at the dead host
+        # the goal string still names.
+        _inject_site_corrections(plan)
 
         while (idx := plan.next_pending_index()) is not None:
             # Cooperative cancel (Part 6): checked BETWEEN steps, before
@@ -3892,6 +4104,19 @@ class AgentPlanner:
                     if retry is not None:
                         plan.steps.insert(idx + 1, retry)
                     continue
+                if _unconfirmed_mutation(step):
+                    # Fired, unconfirmed: the world may already have changed, so
+                    # the plan ENDS here rather than replanning the same submit.
+                    plan.status = PlanStatus.FAILED
+                    plan.message = (result.error or "").strip() or (
+                        "I submitted that but could not confirm it went "
+                        "through. Please check the site before trying again."
+                    )
+                    logger.warning(
+                        f"Unconfirmed mutation on '{step.description}' — ending "
+                        "the plan instead of replanning a possible duplicate"
+                    )
+                    return {"plan": plan, "pause_reason": None}
                 pause = "failed_step"
                 break
 
@@ -4231,6 +4456,14 @@ class AgentPlanner:
             if draft is not None:
                 if draft.question is not None and draft.question.text:
                     question, error = self._validated_question(draft.question, attempt)
+                    if question is not None:
+                        # The same rule, for the other kind of concrete thing an
+                        # option can be: an ADDRESS must resolve, and when none of
+                        # the offered ones do, a search answers the question
+                        # rather than the user (2026-08-02).
+                        question, error = await _verified_site_question(
+                            question, goal, attempt
+                        )
                     if question is not None:
                         # Self-resolution gate: never ask the user something a
                         # real search can answer. Reject-with-the-answer on

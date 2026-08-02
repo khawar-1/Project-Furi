@@ -613,6 +613,22 @@ class StubCommitSession:
         self.page = object()
         self.stats = browser_session.InterceptStats()
         self.commits_done = 0  # multi-commit budget counter (15.1)
+        # Only the run that OPENED a tab may close it (2026-08-01) — a commit
+        # flow that inherited the user's window hands it back instead.
+        self.tab_reused = False
+        self.disarmed = False
+
+    def disarm_commit(self):
+        # Firing is what consumes the one-shot permit, so a submit the site
+        # never issued leaves it armed; perform() must drop it explicitly now
+        # that the tab can outlive the run. Recorded separately from `armed`,
+        # which stays the record of the arm CALL — the evidence tests read to
+        # check WHAT was approved.
+        self.disarmed = True
+
+    async def release_after_run(self):
+        if not self.tab_reused:
+            await self.close()
 
     async def enter_playback_mode(self, *, reload=True):
         # A kept-open result window must NEVER lift interception (unlike media) —
@@ -1827,3 +1843,180 @@ async def test_a_submission_that_did_not_fire_is_never_counted_or_confirmed(
     assert result["submitted"] is False
     assert result["commits_done"] == 0
     assert stub.commits_done == 0
+
+
+# ==========================================================================
+# THE TAB IS THE USER'S, AND "UNCONFIRMED" IS NOT "DIDN'T HAPPEN"
+# (2026-08-01, the junaidjamshed add-to-cart)
+# ==========================================================================
+# The submit really fired and the cart really changed; the interceptor that
+# would have observed it had been lifted by an earlier task's playback hand-off
+# and never put back. So the flow reported failure, CLOSED the tab the user had
+# asked an earlier task to open, and sent a DESTRUCTIVE submit back round the
+# replan loop.
+
+
+async def test_an_inherited_tab_is_left_open_after_a_submit(_direct_browser_runtime):
+    """User report: "it closed the tab, which it shouldn't have — that power
+    should be to me." A flow that inherited the window hands it back."""
+    stub = StubCommitSession(verify=True, fired=False)
+    stub.tab_reused = True
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    await browser_commit.perform(dict(_STATE))
+
+    assert stub.closed is False, "we did not open that tab"
+
+
+async def test_a_tab_we_opened_is_still_closed(_direct_browser_runtime):
+    """The rule is "only the opener closes it", not "never close" — a window
+    this run launched is still cleaned up."""
+    stub = StubCommitSession(verify=True, fired=False)
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    await browser_commit.perform(dict(_STATE))
+
+    assert stub.closed is True
+
+
+async def test_an_unconsumed_permit_is_dropped_before_the_tab_outlives_the_run(
+    _direct_browser_runtime,
+):
+    """What enforced "one submit, ever" was the window CLOSING; now that a tab
+    can outlive the run, the one-shot permit has to be dropped explicitly. Only
+    FIRING consumes it, so a submit the site never issued leaves it armed."""
+    stub = StubCommitSession(verify=True, fired=False)
+    stub.tab_reused = True
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    await browser_commit.perform(dict(_STATE))
+
+    assert stub.disarmed is True
+
+
+async def test_a_fired_but_unobserved_submit_is_flagged_unconfirmed(
+    _direct_browser_runtime,
+):
+    """THE INCIDENT'S FLAG. The form was found and fired; nothing was observed.
+    That is "unknown", not "no" — and a replan of a destructive submit is a
+    second add-to-cart today and a second payment the day one is approved."""
+    stub = StubCommitSession(verify=True, fired=False, form_found=True)
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    result = await browser_commit.perform(dict(_STATE))
+
+    assert result["submitted"] is False
+    assert result["fired_unconfirmed"] is True
+
+
+async def test_a_vanished_form_is_safe_to_retry(_direct_browser_runtime):
+    """The one case we can rule a submission OUT: the approved form was gone, so
+    nothing was clicked. That stays on the ordinary replan path."""
+    stub = StubCommitSession(verify=True, fired=False, form_found=False)
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    result = await browser_commit.perform(dict(_STATE))
+
+    assert result["fired_unconfirmed"] is False
+
+
+async def test_an_undetermined_submit_counts_as_fired(_direct_browser_runtime):
+    """form_found None — the driver did not say. Fail closed: the cost of being
+    wrong runs one way."""
+    stub = StubCommitSession(verify=True, fired=False, form_found=None)
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    result = await browser_commit.perform(dict(_STATE))
+
+    assert result["fired_unconfirmed"] is True
+
+
+async def test_a_form_that_changed_is_not_unconfirmed(_direct_browser_runtime):
+    """Refused BEFORE arming, so nothing was sent and a retry is safe."""
+    stub = StubCommitSession(verify=False)
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    result = await browser_commit.perform(dict(_STATE))
+
+    assert result["submitted"] is False
+    assert result.get("fired_unconfirmed") is not True
+
+
+# ------------------------------------------------- the plan stops, not retries
+async def test_an_unconfirmed_submit_ends_the_plan_instead_of_replanning(
+    db_session, monkeypatch
+):
+    """⚠️ THE INCIDENT'S THIRD SYMPTOM: "the task was still showing as going on."
+
+    The approved add-to-cart fired, the cart really changed, and because the
+    interceptor had been lifted the flow could not observe it — so a DESTRUCTIVE
+    submit went back into the replan loop while the world had already moved. A
+    replan is the right answer to "that didn't work" and the wrong answer to "I
+    don't know whether that worked": the next round is a second add-to-cart, and
+    the day someone approves a payment it is a second payment.
+
+    Measured as "no provider call AFTER the pause", not as a total: the draft
+    and reflect rounds happen before the submit and are not what we are pinning.
+    A replan is exactly one more call, and there is none."""
+
+    async def fake_discover(params, session_id=None, **kwargs):
+        return browser_commit.CommitDiscovery(state=dict(_STATE))
+
+    async def unconfirmed_exec(tool, params, db, session_id=None, approved=False):
+        return ToolResult(
+            success=False,
+            error=(
+                "I fired the form's submit, but no request left the page within "
+                "6s. Nothing was confirmed as sent."
+            ),
+            output={"submitted": False, "fired_unconfirmed": True},
+            permission_level=PermissionLevel.DESTRUCTIVE,
+        )
+
+    monkeypatch.setattr(browser_commit, "discover", fake_discover)
+    monkeypatch.setattr(planner_mod, "execute_tool", unconfirmed_exec)
+
+    provider = FakeProvider([plan_json([_commit_step()])])
+    planner = AgentPlanner(db_session, provider, session_id="s-unconfirmed")
+    plan = await planner.start("post 'hello world' as a comment on example.com")
+    assert plan.status == PlanStatus.AWAITING_APPROVAL
+    before_submit = provider.calls
+
+    resumed = await planner.resume(plan, approved=True)
+
+    assert resumed.status == PlanStatus.FAILED
+    # The step's OWN words reach the user — they are the only party who can
+    # look at the page and decide.
+    assert "Nothing was confirmed as sent" in (resumed.message or "")
+    assert provider.calls == before_submit, "a replan would submit a second time"
+
+
+async def test_a_submit_that_could_not_have_happened_still_replans(
+    db_session, monkeypatch
+):
+    """The counterpart, and what keeps the stop narrow: the approved form was
+    GONE, so nothing was clicked and nothing was sent. Retrying that is safe, so
+    it stays on the ordinary replan path."""
+
+    async def fake_discover(params, session_id=None, **kwargs):
+        return browser_commit.CommitDiscovery(state=dict(_STATE))
+
+    async def vanished_exec(tool, params, db, session_id=None, approved=False):
+        return ToolResult(
+            success=False,
+            error="The approved form is no longer on the page, so nothing was submitted.",
+            output={"submitted": False, "fired_unconfirmed": False},
+            permission_level=PermissionLevel.DESTRUCTIVE,
+        )
+
+    monkeypatch.setattr(browser_commit, "discover", fake_discover)
+    monkeypatch.setattr(planner_mod, "execute_tool", vanished_exec)
+
+    provider = FakeProvider(
+        [plan_json([_commit_step()]), plan_json([]), plan_json([])]
+    )
+    planner = AgentPlanner(db_session, provider, session_id="s-vanished")
+    plan = await planner.start("post 'hello world' as a comment on example.com")
+    await planner.resume(plan, approved=True)
+
+    assert provider.calls > 1, "a submission ruled out is safe to replan"

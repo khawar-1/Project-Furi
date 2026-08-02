@@ -735,3 +735,85 @@ def test_browse_commit_stays_quiet_when_the_action_url_was_used():
         {"url": "https://shop.test/thanks", "title": "Thanks", "response_text": "Done"}
     )
     assert "Sent as" not in text
+
+
+# ==================================== destination-only browse (2026-08-01)
+#
+# The wall of text, second time. The 2026-07-25 round above suppressed the DOM
+# dump for a MEDIA outcome; a browse whose goal was only to ARRIVE somewhere
+# was not covered and fell to the informational branch. Live: "open youtube"
+# finished correctly in one second and then replied with the entire YouTube
+# homepage — 108 element lines plus every video title on it, 8,609 characters.
+
+def _youtube_homepage_dump() -> str:
+    elements = "\n".join(
+        f'[{i}] link "some video {i}" -> /watch?v=vid{i}' for i in range(1, 109)
+    )
+    prose = "Skip navigation\nHome\nShorts\n" + "\n".join(
+        f"some video {i} 3.{i}M views" for i in range(1, 109)
+    )
+    return f"URL: https://www.youtube.com/\nTITLE: YouTube\n\nELEMENTS (108):\n{elements}\n\nPAGE TEXT:\n{prose}"
+
+
+def test_a_destination_only_browse_reports_arriving_and_nothing_else():
+    """The incident, frozen. The goal asked only to BE somewhere; nothing was
+    read, so there is nothing to report but arriving."""
+    dump = _youtube_homepage_dump()
+    text = completed_results_text(completed_plan(done_step(
+        "browse",
+        {
+            "url": "https://www.youtube.com/",
+            "title": "YouTube",
+            "done_reason": "YouTube is open — that was the whole goal.",
+            "rendered": dump,
+            "page_text": dump.split("PAGE TEXT:\n")[1],
+            "destination_only": True,
+        },
+    )))
+    assert "YouTube" in text and "https://www.youtube.com/" in text
+    assert "that was the whole goal" in text
+    assert "ELEMENTS (108)" not in text
+    assert "some video 42" not in text
+    assert len(text) < 400, f"expected a one-line answer, got {len(text)} chars"
+
+
+def test_an_informational_browse_keeps_the_prose_and_drops_the_element_list():
+    """The read-a-fact case still reports what it read — but the element list is
+    the DECISION prompt's format (observe.render: "the observation as the LLM
+    sees it"), scaffolding that exists so the loop can say "click 23". It answers
+    no question and grounds no summary."""
+    dump = (
+        "URL: https://books.test/travel\nTITLE: Travel\n\n"
+        "ELEMENTS (60):\n" + "\n".join(f'[{i}] link "book {i}"' for i in range(1, 61))
+        + "\n\nPAGE TEXT:\nIt's Only the Himalayas\nPrice: £45.17\nIn stock"
+    )
+    text = completed_results_text(completed_plan(done_step(
+        "browse",
+        {
+            "url": "https://books.test/travel",
+            "title": "Travel",
+            "done_reason": "read the price",
+            "rendered": dump,
+            "page_text": "It's Only the Himalayas\nPrice: £45.17\nIn stock",
+            "destination_only": False,
+        },
+    )))
+    assert "£45.17" in text, "the fact the browse went to read must survive"
+    assert "ELEMENTS (60)" not in text
+    assert '[7] link "book 7"' not in text
+
+
+def test_a_page_with_no_prose_still_falls_back_to_the_full_render():
+    """A page that is genuinely all controls must still show something."""
+    dump = 'URL: https://app.test/\n\nELEMENTS (3):\n[1] button "Start"'
+    text = completed_results_text(completed_plan(done_step(
+        "browse",
+        {
+            "url": "https://app.test/",
+            "done_reason": "opened the console",
+            "rendered": dump,
+            "page_text": "",
+            "destination_only": False,
+        },
+    )))
+    assert 'button "Start"' in text

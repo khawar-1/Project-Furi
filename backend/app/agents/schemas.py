@@ -49,11 +49,17 @@ class PlanQuestion(BaseModel):
     `kind` tags a question that is not an ordinary clarification so the UI can
     render it distinctly: "login"/"signup" mark a credential handoff where the
     USER signs in / creates the account in the opened window (Jarvis never enters
-    the credentials). Empty = a plain clarifying question."""
+    the credentials). Empty = a plain clarifying question.
+
+    `about_host` is set only on a "did you mean…?" (kind "site_correction") and
+    carries the address that does NOT exist, so the node that parks the question
+    can arm the deterministic answer path (_match_site_choice) without re-reading
+    it out of the prose. Internal routing, never rendered."""
 
     text: str
     options: list[str] = Field(default_factory=list)
     kind: str = ""
+    about_host: str = ""
 
 
 class PlanStep(BaseModel):
@@ -197,6 +203,15 @@ class AgentPlan(BaseModel):
     # parks the plan, so a counter that did not survive the park would let a
     # correction chain restart from zero on every resume and never terminate.
     site_corrections: int = 0
+    # Every address this plan has learned is WRONG, mapped to the one the user
+    # confirmed instead (2026-08-02). _apply_site_correction re-points the steps
+    # that are pending WHEN IT RUNS, but it never touches plan.goal — and
+    # ground_origins reads the goal, so the dead host stays grounded forever and
+    # a later revise (which drops and re-drafts pending steps) can quietly aim a
+    # new step straight back at it. This is the record that lets code re-point
+    # those too, the _inject_approved_origins pattern. SERIALIZED: the pause
+    # parks the plan, and a correction forgotten across the park is the bug.
+    site_corrections_applied: dict[str, str] = Field(default_factory=dict)
     # A world-acting gesture (send / post / submit / upload / like / follow /
     # delete / buy…) a READ browse loop reached and STOPPED at (2026-07-22): an
     # action on a live site is NEVER performed without the user's yes. Holds the

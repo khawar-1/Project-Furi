@@ -20,6 +20,8 @@ Two halves are pinned here:
 the incident's own query, captured 2026-08-01. They are what make the ordering
 argument checkable: the right answer was THIRD.
 """
+import json
+
 import pytest
 
 import app.tools  # noqa: F401 — registers the real tools
@@ -498,3 +500,407 @@ def test_an_unresolved_site_outranks_every_other_pause_flag():
         }
     )
     assert payload.reason is browse_state.Handoff.SITE_UNRESOLVED
+
+
+# ============================================ the glued verb (2026-08-02)
+# The live provider's answer to a search for "openjunetjamshed", captured
+# 2026-08-02. The right site is 7th of 8, behind two YouTube videos, a reseller,
+# Wikipedia and the BBC.
+GLUED_ROWS = [
+    {"url": "https://www.youtube.com/watch?v=lkryrHfgmns",
+     "title": "Grand Opening of Junaid Jamshed Store New Jersey, Mixed Reactions of JJ Fans"},
+    {"url": "https://www.youtube.com/watch?v=GKbnaRbKSYU",
+     "title": "J.  Junaid Jamshed Grand Opening Ceremony | iTVusa"},
+    {"url": "https://www.786shop.com/brands/junaid-jamshed",
+     "title": "Junaid Jamshed | Buy Dresses Online in USA"},
+    {"url": "https://en.wikipedia.org/wiki/Junaid_Jamshed", "title": "Junaid Jamshed"},
+    {"url": "https://www.bbc.com/news/world-asia-38246109",
+     "title": "Junaid Jamshed: Pakistan pop icon turned preacher - BBC News"},
+    {"url": "https://muslimmatters.org/2016/12/08/junaid-jamshed-inspired-a-generation",
+     "title": "Junaid Jamshed Inspired A Generation of Struggling Souls - MuslimMatters.org"},
+    {"url": "https://www.junaidjamshed.com", "title": "J. Junaid Jamshed Official Website"},
+    {"url": "https://us.junaidjamshed.com", "title": "J. Junaid Jamshed US"},
+]
+
+# The live provider's answer to a search for "amazn", captured 2026-08-02.
+# amazon.com is NOT IN IT — every row is an article, a stock quote or a profile.
+# This is the shape tier 1 structurally cannot serve.
+AMAZN_ROWS = [
+    {"url": "https://en.wikipedia.org/wiki/Amazon_(company)", "title": "Amazon (company)"},
+    {"url": "https://www.ebsco.com/research-starters/amazon-company",
+     "title": "Amazon (company) | Business and Management"},
+    {"url": "https://finance.yahoo.com/quote/AMZN", "title": "Amazon.com, Inc. (AMZN)"},
+    {"url": "https://www.globaldata.com/company-profile/amazoncom-inc",
+     "title": "Amazon.com Inc - Company Profile"},
+    {"url": "https://www.google.com/finance/beta/quote/AMZN:NASDAQ",
+     "title": "Amazon.com Inc (AMZN) Stock Price and News - Google Finance"},
+    {"url": "https://finance.yahoo.com/quote/AMZN/profile",
+     "title": "Amazon.com, Inc. (AMZN) Company Profile and Facts"},
+    {"url": "https://www.cnn.com/markets/stocks/AMZN", "title": "AMZN Stock Quote Price and Forecast"},
+    {"url": "https://www.techtarget.com/whatis/definition/Amazon",
+     "title": "What is Amazon? Definition and Company History"},
+]
+
+
+def test_the_glued_verb_misses_the_floor_by_one_point():
+    """THE MEASUREMENT THAT FORCED TIER 1, frozen as numbers. Speech has no
+    spaces, so STT welds "open" onto a proper noun it does not know. The search
+    still returns the right site; the score does not clear the floor."""
+    assert did_you_mean._similarity(
+        "openjunetjamshed", "junaidjamshed"
+    ) == pytest.approx(69.0, abs=0.1)
+    assert did_you_mean._similarity(
+        "junetjamshed", "junaidjamshed"
+    ) == pytest.approx(80.0, abs=0.1)
+    assert 69.0 < did_you_mean.SIMILARITY_FLOOR < 80.0
+    # …and that one point is the whole difference between a dead end and an answer.
+    assert did_you_mean.rank_candidates("openjunetjamshed.com", GLUED_ROWS) == []
+
+
+def test_the_glued_verb_incident_is_offered_once_the_verb_is_stripped():
+    """THE INCIDENT, FROZEN, against the rows the live provider really returned."""
+    got = did_you_mean.rank_candidates(
+        "openjunetjamshed.com", GLUED_ROWS, extra_names=["junetjamshed"]
+    )
+    assert [s.host for s in got] == ["junaidjamshed.com"]
+    assert got[0].score == pytest.approx(80.0, abs=0.1)
+
+
+@pytest.mark.parametrize(
+    "host,expected",
+    [
+        # A verb welded on is stripped…
+        ("openjunetjamshed.com", ["openjunetjamshed", "junetjamshed"]),
+        ("opengithb.com", ["opengithb", "githb"]),
+        ("gotodaraz.pk", ["gotodaraz", "daraz"]),
+        ("visitjunaidjamshed.com", ["visitjunaidjamshed", "junaidjamshed"]),
+        # …but never when what is left is too short to be a name. THE CASE THAT
+        # MATTERS: openai is not "open" + "ai".
+        ("openai.com", ["openai"]),
+        ("gopro.com", ["gopro"]),
+        # Nothing to strip.
+        ("junetjamshed.com", ["junetjamshed"]),
+        ("amazn.com", ["amazn"]),
+        # Too short to guess about at all.
+        ("abc.com", []),
+    ],
+)
+def test_typed_variants_strips_only_a_leading_verb(host, expected):
+    assert did_you_mean.typed_variants(host) == expected
+
+
+def test_the_strip_is_a_fallback_and_cannot_change_a_working_answer():
+    """A clean name yields the same single candidate it always did — the extra
+    form is only ever consulted when the plain one found nothing, so a strip can
+    turn "no suggestion" into "a suggestion" and nothing else."""
+    plain = did_you_mean.rank_candidates("junitjamsheed.com", REAL_ROWS)
+    assert [s.host for s in plain] == ["junaidjamshed.com"]
+    assert did_you_mean.typed_variants("junitjamsheed.com") == ["junitjamsheed"]
+
+
+# ============================================ tier 2: the name in the titles
+def test_tier_two_finds_a_site_the_search_never_returned():
+    """THE SHAPE TIER 1 CANNOT SERVE. amazon.com is absent from every row; the
+    TITLES say "Amazon" seven times. That is what Google's "showing results
+    for…" is doing, rebuilt out of the results we already have."""
+    assert did_you_mean.rank_candidates("amazn.com", AMAZN_ROWS) == []
+
+    got = did_you_mean.brand_candidates("amazn.com", AMAZN_ROWS)
+    assert got[0].host == "amazon.com"
+    assert got[0].score == pytest.approx(90.9, abs=0.1)
+
+
+def test_tier_two_cannot_fabricate_a_name():
+    """The property extract.py holds for records, applied to hostnames: every
+    name offered is a token that appeared in a returned TITLE. Nothing else can
+    come out of it."""
+    # Every word of every title, and every ADJACENT PAIR run together — the
+    # complete set of names this tier is structurally able to produce.
+    sayable: set[str] = set()
+    for row in AMAZN_ROWS:
+        words = did_you_mean._title_words(str(row["title"]))
+        for i, word in enumerate(words):
+            sayable.add(word)
+            if i + 1 < len(words):
+                sayable.add(word + words[i + 1])
+
+    got = did_you_mean.brand_candidates("amazn.com", AMAZN_ROWS)
+    assert got  # the test is worthless if nothing was produced
+    for suggestion in got:
+        assert suggestion.host.rsplit(".", 1)[0] in sayable
+
+
+def test_tier_two_needs_agreement_and_similarity_together():
+    """Two independent signals, exactly as tier 1 demands. A name only one title
+    mentions is a passing reference; a name several titles agree on but which is
+    spelled nothing like the typed one is a different thing entirely."""
+    once = [
+        {"url": "https://x.com", "title": "Amazon rainforest"},
+        {"url": "https://y.com", "title": "Rivers of Brazil"},
+    ]
+    assert did_you_mean.brand_candidates("amazn.com", once) == []
+
+    agreed_but_unlike = [
+        {"url": "https://x.com", "title": "Kayaking rivers guide"},
+        {"url": "https://y.com", "title": "Rivers kayaking"},
+        {"url": "https://z.com", "title": "Kayaking rivers again"},
+    ]
+    assert did_you_mean.brand_candidates("amazn.com", agreed_but_unlike) == []
+
+
+def test_tier_two_never_offers_the_dead_host_back():
+    rows = [
+        {"url": "https://a.com", "title": "Junetjamshed store"},
+        {"url": "https://b.com", "title": "Junetjamshed reviews"},
+    ]
+    got = did_you_mean.brand_candidates("junetjamshed.com", rows)
+    assert "junetjamshed.com" not in [s.host for s in got]
+
+
+def test_tier_two_uses_the_suffix_the_user_typed():
+    """A .com.pk typo should be offered its own second-level domain first — the
+    suffix is the one part of the address the user did get right."""
+    rows = [
+        {"url": "https://a.example", "title": "Junaid Jamshed store"},
+        {"url": "https://b.example", "title": "Junaid Jamshed reviews"},
+    ]
+    got = [s.host for s in did_you_mean.brand_candidates("junetjamshed.com.pk", rows)]
+    assert got[0] == "junaidjamshed.com.pk"
+    assert "junaidjamshed.com" in got
+
+
+def test_tier_two_is_bounded():
+    rows = [
+        {"url": f"https://s{i}.example", "title": "Junaid Jamshed Junaid Jamshed"}
+        for i in range(12)
+    ]
+    got = did_you_mean.brand_candidates("junetjamshed.com", rows)
+    assert len(got) <= did_you_mean.BRAND_MAX_HOSTS
+
+
+# ============================================ the tiers, end to end
+async def test_tier_two_runs_only_when_the_earlier_tiers_found_nothing(offer):
+    """Order is the whole safety argument: a host the search actually returned
+    always beats a host we synthesised from prose."""
+    offer(rows=REAL_ROWS, resolves=True)
+    got = await did_you_mean.suggest_sites("junitjamsheed.com")
+    # Tier 1 answered; nothing synthetic ("jamshed.com") crept in beside it.
+    assert [s.host for s in got] == ["junaidjamshed.com"]
+
+
+async def test_the_incident_end_to_end_offers_the_real_site(offer):
+    offer(rows=GLUED_ROWS, resolves=lambda h: h == "junaidjamshed.com")
+    got = await did_you_mean.suggest_sites("openjunetjamshed.com")
+    assert [s.host for s in got] == ["junaidjamshed.com"]
+
+
+async def test_amazn_end_to_end_offers_amazon(offer):
+    offer(rows=AMAZN_ROWS, resolves=lambda h: h == "amazon.com")
+    got = await did_you_mean.suggest_sites("amazn.com")
+    assert [s.host for s in got] == ["amazon.com"]
+
+
+async def test_a_synthesised_host_that_does_not_resolve_is_never_offered(offer):
+    """The _validated_question rule, and the reason tier 2 is allowed to build a
+    host at all: DNS is what turns a guess into a fact."""
+    offer(rows=AMAZN_ROWS, resolves=False)
+    assert await did_you_mean.suggest_sites("amazn.com") == []
+
+
+# ================================ the correction must survive a replan (08-02)
+# _apply_site_correction re-points the steps that are PENDING when the user
+# answers. It never touches plan.goal — and ground_origins reads the goal, so
+# the dead host stays permanently GROUNDED and _browse_origin_violation will
+# happily let a re-drafted step aim straight back at it. revise DROPS and
+# re-drafts pending steps, which is exactly when that happens.
+def test_a_correction_is_recorded_even_with_no_step_to_repoint():
+    """The question gate asks at DRAFT time, when the plan has no steps at all.
+    The mapping still has to be remembered, or the next draft is unguarded."""
+    plan = AgentPlan(goal="openjunetjamshed.com")
+
+    assert planner_mod._apply_site_correction(
+        plan, "openjunetjamshed.com", "junaidjamshed.com"
+    ) is False  # nothing to re-point yet…
+    # …but the plan now knows which address is dead.
+    assert plan.site_corrections_applied == {
+        "openjunetjamshed.com": "junaidjamshed.com"
+    }
+    assert "junaidjamshed.com" in plan.approved_origins
+
+
+def test_a_redrafted_step_is_repointed_off_the_dead_host():
+    """THE RESURRECTION, CLOSED. A revise round re-drafts from the goal string,
+    which still says the misheard address. Code moves it back."""
+    plan = AgentPlan(goal="Go to junitjamsheed.com and add the perfume")
+    plan.site_corrections_applied = {"junitjamsheed.com": "junaidjamshed.com"}
+    plan.steps = [
+        planner_mod.PlanStep(
+            description="Open junitjamsheed.com and add the perfume",
+            tool="browse",
+            parameters={
+                "goal": "add the perfume",
+                "start_url": "https://junitjamsheed.com",
+                "allowed_origins": ["junitjamsheed.com"],
+            },
+            permission_level=planner_mod.PermissionLevel.READ,
+            requires_approval=False,
+        )
+    ]
+
+    planner_mod._inject_site_corrections(plan)
+
+    step = plan.steps[0]
+    assert step.parameters["start_url"] == "https://junaidjamshed.com/"
+    assert step.parameters["allowed_origins"] == ["junaidjamshed.com"]
+    # The approval card quotes the address out of the LLM's own sentence, so the
+    # prose has to move with the contract — a card that names one site while
+    # acting on another is a card the user cannot rely on (2026-08-01).
+    assert "junitjamsheed.com" not in step.description
+    assert "junaidjamshed.com" in step.description
+
+
+def test_injection_leaves_an_unrelated_step_alone():
+    plan = AgentPlan(goal="Go to junitjamsheed.com")
+    plan.site_corrections_applied = {"junitjamsheed.com": "junaidjamshed.com"}
+    plan.steps = [
+        planner_mod.PlanStep(
+            description="Open daraz",
+            tool="browse",
+            parameters={
+                "goal": "look",
+                "start_url": "https://daraz.pk",
+                "allowed_origins": ["daraz.pk"],
+            },
+            permission_level=planner_mod.PermissionLevel.READ,
+            requires_approval=False,
+        )
+    ]
+
+    planner_mod._inject_site_corrections(plan)
+
+    assert plan.steps[0].parameters["start_url"] == "https://daraz.pk"
+    assert plan.steps[0].parameters["allowed_origins"] == ["daraz.pk"]
+
+
+def test_injection_never_re_aims_an_approval_bound_step():
+    """A step already carrying a commit contract is what the user said yes to.
+    Re-pointing it would change the approved action — the stamp_start_url rule."""
+    plan = AgentPlan(goal="Go to junitjamsheed.com and buy it")
+    plan.site_corrections_applied = {"junitjamsheed.com": "junaidjamshed.com"}
+    plan.steps = [
+        planner_mod.PlanStep(
+            description="Submit the form",
+            tool="browse_commit",
+            parameters={
+                "goal": "buy it",
+                "start_url": "https://junitjamsheed.com",
+                "allowed_origins": ["junitjamsheed.com"],
+                "_commit": {"method": "POST", "url": "https://junitjamsheed.com/cart/add"},
+            },
+            permission_level=planner_mod.PermissionLevel.DESTRUCTIVE,
+            requires_approval=True,
+        )
+    ]
+
+    planner_mod._inject_site_corrections(plan)
+
+    assert plan.steps[0].parameters["start_url"] == "https://junitjamsheed.com"
+
+
+def test_the_correction_record_survives_the_park():
+    """The ask PARKS the plan. A correction forgotten across the round trip is
+    the bug this record exists to close."""
+    plan = AgentPlan(goal="g")
+    plan.site_corrections_applied = {"junitjamsheed.com": "junaidjamshed.com"}
+
+    restored = AgentPlan.model_validate(plan.model_dump())
+
+    assert restored.site_corrections_applied == {
+        "junitjamsheed.com": "junaidjamshed.com"
+    }
+
+    older = AgentPlan(goal="g").model_dump()
+    older.pop("site_corrections_applied", None)
+    assert AgentPlan.model_validate(older).site_corrections_applied == {}
+
+
+# ============================ the DRAFT-TIME ask, end to end (2026-08-02)
+# The 2026-08-01 flow above is the model DRAFTING a browse step and the browser
+# reporting NXDOMAIN. The 2026-08-02 incident is the other shape entirely: the
+# model asked a QUESTION instead of drafting anything, so nothing ever
+# navigated, so none of the machinery above could run. The stored plan proves
+# it — "site_corrections": 0 — and the user was handed two addresses that do not
+# exist.
+_QUESTION_DRAFT = json.dumps(
+    {
+        "steps": [],
+        "question": {
+            "text": (
+                "Did you mean to open junetjamshed.com, or is the site literally "
+                "openjunetjamshed.com?"
+            ),
+            "options": ["https://junetjamshed.com", "https://openjunetjamshed.com"],
+        },
+    }
+)
+
+
+async def test_a_draft_time_question_never_offers_an_address_that_does_not_exist(
+    db_session, offer
+):
+    """THE 2026-08-02 INCIDENT, END TO END, through the real graph."""
+    offer(rows=GLUED_ROWS, resolves=lambda h: h == "junaidjamshed.com")
+    provider = FakeProvider([_QUESTION_DRAFT] * 3)
+    planner = AgentPlanner(db_session, provider, session_id="s-dym-draft")
+
+    plan = await planner.start("openjunetjamshed.com")
+
+    assert plan.status == PlanStatus.AWAITING_CHOICE
+    assert plan.question is not None
+    # The fabrications never reach the user…
+    assert not any("junetjamshed.com" in o for o in plan.question.options)
+    # …and what replaced them is the site a real search found and DNS confirmed.
+    assert "junaidjamshed.com" in plan.question.options
+    assert plan.question.kind == "site_correction"
+    # The reply will be decided in code, not handed to a revise round as prose.
+    assert plan.pending_site_correction == "openjunetjamshed.com"
+    assert plan.pending_site_candidates == ["junaidjamshed.com"]
+
+
+async def test_answering_the_draft_time_question_records_the_dead_address(
+    db_session, offer
+):
+    """There is no step to re-point yet, so the answer flows to revise — where
+    it is authoritative. What must NOT be lost is the knowledge that the goal's
+    own address is dead, because the goal string keeps saying it."""
+    offer(rows=GLUED_ROWS, resolves=lambda h: h == "junaidjamshed.com")
+    provider = FakeProvider(
+        [_QUESTION_DRAFT, plan_json([_browse_step(
+            start="https://junaidjamshed.com", origins=("junaidjamshed.com",)
+        )])] * 2
+    )
+    planner = AgentPlanner(db_session, provider, session_id="s-dym-draft2")
+
+    plan = await planner.start("openjunetjamshed.com")
+    assert plan.status == PlanStatus.AWAITING_CHOICE
+
+    plan = await planner.answer(plan, "junaidjamshed.com")
+
+    assert plan.site_corrections_applied == {
+        "openjunetjamshed.com": "junaidjamshed.com"
+    }
+    assert "junaidjamshed.com" in plan.approved_origins
+
+
+async def test_a_dead_address_the_user_declines_stops_honestly(db_session, offer):
+    """Fail-closed, exactly like the origin approval: "none of these" means we
+    do not guess, and nothing was opened."""
+    offer(rows=GLUED_ROWS, resolves=lambda h: h == "junaidjamshed.com")
+    provider = FakeProvider([_QUESTION_DRAFT] * 3)
+    planner = AgentPlanner(db_session, provider, session_id="s-dym-draft3")
+
+    plan = await planner.start("openjunetjamshed.com")
+    plan = await planner.answer(plan, "No — none of these")
+
+    assert plan.status == PlanStatus.CANCELLED
+    assert "won't guess which site you meant" in plan.message

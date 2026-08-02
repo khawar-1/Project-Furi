@@ -44,6 +44,9 @@ export function StatusBar() {
     closing: s.closingWindow,
   }));
   const closeWindow = useBrowserStore((s) => s.closeWindow);
+  // 2026-08-01: several browser tasks can be open at once, one tab each.
+  const tabs = useBrowserStore((s) => s.tabs);
+  const [tabsOpen, setTabsOpen] = useState(false);
 
   // The required visible "sensing on" indicator — poll the cheap status.
   useEffect(() => {
@@ -221,25 +224,80 @@ export function StatusBar() {
         )}
 
         {/* Kept-open browser window — a submitted form's response page (14.6) or
-            the persistent agent browse window (2026-07-21), left open so the
-            user can see the result */}
+            the agent's own tabs (2026-08-01), left open so the user can see the
+            result. Several browser tasks can be open at once, so past one tab
+            this becomes a count with a per-tab list. */}
         {resultWindow.open && (
-          <div
-            className="flex items-center gap-1"
-            title={resultWindow.title || 'A browser window is open'}
-          >
+          <div className="relative flex items-center gap-1">
             <FileCheck size={10} className="text-cyan-400" />
-            <span className="text-cyan-400 max-w-[220px] truncate">
-              Browser window{resultWindow.title ? `: ${resultWindow.title}` : ' open'}
-            </span>
-            <button
-              onClick={() => void closeWindow()}
-              disabled={resultWindow.closing}
-              className="ml-0.5 text-muted hover:text-danger transition-fast disabled:opacity-50"
-              title="Close the browser window"
-            >
-              <X size={11} />
-            </button>
+            {tabs.length > 1 ? (
+              <>
+                <button
+                  onClick={() => setTabsOpen((v) => !v)}
+                  className="text-cyan-400 hover:text-cyan-300 transition-fast"
+                  title="Show the open browser tabs"
+                >
+                  {tabs.length} browser tabs
+                </button>
+                {tabsOpen && (
+                  <div className="absolute bottom-full left-0 mb-1 z-50 w-72 rounded-md border border-border bg-surface shadow-lg py-1">
+                    {tabs.map((tab) => (
+                      <div
+                        key={tab.site || tab.url}
+                        className="flex items-center gap-1 px-2 py-1 hover:bg-white/5"
+                      >
+                        <span
+                          className="flex-1 truncate text-cyan-400"
+                          title={tab.goal || tab.url}
+                        >
+                          {tab.title || tab.site || tab.url}
+                        </span>
+                        {tab.busy && (
+                          <span className="text-[10px] text-amber-400" title="Mid-task — waiting on you or still working">
+                            busy
+                          </span>
+                        )}
+                        <button
+                          onClick={() => void closeWindow(tab.site)}
+                          disabled={resultWindow.closing}
+                          className="text-muted hover:text-danger transition-fast disabled:opacity-50"
+                          title="Close this tab"
+                        >
+                          <X size={11} />
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                      onClick={() => {
+                        setTabsOpen(false);
+                        void closeWindow();
+                      }}
+                      disabled={resultWindow.closing}
+                      className="mt-1 w-full border-t border-border px-2 pt-1 text-left text-muted hover:text-danger transition-fast disabled:opacity-50"
+                    >
+                      Close all tabs
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <span
+                  className="text-cyan-400 max-w-[220px] truncate"
+                  title={resultWindow.title || 'A browser window is open'}
+                >
+                  Browser window{resultWindow.title ? `: ${resultWindow.title}` : ' open'}
+                </span>
+                <button
+                  onClick={() => void closeWindow()}
+                  disabled={resultWindow.closing}
+                  className="ml-0.5 text-muted hover:text-danger transition-fast disabled:opacity-50"
+                  title="Close the browser window"
+                >
+                  <X size={11} />
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>

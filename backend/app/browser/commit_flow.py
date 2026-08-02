@@ -66,6 +66,7 @@ from app.browser.state import (  # noqa: F401
     handoff_from_outcome,
 )
 from app.browser import trace as browse_trace
+from app.browser import window as _window
 
 
 def _trace_pre_loop_failure(session: Any, goal: str, error: str) -> None:
@@ -109,6 +110,20 @@ def _submitted_url(session: Any) -> str:
         return str(session.commit_submitted_url() or "")
     except Exception:
         return ""
+
+
+def _fired_unconfirmed(form_found: Any) -> bool:
+    """Was a submit actually FIRED without being confirmed?
+
+    Only `form_found is False` rules a submission out — the approved form was no
+    longer on the page, so nothing was clicked and nothing was sent. Every other
+    case (we fired it and saw nothing; we fired it and saw different traffic; the
+    driver did not say) means the page may well have posted where we could not
+    see it, and the honest answer is "unknown", not "no". Unknown is treated as
+    fired, because the cost of being wrong runs one way: a retry that duplicates
+    a real submission is worse than a stop that turns out to have been
+    unnecessary."""
+    return form_found is not False
 
 
 def _unfired_reason(session: Any, approved: dict, form_found: Any) -> str:
@@ -448,15 +463,18 @@ async def discover(
                 await browser_session.discard_discovery()
                 session = None
             if session is None:
-                # One profile = one live persistent context (the browse rule): a
-                # sign-in window, a kept-open result window from a prior submit, OR
-                # a kept-open media session all hold the profile lock, so close
-                # every one before launching or the launch races the lock.
-                await browser_session.close_login_window()
-                await browser_session.close_result_window()
-                await browser_session.stop_media()
-                await browser_session.close_browse_window()
-                session = await BrowserSession.open(allowlist)
+                # A commit runs in the tab for ITS site (2026-08-01) — reusing
+                # one already there, or opening a new one beside whatever else is
+                # open. This used to close the sign-in window, the result window,
+                # the media session AND the agent window first, because one
+                # profile could hold only one context; only the external-process
+                # windows still need that, and window._launch_context does it in
+                # the one place a context is launched.
+                site = browser_session.browse_site_key(allowlist, start_url)
+                session, _reused = await browser_session.acquire_browse_tab(
+                    allowlist, site=site
+                )
+                browser_session.note_browse_tab(session, goal=goal)
                 await session.goto(start_url)
             # The pages whose sign-in offers the user already decided ride ON
             # THE SESSION, because the session is what survives across the
@@ -568,9 +586,16 @@ async def discover(
                 except Exception:
                     pass
 
+    async def _run_locked() -> CommitDiscovery:
+        # ONE agent run drives at a time (see window.driving_run). Taken inside
+        # the coroutine that runs on the browser loop — an asyncio.Lock binds to
+        # the loop that first awaits it.
+        async with _window.driving_run():
+            return await _run()
+
     try:
         return await browser_runtime.run_browser(
-            _run(), timeout=browser_runtime.BROWSE_HARD_TIMEOUT
+            _run_locked(), timeout=browser_runtime.BROWSE_HARD_TIMEOUT
         )
     except Exception as exc:
         logger.warning(f"commit discovery marshaling failed: {type(exc).__name__}: {exc}")
@@ -699,6 +724,10 @@ async def perform(
                 "error": (
                     "" if fired else _unfired_reason(session, approved, form_found)
                 ),
+                # Read by planner._unconfirmed_mutation: an unconfirmed submit
+                # must end the plan, never go round the replan loop and submit a
+                # second time.
+                "fired_unconfirmed": (not fired) and _fired_unconfirmed(form_found),
             }
 
             # MULTI-COMMIT (15.1): budget remaining → resume the SAME session
@@ -755,20 +784,43 @@ async def perform(
                 result["window_open"] = True
             return result
         finally:
-            # One submit per held session, ever: close it here so the approval can
-            # never be replayed against a lingering window — UNLESS it was handed
-            # to the result-window registry (a read-only viewer, arm spent) or
-            # re-held for the next approved form (a resumed multi-commit flow).
+            # One submit per held session, ever — UNLESS it was handed to the
+            # result-window registry (a read-only viewer, arm spent) or re-held
+            # for the next approved form (a resumed multi-commit flow).
+            #
+            # What enforces "one submit" is the ONE-SHOT PERMIT, not the window
+            # closing; the close was only ever the thing that happened to make
+            # the permit unreachable. Firing is what consumes it, so a submit the
+            # site never issued leaves it armed — drop it explicitly, then hand
+            # the tab back. The user reported the close itself as the bug
+            # (2026-08-01): this flow had inherited the tab from an earlier
+            # "open junaidjamshed.com" task and destroyed it on the way out.
             if not handed_off and not re_held:
-                await session.close()
+                session.disarm_commit()
+                await session.release_after_run()
+
+    async def _run_locked() -> dict:
+        async with _window.driving_run():
+            return await _run()
 
     try:
         return await browser_runtime.run_browser(
-            _run(), timeout=browser_runtime.BROWSE_HARD_TIMEOUT
+            _run_locked(), timeout=browser_runtime.BROWSE_HARD_TIMEOUT
         )
     except Exception as exc:
         logger.warning(f"commit submit marshaling failed: {type(exc).__name__}: {exc}")
-        return {"submitted": False, "error": f"The submission failed: {type(exc).__name__}"}
+        return {
+            "submitted": False,
+            "error": (
+                f"The submission failed: {type(exc).__name__}. I can't tell "
+                "whether it went through — check the site before trying again."
+            ),
+            # A crash or hard timeout inside the SUBMIT phase is the "unknown"
+            # case too: perform() is only ever called after approval, so the
+            # form may already have been fired when this blew up. Fail closed
+            # rather than let a replan submit a second time.
+            "fired_unconfirmed": True,
+        }
 
 
 async def _resume_for_next_form(

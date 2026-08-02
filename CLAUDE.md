@@ -3214,6 +3214,640 @@ yourself"*, but **no window appeared** — the user had to open Indeed themselve
   change. **Live acceptance still pending** (the real Selector loop via
   `npm run dev`). Uncommitted (git deferred).
 
+### One window, many tabs — a second browser task stopped closing the first (2026-08-01)
+Live report: *"jarvis can open and work in only one tab, and if i ask another
+browser task it closes the chrome browser and opens new tab."* Exactly right, and
+structural rather than a bug: `BrowserSession.open()` called `_launch()` →
+`launch_persistent_context` on `~/.jarvis/browser` — **a whole browser per
+session** — and `close()` closed that context. Chromium permits one live context
+per profile, so "one profile = one live context" was enforced at every launch
+site (`browser_agent_tools`, `commit_flow`, login, media): close the sign-in
+window, the result window, the media session AND the held agent window, then
+launch again. **That teardown is the flicker, and it is why only one browser task
+could ever be open.**
+- **THE FIX IS ONE LEVEL UP FROM A FIX THIS STACK ALREADY MADE.**
+  `ensure_playwright_driver` turned the Node driver from per-session into a
+  startup singleton for exactly this shape of reason. The persistent CONTEXT is
+  the next level: NEW `app/browser/window.py` owns it, launched once and
+  outliving any session, and a `BrowserSession` owns a PAGE in it. `_RealBrowser`
+  already wrapped `(playwright, context)` and already exposed `new_page()` — the
+  seam was there. **Ownership is stated once and split cleanly**: the window owns
+  the context and the set of live tabs; a session owns its page; the context goes
+  down only with the last tab. A session the window did NOT open (hand-wired
+  callers, tests) still owns and closes its own handle, which is what kept ~200
+  existing tests correct through the change.
+- **Liveness is proven by USE, not by a probe.** `new_page()` raises on a dead
+  context, so `open_tab` attempts it and relaunches ONCE on failure — cheaper and
+  stronger than a separate round trip, and it covers the user closing the window
+  by hand.
+- **⚠️ THREE THINGS WERE HARMLESS WITH ONE CONTEXT PER SESSION AND ARE NOT WHEN
+  ONE IS SHARED.** (1) `_install_interception` fell back to
+  `context.route("**/*", …)`, so session A's handler would judge session B's
+  requests **against A's allowlist** — Rule 3 is per-session, so that inverts the
+  origin guard both ways. The fallback is PER PAGE now; the preferred CDP path
+  was already per-page. Honest cost, stated: a popup's opening request is
+  unguarded for one round trip, where context routing covered it — judging
+  another task's traffic with the wrong allowlist is worse, `_verify_landing`
+  still catches the landing, and "context-level only when one tab is open" is the
+  conditional-safety shape this codebase keeps having to unpick. (2)
+  `_adopt_new_page` closed a popup only when `opener is not None and opener is
+  not self.page` — and **a `context.new_page()` has a NULL opener**, so it fell
+  through and ADOPTED: A would have seized the tab B had just opened and closed
+  its own page out from under a running task. (3) `_unroute_intercept` lifted at
+  CONTEXT level, so one tab finishing and handing off to playback would disarm
+  the guard on every other live agent tab.
+- **The new-tab ownership decision lives in ONE place** (`window._owner_of_new_page`),
+  not one listener per session — N sessions each running the decision is how they
+  diverge. Rules in order: already some session's page → claimed; opener is a
+  session's page → that session; **no opener at all → whoever is DRIVING, else
+  the only tab** (`rel="noopener"` and `target=_blank` genuinely produce a null
+  opener, and that is the WeWorkRemotely case the popup follow exists for —
+  refusing to attribute those would reintroduce the 2026-07-18 bug); opener is a
+  page nobody owns → a stray ad window, closed; otherwise → left strictly alone,
+  never closed on a guess. MEASURED which guard carries the weight: claim-at-birth
+  does, because `open_tab` assigns and registers with no await after `new_page()`
+  returns; the `_creating` counter is the belt against a refactor widening that gap.
+- **Tabs are keyed by SITE** (`publicsuffix.registrable`, so `www.`/`jobs.` share
+  one and `outfitters.com.pk` is not truncated). A follow-up about a site
+  continues its tab — that is the 2026-07-21 continuity property, now per site
+  instead of globally — and a new site opens its own. `MAX_BROWSE_TABS = 6` with
+  LRU eviction; **eviction never touches a busy tab**, where busy is DERIVED
+  (`registry.is_held` iterates the slot table + `window.is_driving`), never a flag
+  someone must remember to set. Every tab busy → the cap yields rather than close
+  work in progress. The single `browse` held slot is GONE: holding ONE window is
+  precisely what left a second task nowhere to go.
+- **The one-at-a-time lock ships in the same change, and is not new
+  serialization.** `run_browser` marshals onto one loop but never held a lock, so
+  two DELEGATE'd background browses could always interleave; the all-closing
+  teardown HID it by turning an interleave into a destroyed browser. Removing the
+  teardown is what would let it show, so `window.driving_run` (queue, don't
+  reject) lands with it.
+- **What multi-tab does NOT change:** a sign-in window and the clean media window
+  are separate Chrome processes on the same user-data-dir, so they still require
+  the whole context down — signing in closes the tabs. The pre-launch sweep moved
+  INTO `window._launch_context` (the one place a context is launched) instead of
+  being hand-listed at each call site, which is the `close_all_held` lesson.
+  A keep_open media handoff now prefers IN-PLACE playback when other tabs are
+  open: playing a video is not a reason to close somebody else's work.
+  The approval gate, grounding, gesture permits and CAPTCHA no-touch are
+  untouched — this changed WHERE PAGES LIVE, never what the agent may do.
+- **Two defects found by reviewing my own work, both fixed and pinned:**
+  `close_all()` closed pages and the context but bypassed the sessions and the
+  held slots, so a slot would go on reporting media that was already gone (it
+  also has to take the lock only at the END — `session.close()` calls back into
+  `release_tab`, and an asyncio.Lock is not reentrant); and `_adopt_new_page`
+  closed the superseded tab while leaving its route/CDP handles on the session,
+  so `_unroute_intercept` would raise on a dead page at playback and any session
+  that had ever followed a popup would silently run the DEGRADED path forever.
+- **⚠️ TWO FAKES WERE HIDING THE FEATURE, the same test-shape blindness as
+  2026-07-17 and 2026-07-30.** `FakeBrowser.new_page()` returned THE SAME page
+  every call, so two "tabs" were one object and several multi-tab assertions were
+  vacuous; and the continuity fixture's `FakeSession.close()` only flipped a flag,
+  leaving dead tabs in the registry for the next browse to "reuse". Both now model
+  the real contract (distinct pages; close releases the tab), and `FakeContext`
+  fires the context `page` event on `new_page()` the way real Chromium does —
+  which is the only reason the ownership race is testable at all.
+- Every behavioural test was **proven to FAIL on the pre-change code** before
+  being accepted (the 2026-07-30 rule), by restoring the pre-change file from the
+  git index and, for the ownership rules, reverting each guard in turn. The
+  cross-adoption test passed until ALL THREE guards were reverted — recorded
+  because it shows the first two falsification attempts were measuring the wrong
+  thing.
+- Surfaces: `GET /api/browser/media` gains `tabs[{site,title,url,goal,busy}]`
+  (the single-window fields stay valid); `POST /close-window` takes an optional
+  `site` (none = close all, as before); the StatusBar shows "N browser tabs" with
+  a per-tab close and a Close-all.
+- Tests: NEW `test_browser_window.py` (24 — one context for two sessions,
+  per-tab allowlists, tab lifetime, the profile-release stamp on context close
+  only, dead-context relaunch, the ownership race, site keying, LRU eviction,
+  busy-never-evicted, the cap yielding), plus migrations in
+  `test_browser_session.py`, `test_browse_window_continuity.py`,
+  `test_browser_api.py`, `test_browser_registry.py`, `test_task_router.py`.
+- **⚠️ THE SPEED GATE LOOKED LIKE A REGRESSION AND WAS NOT — measure the OLD
+  code on the SAME machine, never against a number from another day.**
+  `browse_speed.py` reported a median repeat-load slowdown of 1.2x then 1.5x
+  (identical code, two runs) against the 2026-07-27 recorded 0.9x, and jarvis's
+  cache multiple came out BELOW the control's where the baseline had it above —
+  which is what a partly-disabled HTTP cache looks like, so it could not be waved
+  off as noise. No mechanism was identifiable (`cache=on`: the CDP path still
+  wins, no Playwright route is registered, and per-request handling is
+  byte-identical). Restoring the pre-change `session.py` + `registry.py` from the
+  git index and re-running WITHIN THE SAME FEW MINUTES settled it: **the
+  pre-change code measures 1.6x today** — worse than either new-code run — with
+  25s first loads on daraz/ebay. The machine and network were simply slower than
+  on 2026-07-27. The historical number was not a usable control; the only valid
+  control is the old code, now.
+- **`browse_bench.py`: 5/6, and the sixth is PRE-EXISTING — A/B-verified the same
+  way.** `quotes-pagination` failed at 10 records (needs 12) with "couldn't work
+  out a safe next action"; a re-run failed differently (0 records), i.e. it is
+  variable, and the run also logged a real `ConnectTimeout` to api.deepseek.com.
+  Restoring all six changed browser files from the index and running that one
+  task reproduced the failure EXACTLY — 10 records, same error, same 3 actions.
+  It lives in the extract/decide path, which this round does not touch. The other
+  five pass, including the navigation-heavy books-toscrape tasks that exercise
+  tab reuse.
+- **2698 passing, 14 skipped**; the 2 `test_multi_name_facts.py` failures are
+  PRE-EXISTING and date-sensitive (they hardcode `2026-08-01`, which is now
+  today, so the future-dated-fact rewrite they assert no longer applies).
+  Typecheck + `vite build` clean. **The live multi-tab acceptance run —
+  `npm run dev`, browse site A, then ask for site B — is user-driven and still
+  outstanding; the hermetic suite plus both measured gates are what is met so far.**
+
+### A navigation goal is not a search goal (2026-08-01)
+Live: *"open youtube"*. The planner's tool call was CORRECT —
+`browse(goal="Open the YouTube homepage", start_url="https://www.youtube.com",
+keep_open=True)`. The loop then typed **the goal's own words** into YouTube's
+search box, clicked a result, and `keep_open` handed that video to the playback
+window: the user asked to open a page and watched a video start playing.
+Root-caused from the run's own trace (`~/.jarvis/logs/browse/…4b9fbac8e53c.jsonl`)
+— **both bad moves were code fast paths, zero LLM calls** (`"source":
+"fast-path"`, `decide_ms: 3`):
+`step 0 {"action":"type","index":4,"text":"the YouTube homepage","submit":true}`
+then `step 1 {"action":"click","index":23}` on `/results?search_query=…`.
+- **⚠️ ROOT CAUSE: `_extract_search_term`'s `_VERB_ALT` lists `open` and `pull up`
+  beside `search for`/`find`/`play`.** It strips the leading verb and calls
+  whatever remains a query — and for a navigation goal what remains **IS THE
+  DESTINATION**. MEASURED across goals before the fix: `open youtube` → searched
+  YouTube for `youtube`; `open google` → `google`; `pull up amazon` → `amazon`;
+  `open my gmail inbox` → `my gmail inbox`. **Every "open X" browse goal in the
+  product did this.** It survived because the fast path's eight documented
+  live-incident guards are all about MANGLING a title (`_TRAIL_SITE_RE`,
+  `_LEAD_ORDINAL_RE`, `_SXEX_RE`, …) — not one of them asks whether there is a
+  title at all.
+- **⚠️ THE TEMPTING FIX IS WRONG.** Deleting `open` from the verb list breaks
+  `open the dangers in my heart`, a real search goal. The distinguishing fact is
+  not the VERB, it is **whether the residue names anything the page is not** — so
+  the test is structural and needs no intent classification (the keyword-list
+  shape this codebase has measured at zero three times): reduce the residue to
+  significant tokens (`_query_tokens` = title tokens − `_QUERY_STOPWORDS` −
+  `_PLACE_WORDS`) and compare against the host we are already on
+  (`_destination_tokens` = host labels + registrable name − place words). A
+  SUBSET means the goal named a place, not a thing to look for
+  (`_names_only_the_destination`). Deliberately generous (every host label
+  counts, not just the registrable name) because the asymmetry runs that way: a
+  false "destination" costs ONE model call — the fast path defers and the model
+  decides correctly — while a false negative costs this incident.
+- **The gate sits on the FINAL term, inside `_fast_path_action`, not in
+  `_search_query_for`**: that function ends `term = query or
+  _extract_search_term(goal)`, so a refusal upstream would be routed around and
+  the goal searched anyway. Pinned by a test.
+- **Second half of the incident: `_top_result_action` clicked on ONE junk token.**
+  After stopwords `want = {youtube, homepage}`, and EVERY row on
+  `youtube.com/results` mentions YouTube — so an unrelated video scored 1 and was
+  clicked. Its guard was only `best_score == 0 → defer`; one shared token off a
+  garbage query is not a match. It now refuses outright when the query names only
+  the destination, and scores on `_query_tokens` (so "homepage" can never match).
+- **Third defect — NO ARRIVAL TERMINATOR for a navigation goal.** The loop had
+  exactly two "already there → done" checks, `_is_media_watch_page` and
+  `_current_episode`, both media-specific. A goal whose entire content is *be at
+  this page* could not finish in code even when it was satisfied the instant the
+  page loaded — which is what left the run hunting for something to do on a
+  YouTube homepage that was already open. NEW `_destination_reached` is the
+  general case those two are instances of: goal reduces to a destination + we are
+  on that host → `done` at step 0, **zero LLM calls, no action taken**. Declines
+  on both sides — a goal it cannot reduce (`_extract_search_term` → None: a
+  compose goal, a multi-clause instruction) is never called done, and a residue
+  naming anything the site is not (`open youtube and find the video about rust`)
+  is not a destination goal.
+- **Found while writing the fix: the bare navigation verbs were never stripped.**
+  `_LEAD_VERB_RE`'s `(go\s+to\s+[\w.\-]+\s+and\s+)?` prefix only consumed "go to"
+  when another verb FOLLOWED, so a plain `go to youtube.com` was stripped of
+  nothing and the WHOLE sentence became the search term. `go to`/`navigate to`/
+  `visit`/`head to`/`take me to`/`bring up` joined `_VERB_ALT`; what makes a
+  navigation goal safe is `_names_only_the_destination` downstream, not
+  withholding the strip.
+- **⚠️ A SECOND, INDEPENDENT ROUTE TO THE SAME SYMPTOM, found while verifying the
+  first fix — and the multi-tab round had made it the COMMON path.**
+  `browser_agent_tools` reads `keep_open` as "this is a media goal", but it only
+  means "leave the window open" and the planner sets it for `open youtube` too.
+  On a successful `keep_open` run the in-place branch calls
+  `enter_playback_mode()` (which LIFTS Rule 1) and `ensure_playing()`, and
+  `ensure_playing` presses `.play()` on **any `<video>`/`<audio>` on the page**,
+  polling ~6s — a YouTube homepage is full of preview videos. So even with the
+  fast path fixed, "open youtube" would have lifted the interception guard on a
+  page it was only asked to open and started something playing. The 2026-08-01
+  multi-tab change makes this the branch normally taken (a clean window would
+  close the user's other tabs). Fixed with the fact the loop ALREADY establishes
+  rather than a new intent guess: `BrowseOutcome.destination_only` (mirrored on
+  the session like `browse_extracted`/`performed_gesture`, so every return path
+  carries it) is set by the arrival terminator, and the media hand-off is gated
+  `and not outcome.destination_only`. A goal that named nothing to find cannot
+  have asked for playback; it falls through to the persistent-window branch,
+  which is exactly what `keep_open` meant. Default False, so every existing
+  play/watch path is untouched (pinned by a regression test).
+- **HONEST LIMIT:** the destination test compares against the host we are ON, so
+  `open my gmail inbox` refuses on `gmail.com` (tokens `{gmail}` ⊆ `{gmail}`) but
+  not on `mail.google.com` (`{gmail}` ⊄ `{google, mail}`). That residual costs one
+  model call, which is the safe direction by construction.
+- **NOT this bug, flagged separately:** that run spent `observe_ms 70953` and
+  `act_ms 99182` on YouTube and died at 284s on `Connection closed while reading
+  from the driver`. Bench runs 20 minutes earlier observed the same DOM stack in
+  30–160ms on a light site, so this is YouTube's page weight, not a regression
+  from the multi-tab round — but 284s to fail a two-step goal is its own problem.
+- Tests: `test_browser_loop.py` (+26 — the incident frozen end-to-end at
+  `provider.calls == 0` and `page.acted == []`; an 11-case navigation matrix; a
+  6-case regression matrix proving real search goals are untouched; the
+  final-term gate placement; the top-result overlap guard and its
+  genuine-match regression; `_destination_reached` both ways),
+  `test_browse_window_continuity.py` (+2 — a navigation goal with `keep_open`
+  plays nothing and leaves Rule 1 armed, pinned on the IN-PLACE branch
+  specifically; a real media goal still hands off).
+  **17 of the 26 loop tests were proven to FAIL on the pre-change code**
+  (restored from the git index), with the captured stderr reproducing the
+  incident verbatim; the 9 that passed on both are the regression tests, which
+  is the correct signature.
+- **⚠️ ONE FALSIFICATION ATTEMPT WAS ITSELF INVALID, and the lesson generalises.**
+  Restoring `browser_agent_tools.py` from the git INDEX failed both new hand-off
+  tests — but that copy predates the (uncommitted, already-staged) multi-tab
+  round, so they failed on a missing `browser_window` import, not on the defect.
+  A test that fails for the wrong reason proves nothing. Redone by reverting
+  ONLY the gate condition in place, which gave the correct signature (behavioural
+  test fails, regression test passes). **In a tree with a large uncommitted
+  baseline, `git show :file` is not "the code before this change" — revert the
+  specific line.**
+- Gates: **2726 passing, 14 skipped** (the 2 `test_multi_name_facts.py` failures
+  are the SAME pre-existing date-sensitive ones — they hardcode `2026-08-01`,
+  which is today, so the future-dated-fact rewrite they assert no longer
+  applies); browser suites 846 green; typecheck clean;
+  `scripts/browse_bench.py` **5/6, median 43.6s**, the failure being
+  `quotes-pagination` at 10 records — the SAME pre-existing variable failure
+  already A/B-proven against the index earlier on 2026-08-01, living in the
+  extract/decide path this round does not touch.
+- **Live acceptance is user-driven and still outstanding**: `npm run dev`, then
+  "open youtube" — the window should open YouTube and the task should FINISH,
+  with nothing searched, nothing clicked, and nothing playing.
+
+### The decision prompt is not a report, and a coin flip is not a route (2026-08-01)
+The live acceptance above PASSED — the trace shows `open youtube` finishing at
+step 0 in 1.0s, `source: "fast-path"`, `llm_calls: 0`, nothing played. The same
+two-message conversation then produced two new defects: `open junaidjamshed.com`
+was answered by plain chat with *"Understood — opening junaidjamshed.com now,
+sir. It's with the browser agent in the background"* and nothing ran, and the
+YouTube completion arrived as **8,609 characters** of DOM.
+- **⚠️ THE WALL WAS THE DECISION PROMPT, USED AS A REPORT.**
+  `rendering._fmt_browse` fenced `output["rendered"]`, which is
+  `observe.render()` — whose own docstring says *"the observation as the LLM
+  sees it"*. It is the format the loop reads to say "click 23": 108 lines of
+  `[42] link "…" → /watch?v=…` followed by every video title on the homepage.
+  Two things were wrong at once. (1) The 2026-07-25 round had already
+  suppressed this dump for a MEDIA outcome ("a wall of 161 DOM elements"), and
+  a DESTINATION-ONLY browse is the identical case — the goal asked only to BE
+  somewhere, so nothing was read and the head line IS the answer — but that
+  branch did not exist until yesterday, so nothing covered it. Gated on
+  `BrowseOutcome.destination_only`, the fact the arrival terminator already
+  establishes: **the same predicate that lets the goal finish is the one that
+  says its page has nothing to say.** (2) Even for an informational browse the
+  ELEMENT LIST is agent scaffolding that answers no question and grounds no
+  summary, so `_fmt_browse` now renders the page's PROSE (new `page_text` on
+  the tool output, falling back to `rendered` only when a page yields no prose
+  at all). MEASURED: the incident render 8,609 → **94 chars**; a book-price
+  browse keeps its `£45.17` and loses 60 element lines. `rendered` stays in the
+  tool output for the audit row — it is a record, not a report.
+- **⚠️ THE ROUTING MISS WAS A COIN FLIP, NOT A GATE HOLE — and that distinction
+  is the whole fix.** `looks_like_task("open junaidjamshed.com")` returns True
+  (verified); `_is_browse_intent` grounds `junaidjamshed.com`. The gate did its
+  job and the CLASSIFIER answered CHAT. MEASURED on that exact message against
+  the real provider: **CHAT, BROWSE, CHAT** with its real conversation; **BROWSE,
+  BROWSE, CHAT, CHAT, CHAT** with a cleaned-up one; **WEB, WEB, WEB** with none.
+  Three different labels for one unambiguous instruction (deepseek's temp-0 is
+  not deterministic — already recorded), and the prompt has no line for a bare
+  navigation instruction: its WEB clause ("open/read a web page") and its BROWSE
+  clause both plausibly cover "open <site>".
+  The wall made it worse but was **not** the cause — that is what the clean-context
+  measurement is for, and it is why "fix the render and re-test" would have
+  shipped a 40% failure rate as a fix.
+- **So the model is not asked.** NEW `task_router._is_bare_navigation` +
+  a short-circuit before `_classify_message`: a message whose ENTIRE content is
+  "take me to <site>" routes BROWSE/DELEGATE **in code, with zero LLM calls**
+  (the live classifier call was 6.5s). This is `placeholder_resolver`'s
+  principle — nothing to DECIDE, only to DO — and the predicate is the router's
+  twin of `browser_loop._names_only_the_destination`: an anchored navigation
+  verb at the start, a site the user's own words ground, and a residue naming
+  nothing the site is not. `open youtube and play lofi` names something else and
+  keeps the ordinary path.
+- **⚠️ TWO BOUNDS, BOTH LOAD-BEARING, BOTH FOUND BY MEASURING RATHER THAN
+  REASONING.** (1) `ground_origins` also grounds BARE names, and **`open notepad`
+  grounds `notepad`** — indistinguishable from a site. (2) "Contains a dot" is
+  not enough either: **`open report.txt` grounds `report.txt`**, whose residue
+  names only itself, so a file open would have been routed to a browser and
+  ended at `did_you_mean`. A domain and a filename are the same SHAPE; only the
+  suffix separates them, and `publicsuffix.py` deliberately bundles multi-label
+  suffixes only (`public_suffix("report.txt")` is `"txt"`). So the final label
+  must be in a small bundled `_NAV_TLDS`. The list is partial ON PURPOSE and
+  fails CLOSED exactly as `publicsuffix.py` argues: a missing TLD means the
+  message goes to the classifier, i.e. today's behaviour. **It grants no
+  capability and relaxes no guard — it decides only whether an LLM call is worth
+  making**, which is why a literal list is acceptable here and is not the
+  intent-keyword shape this router has measured at zero three times. Control set:
+  22/22, including six file extensions and `index.html`.
+- **The fabrication guard learned the shape, and a real hole in it turned up.**
+  `_SYSTEM_VOICE_RE` missed *"It's with the browser agent in the background"*
+  because every hand-off pattern needs a VERB (passed/handed/routed) and this
+  asserts the finished STATE directly; its `to (?:the )?(?:system|backend|planner|
+  agent)` branch also could not see "to the **browser** agent". Both fixed, with
+  capability offers still spared. Then: **a fabrication inside the last 64
+  characters was never cut at all.** The in-loop cut only sees EMITTED text and
+  emission lags by `_OFFER_LOOKBEHIND = 64`, so the 130-char live message put its
+  marker past the 66-char emitted prefix and the whole tail shipped before the
+  flush noticed. The flush now searches the held-back buffer too and cuts there,
+  keeping the marker visible (the correction needs a referent). Pre-existing,
+  found while adding the pattern, and it would have silently weakened every short
+  fabrication.
+- Tests: `test_task_router.py` (+5 — a 13-case recognised matrix, a 20-case
+  deferred matrix incl. local apps and six file extensions, the incident
+  end-to-end asserting **`provider.chat_calls == 0`** with NO scripted response
+  so a classifier call raises rather than silently passing, the errand
+  regression, the hand-off fabrication, the capability-offer spare),
+  `test_plan_rendering.py` (+3 — the incident frozen with a `len(text) < 400`
+  assertion, prose-kept/elements-dropped, the no-prose fallback). **Every
+  behavioural test was proven to FAIL on the pre-change code by reverting the
+  specific line in place** — not `git show :file`, per yesterday's lesson — and
+  each falsification produced the correct signature: behavioural fails,
+  regression passes.
+- Gates: **2765 passing, 14 skipped** (the 2 `test_multi_name_facts.py` failures
+  are the SAME pre-existing date-sensitive ones — they hardcode `2026-08-01`,
+  which is today); typecheck clean. Not re-run: `browse_bench.py`, which drives a
+  real browser — this round changes ROUTING and RENDERING, not the loop.
+- **Live acceptance is user-driven and outstanding**: `npm run dev`, then
+  "open junaidjamshed.com" — it must hand off to the browser agent (not reply in
+  chat), and the completion must be one line, not a page.
+
+### A tab came back from playback unguarded, and the run that borrowed it closed it (2026-08-01)
+Live: *"add a janan sports 100ml in cart on junaidjamshed website"*, on a tab an
+earlier turn's *"open junaidjamshed.com"* had opened. Jarvis found the product,
+paused for approval, the user approved — and then reported **"I fired the form's
+submit, but no request left the page within 6s… Nothing was confirmed as sent."**
+while the perfume **really was in the cart**. It closed the tab on the way out,
+and the task went on showing as running. Three symptoms, **one root cause**,
+proven from `backend.log` + the three run traces before any code moved.
+
+- **⚠️ ROOT CAUSE: `acquire_browse_tab` restored a reused tab's allowlist and
+  history and NOTHING ELSE.** At 23:00:56 the previous task ended in the media
+  hand-off — `enter_playback_mode` LIFTS interception and sets `_read_only =
+  False` by design, because the tab is the user's now. At 23:02:30 the commit
+  run logged `reusing the 'junaidjamshed.com' tab` and drove that same object.
+  So an entire autonomous commit flow ran with **Rules 1, 2 and 3 all stood
+  down**: no origin allowlist, no SSRF guard, no one-shot permit. The approved
+  POST went out unobserved (`commits=0`, `blocked_mut=0` in the session
+  summary), `commit_fired()` — which is set BY `_intercept` — stayed False, and
+  everything downstream followed correctly from a false premise: `fired=False`
+  ⇒ not `keep_open and fired` ⇒ the `finally` closed the tab; `submitted=False`
+  ⇒ a FAILED tool result ⇒ the planner replanned, which is why the task was
+  still running. **The reported bug was the tab closing; the actual bug was that
+  the tab had no guards on it.**
+- **THE FIX IS TWO INDEPENDENT GUARDS, EITHER OF WHICH STOPS THE INCIDENT.**
+  (a) **A HELD tab is never reused.** `_evictable` already refused to CLOSE a
+  tab held in a registry slot — media, result window, commit, challenge,
+  discovery — because "a tab the user is mid-something with"; SEIZING one to
+  drive is the same intrusion by another route, and it is exactly how a playback
+  tab became an autonomous commit's tab. Same derived `registry.is_held`
+  predicate, so a new slot is covered by construction.
+  (b) **A tab that IS reused is re-armed.** `resume_agent_control()` restores
+  `_read_only` AND puts the interceptor back, and a tab that cannot be re-armed
+  is **left to the user rather than driven** (fail closed: an extra tab costs a
+  tab; driving an unguarded one costs every guarantee in the module docstring).
+  `_rearm_intercept` is written as `_unroute_intercept`'s mirror and re-enables
+  on the pages ALREADY recorded — calling `_install_interception` again would
+  open a SECOND CDP session and a SECOND handler on one target, answering every
+  paused request twice. Both halves are needed: `_read_only` alone is a flag
+  nobody reads, the route alone leaves Rule 1 down. The `Fetch.enable` patterns
+  are now one constant, because a re-arm that enabled a narrower set would
+  silently stop guarding while reporting the tab armed.
+- **⚠️ THE UPSTREAM CAUSE: the media gate was NEGATIVE, and negative fails OPEN.**
+  The destination-only gate shipped that same morning (`keep_open and not
+  destination_only`) and did not survive the evening: the planner wrote *"Open
+  the junaidjamshed.com homepage **so it is visible in the browser**."*, whose
+  trailing clause defeats `_extract_search_term` (returns **None**), so
+  `destination_only` was False and the gate opened on a storefront —
+  interception lifted, `ensure_playing()` pressing `.play()` on a banner video.
+  **A negative test over an LLM-authored string is a coin flip; lifting a safety
+  guard has to require a REASON.** New `loop.goal_wants_playback` is the
+  positive test: a play/watch/listen/put-on/stream/resume verb **leading** the
+  goal, anchored to the same `_LEAD_VERB_RE` chain so "Find and play X" and "go
+  to site and find and play X" still qualify. **The verb must LEAD** — mere
+  presence would make *"find a watch under $200"* and *"buy a watch on amazon"*
+  media goals, on sites that sell watches. MEASURED 16/16 on a control set;
+  `destination_only` stays as a second, narrower refusal.
+- **CLOSING THE TAB IS THE USER'S CALL** — their words: *"that power should be to
+  me."* `release_after_run()` closes only a tab **this run opened**
+  (`tab_reused`, set by `acquire_browse_tab`), at all three sites that used to
+  close unconditionally: the commit `finally`, the browse `finally` (an
+  exception still discards a window we launched — a broken page the user can see
+  beats one that vanished), and the gesture-approval pause, whose stated reason
+  ("free the single-profile lock") went stale with the shared window: closing
+  ONE tab of a shared context frees no lock. **What enforces "one submit, ever"
+  was never the close** — it is the one-shot permit, and the close was only what
+  made the permit unreachable. Since only FIRING consumes that permit, a submit
+  the site never issued leaves it armed, so `disarm_commit()` now drops it
+  explicitly before a borrowed tab outlives the run.
+- **"UNCONFIRMED" IS NOT "DIDN'T HAPPEN", AND A REPLAN IS NOT FREE.** The
+  wording had been careful since 2026-07-26 ("Nothing was **confirmed** as
+  sent"), but the OUTCOME was a hard failure, so a DESTRUCTIVE submit went back
+  round the replan loop while the world had already changed. A replan is the
+  right answer to "that didn't work" and the wrong answer to "I don't know
+  whether that worked" — a second add-to-cart today, a second payment the day
+  someone approves one. `commit_flow._fired_unconfirmed` rules a submission out
+  in exactly ONE case (`form_found is False`: the approved form was gone, so
+  nothing was clicked — safe to retry); True, False-from-the-driver and a crash
+  in the submit phase all mean **unknown**, and unknown is treated as fired.
+  `planner._unconfirmed_mutation` then ENDS the plan carrying the step's own
+  words, so the user — the only party who can look at the page — decides.
+- **⚠️ THREE TESTS WERE PINNING THE DEFECT, and their own docstrings said so.**
+  `test_media_keep_open_*` all begin *"A **play** goal with keep_open…"* and all
+  passed the module default goal `"click the top book and read its price"`. They
+  were asserting that `keep_open` ALONE hands a window to the media path — the
+  incident, written as an expectation. Fixed by passing a real play goal, which
+  is what makes them test their own docstring. Same shape as 2026-07-17
+  (fan-out tests that bypassed the planner) and 2026-07-30 (bulk tests that
+  drove the singular tool).
+- **⚠️ AND MY OWN FIRST FALSIFICATION OF THE TAB-CLOSING FIX WAS INVALID —
+  it reported "3 passed".** Reverting the real `BrowserSession.release_after_run`
+  changed nothing, because the commit and continuity tests drive FAKE sessions
+  carrying their own copy of it. A revert that cannot reach the code under test
+  proves nothing. Split in two: the real method is falsified against tests that
+  drive the real method, the CALL SITES against the tests that drive fakes — and
+  the real method got direct coverage it did not have. **When a falsification
+  comes back green, suspect the harness before the test.**
+- Every behavioural test was proven to FAIL on the pre-change code by reverting
+  the specific line **in place** (the 2026-08-01 rule — `git show :file` in a
+  tree with a large uncommitted baseline is not "before this change"), and each
+  gave the correct signature: **D1 re-arm 4 fail / 1 regression passes · D1
+  held-tab 1/1 · D2 1/2 · D3a 1/1 · D3b 3/1 · D4 1/1.**
+- Tests: `test_browser_session.py` (+8 — re-arm re-enables with the same
+  patterns, the re-armed tab BLOCKS the mutation again rather than just setting
+  a flag, no double handler, an un-re-armable tab is refused, the no-op path
+  costs nothing, release closes-what-we-opened / leaves-what-we-borrowed,
+  disarm), `test_browser_window.py` (+4 — the incident at registry level: a
+  media-held tab is never reused and is left untouched; a reused tab comes back
+  armed; a refuse-to-re-arm opens our own tab; reuse marks the tab inherited),
+  `test_browse_window_continuity.py` (+2 — the incident goal string frozen with
+  `destination_only=False`, so the test is worthless if that field ever carries
+  it; an inherited tab survives an exception), `test_browser_loop.py` (+16 —
+  the playback matrix, including the two watch-the-noun cases),
+  `test_browser_commit.py` (+9 — inherited/opened tab, the permit dropped, the
+  unconfirmed flag in all four `form_found` states, and the planner ending the
+  plan with **no provider call after the pause** vs. a vanished form still
+  replanning).
+- **Not changed, deliberately:** `COMMIT_WAIT_SECONDS = 6.0`. It never expired
+  on a real request here — the interceptor that would have set the event was
+  off — so raising it would have papered over the actual defect.
+- **Live acceptance is user-driven and outstanding**: open a site, then in a
+  later turn ask for a cart action on it — the approved submit must be
+  CONFIRMED, the tab must still be there afterwards, and the task must settle.
+
+### An address offered as an option must exist, and a two-word brand is still its own site (2026-08-02)
+Spoken into the mic: *"open junaidjamshed.com"*. Transcribed **`openjunetjamshed.com`**
+— "open" GLUED to the host, because speech has no spaces. Four defects followed,
+root-caused at both ends before any code moved (`backend.log` 34550–34595, both
+browse traces, the stored `plan_payload`/`tasks` rows). The user's question was
+the sharpest part of the report: *Google, given the same misspelling, shows the
+real site — why can't Jarvis?*
+- **⚠️ THE COMPONENT THAT HAD THE ANSWER NEVER RAN.** At 13:15:48 the planner
+  paused on a clarifying question **at DRAFT time, before any browser existed**,
+  offering `https://junetjamshed.com` and `https://openjunetjamshed.com`. NEITHER
+  EXISTS. `did_you_mean` — search-backed, similarity-filtered, DNS-verified, and
+  MEASURED right on this input — is wired only to a live navigation NXDOMAIN, and
+  the model asked INSTEAD of drafting a browse step, so nothing ever navigated.
+  The stored plan proves it: `"site_corrections": 0`, and `suggest_sites` appears
+  nowhere in the session. **Two existing rules each stopped one step short.**
+  `_option_is_dead_path` enforces "an option written as a concrete thing must
+  EXIST" (the 2026-07-10 invented-paths incident) but opens
+  `if not _PATH_LIKE_RE.match(text): return False` — its whole notion of a
+  concrete thing is a FILESYSTEM PATH, and an address is exactly as concrete and
+  exactly as checkable. `question_gate.self_resolve` could not cover it either:
+  its first line returns `pass` when a question has more than one option, and a
+  "did you mean A or B?" always has two. FIX: `planner._verified_site_question`,
+  called at the same gate site as `_validated_question`. DNS-verify every
+  address-shaped option; drop the dead; when ALL are dead run `suggest_sites` on
+  the dead host the GOAL's own words grounded (a suggestion for a host the MODEL
+  invented would be a guess about a guess) and REPLACE the question with the
+  code-authored `_site_correction_question`; otherwise reject on attempt 1 and
+  strip on attempt 2 — `_option_is_dead_path`'s own ladder. `PlanQuestion.
+  about_host` carries the dead address so `_pause_on_question` arms the SAME
+  deterministic reply path (`_match_site_choice`, fail-closed) a navigation-time
+  correction uses. **Costs nothing on a question with no addresses** — the first
+  check is a regex over the options — and `did_you_mean.option_host` requires a
+  WHOLE option to be an address plus a known TLD, so `report.txt` (identical
+  shape) is never one.
+- **⚠️ AND HAD IT RUN, IT WOULD HAVE MISSED BY ONE POINT.** MEASURED against the
+  real provider: searching `openjunetjamshed` DOES return junaidjamshed.com (3 of
+  8 rows) at **69.0** against `SIMILARITY_FLOOR = 70.0` → `rank_candidates() ==
+  []`. Strip the glued verb and it is **80.0**. The module docstring's claim that
+  the floor "sits between 55.6 and 84.6 with margin on both sides" was true of a
+  CLEAN name only. A verb welded to a proper noun is not exotic — it is what STT
+  does every time it does not know the noun, i.e. the exact case the module
+  exists for. FIX: `typed_variants()` compares the typed name in two forms, and
+  the stripped one is a strict FALLBACK (consulted only when the raw name found
+  nothing), so the common path is byte-identical and a strip can only ever turn
+  "no suggestion" into "a suggestion". `openai` is untouched — stripping "open"
+  leaves 2 chars, under `MIN_NAME_LENGTH`.
+- **GOOGLE SPELL-CORRECTS THE QUERY; TAVILY DOES NOT — so tier 2 rebuilds that
+  deterministically.** MEASURED: `amazn` returns NO amazon.com at all (best host
+  is aboutamazon.com at 62), `opengithb` returns github.com once at 66.7. Both
+  return TITLES that say the corrected name over and over. `brand_candidates()`
+  reads the name out of the titles (unigrams + adjacent pairs concatenated —
+  "junaid jamshed" is one label), requires `BRAND_MIN_OCCURRENCES = 2` titles to
+  agree AND the same similarity floor, forms `<name>.<suffix>` from the suffix the
+  user typed, and RESOLVES it. Consulted ONLY when tier 1 is empty; no extra
+  search. It cannot invent a name (every token came from a returned title —
+  extract.py's property applied to hostnames), cannot reach a dead host (DNS), and
+  is still only ever OFFERED: **we suggest, the user grounds, we never navigate**.
+  MEASURED: `amazn`→amazon.com (91), `opengithb`→github.com (91),
+  `openjunetjamshed`→junaidjamshed.com (80); wikipedia.org/junit.org/opennj.net
+  never offered.
+- **⚠️ `_destination_reached` CANNOT SEE A BRAND THAT CONCATENATES IN ITS DOMAIN.**
+  After the user typed the right address, the page loaded perfectly (121 elements)
+  and the loop typed **the goal's own words — "the Junaid Jamshed website" — into
+  the storefront's SEARCH BOX**. MEASURED: term tokens `{junaid, jamshed}` vs host
+  tokens `{junaidjamshed}` — not a subset, so the goal read as "there is something
+  to look for" and the fast path obliged. That gesture acts on the world, so the
+  run paused for approval, on a page already exactly where the goal asked to be.
+  The subset test is right for a one-word brand and blind for a two-word one. FIX:
+  when the subset fails, the ≥2 significant tokens are also compared the way the
+  host spells them — joined, in the order said, **EQUALITY with a label, never
+  containment** (a lone "jam" must not match "junaidjamshed"). MEASURED 11/11:
+  junaidjamshed / bookdepository / stackoverflow now arrive; "junaid jamshed
+  perfume", "jane by the long faces", cross-site and the lone-substring cases are
+  unchanged. This also sets `destination_only`, so a storefront can no longer be
+  handed to the media path with Rule 1 lifted.
+- **⚠️ A PAUSE CLOSED THE TAB IT WAS ASKING ABOUT.** `release_after_run()` closes
+  any tab THIS run opened, and a run that opened its own tab always has
+  `tab_reused` False — so the storefront vanished ONE SECOND before "I'm about to
+  send … on www.junaidjamshed.com — say yes", and the user read the approval card
+  (same header, same numbered options) as the question being asked again. The
+  resumed run then had to navigate again and landed on a half-rendered page (39
+  elements where the first load saw 121). The 2026-08-01 reasoning for keeping a
+  BORROWED tab — *"the user is about to be asked a question about the page they
+  are looking at"* — never depended on who opened it; **it reached one pause
+  branch of four** by accident of where that round was working. FIX:
+  `action_approval_required` and `origin_approval_required` keep the tab
+  (`note_browse_tab` + `handed_off` + `window_open`); `login_required` and
+  `challenge_required` still close, because a sign-in window is a separate Chrome
+  process on the same profile and `_open_commit_login` calls `close_all()` anyway.
+  Nothing is loosened: no gesture has fired (that is what the pause is FOR), the
+  one-shot permit is unspent, interception stays ON, and on resume
+  `acquire_browse_tab` re-arms via `resume_agent_control()` before anything drives
+  it. The `browser_window` push moved above the origin hand-off's early return so
+  the StatusBar agrees with the screen.
+- **A CORRECTION MUST SURVIVE A REPLAN** (not this run's failure, but the
+  documented shape of "it asked again"): `_apply_site_correction` re-points the
+  steps PENDING when the user answers and never touches `plan.goal` — and
+  `ground_origins` reads the goal, so the dead host stays permanently GROUNDED and
+  a revise (which drops and re-drafts pending steps) can aim a new one straight
+  back at it. NEW serialized `AgentPlan.site_corrections_applied` records every
+  wrong→right pair (recorded even when there is no step to re-point yet, because
+  the question gate asks at draft time), and `_inject_site_corrections` replays it
+  onto re-drafted steps beside `_inject_approved_origins`. One shared
+  `_apply_one_site_correction` does the re-point for both callers — two copies
+  would drift, and the half that drifts is the one that stops refreshing the
+  approval card's prose.
+- `task_router._NAV_TLDS` moved into `publicsuffix.KNOWN_TLDS` (+ `has_known_tld`):
+  the site gate needs the identical fact, and two private copies of "what is a
+  TLD" drift — the `registry.mutates` lesson.
+- **NOT a code change, and the highest-leverage config fix:** `.env` has
+  `TAVILY_API_KEY` and no `GOOGLE_SEARCH_API_KEY`/`GOOGLE_SEARCH_CX`. Google CSE
+  is the one provider in the chain that spell-corrects a query — the exact
+  mechanism the user's screenshot shows. `_real_search` already prefers it.
+- Tests: NEW `test_site_question_gate.py` (29 — the incident frozen; the suggester
+  asked about the GOAL's host; reject/strip; a partial death drops only the
+  fabrication; **a question with no addresses costs ZERO DNS lookups**, including
+  `report.txt`; a verification or suggester failure never breaks a plan; the
+  option-shape matrix), `test_did_you_mean.py` (+27 — the 69.0/80.0 numbers
+  frozen; a 9-case variant matrix incl. `openai`; tier 2 against the REAL rows for
+  `amazn`; the no-fabrication property proved against the complete set of names
+  the tier can emit; the draft-time incident end-to-end through the real graph),
+  `test_browser_loop.py` (+3, a 13-case destination matrix), `test_browse_window_
+  continuity.py` (+4, incl. login still closing). **Every one of the nine changes
+  was proven to FAIL when reverted IN PLACE** (not `git show :file` — the
+  2026-08-01 rule), each with the correct signature: behavioural fails, regression
+  passes.
+- **THE 29s/64s `observe_ms` WAS NOT OURS — MEASURED, AND NOTHING WAS TUNED.** The
+  same run recorded `observe_ms` 28,993 then 64,157 and a `goto` that "never
+  reached readiness in 15000ms", which reads like a reason to raise a budget. NEW
+  `scripts/browse_observe_profile.py` splits `observe()` into
+  goto/settle/top-eval/frames/render and A/Bs the SAME `_EXTRACT_JS` against an
+  UN-INTERCEPTED control browser (two SEQUENTIAL arms — the single persistent
+  profile allows one live Chromium, which the first cut of the script learned the
+  hard way). On the incident's own page, today:
+
+      url                         goto  settle  top  observe   raw  ours/raw  els
+      junaidjamshed.com           5043     294  150      135   272     0.55   102
+      books.toscrape.com           780      62   47       45    90     0.52   114
+      en.wikipedia.org/…/Pakistan 3100     269  186      174   504     0.37   327
+      daraz.pk                    3703     263   86       74    90     0.96   234
+
+  `observe()` costs **135ms**, and our intercepted path is FASTER than the control
+  (0.55×, the CDP-Fetch cache win of 2026-07-27). So the DOM path is ruled out as
+  the cause and **no constant was moved** — the same verdict, and the same
+  precedent, as the 2026-07-27 run that spent 151s on one decision and turned out
+  to be machine-wide contention. `browse_bench` after this round: the batch run
+  scored 4/6 vs the 5/6 baseline, `ebay-search` being the only delta — it RE-RAN
+  green (80.8s, 60 records, 60/60 prices; baseline 83.7s), so it was decide-path
+  variance, not a regression, and `quotes-pagination` failed in the baseline too.
+  Proven rather than assumed in the other direction as well: all six bench goals
+  reduce to `_extract_search_term → None`, so the destination change is
+  structurally incapable of touching any of them.
+
 ### Browser stack — CURRENT STATE (authoritative; supersedes the log above)
 
 Everything above this heading is the build log. This section is what the code does
@@ -3221,8 +3855,11 @@ today. Where they disagree, this wins.
 
 **Package layout** — everything browser lives in `backend/app/browser/`:
 `runtime.py` (dedicated Proactor-thread loop + `run_browser` marshaling + the outer
-belt) · `session.py` (lifecycle, launch chain, interception, profile lock, the six
-held-window registries) · `observe.py` (DOM → numbered element list, index/obs-id
+belt) · **`window.py`** (THE SHARED WINDOW: one persistent context, many tabs —
+`open_tab`/`release_tab`/`close_all`, the new-tab ownership decision, the
+one-run-at-a-time lock) · `session.py` (a TAB's lifecycle, launch chain,
+interception, profile lock, the site-keyed tab registry, the five held-window
+registries) · `observe.py` (DOM → numbered element list, index/obs-id
 staleness contract, cross-frame union, challenge probe, screenshots) ·
 **`extract.py`** (deterministic structured extraction) · `loop.py` (observe→decide→
 act, fast paths, wall detectors, budgets) · `commit_flow.py` (discover → approve →
@@ -3263,7 +3900,27 @@ does:
   (`performed_gesture`) and rides into the ActivityLog row.
 - **A form submit** still goes only through `arm_commit` → `submit_commit` under a
   signature approval of the code-read contract (method, URL, every field value, any
-  attached file). Never a raw click.
+  attached file). Never a raw click. The permit is one-shot, and only FIRING
+  consumes it — a submit the site never issued is dropped explicitly by
+  `disarm_commit()`, because the tab may now outlive the run (2026-08-01).
+- **A TAB IS GUARDED BEFORE IT IS DRIVEN** (2026-08-01). `enter_playback_mode`
+  deliberately lifts interception when a tab is handed to the user, so a tab
+  coming back has to be re-armed: `acquire_browse_tab` never reuses a tab HELD in
+  a registry slot, `resume_agent_control()` restores `_read_only` + the
+  interceptor on any tab it does reuse, and a tab that cannot be re-armed is left
+  to the user rather than driven. The playback hand-off itself is now gated on a
+  POSITIVE read of the goal (`loop.goal_wants_playback` — a play/watch/listen
+  verb LEADING the goal), never on the absence of a heuristic.
+- **A PAUSE KEEPS THE PAGE IT IS ASKING ABOUT** (2026-08-02). An
+  `action_approval` or `origin_approval` hand-off leaves its tab open — the user
+  is deciding about that page, and the resumed run reuses it instead of
+  navigating again. Only `login`/`challenge` still close, because a sign-in window
+  is a separate Chrome process needing the whole single profile. No gesture has
+  fired at a pause, the one-shot permit is unspent, and the tab is re-armed by
+  `resume_agent_control()` before it is driven again.
+- **CLOSING A TAB IS THE USER'S CALL.** `release_after_run()` closes only a tab
+  the run OPENED (`tab_reused`); an inherited window is handed back, including
+  after a failure or an exception.
 - **Grounding** is unchanged and is the exfiltration bound: origins, fill values and
   upload paths must trace to the user's words or their curated profile — never to
   page content. Autofill secrets are DPAPI-encrypted at rest and never enter a
@@ -3272,6 +3929,16 @@ does:
   the window is headed and watchable.
 - **Honest residual limit**, unchanged: within an allowlisted, authenticated origin a
   compromised loop has full user authority.
+
+**The loop terminates in CODE when the goal is already met.** Three checks, in
+`_execute`'s decision order, none of which costs an LLM call: `_is_media_watch_page`
+(a keep_open play goal that reached a video page), `_current_episode` (already on
+the episode named), and `_destination_reached` (2026-08-01 — the goal asked only to
+BE somewhere and we are there: `open youtube`, `go to youtube.com`). The third also
+sets `BrowseOutcome.destination_only`, which suppresses the `keep_open` media
+hand-off — opening a page is not asking for anything to be played. Before it
+existed, a satisfied navigation goal had no way to finish and the fast path
+invented work: see "A navigation goal is not a search goal".
 
 **Perception is DOM-FIRST** (2026-07-26, owner decision, reversing the 2026-07-21
 vision-first decision on measurement — vision was spending up to 12s a step on

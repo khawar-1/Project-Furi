@@ -278,6 +278,7 @@ def _hermetic_browser_session():
     real client. Vision-loop tests pass their own fake `vision` straight to
     run_browse and never touch this seam."""
     from app.browser import registry as browser_registry
+    from app.browser import window as browser_window
     from app.core import browser_session
     from app.providers import vision
 
@@ -315,6 +316,11 @@ def _hermetic_browser_session():
     # only ever register fakes), the reset_host_cache hygiene. One call covers
     # every slot by construction.
     browser_registry.reset_for_tests()
+    # The shared persistent CONTEXT is a singleton that outlives sessions (see
+    # app/browser/window.py). A fake context launched by one test would be
+    # REUSED by the next — no factory call, a dead handle, and a cross-test leak
+    # of exactly the kind reset_host_cache exists to stop. Drop it both sides.
+    browser_window.reset_for_tests()
     browser_session._login_browser = None
     browser_session._clean_login_proc = None
     yield
@@ -326,6 +332,7 @@ def _hermetic_browser_session():
     browser_session._shared_playwright = None
     browser_session.reset_host_cache()
     browser_registry.reset_for_tests()
+    browser_window.reset_for_tests()
     browser_session._login_browser = None
     browser_session._clean_login_proc = None
 

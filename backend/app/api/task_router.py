@@ -71,6 +71,7 @@ from app.agents import (
 from app.agents.agent_registry import GENERAL, AgentSpec, agent_for_key, agent_for_label
 from app.agents.summary import stream_completed_summary
 from app.api.agent import _plan_response
+from app.browser import publicsuffix
 from app.browser.grounding import ground_origins
 from app.db.persist import persist_message_best_effort
 from app.db.schemas import ChatRequest, StreamChunk
@@ -363,6 +364,106 @@ def _is_browse_intent(text: str) -> bool:
         return False
 
 
+# ---------------------------------------------------------- bare navigation
+#
+# "open junaidjamshed.com" — a message whose ENTIRE content is "take me to this
+# site". Routed to BROWSE in CODE, with NO classifier call at all.
+#
+# ⚠️ THIS IS NOT A RECALL FIX — the gate already fired on it. It is a fix for a
+# COIN FLIP. Live 2026-08-01 the user asked "open junaidjamshed.com" and got
+# "Understood — opening junaidjamshed.com now, sir. It's with the browser agent
+# in the background" from the plain CHAT path, which can open nothing: the
+# classifier had answered CHAT. MEASURED on that exact message and its real
+# conversation: CHAT, BROWSE, CHAT. On a cleaned-up conversation: BROWSE,
+# BROWSE, CHAT, CHAT, CHAT. With no conversation at all: WEB, WEB, WEB. Three
+# different labels for one unambiguous instruction — deepseek's temp-0 is not
+# deterministic, and the prompt has no line for a bare navigation instruction
+# (its WEB and BROWSE definitions both plausibly cover "open <site>").
+#
+# So the model is not asked. This is the placeholder_resolver principle —
+# nothing to DECIDE, only to DO: the user named a site, in their own words, and
+# asked to be taken to it. The whole classifier call (6.5s live) is skipped.
+#
+# The predicate is the router's twin of browser_loop._names_only_the_destination,
+# the same structural question one layer up: does the message name anything the
+# site is NOT? "open youtube and play lofi" does, and keeps today's path.
+#
+# ⚠️ A DOTTED DOMAIN IS REQUIRED, and that bound is load-bearing. ground_origins
+# also grounds BARE names ("open indeed"), which are indistinguishable from a
+# local application — "open notepad" grounds `notepad`, and routing that to a
+# browser would try to navigate to a host that does not exist. A bare name that
+# is not in grounding's known-sites map falls through to the classifier, i.e.
+# exactly today's behaviour: this rule only ever REPLACES a coin flip with a
+# certainty, never widens what reaches the browser.
+_NAV_ONLY_PREFIX_RE = re.compile(
+    r"^(?:(?:hey|ok|okay|yo)\s+)?(?:jarvis\b[\s,]*)?"
+    r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+|pls\s+|just\s+)*"
+    r"(?:go(?:ing)?\s+to|goto|navigate\s+to|head\s+(?:over\s+)?to|take\s+me\s+to|"
+    r"bring\s+up|pull\s+up|visit|browse\s+to|launch|load|open\s+up|open)\s+",
+    re.IGNORECASE,
+)
+
+# Words that can trail a bare navigation instruction without adding an errand
+# ("open youtube please", "go to amazon.com in the browser", "open the
+# junaidjamshed website"). Stripped before the residue is compared.
+_NAV_ONLY_TRAILER_RE = re.compile(
+    r"\b(?:please|pls|for\s+me|sir|now|quickly|thanks|thank\s+you|"
+    r"in\s+(?:the\s+)?browser|in\s+chrome|on\s+(?:the\s+)?browser|"
+    r"web\s?site|web\s?page|website|webpage|homepage|home\s+page|"
+    r"the|a|an|and|dot|site|page)\b",
+    re.IGNORECASE,
+)
+
+# Pieces of a written-out address that are part of the destination, not an
+# errand added to it.
+_NAV_ADDRESS_NOISE = frozenset({"www", "http", "https"})
+
+# ⚠️ "Contains a dot" is NOT enough: `open report.txt` grounds `report.txt`, whose
+# residue names only itself, and routing that to a browser would try to navigate
+# to a host that does not exist. A domain and a filename are the same shape; only
+# the suffix tells them apart, and publicsuffix.py deliberately bundles multi-label
+# suffixes only (`public_suffix("report.txt")` is "txt").
+#
+# So the final label must be a TLD we know. The list lives in publicsuffix.py —
+# the module that already owns "what is a TLD" — because the site-question gate
+# needs the identical fact and two private copies would drift (2026-08-02). It is
+# partial ON PURPOSE and fails CLOSED: a TLD missing there means the message goes
+# to the classifier, i.e. exactly today's behaviour. It grants no capability,
+# relaxes no guard, and decides one thing only: whether an LLM call is worth
+# making. That is why a literal list is acceptable here and is not the
+# intent-keyword shape this router has measured at zero three times.
+_NAV_TLDS = publicsuffix.KNOWN_TLDS
+
+
+def _nav_tokens(text: str) -> set[str]:
+    return {w for w in re.split(r"[^a-z0-9]+", (text or "").lower()) if w}
+
+
+def _is_bare_navigation(text: str) -> bool:
+    """Is this message ONLY "take me to <site>"? Requires a navigation verb at
+    the very start, a site the user's own words ground to a real DOTTED domain,
+    and a residue that names nothing the site is not."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    m = _NAV_ONLY_PREFIX_RE.match(t)
+    if not m:
+        return False
+    try:
+        origins = ground_origins(t)
+    except Exception:  # grounding is best-effort; a miss is never a crash
+        return False
+    dotted = [o for o in origins if o.rsplit(".", 1)[-1] in _NAV_TLDS and "." in o]
+    if not dotted:
+        return False
+    destination = set()
+    for origin in dotted:
+        destination |= _nav_tokens(origin)
+    residue = _NAV_ONLY_TRAILER_RE.sub(" ", t[m.end():])
+    tokens = _nav_tokens(residue) - _NAV_ADDRESS_NOISE
+    return bool(tokens) and tokens <= destination
+
+
 def looks_like_task(text: str) -> bool:
     """Deterministic pre-filter, tuned for RECALL: a strong computer-domain
     noun fires alone (any verb, any phrasing); an external question fires
@@ -436,13 +537,18 @@ _BROWSE_FOLLOWUP_VERB_RE = re.compile(
 
 
 def _browse_window_active() -> bool:
-    """True when a live agent browser window is held open (the user is mid-
-    session on a site). Cheap and lock-free; import-light (the registry pulls no
-    Playwright); best-effort — a probe failure is never a crash."""
-    try:
-        from app.browser.registry import REGISTRIES
+    """True when at least one agent browser TAB is open (the user is mid-session
+    on a site). Cheap and lock-free; import-light (window pulls no Playwright —
+    it imports session lazily, inside its functions); best-effort — a probe
+    failure is never a crash.
 
-        return REGISTRIES["browse"].peek() is not None
+    Reads the tab registry rather than the old single `browse` held slot, which
+    2026-08-01 removed: agent tabs live in the shared window now, and 'is a
+    browser window open' is 'is any tab open'."""
+    try:
+        from app.browser import window as browser_window
+
+        return browser_window.tab_count() > 0
     except Exception:
         return False
 
@@ -712,10 +818,19 @@ async def maybe_handle_task(
     # cheap, while the saved wall time is paid on every action turn. Neither
     # coroutine raises by contract (classify fails to CHAT, memory to "").
     effective_goal = cleaned_goal if background else goal
-    classification, memory = await asyncio.gather(
-        _classify_message(provider, effective_goal, conversation),
-        planner_memory_context(db, effective_goal),
-    )
+
+    # A bare navigation instruction ("open junaidjamshed.com") is decided in code
+    # — see _is_bare_navigation. The classifier is not asked, because on this
+    # message shape it does not agree with itself.
+    if _is_bare_navigation(effective_goal):
+        logger.info(f"Bare navigation routed in code [BROWSE]: '{goal[:80]}'")
+        classification = ("BROWSE", "DELEGATE")
+        memory = await planner_memory_context(db, effective_goal)
+    else:
+        classification, memory = await asyncio.gather(
+            _classify_message(provider, effective_goal, conversation),
+            planner_memory_context(db, effective_goal),
+        )
     label, mode = classification
     if label == "CHAT":
         return None

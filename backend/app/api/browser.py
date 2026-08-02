@@ -28,40 +28,47 @@ router = APIRouter()
 
 @router.get("/media", summary="What the browser is currently playing or showing")
 async def get_media() -> dict:
-    """{playing, title, url} for a media window PLUS {window_open, window_title,
-    window_url} for a kept-open window — a commit result window or the
-    persistent agent browse window (2026-07-21; the result window wins when both
-    somehow exist). Cheap and I/O-free — the StatusBar polls it to recover both
-    indicators after a reload (the context_status precedent)."""
+    """{playing, title, url} for a media window, PLUS `tabs` — one row per open
+    agent tab (2026-08-01) — PLUS the original {window_open, window_title,
+    window_url} single-window fields, kept so a client that has not moved to the
+    tab list still reads correctly. Cheap and I/O-free: the StatusBar polls it to
+    recover its indicators after a reload (the context_status precedent)."""
     active = browser_session.active_media()
-    window = (
-        browser_session.active_result_window()
-        or browser_session.active_browse_window()
-    )
+    tabs = browser_session.active_browse_tabs()
+    window = browser_session.active_result_window() or (tabs[0] if tabs else None)
     return {
         "playing": active is not None,
         "title": active.get("title", "") if active else "",
         "url": active.get("url", "") if active else "",
+        "tabs": tabs,
         "window_open": window is not None,
         "window_title": window.get("title", "") if window else "",
         "window_url": window.get("url", "") if window else "",
     }
 
 
-@router.post("/close-window", summary="Close a kept-open browser window")
-async def close_window() -> dict:
-    """Close the browser window left open for the user — a commit result page or
-    the persistent agent browse window. Idempotent — closing nothing is fine.
-    Pushes a cleared state so any open StatusBar drops the indicator live."""
-    # Both windows live on the dedicated browser loop — close them there.
-    closed = await browser_runtime.run_browser(browser_session.close_result_window())
-    closed_browse = await browser_runtime.run_browser(
-        browser_session.close_browse_window()
-    )
-    closed = closed or closed_browse
+class CloseWindowRequest(BaseModel):
+    # Which tab to close, by site key (the value `tabs[].site` carries). Omitted
+    # or empty = close them all, which is what the original single-window Close
+    # button meant and still means.
+    site: str = ""
+
+
+@router.post("/close-window", summary="Close a kept-open browser window or tab")
+async def close_window(req: Optional[CloseWindowRequest] = None) -> dict:
+    """Close the browser window left open for the user — one agent tab by site,
+    or every tab plus a commit result page when no site is given. Idempotent —
+    closing nothing is fine. Pushes a cleared state so any open StatusBar drops
+    the indicator live."""
+    site = (req.site if req else "") or ""
+    # Everything here lives on the dedicated browser loop — close it there. With
+    # no site this closes EVERY tab and every held session (a submitted-form
+    # result window included), so there is nothing left to sweep separately.
+    closed = await browser_runtime.run_browser(browser_session.close_browse_window(site))
     if closed:
-        await push("browser_window", {"open": False})
-    return {"closed": closed}
+        remaining = browser_session.active_browse_tabs()
+        await push("browser_window", {"open": bool(remaining), "tabs": remaining})
+    return {"closed": closed, "tabs": browser_session.active_browse_tabs()}
 
 
 @router.post("/stop-media", summary="Stop and close a playing browser window")

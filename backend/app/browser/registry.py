@@ -107,10 +107,28 @@ class HeldSessionRegistry:
 
 # The slot table. close_all_held()/reset_for_tests() iterate THIS — adding a
 # slot here is the whole registration step, and every aggregate covers it.
+# The "browse" slot is deliberately GONE (2026-08-01). It held THE one agent
+# window, which is precisely why a second browser task had to close it; agent
+# tabs now live in app/browser/window.py, keyed by site and bounded by
+# MAX_BROWSE_TABS. What remains here are the states a tab can be SUSPENDED in,
+# which is what a one-at-a-time slot models correctly.
 REGISTRIES: dict[str, HeldSessionRegistry] = {
     slot: HeldSessionRegistry(slot)
-    for slot in ("media", "result_window", "commit", "challenge", "discovery", "browse")
+    for slot in ("media", "result_window", "commit", "challenge", "discovery")
 }
+
+
+def is_held(session: Any) -> bool:
+    """Whether `session` occupies ANY slot — i.e. it is a tab the user is
+    mid-something with: awaiting a signature approval, solving a CAPTCHA,
+    answering a discovery question, watching media, reading a result page.
+
+    DERIVED, never a flag on the session. Tab eviction must not close such a tab
+    (a pending approval whose window vanished can only report that it expired),
+    and a boolean someone has to remember to set is exactly the hand-maintained
+    state this module exists to delete — it iterates the table, so a new slot is
+    covered here by construction."""
+    return any(reg._session is session for reg in REGISTRIES.values())
 
 
 async def close_all_held() -> None:

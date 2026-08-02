@@ -50,6 +50,7 @@ async def test_media_status_empty(client):
         "playing": False,
         "title": "",
         "url": "",
+        "tabs": [],
         "window_open": False,
         "window_title": "",
         "window_url": "",
@@ -66,7 +67,7 @@ async def test_close_window_idempotent(client):
     """Closing a result window when none is open is fine, not an error."""
     resp = await client.post("/api/browser/close-window")
     assert resp.status_code == 200
-    assert resp.json() == {"closed": False}
+    assert resp.json() == {"closed": False, "tabs": []}
 
 
 async def test_media_status_reports_an_open_result_window(client):
@@ -87,7 +88,7 @@ async def test_media_status_reports_an_open_result_window(client):
         assert status["window_url"] == "https://the-internet.herokuapp.com/upload"
 
         closed = (await client.post("/api/browser/close-window")).json()
-        assert closed == {"closed": True}
+        assert closed["closed"] is True
         assert browser_session.active_result_window() is None
     finally:
         await browser_session.close_result_window()
@@ -199,22 +200,37 @@ async def test_vision_posture_defaults_to_dom_first_and_round_trips(client, monk
     assert junk.json()["posture"] == "dom_first"
 
 
+from app.browser import window as browser_window
+
+
+class _FakeTab:
+    """A tab the way a real session behaves: closing it RELEASES it from the
+    shared window. A fake that only flipped a flag would leave a dead tab in the
+    registry for the next browse to 'reuse'."""
+
+    def __init__(self):
+        self.closed = False
+        self.tab_site = ""
+        self.page = None
+
+    async def close(self):
+        self.closed = True
+        await browser_window.release_tab(self)
+
+
+def _seed_tab(site, title, url):
+    tab = _FakeTab()
+    browser_window.track_for_tests(tab)
+    tab.tab_site = site
+    browser_session.note_browse_tab(tab, title=title, url=url)
+    return tab
+
+
 async def test_media_status_reports_the_persistent_browse_window(client):
-    """The held agent browse window (2026-07-21) surfaces through the SAME
-    window fields the StatusBar already renders, and POST /close-window closes
-    it too."""
-
-    class _FakeWindow:
-        def __init__(self):
-            self.closed = False
-
-        async def close(self):
-            self.closed = True
-
-    window = _FakeWindow()
-    await browser_session.hold_browse_window(
-        window, title="It's Only the Himalayas", url="https://books.toscrape.com/x"
-    )
+    """An open agent tab surfaces through the SAME window fields the StatusBar
+    already renders (kept for clients that have not moved to `tabs`), and POST
+    /close-window closes it."""
+    tab = _seed_tab("toscrape.com", "It's Only the Himalayas", "https://books.toscrape.com/x")
     try:
         status = (await client.get("/api/browser/media")).json()
         assert status["window_open"] is True
@@ -222,8 +238,56 @@ async def test_media_status_reports_the_persistent_browse_window(client):
         assert status["window_url"] == "https://books.toscrape.com/x"
 
         closed = (await client.post("/api/browser/close-window")).json()
-        assert closed == {"closed": True}
-        assert window.closed is True
+        assert closed["closed"] is True
+        assert tab.closed is True
         assert browser_session.active_browse_window() is None
+    finally:
+        await browser_session.close_browse_window()
+
+
+async def test_media_status_lists_every_open_tab(client):
+    """MULTI-TAB (2026-08-01): several browser tasks can be open at once, so the
+    status carries one row per tab, most recently used first."""
+    first = _seed_tab("toscrape.com", "Books", "https://books.toscrape.com/x")
+    first.tab_used_monotonic = 100.0
+    second = _seed_tab("linkedin.com", "LinkedIn", "https://www.linkedin.com/feed/")
+    second.tab_used_monotonic = 200.0
+    try:
+        tabs = (await client.get("/api/browser/media")).json()["tabs"]
+        assert [t["site"] for t in tabs] == ["linkedin.com", "toscrape.com"]
+        assert tabs[0]["title"] == "LinkedIn"
+        assert tabs[1]["url"] == "https://books.toscrape.com/x"
+    finally:
+        await browser_session.close_browse_window()
+
+
+async def test_close_window_can_close_one_tab_by_site(client):
+    """Per-tab close: the user shuts the tab they are done with and the others
+    stay open. No site given still means 'close them all', as it always did."""
+    books = _seed_tab("toscrape.com", "Books", "https://books.toscrape.com/x")
+    linked = _seed_tab("linkedin.com", "LinkedIn", "https://www.linkedin.com/feed/")
+    try:
+        body = (await client.post(
+            "/api/browser/close-window", json={"site": "toscrape.com"}
+        )).json()
+
+        assert body["closed"] is True
+        assert books.closed is True
+        assert linked.closed is False, "the other tab must stay open"
+        assert [t["site"] for t in body["tabs"]] == ["linkedin.com"]
+    finally:
+        await browser_session.close_browse_window()
+
+
+async def test_closing_an_unknown_site_closes_nothing(client):
+    """Idempotent, and it must not fall back to closing everything."""
+    linked = _seed_tab("linkedin.com", "LinkedIn", "https://www.linkedin.com/feed/")
+    try:
+        body = (await client.post(
+            "/api/browser/close-window", json={"site": "nowhere.example"}
+        )).json()
+
+        assert body["closed"] is False
+        assert linked.closed is False
     finally:
         await browser_session.close_browse_window()

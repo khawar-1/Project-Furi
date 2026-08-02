@@ -602,10 +602,11 @@ def _fmt_browse_page(output: dict) -> str:
 
 
 def _fmt_browse(output: dict) -> str:
-    """A browse run's result: what it accomplished, then the final page rendered
-    (fenced, for the _fmt_browse_page reasons). Leads with the outcome — 'playing'
-    or the done reason — so a summary can answer 'did it play?' without parsing the
-    element list."""
+    """A browse run's result: what it accomplished, then — only when the run
+    actually READ something — the final page's PROSE, fenced (untrusted page text
+    carrying its own markdown, the _fmt_web_search lesson). Leads with the outcome
+    so a summary can answer 'did it play?' / 'did it get there?' without reading
+    any page at all."""
     title = str(output.get("title") or "").strip()
     url = str(output.get("url") or "")
     where = f"**{title}** — {url}" if title else url
@@ -617,6 +618,14 @@ def _fmt_browse(output: dict) -> str:
     # the page is rendered ONLY for the informational fallback below (a browse that
     # READ a fact — the book-price case relies on the excerpt surviving).
     show_page = False
+    # A DESTINATION-ONLY browse is the same case as a media outcome and was not
+    # covered: the goal asked only to BE somewhere, so nothing was read and there
+    # is nothing to report but arriving. Live 2026-08-01: "open youtube" finished
+    # correctly in 1s and then replied with the entire YouTube homepage — 108
+    # element lines plus every video title on it, 8,609 characters. The arrival
+    # terminator that made that goal finish is also the fact that says its page
+    # has nothing to say.
+    destination_only = bool(output.get("destination_only"))
     if output.get("playing") and handoff == "clean_window":
         # Handed off to a normal, ad-blocked (uBlock) window (2026-07-22). Honest
         # about the one trade-off: a non-automation window can't be told to press
@@ -638,7 +647,7 @@ def _fmt_browse(output: dict) -> str:
     else:
         reason = str(output.get("done_reason") or "").strip()
         head = f"Browsed to {where}" + (f" — {reason}" if reason else "")
-        show_page = True
+        show_page = not destination_only
 
     blocked = output.get("blocked") or {}
     if isinstance(blocked, dict) and blocked.get("blocked_mutations"):
@@ -653,11 +662,22 @@ def _fmt_browse(output: dict) -> str:
     # gathered data, not the raw element dump.
     extracted_block = _fmt_extracted(output.get("extracted"))
 
-    rendered = str(output.get("rendered") or "").strip()
+    # The page's PROSE, never `rendered`. `rendered` is observe.render's output —
+    # "the observation as the LLM sees it", i.e. the DECISION prompt's format,
+    # led by a numbered listing of every clickable element on the page. That
+    # listing is agent scaffolding: it exists so the loop can say "click 23". It
+    # answers no user's question and grounds no summary, and it was the larger
+    # half of the 8,609-character wall. `rendered` stays in the tool output for
+    # the audit record; it is not a report. Falls back to it only when the page
+    # yielded no prose at all, so a page that is genuinely all controls still
+    # shows something.
+    page = str(output.get("page_text") or "").strip()
+    if not page:
+        page = str(output.get("rendered") or "").strip()
     return (
         head
         + extracted_block
-        + ("\n" + _fence(rendered) if (show_page and rendered) else "")
+        + ("\n" + _fence(page) if (show_page and page) else "")
     )
 
 

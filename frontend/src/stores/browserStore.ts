@@ -8,7 +8,7 @@
  * to catch a window opened before it connected).
  */
 import { create } from 'zustand';
-import { browserApi } from '@/lib/api';
+import { browserApi, type BrowserTab } from '@/lib/api';
 
 interface BrowserMediaState {
   playing: boolean;
@@ -21,16 +21,24 @@ interface BrowserMediaState {
   windowTitle: string;
   closingWindow: boolean;
 
+  /** Every open agent tab (2026-08-01), most recently used first. */
+  tabs: BrowserTab[];
+
   /** Apply a pushed {playing,title,url} update. */
   receive: (payload: { playing?: boolean; title?: string; url?: string }) => void;
-  /** Apply a pushed {open,title,url} result-window update. */
-  receiveWindow: (payload: { open?: boolean; title?: string; url?: string }) => void;
+  /** Apply a pushed {open,title,url,tabs} window update. */
+  receiveWindow: (payload: {
+    open?: boolean;
+    title?: string;
+    url?: string;
+    tabs?: BrowserTab[];
+  }) => void;
   /** One-shot recovery poll (startup / reload). */
   refresh: () => Promise<void>;
   /** Stop and close the playing window. Optimistic — the push confirms. */
   stop: () => Promise<void>;
-  /** Close the kept-open result window. Optimistic — the push confirms. */
-  closeWindow: () => Promise<void>;
+  /** Close one tab by site, or every tab when no site is given. */
+  closeWindow: (site?: string) => Promise<void>;
 }
 
 export const useBrowserStore = create<BrowserMediaState>((set) => ({
@@ -41,6 +49,7 @@ export const useBrowserStore = create<BrowserMediaState>((set) => ({
   windowOpen: false,
   windowTitle: '',
   closingWindow: false,
+  tabs: [],
 
   receive: (payload) =>
     set({
@@ -53,6 +62,7 @@ export const useBrowserStore = create<BrowserMediaState>((set) => ({
     set({
       windowOpen: !!payload.open,
       windowTitle: payload.open ? payload.title ?? '' : '',
+      tabs: payload.tabs ?? [],
     }),
 
   refresh: async () => {
@@ -62,6 +72,7 @@ export const useBrowserStore = create<BrowserMediaState>((set) => ({
         playing: m.playing,
         title: m.title,
         url: m.url,
+        tabs: m.tabs ?? [],
         windowOpen: m.window_open,
         windowTitle: m.window_title,
       });
@@ -82,11 +93,18 @@ export const useBrowserStore = create<BrowserMediaState>((set) => ({
     }
   },
 
-  closeWindow: async () => {
+  closeWindow: async (site?: string) => {
     set({ closingWindow: true });
     try {
-      await browserApi.closeWindow();
-      set({ windowOpen: false, windowTitle: '' });
+      const res = await browserApi.closeWindow(site);
+      // The response carries what is LEFT, so closing one tab of several keeps
+      // the indicator up for the rest instead of clearing it wholesale.
+      const tabs = res.tabs ?? [];
+      set({
+        tabs,
+        windowOpen: tabs.length > 0,
+        windowTitle: tabs.length > 0 ? tabs[0].title : '',
+      });
     } catch {
       // Keep showing the indicator; the user can retry.
     } finally {

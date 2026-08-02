@@ -85,8 +85,44 @@ _MULTI_LABEL_SUFFIXES: frozenset[str] = frozenset({
 })
 
 
+# ⚠️ "Contains a dot" is NOT enough to call a string a site: `report.txt` has the
+# same shape as a domain, and only the suffix tells them apart — the table above
+# bundles MULTI-label suffixes only, so `public_suffix("report.txt")` is "txt"
+# and says nothing about whether "txt" is a real TLD.
+#
+# So a caller that must decide "is this a site or a filename?" needs a set of
+# final labels it recognises. The list is partial ON PURPOSE and fails CLOSED the
+# same way the suffix table does: a TLD missing here means the caller declines to
+# treat the string as a site, which is always the pre-existing behaviour. It
+# grants no capability and relaxes no guard.
+#
+# ONE HOME, TWO CALLERS (2026-08-02). This was born in task_router as
+# `_NAV_TLDS`, deciding whether a message is a bare navigation instruction; the
+# site-question gate needs the identical fact to decide whether a clarifying
+# question's option is an address worth resolving. Two private copies of "what is
+# a TLD" would drift, and drift here is a boundary nobody reviewed — the same
+# reasoning that moved `registry.mutates` out of placeholder_resolver.
+KNOWN_TLDS: frozenset[str] = frozenset({
+    "com", "org", "net", "edu", "gov", "mil", "int", "info", "biz", "name",
+    "io", "ai", "app", "dev", "co", "me", "tv", "cc", "xyz", "online", "site",
+    "shop", "store", "blog", "cloud", "tech", "news", "live", "media", "page",
+    # ccTLDs, common ones and the user's own.
+    "pk", "uk", "us", "ca", "au", "nz", "in", "de", "fr", "es", "it", "nl",
+    "se", "no", "fi", "dk", "pl", "ru", "jp", "cn", "kr", "br", "mx", "ar",
+    "za", "ae", "sa", "tr", "ch", "at", "be", "ie", "pt", "gr", "cz", "sg",
+    "hk", "my", "id", "ph", "th", "vn", "bd", "lk", "np", "ir", "eu",
+})
+
+
 def _labels(host: str) -> list[str]:
     return [p for p in (host or "").strip().lower().rstrip(".").split(".") if p]
+
+
+def has_known_tld(host: str) -> bool:
+    """True when `host` is dotted and its final label is a TLD we recognise —
+    i.e. it reads as an address rather than a filename. See KNOWN_TLDS."""
+    labels = _labels(host)
+    return len(labels) >= 2 and labels[-1] in KNOWN_TLDS
 
 
 def public_suffix(host: str) -> str:

@@ -1,0 +1,50 @@
+[
+ {
+  "url": "https://www.junaidjamshed.com/",
+  "run": 1,
+  "raw_eval_ms": 538.1632000207901,
+  "raw_error": ""
+ },
+ {
+  "url": "https://www.junaidjamshed.com/",
+  "run": 2,
+  "raw_eval_ms": 433.1887000007555,
+  "raw_error": ""
+ },
+ {
+  "url": "https://books.toscrape.com/",
+  "run": 1,
+  "raw_eval_ms": 60.018799966201186,
+  "raw_error": ""
+ },
+ {
+  "url": "https://books.toscrape.com/",
+  "run": 2,
+  "raw_eval_ms": 45.186799950897694,
+  "raw_error": ""
+ },
+ {
+  "url": "https://en.wikipedia.org/wiki/Pakistan",
+  "run": 1,
+  "raw_eval_ms": 286.75680002197623,
+  "raw_error": ""
+ },
+ {
+  "url": "https://en.wikipedia.org/wiki/Pakistan",
+  "run": 2,
+  "raw_eval_ms": 213.01850001327693,
+  "raw_error": ""
+ },
+ {
+  "url": "https://www.daraz.pk/",
+  "run": 1,
+  "raw_eval_ms": 162.2854000888765,
+  "raw_error": ""
+ },
+ {
+  "url": "https://www.daraz.pk/",
+  "run": 2,
+  "raw_eval_ms": 105.42729997541755,
+  "raw_error": ""
+ }
+]
