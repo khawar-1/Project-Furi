@@ -39,7 +39,16 @@ from app.agents.cancellation import (
     request_cancel,
 )
 from app.agents.agent_registry import GENERAL, AgentSpec, agent_for_key
-from app.agents.plan_store import put_plan
+from app.agents.interruption import (
+    CURRENT_TASK_ID,
+    MAX_STEER_ROUNDS,
+    clear_pause,
+    log_steer,
+    pause_requested,
+    request_pause,
+    take_steer,
+)
+from app.agents.plan_store import pop_plan, put_plan
 from app.agents.planner import AgentPlanner
 from app.agents.rendering import deterministic_plan_text, serialize_plan_for_api
 from app.agents.schemas import AgentPlan, PlanStatus
@@ -68,6 +77,10 @@ _RUNNING: dict[str, asyncio.Task] = {}
 _PAUSED_STATUS = {
     PlanStatus.AWAITING_APPROVAL: "awaiting_approval",
     PlanStatus.AWAITING_CHOICE: "awaiting_choice",
+    # Stopped by the user mid-run (2026-08-03). Parks through the SAME store,
+    # so Continue (/api/agent/approve) and a typed steer (/api/agent/choose or
+    # a chat message) both route back here with no new resume path.
+    PlanStatus.PAUSED: "paused",
 }
 _TERMINAL_STATUS = {
     PlanStatus.COMPLETED: "completed",
@@ -78,6 +91,7 @@ _TERMINAL_STATUS = {
 _TITLES = {
     "awaiting_approval": "Jarvis needs your approval",
     "awaiting_choice": "Jarvis has a question",
+    "paused": "Jarvis paused",
     "completed": "Task complete",
     "failed": "Task failed",
     "cancelled": "Task cancelled",
@@ -94,6 +108,9 @@ def _spawn(task_id: str, coro) -> None:
         # paused before the next between-steps check) must not leak into a
         # later resume of the same task.
         clear_cancel(task_id)
+        # Same for a pause/steer that arrived too late to be applied — the run
+        # had already settled, so there is nothing left to hold.
+        clear_pause(task_id)
         if fut.cancelled():
             return
         exc = fut.exception()
@@ -123,6 +140,7 @@ def _task_body(task: Task, plan: AgentPlan, status: str) -> str:
     prefixes = {
         "awaiting_approval": f'Background task "{goal}" is ready and needs your approval.\n\n',
         "awaiting_choice": f'Background task "{goal}" has a question for you.\n\n',
+        "paused": f'Stopped the background task "{goal}". ',
         "completed": f'Finished the background task "{goal}". ',
         "failed": f'The background task "{goal}" failed. ',
         "cancelled": f'Background task "{goal}": ',
@@ -186,6 +204,24 @@ async def answer_task_in_background(
     return task
 
 
+def request_task_pause(task_id: str, steer: str = "") -> bool:
+    """Ask a LIVE background run to STOP between steps and hold (2026-08-03).
+
+    Cancel's sibling, with one behavioural difference that is the whole point:
+    the pending steps stay PENDING, so the plan parks and can be continued or
+    replanned instead of being re-asked from scratch. `steer` is an optional
+    instruction that came with the pause ("stop, use the D drive one") — it is
+    applied automatically once the run actually stops.
+
+    Cooperative, exactly like cancel: the step currently executing finishes.
+    Returns False when no run is in flight in this process — there is nothing a
+    flag could stop, and the caller must say so rather than promise a pause."""
+    if task_id not in _RUNNING:
+        return False
+    request_pause(task_id, steer)
+    return True
+
+
 def request_task_cancel(task_id: str) -> bool:
     """Ask a LIVE background run to stop between steps (Phase 4, Part 6).
     Cooperative: the step currently executing finishes — never killed
@@ -238,6 +274,11 @@ async def _run_new(
     agent: Optional[AgentSpec] = None,
     user_answers: Optional[list[str]] = None,
 ) -> None:
+    # Bind the run id for anything awaited inside it: a tool that loops
+    # internally (browse) reads this to stop between its OWN actions rather
+    # than only at the step boundary. A ContextVar, not a global — several
+    # domain agents run concurrently on this loop.
+    CURRENT_TASK_ID.set(task_id)
     async with _session_factory()() as db:
         task = await db.get(Task, task_id)
         if task is None:
@@ -248,10 +289,12 @@ async def _run_new(
                 db, provider, session_id=session_id,
                 conversation=conversation, memory=memory,
                 cancel_check=lambda: cancel_requested(task_id),
+                pause_check=lambda: pause_requested(task_id),
                 agent=agent or GENERAL,
             )
             plan = await planner.start(goal, user_answers=user_answers)
             await _settle(db, task, plan)
+            await _apply_pending_steer(db, task, plan, planner)
         except Exception as e:
             logger.error(f"Background task {task_id} crashed while planning: {e}")
             await _fail_task(db, task_id, f"The planner crashed: {e}")
@@ -263,6 +306,7 @@ async def _run_continuation(
     """Post-approval / post-answer execution. If this crashes, the plan is
     NEVER re-parked — steps may have run; ActivityLog is the audit trail.
     The Task settles as failed instead (same rule approve_plan documents)."""
+    CURRENT_TASK_ID.set(task_id)  # see _run_new
     async with _session_factory()() as db:
         task = await db.get(Task, task_id)
         if task is None:
@@ -273,6 +317,7 @@ async def _run_continuation(
                 db, provider, session_id=plan.session_id,
                 conversation=plan.conversation, memory=plan.memory_context,
                 cancel_check=lambda: cancel_requested(task_id),
+                pause_check=lambda: pause_requested(task_id),
                 # Rebuild the SAME specialist the plan was drafted as, so a
                 # paused browser/email task never resumes as the general agent.
                 agent=agent_for_key(plan.agent_key),
@@ -282,6 +327,7 @@ async def _run_continuation(
             else:
                 plan = await planner.answer(plan, answer)
             await _settle(db, task, plan)
+            await _apply_pending_steer(db, task, plan, planner)
         except Exception as e:
             logger.error(f"Background task {task_id} crashed while resuming: {e}")
             await _fail_task(
@@ -289,6 +335,67 @@ async def _run_continuation(
                 "The plan could not be resumed. Check the Activity timeline "
                 "for anything that already ran.",
             )
+
+
+async def _apply_pending_steer(
+    db: AsyncSession, task: Task, plan: AgentPlan, planner: AgentPlanner
+) -> None:
+    """"Stop, use the D drive one" — one message that pauses AND corrects.
+
+    The pause landed between steps and the plan has just settled as PAUSED; the
+    instruction that came with it is applied here, immediately, so the user
+    gets one stop and one resumption rather than having to repeat themselves.
+
+    Runs IN THE SAME asyncio task on purpose. _spawn's done-callback pops
+    _RUNNING[task_id], so spawning a second handle for the same id would race
+    it — the old run's callback would evict the new run's handle and clear its
+    flags. Awaiting here keeps one handle, one lifecycle, one done-callback.
+
+    Bounded by MAX_STEER_ROUNDS. A steer is consumed once (take_steer pops), so
+    the loop only runs again if the user steers again mid-continuation; the cap
+    exists so a pathological pause-steer-pause cycle cannot spin.
+
+    The parked plan is CONSUMED (pop_plan) before it is resumed — one answer
+    per plan, ever. _settle parked it moments ago, so the user could already
+    have clicked Continue or Cancel on the pushed card; the atomic pop is what
+    stops two copies of the same plan running."""
+    for _ in range(MAX_STEER_ROUNDS):
+        if plan.status != PlanStatus.PAUSED:
+            return
+        steer = take_steer(task.id)
+        if not steer:
+            return
+        parked = await pop_plan(db, plan.id)
+        if parked is None:
+            logger.info(
+                f"Steer for task {task.id} dropped — the paused plan was "
+                "already answered from the UI"
+            )
+            return
+        plan = parked
+        plan.task_id = task.id  # a plan restored from SQLite carries it; be sure
+        logger.info(f"Background task {task.id} steered mid-run: '{steer[:80]}'")
+        try:
+            await log_steer(db, plan, steer)
+            # The SAME path a typed correction takes — the answer is appended
+            # to plan.user_answers and the graph re-enters at revise, so every
+            # goal-keyed guard stays armed and any write it produces pauses for
+            # fresh approval.
+            plan = await planner.answer(plan, steer)
+            await _settle(db, task, plan)
+        except Exception as e:
+            # The plan was popped, so it is NOT re-parked (steps may have run —
+            # ActivityLog is the audit trail, the same rule _run_continuation
+            # follows). Settle the Task honestly rather than leaving a "paused"
+            # row with nothing behind it.
+            logger.error(f"Applying the steer to task {task.id} failed: {e}")
+            await _fail_task(
+                db, task.id,
+                "I stopped as you asked, but couldn't pick it up again with "
+                "that correction. Check the Activity timeline for anything "
+                "that already ran, and ask again if you still want it done.",
+            )
+            return
 
 
 # ================================================================== settling
@@ -313,7 +420,11 @@ async def _settle(db: AsyncSession, task: Task, plan: AgentPlan, notify: bool = 
         plan.status = PlanStatus.FAILED
         plan.message = plan.message or "The plan ended in an unexpected state."
 
-    if status in ("awaiting_approval", "awaiting_choice"):
+    # Read from _PAUSED_STATUS, never a second hand-written list of the same
+    # names: a plan that is not parked cannot be resumed, so a status added to
+    # that map and missed here is a plan the user silently loses (caught by
+    # test_a_paused_task_parks_pushes_and_persists when "paused" was added).
+    if status in _PAUSED_STATUS.values():
         await put_plan(db, plan)  # unchanged store: same signatures, same pop-once
 
     task.status = status
@@ -384,53 +495,90 @@ async def _fail_task(db: AsyncSession, task_id: str, reason: str) -> None:
             "body": body,
         })
     except Exception as e:
-        logger.error(f"Settling failed task {task.id} also failed: {e}")
+        # task_id, not task.id: if the db.get above is what raised, `task` is
+        # unbound and this last-line handler would die of a NameError instead
+        # of logging why it failed.
+        logger.error(f"Settling failed task {task_id} also failed: {e}")
 
 
-# ================================================================== startup
+# ============================================== startup + periodic sweeping
 
-async def fail_interrupted_tasks(db: AsyncSession) -> None:
-    """Startup truth-keeping (called AFTER purge_expired_plans): a Task still
-    `running` was killed by the restart — mark it failed honestly (steps may
-    have run; ActivityLog has the audit). A paused Task whose parked_plans
-    row is gone (expired unanswered, or consumed without settling) can never
-    be resumed — failed too. Paused tasks WITH a live parked row survive:
-    the plan restores from SQLite when the user answers."""
-    interrupted = 0
+# The statuses that mean "settled in the DB, waiting on the user, resumable
+# ONLY while its parked plan lives". Hand-listing these in two places is how
+# `paused` was nearly missed — one tuple, both readers.
+_WAITING_STATUSES = ("awaiting_approval", "awaiting_choice", "paused")
 
-    result = await db.execute(select(Task).where(Task.status == "running"))
-    for task in result.scalars().all():
-        task.status = "failed"
-        body = (
-            f'The background task "{_short_goal(task.goal)}" was interrupted '
-            f"by a backend restart. Check the Activity timeline for anything "
-            f"that already ran, and ask again if you still want it done."
-        )
-        task.message = body
-        task.finished_at = utc_now()
-        if task.session_id:
-            db.add(Message(session_id=task.session_id, role="assistant", content=body))
-        interrupted += 1
 
-    result = await db.execute(
-        select(Task).where(Task.status.in_(("awaiting_approval", "awaiting_choice")))
-    )
+def _settle_row_failed(db: AsyncSession, task: Task, body: str) -> None:
+    """Mark one Task failed and tell the user why, in its own session."""
+    task.status = "failed"
+    task.message = body
+    task.finished_at = utc_now()
+    if task.session_id:
+        db.add(Message(session_id=task.session_id, role="assistant", content=body))
+
+
+async def reconcile_expired_task_plans(db: AsyncSession) -> int:
+    """A Task waiting on the user whose parked plan is gone or expired can
+    never be resumed — settle the row honestly. Returns how many it settled.
+
+    ⚠️ SAFE TO RUN AT ANY TIME, and split out of fail_interrupted_tasks
+    (2026-08-03) precisely so it can be. Its sibling half — `running` → failed —
+    is TRUE ONLY AT STARTUP, where no run can be live by definition; running
+    that on a timer against a healthy backend would kill every working agent
+    mid-flight. This half touches only rows that have already settled, and
+    skips any whose parked plan is still answerable, so a just-parked plan
+    (24h TTL, seconds old) is never in scope.
+
+    Why it needs to run at all while the backend is up: reconciliation used to
+    be startup-only, so on a machine that stays on, a paused/approval-pending
+    task abandoned past its plan's 24h TTL kept its row — un-continuable, but
+    still counted as active in the Agents panel and the status bar, and its
+    Continue button led to an error. The DB should be true, not eventually
+    true."""
+    result = await db.execute(select(Task).where(Task.status.in_(_WAITING_STATUSES)))
+    settled = 0
     for task in result.scalars().all():
         row = await db.get(ParkedPlan, task.plan_id) if task.plan_id else None
         if row is not None and row.expires_at > utc_now():
             continue  # still answerable — the parked plan is the resume truth
-        task.status = "failed"
-        body = (
+        _settle_row_failed(
+            db,
+            task,
             f'The background task "{_short_goal(task.goal)}" expired while '
             f"waiting for your answer — nothing further was executed. Ask "
-            f"again if you still want it done."
+            f"again if you still want it done.",
         )
-        task.message = body
-        task.finished_at = utc_now()
-        if task.session_id:
-            db.add(Message(session_id=task.session_id, role="assistant", content=body))
-        interrupted += 1
+        settled += 1
 
     await db.commit()
+    if settled:
+        logger.info(f"Settled {settled} background task(s) whose parked plan expired")
+    return settled
+
+
+async def fail_interrupted_tasks(db: AsyncSession) -> None:
+    """STARTUP truth-keeping (called AFTER purge_expired_plans): a Task still
+    `running` was killed by the restart — mark it failed honestly (steps may
+    have run; ActivityLog has the audit), then reconcile the waiting rows.
+
+    ⚠️ STARTUP ONLY. The `running` sweep below assumes no run can be alive,
+    which is true exactly once per process. For the periodic sweep call
+    reconcile_expired_task_plans() instead."""
+    result = await db.execute(select(Task).where(Task.status == "running"))
+    interrupted = 0
+    for task in result.scalars().all():
+        _settle_row_failed(
+            db,
+            task,
+            f'The background task "{_short_goal(task.goal)}" was interrupted '
+            f"by a backend restart. Check the Activity timeline for anything "
+            f"that already ran, and ask again if you still want it done.",
+        )
+        interrupted += 1
+
     if interrupted:
-        logger.info(f"Marked {interrupted} interrupted/expired background task(s) failed")
+        await db.commit()
+        logger.info(f"Marked {interrupted} interrupted background task(s) failed")
+
+    await reconcile_expired_task_plans(db)

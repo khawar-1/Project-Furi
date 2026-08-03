@@ -257,6 +257,20 @@ export const tasksApi = {
     taskId: string
   ): Promise<{ task_id: string; status: string; accepted: boolean; detail: string }> =>
     apiFetch(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' }),
+
+  /** Cooperative mid-plan PAUSE (2026-08-03): the same between-steps flag, but
+   *  the plan HOLDS — the pending steps stay pending, so it can be continued
+   *  (agentApi.approve) or steered (agentApi.choose / a typed message).
+   *  `steer` carries an instruction that came with the stop, applied as soon
+   *  as the run actually pauses. */
+  pause: (
+    taskId: string,
+    steer = ''
+  ): Promise<{ task_id: string; status: string; accepted: boolean; detail: string }> =>
+    apiFetch(`/api/tasks/${encodeURIComponent(taskId)}/pause`, {
+      method: 'POST',
+      body: JSON.stringify({ steer }),
+    }),
 };
 
 // ============================================================

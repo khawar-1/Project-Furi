@@ -314,6 +314,7 @@ class BrowseTool(BaseTool):
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         from app.agents import browser_loop
+        from app.agents import interruption
         from app.core import browser_runtime, browser_session  # see module docstring
         from app.core.browser_session import (
             BrowserBlocked,
@@ -327,6 +328,14 @@ class BrowseTool(BaseTool):
         goal = str(kwargs.get("goal") or "").strip()
         if not goal:
             return _fail(self, "A goal is required — what should I do in the browser?")
+
+        # "Pause the task" (2026-08-03). Built HERE, on the main loop, where the
+        # ContextVar the task runner set is visible — the browse itself runs on
+        # the dedicated browser loop in another thread, where it would not be.
+        # The closure only reads a module-level dict, so it is safe to call from
+        # there. None when this browse is not part of a background task (an
+        # inline plan, a direct API call, a test) — then nothing changes.
+        stop_check = interruption.stop_check_for_current()
 
         start_url, error = _validate_url(str(kwargs.get("start_url") or ""))
         if error:
@@ -431,6 +440,7 @@ class BrowseTool(BaseTool):
                     approved_gesture=approved_gesture,
                     skip_login_wall=skip_login_wall,
                     keep_open=keep_open,
+                    stop_check=stop_check,
                 )
 
                 output = {
@@ -474,6 +484,12 @@ class BrowseTool(BaseTool):
                     # nothing to report beyond arriving — the head line IS the
                     # complete answer, exactly as it is for a media outcome.
                     "destination_only": outcome.destination_only,
+                    # The user stopped this run (2026-08-03). A code-owned
+                    # marker, not prose: interruption.apply_pause reads it to
+                    # tell "this step failed because it was ASKED to" from
+                    # "this step failed because something broke", and resets
+                    # the step to PENDING so a plain "carry on" re-runs it.
+                    interruption.STOPPED_BY_USER: outcome.stopped_by_user,
                     "blocked": outcome.blocked,
                     "playing": False,
                     "window_open": False,

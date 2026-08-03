@@ -35,6 +35,10 @@ class PlanStatus(str, Enum):
     EXECUTING = "executing"
     AWAITING_APPROVAL = "awaiting_approval"
     AWAITING_CHOICE = "awaiting_choice"  # paused on a clarifying question
+    PAUSED = "paused"  # stopped BY THE USER mid-run, holding for their steer.
+    # Distinct from CANCELLED in exactly one way that matters: the pending
+    # steps stay PENDING (see interruption.apply_pause), so the plan can be
+    # continued or replanned instead of re-asked from scratch.
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"

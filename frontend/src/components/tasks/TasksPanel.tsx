@@ -20,6 +20,7 @@ import {
   Clock,
   HelpCircle,
   Loader2,
+  Pause,
   RefreshCw,
   ShieldAlert,
   XCircle,
@@ -44,6 +45,12 @@ const STATUS: Record<
     badge: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
     label: 'needs your approval',
     icon: <ShieldAlert size={12} />,
+    active: true,
+  },
+  paused: {
+    badge: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+    label: 'paused by you',
+    icon: <Pause size={12} />,
     active: true,
   },
   awaiting_choice: {
@@ -83,13 +90,19 @@ const AGENT_ACCENT: Record<string, string> = {
 };
 
 function TaskCard({ task }: { task: Task }) {
-  const { cancellingId, cancelTask, progress, respondingId, respondErrors, respondToTask, answerTask } =
-    useTasksStore();
+  const {
+    cancellingId, cancelTask, pausingId, pauseTask, progress,
+    respondingId, respondErrors, respondToTask, answerTask,
+  } = useTasksStore();
   const s = STATUS[task.status];
   const accent = AGENT_ACCENT[task.domain ?? 'general'] ?? AGENT_ACCENT.general;
   const isCancelling = cancellingId === task.id;
+  const isPausing = pausingId === task.id;
   const step = task.status === 'running' ? progress[task.id] : undefined;
-  const needsYou = task.status === 'awaiting_approval' || task.status === 'awaiting_choice';
+  const needsYou =
+    task.status === 'awaiting_approval' ||
+    task.status === 'awaiting_choice' ||
+    task.status === 'paused';
   // A paused task carries its full plan (serialized by /api/tasks), so the
   // approval / question card renders RIGHT HERE — reachable regardless of
   // whether the live push was ever seen or which chat session you're in.
@@ -133,6 +146,16 @@ function TaskCard({ task }: { task: Task }) {
           )}
         </div>
 
+        {task.status === 'running' && (
+          <button
+            onClick={() => void pauseTask(task.id)}
+            disabled={isPausing || isCancelling}
+            className="flex-shrink-0 p-1.5 rounded-lg text-slate-600 hover:text-amber-400 hover:bg-amber-500/10 transition-colors disabled:opacity-40"
+            title="Pause this task and hold — nothing is lost, and you can tell it what to change"
+          >
+            <Pause size={14} />
+          </button>
+        )}
         {task.status === 'running' && (
           <button
             onClick={() => void cancelTask(task.id)}

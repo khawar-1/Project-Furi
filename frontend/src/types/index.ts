@@ -29,6 +29,10 @@ export interface ChatMessage {
    *  (Phase 4, Part 6) — the card shows "Cancelling…" until the cancelled
    *  "task" push event resolves it. */
   planCancelRequested?: boolean;
+  /** A mid-plan PAUSE was requested for this message's background task
+   *  (2026-08-03) — the card shows "Stopping…" until the paused "task" push
+   *  event resolves it. */
+  planPauseRequested?: boolean;
 }
 
 export interface StreamChunk {
@@ -166,6 +170,10 @@ export type PlanStatus =
   | 'executing'
   | 'awaiting_approval'
   | 'awaiting_choice'
+  /** Stopped by the user mid-run and HOLDING (2026-08-03). Unlike 'cancelled'
+   *  the remaining steps are still pending: Continue runs them, or a typed
+   *  correction replans them. */
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'cancelled';
@@ -401,6 +409,7 @@ export type TaskStatus =
   | 'running'
   | 'awaiting_approval'
   | 'awaiting_choice'
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'cancelled';

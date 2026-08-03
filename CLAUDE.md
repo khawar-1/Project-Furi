@@ -2450,6 +2450,317 @@ the loop never started.
   `properties[_Charge Code]: PERFUME`, `properties[_Barcode]: PM135415-100-999-M`.
   Cancelled; nothing was submitted.
 
+### Pause a running task and steer it (2026-08-03)
+Asked for directly: *"when jarvis is performing a task and it got something
+wrong, then i can ask jarvis to pause the task and then tell it what to do."*
+Until now the only mid-run lever was **Cancel**, which is TERMINAL — every
+pending step is marked SKIPPED and the plan is gone, so the completed work
+could only be recovered by re-asking from scratch. Three holes, all verified
+in the tree before any code moved:
+- **No pause state.** `PlanStatus` had nothing meaning "stopped, holding,
+  waiting for you".
+- **A message typed mid-run had nowhere to go.** `maybe_handle_task` only
+  intercepted an AWAITING_CHOICE plan. "pause" carries no domain noun and no
+  action verb, so `looks_like_task` returned False and it fell to plain chat —
+  which cannot stop anything. Worse, a correction that DID name a noun ("use
+  the D drive one") passed the task gate and started a **SECOND concurrent
+  agent** while the first carried on doing the wrong thing.
+- **A browse step ignored the stop flag entirely.** `browser/loop.py` had only
+  its own `BROWSE_DEADLINE_SECONDS = 400` wall-clock check, so even the
+  EXISTING cancel could take ~7 minutes to land on a browse — exactly the
+  surface where the user watches it go wrong.
+
+- **THE DESIGN IS CANCEL'S SIBLING, NOT A NEW ENGINE** (`app/agents/
+  interruption.py`, modelled on `cancellation.py` line for line): cooperative
+  flag checked BETWEEN steps, the step in flight always finishes, in-memory
+  (it targets a run alive in THIS process), every applied pause and steer
+  AUDITED in ActivityLog (`pause_plan` / `steer_plan` — this codebase carries
+  "no routing audit trail" as a recorded open gap; not repeating it). **The one
+  behavioural difference is the entire feature: `apply_cancellation` marks
+  pending steps SKIPPED, `apply_pause` leaves them PENDING.** That is what
+  makes continue, steer and restart survival possible at all, and it is the
+  assertion `test_pause_between_steps_leaves_the_remaining_steps_pending`
+  exists to freeze.
+- **THE RESUME REUSES `planner.answer()` VERBATIM — there is no steer
+  machinery.** A paused plan's correction IS the answer to an implicit "what
+  should I do differently?", and `answer()` already appends to
+  `plan.user_answers`, re-enters the graph at `revise`, keeps every completed
+  step's results, and forces FRESH approval on anything new it produces. So a
+  steer can never smuggle an approved write past the gate, and every guard that
+  keys on the goal STRING stays armed (the `continuation_router` lesson — a new
+  plan whose goal is literally "look again" silently disarms `folder_resolver`
+  and `_scope_violation`). `resume()` and `answer()` simply learned to accept
+  PAUSED; `PlanStatus.PAUSED` and `Task.status="paused"` need **no migration**
+  (the column is a free-form `String(24)`).
+- **NO RESUME ENDPOINT, deliberately.** Continue is the existing
+  `/api/agent/approve`; a steer is the existing `/api/agent/choose` or just
+  typing. Approval logic stays in one place. Only `POST /api/tasks/{id}/pause`
+  is new, mirroring `cancel`'s `accepted`/`detail` honesty contract.
+- **⚠️ "CARRY ON" GRANTS NO APPROVAL, and this reverses the obvious design.**
+  The intuitive reading — "the remaining steps are the ones you already
+  approved, so Continue re-approves those signatures" — is FALSE in the case
+  that matters: a plan can pause BEFORE it ever reached the approval gate (the
+  user stopped it during a read), and its pending WRITE has then never been
+  shown on an approval card. Re-approving would run a delete on a button
+  labelled "Carry on". So `resume()` passes an EMPTY signature set for a PAUSED
+  plan and the gate re-applies exactly as it would have. Cost: one approval
+  click on a step that was already approved before the pause. Benefit: the
+  house rule ("approval never transfers to actions the user hasn't seen") stays
+  true through a state it predates. Frozen by
+  `test_carry_on_grants_no_approval_to_a_pending_write`.
+- **ONE WIDENING DOES THE WHOLE OF ROUTING**: `plan_store.
+  get_choice_plan_for_session` now matches AWAITING_CHOICE **or** PAUSED. That
+  single change routes a typed steer into `answer()` AND makes the reminder /
+  routine / continuation routers correctly defer to a paused plan, because they
+  all already call it to mean "an open plan owns the next message".
+- **NEW `app/api/interrupt_router.py`** (hooked between continuation and task
+  in chat.py, the sibling pattern). **WHAT MAKES A GENEROUS TRIGGER SAFE: it
+  only fires when the session has a LIVE RUNNING task** — with nothing running
+  it returns None and "stop"/"wait" keep their ordinary meaning, the same guard
+  `continuation_router` uses inverted. The trigger is anchored to the START of
+  the message (an interjection opens a sentence; the same word mid-sentence is
+  usually about the task's own subject — "find the files that stop the build"),
+  and `stop the music|video|playing` is excluded so it stays a `stop_media`
+  task. It is deliberately NOT a general "is the user unhappy?" classifier —
+  that is a judgement, and this codebase has measured keyword lists standing in
+  for judgements at ZERO three times. **"stop" pauses EVERY running agent in
+  the session**, not just the newest: pausing is LOSSLESS, so over-pausing
+  costs one "carry on" while pausing the wrong one of two leaves the agent the
+  user is actually watching still doing the wrong thing — the entire defect.
+  The steer rides on the NEWEST only (a correction is about one piece of work).
+- **A pause may carry its instruction** ("stop, use the D drive one"). The
+  runner's `_apply_pending_steer` consumes it once and continues **in the same
+  asyncio task** — `_spawn`'s done-callback pops `_RUNNING[task_id]`, so
+  spawning a second handle for the same id would race it and evict the new
+  run's flags. It POPS the parked plan first (`pop_plan`): `_settle` parked it
+  moments ago and the user could already have clicked Continue, and the atomic
+  pop is what stops two copies of one plan running.
+- **Deterministic replies where a judgement is not needed**: `_is_bare_continue`
+  ("carry on", the phrase the pause message itself suggests) resumes with ZERO
+  LLM calls, and `_declined_choice` ("stop" again, "cancel") drops the plan
+  instead of replanning with the word "stop" as an authoritative instruction.
+  Both are whole-message by construction, erring toward STEER — a misread steer
+  replans, a misread continue would silently ignore what the user asked for.
+- **The browse loop stops between its OWN actions** (`run_browse(...,
+  stop_check=None)`, checked beside the existing deadline check under the same
+  cooperative rule). `BrowseTool.execute` and `commit_flow.discover`/`perform`
+  build the closure **on the main loop**, where the runner's
+  `interruption.CURRENT_TASK_ID` ContextVar is visible — the browse itself runs
+  on the dedicated browser loop in another thread, where it would not be. A
+  ContextVar rather than a module global because several domain agents run
+  concurrently and a global would let one agent's pause stop another's browse.
+  The outcome carries `stopped_by_user`, the tool writes the code-owned
+  `STOPPED_BY_USER` marker into its output, and `apply_pause` resets that step
+  to PENDING so a plain "carry on" re-runs the browse (safe: `browse` is READ,
+  and any gesture or submit inside it pauses for its own approval).
+- **⚠️ A REAL BUG THE TESTS CAUGHT, and it is the shape this file keeps
+  recording:** `_settle` parked on a hand-written `("awaiting_approval",
+  "awaiting_choice")` tuple while `_PAUSED_STATUS` was the map everything else
+  read. Adding "paused" to the map did nothing, the plan was never parked, and
+  it could never be continued or steered. Now `status in
+  _PAUSED_STATUS.values()` — **a second hand-kept copy of the same list is a
+  hole** (`registry.mutates`, `publicsuffix.KNOWN_TLDS`). Also fixed in passing:
+  `_fail_task`'s last-line handler logged `task.id` where `task` can be unbound
+  if the `db.get` is what raised.
+- Frontend: `PlanCard` gains a Pause button in the running banner and a paused
+  banner (Carry on / Cancel / a free-text correction — the SAME form the
+  clarifying question uses, because a steer and an answer are the same
+  gesture); `chatStore.pauseBackgroundTask`; the Agents panel gains a per-task
+  Pause; StatusBar counts paused agents as active (losing them there would hide
+  the one state that needs a reply to move).
+- **⚠️ A SECOND BUG FOUND BY REVIEWING MY OWN WORK, and it would have made the
+  whole card DEAD:** `chatStore.respondToPlan` early-returns unless the status
+  is `awaiting_approval` (or a cancel on `awaiting_choice`), and
+  `respondToChoice` unless it is `awaiting_choice`. Both are one-answer-per-plan
+  guards, both predate PAUSED, and neither knew about it — so Carry on, Cancel
+  AND the correction box would every one of them have silently done nothing,
+  with a backend that worked perfectly underneath. The lesson is the same one
+  the `registry.mutates` and `_settle` bullets record, in the FRONTEND: adding a
+  state means finding every predicate that enumerates the old ones. The Agents
+  panel was unaffected (it calls `tasksStore` directly, which gates on the plan
+  id, not the status) — which is exactly why a green typecheck said nothing.
+- **HONEST LIMITS, stated in the module docstrings.** (1) **INLINE tasks cannot
+  be paused** — they hold the chat SSE open, so there is no turn in which to
+  type; pause covers DELEGATE'd background work, which is where long-running
+  work lives by design. (2) **A step in flight always finishes** — a 30s
+  `run_command` completes before the pause lands. (3) A steer whose run settles
+  for its OWN reason (a login wall, an approval) is DROPPED rather than
+  auto-answered into that question — the user sees the question and answers it.
+  (4) The flag is in-memory; a plan that already PAUSED is parked in SQLite and
+  does survive a restart.
+- Tests: NEW `test_task_pause.py` (24 — the pending-steps invariant, cancel
+  beats pause, a paused replan spends no LLM call, both `apply_pause` rules,
+  carry-on/steer/decline, the fresh-approval invariant, park+push+persist,
+  the auto-applied steer, restart reconciliation, the router matrix incl.
+  media stops and the live-task guard, pause-all-agents, and both browse-loop
+  directions). **All 16 behavioural changes were proven to FAIL by reverting
+  the specific line IN PLACE** (never `git show :file` — the 2026-08-01 rule),
+  each with the correct signature: behavioural fails, regression passes. The
+  harness re-reads the patched file to confirm the revert landed before
+  trusting a green result (three lying falsifications in this project so far).
+  **3003 passing, 14 skipped, 0 failed** (baseline 2980); typecheck +
+  `vite build` clean.
+- **LIVE ACCEPTANCE IS USER-DRIVEN AND OUTSTANDING**: `npm run dev`, start a
+  multi-step task, type "pause" mid-run (the card must hold with completed
+  steps intact and nothing skipped), then type a correction (the remainder
+  replans; any write shows a FRESH approval card), then repeat with a browse
+  goal to confirm the pause lands in seconds rather than minutes.
+
+### The approval card was deaf, and the sweep was startup-only (2026-08-03)
+Asked as a question about the pause round, not a bug report: *"what if it asks me
+for a permission and then I correct it — what will happen to the permission, will
+it stay in the background?"* It does, and worse than that. Plus a second, smaller
+one from the same conversation: *"make sure there are no problems like memory
+leak, a process running in background."* The leak audit came back clean (see
+below); the sweep did not.
+
+- **⚠️ DEFECT 1 — a typed correction never reached a plan holding an approval
+  card.** `plan_store._OPEN_STATUSES` was `(AWAITING_CHOICE, PAUSED)`, so
+  `get_choice_plan_for_session` — the ONE predicate every router calls to mean
+  "an open plan owns this message" — walked straight past a live card. The
+  message then fell through to `maybe_handle_task`, where a correction naming a
+  domain noun ("use the D drive downloads") passes `looks_like_task` and **starts
+  a SECOND agent**, while the original plan stayed parked for the full 24h TTL
+  with its card **still armed**: `respondToPlan` accepts `awaiting_approval`, so
+  clicking Approve the next morning ran the uncorrected plan. Typing "stop" did
+  nothing either — `interrupt_router.running_tasks` requires `Task.status ==
+  "running"` and an approval-paused task is `"awaiting_approval"`.
+  **Pre-existing** (AWAITING_APPROVAL was never an open plan), but the pause
+  round made it conspicuous: "stop and correct it" now worked everywhere EXCEPT
+  the moment Jarvis was literally asking.
+- **The fix is the one-line shape the pause round already used** — put
+  AWAITING_APPROVAL in `_OPEN_STATUSES` — and it buys every router at once: the
+  reminder / routine / continuation / interrupt routers all defer, and the task
+  router pops the plan and routes the message to `planner.answer()`. A question
+  card and an approval card are the same thing from the user's chair (Jarvis
+  stopped and is waiting), and they now behave the same.
+- **⚠️ WHAT A TYPED WORD MEANS THERE IS DECIDED IN CODE, AND IT CAN NEVER GRANT
+  APPROVAL.** Three branches, checked in the router BEFORE the pop so a refusal
+  leaves the card clickable: a **decline** ("no", "cancel", "stop" —
+  `_declined_choice`, already carrying the negative lookahead so *"no, use the D
+  drive one"* is a correction) → `resume(approved=False)`; an **approval attempt**
+  → REFUSED with a deterministic nudge, plan untouched, card stands; **anything
+  else** → a STEER through `planner.answer()`, which keeps every completed step's
+  results, replans the pending ones, and forces a FRESH signature on whatever
+  comes back. Declining is safe in a way its mirror image is not — it can only
+  ever do LESS than the card asked for.
+- **⚠️ THE MEASUREMENT THAT SETTLED THE CONSENT QUESTION, and it is why there are
+  two word sets rather than one reused.** The obvious implementation is to borrow
+  `planner._is_bare_continue` — it already means "a whole-message affirmation
+  with no correction in it", and it is what the PAUSED Continue branch uses. But
+  it answers a DIFFERENT question: `_CARRY_ON_RE` accepts **"never mind"** and
+  **"nvm"**, because at a pause they mean *"forget I interrupted, carry on"*. At
+  an approval card the same words mean *"forget it, DON'T"*. One word set,
+  opposite meanings — reusing it would have read a request to DROP a delete as
+  consent to RUN it. So `task_router._is_typed_approval` is its own list, used
+  ONLY to refuse (a false positive costs a nudge, never an action), and the
+  contradiction is frozen in
+  `test_the_carry_on_word_set_would_have_flipped_a_delete_on`. This is the same
+  shape as the 2026-08-03 "Carry on grants no approval" reversal one round
+  earlier: the intuitive design is wrong specifically where consent is at stake.
+- **KNOWN COST, accepted:** an approval card now OWNS the next message, so an
+  unrelated question typed while one is up is consumed as a correction and
+  replans. AWAITING_CHOICE has had exactly this property since Phase 3 and it is
+  documented as deliberate; both are recoverable (the replan pauses again),
+  whereas leaving the card deaf is the reported defect. Narrowing it by guessing
+  whether the message is "really" a correction would be the intent-classifier
+  keyword shape this codebase has measured at ZERO three times.
+- **The stale card in the UI dies with the plan.** `planner.answer()` returns the
+  SAME plan id, so `chatStore`'s plan-chunk branch re-points any EARLIER message
+  carrying that id at the current state — the buttons go with the status, and a
+  click can never post to a plan that is gone. (Background tasks were already
+  covered: `receiveTaskEvent` patches by `task_id`. This brings the inline path
+  in line.) The `interactive` flag also learned `paused`.
+- **⚠️ DEFECT 2 — reconciliation was startup-only, and the obvious fix is a
+  LOADED GUN.** A Task waiting on the user whose parked plan expired can never be
+  resumed, but `fail_interrupted_tasks` runs once per process, so on a desktop
+  backend that stays up for days the row kept saying `"paused"` — counted as an
+  active worker in the Agents panel and the StatusBar, with a Continue button
+  that could only ever error. **The trap: `fail_interrupted_tasks` ALSO sweeps
+  `running` → `failed`, which is true ONLY at startup, where no run can be live
+  by definition. Put THAT on a timer and every working agent dies mid-flight.**
+  So the safe half was split out as `reconcile_expired_task_plans(db)` (touches
+  only already-settled rows, skips any whose parked plan is still answerable — a
+  plan parked seconds ago carries a 24h TTL and is never in scope), and
+  `fail_interrupted_tasks` keeps both halves for boot.
+- **NEW `app/core/housekeeping.py` — a plain lifespan-owned asyncio task, NOT a
+  scheduler job, and that is a deliberate reversal of the house pattern.** Every
+  recurring FEATURE goes through `JarvisScheduler` because SQLite is the truth
+  and a job due while the backend slept must still fire. **None of that applies
+  to housekeeping: this sweep is meaningless across a restart**, since startup
+  already does the same work more thoroughly. Persisting a wake-up for it would
+  buy nothing and cost a job kind, an `app_settings` pointer and a reconcile of
+  its own. So: no migration, no new table, 15-minute interval, each of the three
+  steps independently best-effort (the `gather_briefing_sections` rule, with a
+  rollback between so a poisoned session cannot carry into the next step),
+  cancelled and AWAITED on shutdown, and armed AFTER the startup purge so it
+  never races it.
+- **⚠️ A FALSIFICATION CAME BACK GREEN, AND IT WAS THE USEFUL ONE.** Reverting the
+  sweep's wiring to call `fail_interrupted_tasks` left
+  `test_reconcile_never_touches_a_running_task` PASSING — because that test calls
+  the function directly and never touches the wiring. It proves the safe function
+  is safe; it says nothing about which one the timer calls, i.e. it could not see
+  the exact trap it was written for. NEW
+  `test_the_periodic_pass_never_kills_a_live_agent` drives the real
+  `run_housekeeping_pass()` against a live `running` row (the `db` fixture now
+  points `AsyncSessionLocal` at the test database, since the sweep opens its own
+  session). **When a falsification comes back green, suspect the test's reach
+  before the code** — same lesson as the 2026-08-01 fakes carrying their own copy
+  of the method under test.
+- **The pause round's leak audit, recorded because it was asked for and is
+  otherwise invisible:** `_PAUSE_REQUESTED` cannot orphan (both callers go
+  through `request_task_pause`, which writes NOTHING when no run is live, and
+  `_spawn._done` clears on every exit); `CURRENT_TASK_ID` is a ContextVar set
+  INSIDE the spawned task, so it is task-local and dies with it (a module global
+  would let one agent's pause stop another's browse); the browse `stop_check`
+  closure captures a string and reads a module dict, pinning no Playwright
+  object; a stopped browse is not a hand-off, so `held`/`handed_off` stay False
+  and the `finally` runs `release_after_run()`; the steer runs in the SAME
+  asyncio task (a second handle would race `_spawn`'s done-callback), bounded at
+  `MAX_STEER_ROUNDS`, no recursion; no new frontend timers.
+- **A fourth hand-kept copy of "which statuses park" died with this round.**
+  `task_router._stream_plan_run` had its own literal
+  `(AWAITING_APPROVAL, AWAITING_CHOICE)` tuple deciding whether to `put_plan` —
+  so an inline plan that PAUSED was never parked from that path. It reads
+  `agent._PARKABLE` now. Same lesson as `_settle` one round earlier
+  (`registry.mutates`, `publicsuffix.KNOWN_TLDS`): a second copy of a list is a
+  hole, and this was the fourth.
+- Tests: NEW `test_approval_steer.py` (54 — the incident frozen end-to-end
+  through a REAL planner stopped at a real delete card, and again through a
+  REAL background Task (where writes actually live, since the router DELEGATEs
+  them); the card found again after a cache clear; a typed approval leaving
+  both plan and file untouched; "stop" reaching the plan where it used to hit
+  plain chat; the nudge contract; all four sibling routers deferring;
+  decline-at-zero-LLM-cost; a correction keeping the completed read and
+  re-signing the write; the 27-case consent/steer matrix; the wiring guard;
+  the three waiting statuses; both sweep-lifecycle properties). **All seven
+  behavioural changes proven to FAIL when reverted IN PLACE** (never
+  `git show :file` — the 2026-08-01 rule), each with the correct signature.
+- **⚠️ A SECOND GREEN FALSIFICATION, and it caught a test asserting the wrong
+  thing.** The background-card test first ended on `task.status ==
+  "awaiting_approval"` — which the BROKEN code produces too: an `answer()` that
+  refuses AWAITING_APPROVAL logs a warning and returns the plan UNCHANGED,
+  settling to the identical row with the identical files on disk. It now
+  asserts WHICH FILE the re-parked card names. **Twice in one round the
+  falsification found a test that could not see its own defect** — first the
+  sweep's wiring, then this. A behavioural assertion has to name something that
+  DIFFERS between fixed and broken, not something the fix merely preserves.
+- **RUNTIME-VERIFIED on the REAL `main.py` lifespan** (isolated scratch DB, the
+  real `jarvis.db` untouched — a hermetic test cannot tell you the wiring boots):
+  the sweeper arms at startup, one real periodic pass leaves a `running` row
+  RUNNING while settling a `paused` row whose parked plan expired, and shutdown
+  clears it. **⚠️ The first attempt reported the live row as `failed` and it was
+  MY CHECK, not the code**: the scratch DB was reused, so a previous process's
+  `running` row was correctly failed by the next boot's `fail_interrupted_tasks`,
+  and `select(Task).first()` read THAT row. The failed row's message
+  ("interrupted by a backend restart") is the STARTUP text, not the sweep's
+  ("expired while waiting"), which is what settles it conclusively — the message
+  identifies the code path. A fresh DB reproduced neither.
+- **LIVE ACCEPTANCE IS USER-DRIVEN AND OUTSTANDING**: start a task that pauses
+  for approval, then (a) type "yes" — it must refuse and the card must survive;
+  (b) type a correction — the card must update, no second agent must appear, and
+  the replanned write must show a FRESH approval card; (c) type "no" — cancelled.
+
 ### Timestamp serialization (API convention)
 The DB stores naive UTC (`utc_now()` in models.py). API serializers MUST use `utc_iso()` (models.py), never bare `.isoformat()`: a naive ISO string has no timezone marker, so the frontend's `new Date(iso)` reads it as LOCAL time and every displayed timestamp shifts by the machine's UTC offset (the "reminder set for 6 PM shows 1 PM" bug, fixed 2026-07-09). Applied to reminders, activity, tasks, chat messages, and schedule serializers. Extraction-derived date-semantics fields (`event_date`, `interaction_date`, `occurred_at` in contacts/episodes/memory) deliberately keep bare `.isoformat()` — they are calendar dates, not UTC moments, and marking them UTC would shift the displayed day.
 

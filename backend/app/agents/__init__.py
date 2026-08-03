@@ -21,6 +21,7 @@ from app.agents.schemas import AgentPlan, PlanQuestion, PlanStatus, PlanStep, St
 from app.agents.task_runner import (
     answer_task_in_background,
     fail_interrupted_tasks,
+    reconcile_expired_task_plans,
     request_task_cancel,
     resume_task_in_background,
     settle_cancelled_task,
@@ -35,4 +36,5 @@ __all__ = [
     "deterministic_plan_text", "serialize_plan_for_api", "steps_for_summary",
     "start_task", "resume_task_in_background", "answer_task_in_background",
     "settle_cancelled_task", "fail_interrupted_tasks", "request_task_cancel",
+    "reconcile_expired_task_plans",
 ]

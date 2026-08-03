@@ -94,7 +94,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urljoin, urlparse
 
 from loguru import logger
@@ -518,6 +518,12 @@ class BrowseOutcome:
     # 2026-08-01 symptom ("it started playing a video I didn't ask for"), and
     # the multi-tab round made the in-place branch the common one.
     destination_only: bool = False
+    # The user asked Jarvis to stop, and this run halted between its own actions
+    # to obey (2026-08-03). NOT a failure to replan around: the tool marks the
+    # step's result with interruption.STOPPED_BY_USER, the planner's pause check
+    # fires on the very next node, and apply_pause resets the step to PENDING so
+    # a plain "carry on" re-runs the browse from the top.
+    stopped_by_user: bool = False
     # The loop stopped at a sign-in wall it must never pass (14.4). Not a
     # failure to replan around — the tool opens a user-driven login window and
     # the plan PAUSES (AWAITING_CHOICE) until the user signs in and says
@@ -3306,6 +3312,7 @@ def _outcome(
     error: str = "",
     llm_calls: int = 0,
     vision_calls: int = 0,
+    stopped_by_user: bool = False,
 ) -> BrowseOutcome:
     final = dom_observe.summarize(obs) if obs is not None else {}
     if obs is not None:
@@ -3342,6 +3349,7 @@ def _outcome(
         # return path funnels through here, so one read carries it out of all
         # of them.
         destination_only=bool(getattr(session, "browse_destination_only", False)),
+        stopped_by_user=stopped_by_user,
         blocked=session.stats.as_dict() if getattr(session, "stats", None) else {},
     )
 
@@ -3376,6 +3384,13 @@ async def run_browse(
     # browser/choice.py::locate and the ENFORCE-NEVER-TRUST rule it cites.
     chosen_target: str = "",
     chosen_option: str = "",
+    # "Pause the task" (2026-08-03). A browse can legitimately run for minutes,
+    # so the plan-level between-steps check is far too coarse here: the user
+    # would ask it to stop and watch it carry on browsing. Consulted between
+    # this loop's OWN actions, next to the deadline check below, under exactly
+    # the same cooperative rule — an action already in flight finishes. None
+    # (every pre-existing caller) means not stoppable, unchanged behaviour.
+    stop_check: Optional[Callable[[], bool]] = None,
 ) -> BrowseOutcome:
     """Drive `session` toward `goal`, observing and acting until the model says
     done, the action budget is spent, or a dead-loop is detected. Read-only by
@@ -3564,6 +3579,19 @@ async def run_browse(
         # multi-minute freeze. Checked between steps (a step already in flight
         # finishes — the same cooperative rule as the mid-plan cancel), so the
         # worst overrun is one step past the deadline, never open-ended.
+        # The user asked it to stop (2026-08-03). Same place, same cooperative
+        # rule as the deadline: the action in flight always finishes, so the
+        # worst case is one action past the request rather than a browser left
+        # mid-click. The outcome carries STOPPED_BY_USER so the planner knows
+        # this step failed because it was ASKED to, not because anything broke.
+        if stop_check is not None and stop_check():
+            logger.info(f"browse: stopped at the user's request at step {step}")
+            return _outcome(
+                False, step, obs, session,
+                error="stopped at your request",
+                llm_calls=llm_calls, vision_calls=vision_calls,
+                stopped_by_user=True,
+            )
         elapsed = time.monotonic() - started
         if elapsed > BROWSE_DEADLINE_SECONDS:
             logger.info(

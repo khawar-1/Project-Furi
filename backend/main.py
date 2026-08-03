@@ -301,12 +301,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as e:
         logger.debug(f"browser profile reclaim (startup): {e}")
 
+    # The startup purge above runs ONCE; this keeps it true while the backend
+    # stays up (2026-08-03). A desktop backend can run for days, and an
+    # abandoned approval/pause left its Task row counted as an active worker
+    # long after its parked plan expired. Best-effort, cancelled on shutdown.
+    try:
+        from app.core.housekeeping import start_housekeeping
+        start_housekeeping()
+    except Exception as e:
+        logger.warning(f"⚠️  Housekeeping sweep could not start (non-critical): {e}")
+
     logger.info(f"🤖 LLM Provider: {settings.LLM_PROVIDER}")
     logger.info(f"🌐 Backend ready at http://{settings.BACKEND_HOST}:{settings.BACKEND_PORT}")
 
     yield
 
     logger.info("🛑 Jarvis OS backend shutting down...")
+    # Stop the sweep FIRST — it opens DB sessions, and a pass starting while
+    # the rest of shutdown runs would race the teardown it cannot see.
+    try:
+        from app.core.housekeeping import stop_housekeeping
+        await stop_housekeeping()
+    except Exception as e:
+        logger.debug(f"housekeeping shutdown: {e}")
     await scheduler.shutdown()
 
     # Phase 14: close every browser window Jarvis has open BEFORE stopping the

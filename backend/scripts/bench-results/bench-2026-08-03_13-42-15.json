@@ -1,0 +1,27 @@
+{
+  "when": "2026-08-03_13-42-15",
+  "passed": 1,
+  "scored": 1,
+  "blocked": 0,
+  "total": 1,
+  "tasks": [
+    {
+      "id": "wikipedia-read",
+      "passed": true,
+      "seconds": 12.4,
+      "actions": 0,
+      "records": 0,
+      "url": "https://en.wikipedia.org/wiki/Eiffel_Tower",
+      "tool_success": true,
+      "error": "",
+      "checks": [
+        {
+          "kind": "text_contains_any",
+          "passed": true,
+          "detail": "found '1889'"
+        }
+      ],
+      "sample": []
+    }
+  ]
+}

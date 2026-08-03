@@ -48,6 +48,7 @@ interface ChatState {
   /** Mid-plan cancel (Phase 4, Part 6): ask the backend to stop this
    *  message's background task between steps. The cancelled outcome arrives
    *  as a "task" push event, which resolves the card. */
+  pauseBackgroundTask: (messageId: string) => Promise<void>;
   cancelBackgroundTask: (messageId: string) => Promise<void>;
   clearConversation: () => void;
   setProvider: (provider: LLMProviderName) => void;
@@ -142,13 +143,26 @@ export const useChatStore = create<ChatState>((set, get) => {
           // The card carries the interaction (approval buttons OR a
           // clarifying question) — hide the duplicate text bubble for both.
           const interactive =
-            plan.requires_approval || plan.status === 'awaiting_choice';
+            plan.requires_approval ||
+            plan.status === 'awaiting_choice' ||
+            plan.status === 'paused';
           set((state) => ({
-            messages: state.messages.map((m) =>
-              m.id === assistantMessageId
-                ? { ...m, plan, planNeededApproval: interactive }
-                : m
-            ),
+            messages: state.messages.map((m) => {
+              if (m.id === assistantMessageId) {
+                return { ...m, plan, planNeededApproval: interactive };
+              }
+              // An EARLIER card for this same plan is now stale: answering it
+              // by typing consumed it server-side (planner.answer returns the
+              // same plan id), so its Approve button would post to a plan that
+              // no longer exists. Re-point it at the current state — the
+              // buttons go with the status, and a click can never act on a
+              // decision the user has already moved past. Same rule
+              // receiveTaskEvent applies to a background task's card.
+              if (m.plan && m.plan.id === plan.id) {
+                return { ...m, plan, planResponding: false };
+              }
+              return m;
+            }),
           }));
           return;
         }
@@ -220,7 +234,13 @@ export const useChatStore = create<ChatState>((set, get) => {
     // needs the approval gate; Cancel also works on a clarifying question.
     if (!message?.plan || message.planResponding) return;
     const status = message.plan.status;
-    if (status !== 'awaiting_approval' && !(status === 'awaiting_choice' && !approved))
+    if (
+      status !== 'awaiting_approval' &&
+      // A PAUSED plan takes BOTH: Carry on (approved) re-approves exactly the
+      // remaining steps the card is showing, Cancel drops it (2026-08-03).
+      status !== 'paused' &&
+      !(status === 'awaiting_choice' && !approved)
+    )
       return;
 
     const planId = message.plan.id;
@@ -257,7 +277,11 @@ export const useChatStore = create<ChatState>((set, get) => {
     const message = get().messages.find((m) => m.id === messageId);
     // Same one-answer-per-plan rule as respondToPlan.
     if (!message?.plan || message.planResponding) return;
-    if (message.plan.status !== 'awaiting_choice' || !answer.trim()) return;
+    // 'paused' too: a correction typed into the paused card is the same
+    // gesture as answering a question, and goes down the same endpoint.
+    const answerable =
+      message.plan.status === 'awaiting_choice' || message.plan.status === 'paused';
+    if (!answerable || !answer.trim()) return;
 
     const planId = message.plan.id;
     const patch = (fields: Partial<ChatMessage>) =>
@@ -307,17 +331,36 @@ export const useChatStore = create<ChatState>((set, get) => {
     const body = typeof payload.body === 'string' ? payload.body : '';
     const taskId = typeof payload.task_id === 'string' ? payload.task_id : null;
 
-    if ((status === 'awaiting_approval' || status === 'awaiting_choice') && plan) {
+    // 'paused' belongs with the other non-terminal stops (2026-08-03): the card
+    // carries the interaction (Continue / Cancel / a typed correction), and the
+    // plan is still answerable. Matching on task_id as well as plan id is what
+    // lets the ALREADY-VISIBLE executing card become the paused one — a pause
+    // usually arrives for a plan the user is watching tick.
+    if (
+      (status === 'awaiting_approval' ||
+        status === 'awaiting_choice' ||
+        status === 'paused') &&
+      plan
+    ) {
       // The card carries the interaction — approving it resumes the
       // background task through the normal respondToPlan / respondToChoice.
       // A re-pause after a replan patches the card already showing this
       // plan (fresh signatures, fresh approval) instead of stacking a new one.
-      const existing = messages.find((m) => m.plan?.id === plan.id);
+      const existing = messages.find(
+        (m) => m.plan?.id === plan.id || (taskId && m.plan?.task_id === taskId)
+      );
       if (existing) {
         set((state) => ({
           messages: state.messages.map((m) =>
             m.id === existing.id
-              ? { ...m, plan, planNeededApproval: true, planResponding: false, planError: null }
+              ? {
+                  ...m,
+                  plan,
+                  planNeededApproval: true,
+                  planResponding: false,
+                  planError: null,
+                  planPauseRequested: false,
+                }
               : m
           ),
         }));
@@ -345,7 +388,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     set((state) => {
       const patched = state.messages.map((m) =>
         plan && taskId && m.plan && m.plan.task_id === taskId
-          ? { ...m, plan, planCancelRequested: false }
+          ? { ...m, plan, planCancelRequested: false, planPauseRequested: false }
           : m
       );
       return {
@@ -394,6 +437,40 @@ export const useChatStore = create<ChatState>((set, get) => {
         };
       }),
     }));
+  },
+
+  pauseBackgroundTask: async (messageId: string) => {
+    const message = get().messages.find((m) => m.id === messageId);
+    const taskId = message?.plan?.task_id;
+    // A cancel already in flight wins — don't ask a dying run to hold.
+    if (!taskId || message?.planPauseRequested || message?.planCancelRequested) return;
+
+    const patch = (fields: Partial<ChatMessage>) =>
+      set((state) => ({
+        messages: state.messages.map((m) =>
+          m.id === messageId ? { ...m, ...fields } : m
+        ),
+      }));
+
+    patch({ planPauseRequested: true, planError: null });
+    try {
+      const res = await tasksApi.pause(taskId);
+      if (!res.accepted) {
+        // Nothing live to pause (it just settled, or the backend restarted) —
+        // re-enable the button and surface the backend's honest reason.
+        patch({
+          planPauseRequested: false,
+          planError: res.detail || 'The task could not be paused.',
+        });
+      }
+      // accepted: keep "Stopping…" — the paused "task" push event patches the
+      // card with the held plan and clears the banner.
+    } catch (e) {
+      patch({
+        planPauseRequested: false,
+        planError: e instanceof Error ? e.message : 'The task could not be paused.',
+      });
+    }
   },
 
   cancelBackgroundTask: async (messageId: string) => {

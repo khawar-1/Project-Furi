@@ -1,0 +1,152 @@
+{
+  "when": "2026-08-03_13-30-21",
+  "passed": 2,
+  "scored": 4,
+  "blocked": 2,
+  "total": 6,
+  "tasks": [
+    {
+      "id": "daraz-compare",
+      "passed": true,
+      "seconds": 23.1,
+      "actions": 2,
+      "records": 40,
+      "url": "https://www.daraz.pk/catalog/?spm=a2a0e.tm80335142.search.d_go&q=Yonex%20badminton%20rackets",
+      "tool_success": true,
+      "error": "",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": true,
+          "detail": "40 records (needed 3)"
+        },
+        {
+          "kind": "field_present",
+          "passed": true,
+          "detail": "40/40 records carry 'price'"
+        },
+        {
+          "kind": "price_grounded",
+          "passed": true,
+          "detail": "40/40 prices grounded"
+        }
+      ],
+      "sample": [
+        {
+          "name": "Yonex, VS badminton Racket (single) premium quality",
+          "price": "Rs. 1,558"
+        },
+        {
+          "name": "Yonex, Hi Qua badminton Racket (single) premium quality",
+          "price": "Rs. 1,750"
+        },
+        {
+          "name": "Yonex 2 Player Badminton Set -DS",
+          "price": "Rs. 549"
+        }
+      ]
+    },
+    {
+      "id": "books-toscrape-extract",
+      "passed": true,
+      "seconds": 52.3,
+      "actions": 1,
+      "records": 20,
+      "url": "https://books.toscrape.com/",
+      "tool_success": false,
+      "error": "couldn't work out a safe next action on this page",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": true,
+          "detail": "20 records (needed 10)"
+        },
+        {
+          "kind": "field_present",
+          "passed": true,
+          "detail": "20/20 records carry 'price'"
+        },
+        {
+          "kind": "price_grounded",
+          "passed": true,
+          "detail": "20/20 prices grounded"
+        }
+      ],
+      "sample": [
+        {
+          "name": "A Light in the ...",
+          "price": "£51.77"
+        },
+        {
+          "name": "Tipping the Velvet",
+          "price": "£53.74"
+        },
+        {
+          "name": "Add to basket",
+          "price": "£50.10"
+        }
+      ]
+    },
+    {
+      "id": "books-toscrape-navigate",
+      "passed": false,
+      "seconds": 23.4,
+      "actions": 0,
+      "records": 0,
+      "url": "https://books.toscrape.com/",
+      "tool_success": false,
+      "error": "couldn't work out a safe next action on this page",
+      "checks": [
+        {
+          "kind": "url_contains",
+          "passed": false,
+          "detail": "final url 'https://books.toscrape.com/'"
+        },
+        {
+          "kind": "records_at_least",
+          "passed": false,
+          "detail": "0 records (needed 2)"
+        }
+      ],
+      "sample": []
+    },
+    {
+      "id": "quotes-pagination",
+      "passed": false,
+      "seconds": 168.3,
+      "actions": 0,
+      "records": 0,
+      "url": "https://quotes.toscrape.com/",
+      "tool_success": false,
+      "error": "Error: Page.evaluate: Execution context was destroyed, most likely because of a navigation",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": false,
+          "detail": "0 records (needed 12)"
+        }
+      ],
+      "sample": []
+    },
+    {
+      "id": "ebay-search",
+      "passed": null,
+      "blocked": "the site was unreachable (DNS / certificate / refused)",
+      "seconds": 22.9,
+      "actions": 0,
+      "records": 0,
+      "url": "https://www.ebay.com",
+      "error": "Couldn't load www.ebay.com: it didn't respond in time."
+    },
+    {
+      "id": "wikipedia-read",
+      "passed": null,
+      "blocked": "the site was unreachable (DNS / certificate / refused)",
+      "seconds": 41.1,
+      "actions": 0,
+      "records": 0,
+      "url": "https://en.wikipedia.org/wiki/Eiffel_Tower",
+      "error": "Couldn't load en.wikipedia.org: it didn't respond in time."
+    }
+  ]
+}

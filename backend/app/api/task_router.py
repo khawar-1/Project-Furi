@@ -70,7 +70,7 @@ from app.agents import (
 )
 from app.agents.agent_registry import GENERAL, AgentSpec, agent_for_key, agent_for_label
 from app.agents.summary import stream_completed_summary
-from app.api.agent import _plan_response
+from app.api.agent import _PARKABLE, _plan_response
 from app.browser import publicsuffix
 from app.browser.grounding import ground_origins
 from app.db.persist import persist_message_best_effort
@@ -757,15 +757,44 @@ async def maybe_handle_task(
     if not goal:
         return None
 
-    # An open clarifying question ("which notes.txt?") owns the next message:
-    # the user is answering it, not starting a new task. Typed answers and
-    # clicked options are equivalent (a click posts to /api/agent/choose and
-    # consumes the plan first — hence the second, atomic pop check).
+    # An open plan owns the next message: a clarifying question ("which
+    # notes.txt?"), a plan the user paused, or — since 2026-08-03 — one holding
+    # an APPROVAL card. The user is answering Jarvis, not starting a new task.
+    # Typed answers and clicked buttons are equivalent (a click posts to
+    # /api/agent/choose or /approve and consumes the plan first — hence the
+    # second, atomic pop check).
     choice_plan = await get_choice_plan_for_session(db, session_id)
     if choice_plan is not None:
+        # ⚠️ A TYPED WORD NEVER GRANTS APPROVAL. Checked BEFORE the pop, so the
+        # card survives and the user can still click it. Two independent
+        # reasons, both structural rather than a preference:
+        #
+        #  1. Consent to a write is consent to a SIGNATURE — the exact command
+        #     and paths rendered on the card. That is the whole approval
+        #     model ("approval never transfers to actions the user hasn't
+        #     seen"), and no free-text parse can be that specific.
+        #  2. MEASURED against the phrase list we would have to reuse: the
+        #     PAUSED continue detector (_CARRY_ON_RE) accepts "never mind" and
+        #     "nvm", because at a pause they mean "forget I interrupted, carry
+        #     on". At an approval card the same words mean "forget it, DON'T".
+        #     One word set, opposite meanings — so borrowing it would have
+        #     flipped a delete ON for a user asking to drop it.
+        #
+        # A false positive here costs one nudge and a button click. Getting it
+        # wrong the other way runs something irreversible.
+        if choice_plan.status == PlanStatus.AWAITING_APPROVAL and _is_typed_approval(goal):
+            logger.info(
+                f"Typed approval refused for plan {choice_plan.id} — the card stands"
+            )
+            return _stream_static_text(
+                goal, session_id, db, provider, _typed_approval_nudge,
+            )
         plan = await pop_plan(db, choice_plan.id)
         if plan is not None:
-            logger.info(f"Chat message routed as the answer to plan {plan.id}'s question")
+            logger.info(
+                f"Chat message routed to plan {plan.id} ({plan.status.value}) "
+                "as the user's answer"
+            )
             return _stream_answer(goal, plan, session_id, db, provider)
 
     # Built before the gate: the follow-up check reads it, and the classifier
@@ -899,6 +928,54 @@ def _stream_task(
         return await planner.start(goal)
 
     return _stream_plan_run(goal, conversation, memory, run, session_id, db, provider, agent=agent)
+
+
+# Whole-message affirmations that READ as "approve this card". Deliberately NOT
+# planner._CARRY_ON_RE: that set answers a different question and contains
+# "never mind"/"nvm", which mean the OPPOSITE here (see the call site). Used
+# only to REFUSE — a false positive costs a nudge, never an action — so it can
+# afford to be generous.
+_TYPED_APPROVAL_RE = re.compile(
+    r"^\W*(?:yes|yeah|yep|yup|ya|sure|ok|okay|k|fine|alright|"
+    r"go\s*ahead|go\s*for\s*it|go\s*on|do\s*it|send\s*it|"
+    r"proceed|continue|carry\s*on|confirm(?:ed)?|approve[d]?|"
+    r"permission\s*granted|you\s*(?:can|may)|please\s*do)\b",
+    re.IGNORECASE,
+)
+# Filler that may trail an approval without making it an instruction.
+_TYPED_APPROVAL_NOISE = frozenset({
+    "then", "please", "now", "jarvis", "thanks", "thank", "you", "it", "that",
+    "sir", "and", "just", "go", "ahead", "on", "with", "the", "task", "sure",
+    "do", "this", "all", "of", "them", "yes", "ok", "okay", "fine",
+})
+
+
+def _is_typed_approval(message: str) -> bool:
+    """True when a message typed at an APPROVAL card reads as consent and
+    carries no correction. Whole-message by construction: "yes" is consent,
+    "yes but use the D drive" has substantive words left over and is a STEER.
+
+    Erring toward STEER is the safe direction here, the mirror of
+    _is_bare_continue's reasoning: a misread steer replans (and pauses again
+    for approval), while a misread consent would let a delete through on words
+    that were actually a correction."""
+    text = (message or "").strip()
+    match = _TYPED_APPROVAL_RE.match(text)
+    if match is None:
+        return False
+    rest = re.findall(r"[\w'-]+", text[match.end():].lower())
+    return not [w for w in rest if w not in _TYPED_APPROVAL_NOISE]
+
+
+async def _typed_approval_nudge() -> str:
+    """Deterministic, never LLM-paraphrased — the same rule every other consent
+    text in this codebase follows. Says what did NOT happen, and what to do."""
+    return (
+        "I'd rather you confirmed that on the card itself, sir — approval is "
+        "tied to the exact steps shown there, and a typed word can't be. "
+        "Nothing has run. Use **Approve** on the card above to go ahead, or "
+        "**Cancel** to drop it — or just tell me what to change instead."
+    )
 
 
 def _stream_answer(
@@ -1104,7 +1181,11 @@ def plan_run_events(
             )
             return
 
-        if plan.status in (PlanStatus.AWAITING_APPROVAL, PlanStatus.AWAITING_CHOICE):
+        # ONE list of "stopped without settling, so it must stay answerable",
+        # shared with the /api/agent endpoints. A hand-kept second copy is how
+        # `paused` was nearly missed in _settle (2026-08-03) — and this was the
+        # fourth copy in the tree.
+        if plan.status in _PARKABLE:
             await put_plan(db, plan)  # answered via /api/agent/approve, /choose, or chat
 
         # The special message type: the full serialized plan, first.

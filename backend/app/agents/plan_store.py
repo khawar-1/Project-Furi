@@ -126,17 +126,45 @@ async def pop_plan(db: AsyncSession, plan_id: str) -> Optional[AgentPlan]:
     return plan
 
 
+# The statuses in which a parked plan OWNS the session's next chat message.
+# AWAITING_CHOICE: it asked a question and is waiting for the answer.
+# PAUSED (2026-08-03): the user stopped it mid-run and is about to say what to
+# change — the same relationship, with the question left implicit. Widening
+# this ONE set is what routes a typed steer into planner.answer() *and* makes
+# the reminder / routine / continuation routers defer to a paused plan, since
+# they all already call this to mean "an open plan owns the next message".
+# The states in which a parked plan OWNS the session's next chat message.
+#
+# AWAITING_APPROVAL joined the set on 2026-08-03, closing a hole that predates
+# the pause round: an approval card was DEAF. Telling Jarvis "that's not right"
+# while it asked to delete five files never reached the plan — the message fell
+# through to the task router (starting a SECOND agent on the correction) while
+# the original card stayed live and CLICKABLE for the parked plan's whole 24h
+# TTL. Approve it the next morning and the uncorrected plan ran.
+#
+# A question card and an approval card are the same thing from the user's
+# chair: Jarvis stopped and is waiting. They now behave the same. What a typed
+# message MEANS at an approval card is decided in code by the task router —
+# and a typed word can never GRANT approval (see _is_typed_approval there).
+_OPEN_STATUSES = (
+    PlanStatus.AWAITING_CHOICE,
+    PlanStatus.PAUSED,
+    PlanStatus.AWAITING_APPROVAL,
+)
+
+
 async def get_choice_plan_for_session(
     db: AsyncSession, session_id: str
 ) -> Optional[AgentPlan]:
-    """The session's open clarifying-question plan, WITHOUT consuming it —
-    the chat router peeks here so a typed reply can answer the question.
-    Checks the memory cache first, then SQLite (restart survival).
-    Newest first if several exist (shouldn't happen, but be deterministic)."""
+    """The session's open plan — one awaiting a clarifying answer, or one the
+    user paused — WITHOUT consuming it. The chat router peeks here so a typed
+    reply reaches the plan it belongs to. Checks the memory cache first, then
+    SQLite (restart survival). Newest first if several exist (shouldn't happen,
+    but be deterministic)."""
     _evict_expired()
     candidates = [
         plan for plan, _ in _PENDING_PLANS.values()
-        if plan.status == PlanStatus.AWAITING_CHOICE and plan.session_id == session_id
+        if plan.status in _OPEN_STATUSES and plan.session_id == session_id
     ]
     if candidates:
         return max(candidates, key=lambda p: p.created_at)
@@ -146,7 +174,7 @@ async def get_choice_plan_for_session(
             select(ParkedPlan)
             .where(
                 ParkedPlan.session_id == session_id,
-                ParkedPlan.status == PlanStatus.AWAITING_CHOICE.value,
+                ParkedPlan.status.in_([s.value for s in _OPEN_STATUSES]),
                 ParkedPlan.expires_at > utc_now(),
             )
             .order_by(ParkedPlan.created_at.desc())

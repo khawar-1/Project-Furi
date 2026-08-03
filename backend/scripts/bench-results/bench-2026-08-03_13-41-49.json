@@ -1,0 +1,45 @@
+{
+  "when": "2026-08-03_13-41-49",
+  "passed": 1,
+  "scored": 1,
+  "blocked": 0,
+  "total": 1,
+  "tasks": [
+    {
+      "id": "books-toscrape-navigate",
+      "passed": true,
+      "seconds": 10.7,
+      "actions": 2,
+      "records": 11,
+      "url": "https://books.toscrape.com/catalogue/category/books/travel_2/index.html",
+      "tool_success": true,
+      "error": "",
+      "checks": [
+        {
+          "kind": "url_contains",
+          "passed": true,
+          "detail": "final url 'https://books.toscrape.com/catalogue/category/books/travel_2/index.html'"
+        },
+        {
+          "kind": "records_at_least",
+          "passed": true,
+          "detail": "11 records (needed 2)"
+        }
+      ],
+      "sample": [
+        {
+          "name": "It's Only the Himalayas",
+          "price": "£45.17"
+        },
+        {
+          "name": "Full Moon over Noah’s ...",
+          "price": "£49.43"
+        },
+        {
+          "name": "See America: A Celebration ...",
+          "price": "£48.87"
+        }
+      ]
+    }
+  ]
+}

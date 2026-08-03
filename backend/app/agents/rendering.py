@@ -1013,6 +1013,26 @@ def deterministic_plan_text(plan: AgentPlan) -> str:
             )
             return f"{text}\n\n{results}" if results else text
         return f"I couldn't do that. {base}"
+    if plan.status == PlanStatus.PAUSED:
+        # Stopped by the user mid-run (2026-08-03). They are about to tell it
+        # what to change, so the text must show WHERE IT GOT TO: the results so
+        # far (same renderer every other path uses) and the steps still queued.
+        # Without the remaining list "carry on" is a blind choice.
+        base = plan.message or "Paused — nothing further was executed."
+        parts = [base]
+        results = completed_results_text(plan)
+        if results:
+            parts.append(results)
+        pending = plan.pending_steps()
+        if pending:
+            lines = ["Still to run:"]
+            for i, s in enumerate(pending, 1):
+                tag = _PERMISSION_TAGS.get(
+                    s.permission_level.value, s.permission_level.value
+                )
+                lines.append(f"{i}. {s.description} ({tag})")
+            parts.append("\n".join(lines))
+        return "\n\n".join(parts)
     if plan.status == PlanStatus.CANCELLED:
         return plan.message or "Cancelled by the user — nothing further was executed."
     # COMPLETED (or any unexpected status): the text must CARRY the results —

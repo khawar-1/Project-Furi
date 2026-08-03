@@ -576,6 +576,22 @@ async def chat_stream(
         timer.log()
         return continuation_response
 
+    # --- 2026-08-03: mid-run interrupt (app/api/interrupt_router.py). Runs
+    # between continuation and tasks. An explicit stop word while an agent is
+    # WORKING pauses it cooperatively instead of falling into chat (which can
+    # only reassure) or — worse — passing the task gate and starting a SECOND
+    # agent alongside the one doing the wrong thing. Fires only when this
+    # session has a live running task, so "wait" and "stop" keep their ordinary
+    # meaning the rest of the time.
+    from app.api.interrupt_router import maybe_handle_interrupt
+    with timer.stage("interrupt_route"):
+        interrupt_response = await maybe_handle_interrupt(
+            request=request, session_id=session_id, db=db
+        )
+    if interrupt_response is not None:
+        timer.log()
+        return interrupt_response
+
     # --- Phase 3: task-request routing (app/api/task_router.py). Returns a
     # response ONLY for confirmed task requests; None (the overwhelmingly
     # common case — the deterministic gate makes no LLM call) continues into

@@ -19,6 +19,8 @@ import {
   Loader2,
   Lock,
   MinusCircle,
+  Pause as PauseIcon,
+  Play,
   Send,
   X,
   XCircle,
@@ -48,6 +50,11 @@ const STATUS_META: Record<PlanStatus, { label: string; badge: string; border: st
     label: 'needs your answer',
     badge: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
     border: 'border-cyan-500/30',
+  },
+  paused: {
+    label: 'paused — waiting for you',
+    badge: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+    border: 'border-amber-500/30',
   },
   completed: {
     label: 'completed',
@@ -269,6 +276,10 @@ interface PlanCardProps {
   cancelRequested?: boolean;
   /** Request a cooperative mid-plan cancel of the background task. */
   onCancelTask?: () => void;
+  /** Mid-plan PAUSE was requested and is pending (2026-08-03). */
+  pauseRequested?: boolean;
+  /** Request a cooperative mid-plan pause — the plan HOLDS, nothing is lost. */
+  onPauseTask?: () => void;
 }
 
 export function PlanCard({
@@ -279,12 +290,19 @@ export function PlanCard({
   onAnswer,
   cancelRequested,
   onCancelTask,
+  pauseRequested,
+  onPauseTask,
 }: PlanCardProps) {
   const [choice, setChoice] = useState<'approve' | 'cancel' | null>(null);
   const [answerText, setAnswerText] = useState('');
   const status = STATUS_META[plan.status] ?? STATUS_META.executing;
   const awaiting = plan.status === 'awaiting_approval' && !error;
   const asking = plan.status === 'awaiting_choice' && !error && plan.question != null;
+  // Stopped by the user and holding (2026-08-03). Its own banner: the choice
+  // here is Continue / correct / Cancel, not approve-or-not, and the remaining
+  // steps are listed above so "carry on" is an informed choice.
+  const paused = plan.status === 'paused' && !error;
+  const pendingCount = plan.steps.filter((s) => s.status === 'pending').length;
   const destructiveCount = plan.steps.filter(
     (s) => s.status === 'pending' && s.permission_level === 'destructive'
   ).length;
@@ -353,9 +371,21 @@ export function PlanCard({
           <span className="flex-1">
             {cancelRequested
               ? 'Cancelling — the step currently running will finish first; nothing further will run.'
-              : 'Running in the background — Jarvis will notify you when it finishes.'}
+              : pauseRequested
+                ? 'Stopping — the step currently running will finish first, then I’ll hold so you can tell me what to change.'
+                : 'Running in the background — Jarvis will notify you when it finishes.'}
           </span>
-          {!cancelRequested && onCancelTask && (
+          {!cancelRequested && !pauseRequested && onPauseTask && (
+            <button
+              onClick={onPauseTask}
+              title="Stop between steps and hold — nothing is lost, and you can tell me what to change."
+              className="flex items-center gap-1 flex-shrink-0 px-2.5 py-1 rounded-lg border border-amber-500/30 bg-amber-500/10 text-[11px] font-semibold text-amber-300 hover:text-amber-100 hover:border-amber-400/50 transition-colors"
+            >
+              <PauseIcon size={12} />
+              Pause
+            </button>
+          )}
+          {!cancelRequested && !pauseRequested && onCancelTask && (
             <button
               onClick={onCancelTask}
               className="flex items-center gap-1 flex-shrink-0 px-2.5 py-1 rounded-lg border border-surface-border bg-surface-2 text-[11px] font-semibold text-slate-300 hover:text-slate-100 hover:border-slate-500/40 transition-colors"
@@ -390,6 +420,83 @@ export function PlanCard({
       {!error && plan.status === 'cancelled' && (
         <div className="mx-4 mb-4 px-3 py-2 rounded-lg bg-surface-2 border border-surface-border text-slate-400 text-xs">
           Cancelled — nothing was changed.
+        </div>
+      )}
+
+      {/* PAUSED (2026-08-03): stopped by the user and holding. Deliberately not
+          the approval banner — nothing here is asking "may I?", it is asking
+          "what now?". The steps above show exactly where it got to, so Continue
+          is an informed choice; a correction replans only what is left. */}
+      {paused && (
+        <div className="mx-4 mb-4 px-3 py-3 rounded-lg bg-amber-500/5 border border-amber-500/25 space-y-2.5">
+          <div className="flex items-start gap-2 text-xs text-amber-200">
+            <PauseIcon size={14} className="flex-shrink-0 mt-0.5 text-amber-400" />
+            <span className="break-words">
+              {plan.message ||
+                'Stopped — nothing further was executed. Tell me what to change, or carry on.'}
+            </span>
+          </div>
+          {responding ? (
+            <div className="flex items-center gap-2 text-xs text-slate-400 py-1">
+              <Loader2 size={14} className="animate-spin text-cyan-400" />
+              {choice === 'cancel' ? 'Cancelling…' : 'Picking it up…'}
+            </div>
+          ) : (
+            <>
+              {/* The correction. Same free-text form the clarifying question
+                  uses — a steer and an answer are the same gesture, so they
+                  are the same control. Typing in the chat box works too. */}
+              {onAnswer && (
+                <form
+                  className="flex items-center gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const text = answerText.trim();
+                    if (!text) return;
+                    setAnswerText('');
+                    onAnswer(text);
+                  }}
+                >
+                  <input
+                    value={answerText}
+                    onChange={(e) => setAnswerText(e.target.value)}
+                    placeholder="Tell me what to change…"
+                    className="flex-1 min-w-0 px-3 py-1.5 rounded-lg bg-surface-2 border border-surface-border text-xs text-slate-200 placeholder:text-muted focus:outline-none focus:border-amber-500/40"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!answerText.trim()}
+                    className="px-3 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs font-semibold text-amber-300 hover:text-amber-100 hover:border-amber-400/50 disabled:opacity-40 disabled:hover:text-amber-300 transition-colors"
+                  >
+                    Send
+                  </button>
+                </form>
+              )}
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={() => respond(true)}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-cyan-500 text-white text-xs font-semibold hover:bg-cyan-400 transition-colors"
+                >
+                  <Play size={13} />
+                  Carry on
+                </button>
+                <button
+                  onClick={() => respond(false)}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-surface-border bg-surface-2 text-xs font-semibold text-slate-300 hover:text-slate-100 hover:border-slate-500/40 transition-colors"
+                >
+                  <X size={13} />
+                  Cancel
+                </button>
+                <span className="text-[10px] text-muted">
+                  {pendingCount > 0
+                    ? `Carry on picks up the ${pendingCount} remaining step${
+                        pendingCount !== 1 ? 's' : ''
+                      } — anything that changes files or sends data will still ask you first.`
+                    : 'Nothing is left to run — a correction will replan it.'}
+                </span>
+              </div>
+            </>
+          )}
         </div>
       )}
 

@@ -16,7 +16,13 @@ import { initiativeApi } from '@/lib/api';
 const SENSING_POLL_MS = 10_000;
 const INITIATIVE_POLL_MS = 30_000;
 const AGENTS_POLL_MS = 8_000;
-const AGENT_ACTIVE = new Set(['running', 'awaiting_approval', 'awaiting_choice']);
+const AGENT_ACTIVE = new Set([
+  'running', 'awaiting_approval', 'awaiting_choice',
+  // Paused by the user and holding — still an agent waiting on you, so it must
+  // stay visible in the indicator; losing it there would hide the one state
+  // that needs a reply to move.
+  'paused',
+]);
 
 export function StatusBar() {
   const { backendStatus, healthData, isCheckingHealth, checkBackendHealth } = useUIStore();

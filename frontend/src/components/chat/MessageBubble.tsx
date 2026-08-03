@@ -28,6 +28,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   const respondToPlan = useChatStore((s) => s.respondToPlan);
   const respondToChoice = useChatStore((s) => s.respondToChoice);
   const cancelBackgroundTask = useChatStore((s) => s.cancelBackgroundTask);
+  const pauseBackgroundTask = useChatStore((s) => s.pauseBackgroundTask);
 
   // Phase 3: for plans that paused at the approval gate, the PlanCard IS the
   // message — the streamed deterministic text repeats the same step list, so
@@ -80,6 +81,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             onAnswer={(answer) => void respondToChoice(message.id, answer)}
             cancelRequested={Boolean(message.planCancelRequested)}
             onCancelTask={() => void cancelBackgroundTask(message.id)}
+            pauseRequested={Boolean(message.planPauseRequested)}
+            onPauseTask={() => void pauseBackgroundTask(message.id)}
           />
         )}
 

@@ -3,6 +3,12 @@ Jarvis OS — Background Tasks API (Phase 4, Parts 5-6)
 
 GET  /api/tasks              — list background tasks (status filter, newest first).
 GET  /api/tasks/{id}         — one task, including its serialized plan snapshot.
+POST /api/tasks/{id}/pause   — cooperative mid-plan PAUSE (2026-08-03): the same
+                               between-steps flag, but the plan HOLDS instead of
+                               dying — pending steps stay pending. Continue via
+                               /api/agent/approve, steer via /api/agent/choose
+                               or just by typing; there is deliberately no
+                               resume endpoint, so approval stays in one place.
 POST /api/tasks/{id}/cancel  — cooperative mid-plan cancel (Part 6): sets the
                                flag a RUNNING plan checks between steps. The
                                step currently executing always finishes; the
@@ -19,17 +25,27 @@ import json
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.agent_registry import agent_for_key
-from app.agents.task_runner import request_task_cancel
+from app.agents.task_runner import request_task_cancel, request_task_pause
 from app.core.dependencies import get_db
 from app.db.models import Task, utc_iso
 
 router = APIRouter()
 
-_STATUSES = {"running", "awaiting_approval", "awaiting_choice", "completed", "failed", "cancelled"}
+_STATUSES = {
+    "running", "awaiting_approval", "awaiting_choice", "paused",
+    "completed", "failed", "cancelled",
+}
+
+
+class PauseRequest(BaseModel):
+    """An optional instruction that came with the pause ("stop, use the D
+    drive one"), applied automatically once the run actually stops."""
+    steer: str = Field(default="", max_length=2000)
 
 
 def _serialize(task: Task) -> dict:
@@ -77,6 +93,46 @@ async def get_task(task_id: str, db: AsyncSession = Depends(get_db)) -> dict:
     if task is None:
         raise HTTPException(status_code=404, detail="No such task")
     return _serialize(task)
+
+
+@router.post("/{task_id}/pause", summary="Pause a running background task")
+async def pause_task(
+    task_id: str,
+    request: Optional[PauseRequest] = None,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Request a cooperative mid-plan PAUSE. Unlike cancel this is not
+    terminal: the pending steps are held, so the plan can be continued or
+    replanned with a correction. `accepted` means the flag was set on a live
+    run — the paused card arrives as a "task" push once the current step
+    finishes (never killed mid-write)."""
+    task = await db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="No such task")
+
+    if task.status != "running":
+        detail = (
+            "That task is already stopped and waiting for you."
+            if task.status in ("awaiting_approval", "awaiting_choice", "paused")
+            else f"This task already settled ({task.status})."
+        )
+        return {"task_id": task.id, "status": task.status, "accepted": False, "detail": detail}
+
+    steer = (request.steer if request is not None else "") or ""
+    accepted = request_task_pause(task.id, steer)
+    detail = (
+        "Pausing — the step currently running will finish, then I'll hold. "
+        + (
+            "Your correction will be applied as soon as it stops."
+            if steer
+            else "Tell me what to change, or say carry on."
+        )
+        if accepted
+        else "No live run found for this task in this backend process — it "
+             "may have just settled, or the backend restarted (startup marks "
+             "interrupted tasks failed)."
+    )
+    return {"task_id": task.id, "status": task.status, "accepted": accepted, "detail": detail}
 
 
 @router.post("/{task_id}/cancel", summary="Cancel a running background task")

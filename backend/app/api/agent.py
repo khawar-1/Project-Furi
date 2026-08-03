@@ -62,6 +62,17 @@ class ChooseRequest(BaseModel):
     answer: str = Field(..., min_length=1, max_length=2000)
 
 
+# Statuses a plan is PARKED in — it stopped without settling, so it must stay
+# answerable. PAUSED (2026-08-03) is here for the same reason the other two
+# are: a plan that is not parked cannot be resumed, and the user's remaining
+# steps would be silently lost.
+_PARKABLE = (
+    PlanStatus.AWAITING_APPROVAL,
+    PlanStatus.AWAITING_CHOICE,
+    PlanStatus.PAUSED,
+)
+
+
 def _plan_response(plan: AgentPlan, outcome_text: Optional[str] = None) -> dict:
     data = plan.model_dump(mode="json")
     # Convenience flag so the frontend never string-compares the status enum
@@ -161,7 +172,7 @@ async def execute_goal(
             status_code=500,
             detail="The agent could not process this goal. Please try again.",
         )
-    if plan.status in (PlanStatus.AWAITING_APPROVAL, PlanStatus.AWAITING_CHOICE):
+    if plan.status in _PARKABLE:
         await put_plan(db, plan)
     return _plan_response(plan)
 
@@ -186,10 +197,14 @@ async def approve_plan(
     # arrives by push. Cancels stay inline (no LLM, no tools). If the Task
     # row is somehow gone, fall through to the inline resume so an approval
     # is never lost.
+    # PAUSED belongs here too (2026-08-03): "Continue" on a paused card is this
+    # same call, and it MUST go back to the background runner — resuming it
+    # inline would run the remaining steps inside this HTTP request, push
+    # nothing, and leave the Task row stuck on "paused".
     if (
         plan.task_id
         and request.approved
-        and plan.status == PlanStatus.AWAITING_APPROVAL
+        and plan.status in (PlanStatus.AWAITING_APPROVAL, PlanStatus.PAUSED)
     ):
         response = _executing_snapshot(plan)
         task = await resume_task_in_background(db, plan, provider)
@@ -213,7 +228,7 @@ async def approve_plan(
             detail="The plan could not be resumed. Check the Activity timeline "
             "for anything that already ran.",
         )
-    if plan.status in (PlanStatus.AWAITING_APPROVAL, PlanStatus.AWAITING_CHOICE):
+    if plan.status in _PARKABLE:
         # Replanned steps have new signatures → fresh approval. A choice plan
         # that resume() refused to touch (approve on a question) re-parks too,
         # so a stray approve click can never destroy an open question.
@@ -266,7 +281,7 @@ async def choose_option(
             detail="The plan could not continue after your answer. Check the "
             "Activity timeline for anything that already ran.",
         )
-    if plan.status in (PlanStatus.AWAITING_APPROVAL, PlanStatus.AWAITING_CHOICE):
+    if plan.status in _PARKABLE:
         await put_plan(db, plan)  # paused again: fresh approval or a follow-up question
     outcome = (
         await _finalize_inline_plan(db, provider, plan, user_reply=request.answer)

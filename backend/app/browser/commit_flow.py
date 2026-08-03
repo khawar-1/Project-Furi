@@ -538,9 +538,16 @@ async def discover(
     from app.providers.vision import build_vision_provider
     from app.tools.browser_tools import _validate_url
 
+    from app.agents import interruption
+
     goal = str(params.get("goal") or "").strip()
     if not goal:
         return CommitDiscovery(error="A goal is required — what form should I fill and submit?")
+
+    # "Pause the task" (2026-08-03): built HERE, on the main loop, where the
+    # task runner's ContextVar is visible — the loop below runs on the browser
+    # loop in another thread. None outside a background task, unchanged.
+    stop_check = interruption.stop_check_for_current()
 
     start_url, error = _validate_url(str(params.get("start_url") or ""))
     if error:
@@ -639,6 +646,7 @@ async def discover(
             # form with no upload.
             outcome = await browser_loop.run_browse(
                 session, goal, provider, commit=True,
+                stop_check=stop_check,
                 upload_path=str(params.get("upload_path") or "").strip() or None,
                 profile=profile,
                 fill_grounding=fill_grounding,
@@ -797,9 +805,13 @@ async def perform(
     form instead. `response_text` (the site's own visible response prose) is
     returned so the completion text is GROUNDED in what the server actually said,
     not the goal."""
+    from app.agents import interruption
     from app.core import browser_runtime, browser_session, dom_observe
 
     budget = max(1, int(max_commits or 1))
+    # Built on the main loop (see discover) and threaded into the multi-commit
+    # RESUME, so "stop" reaches the browse toward form N+1 too.
+    stop_check = interruption.stop_check_for_current()
     # The 15.3 vision fallback toggle (read on THIS main loop when the caller did
     # not supply it) — threaded into the multi-commit RESUME so a later form is
     # filled with the same vision assist. Best-effort → DOM-only on any hiccup.
@@ -914,6 +926,7 @@ async def perform(
                 outcome = await _resume_for_next_form(
                     session, goal, upload_path, profile, fill_grounding, fields,
                     vision_config,
+                    stop_check=stop_check,
                     auth_resolved=set(getattr(session, "auth_resolved", None) or set()),
                 )
                 payload = (
@@ -1008,6 +1021,7 @@ async def _resume_for_next_form(
     fill_grounding: str = "",
     fields: Optional[dict] = None,
     vision_config: Any = None,
+    stop_check: Optional[Any] = None,
     auth_resolved: Optional[set] = None,
 ) -> Optional[Any]:
     """Drive the SAME (now read-only again) session onward toward the next form
@@ -1029,6 +1043,7 @@ async def _resume_for_next_form(
     try:
         return await browser_loop.run_browse(
             session, goal, provider, commit=True,
+            stop_check=stop_check,
             upload_path=(str(upload_path).strip() or None) if upload_path else None,
             profile=profile,
             fill_grounding=fill_grounding,

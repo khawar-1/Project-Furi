@@ -24,6 +24,7 @@ const PLAN_TO_TASK_STATUS: Record<string, TaskStatus> = {
   executing: 'running',
   awaiting_approval: 'awaiting_approval',
   awaiting_choice: 'awaiting_choice',
+  paused: 'paused',
   completed: 'completed',
   failed: 'failed',
   cancelled: 'cancelled',
@@ -36,6 +37,8 @@ interface TasksState {
   isLoading: boolean;
   error: string | null;
   cancellingId: string | null;
+  /** A task whose cooperative pause has been requested and not yet landed. */
+  pausingId: string | null;
   /** A task whose paused plan is being approved / answered from the panel. */
   respondingId: string | null;
   /** Per-task error from an approve/answer call (plan expired, resume failed). */
@@ -43,6 +46,9 @@ interface TasksState {
 
   loadTasks: (opts?: { silent?: boolean }) => Promise<void>;
   cancelTask: (id: string) => Promise<void>;
+  /** Ask a running task to stop between steps and HOLD (2026-08-03) — unlike
+   *  cancel nothing is lost; the paused card then offers Carry on / correct. */
+  pauseTask: (id: string) => Promise<void>;
   /** Approve (or cancel, approved=false) a task paused at the approval gate. */
   respondToTask: (task: Task, approved: boolean) => Promise<void>;
   /** Answer a task paused on a clarifying question (awaiting_choice). */
@@ -57,6 +63,7 @@ export const useTasksStore = create<TasksState>((set, get) => ({
   isLoading: false,
   error: null,
   cancellingId: null,
+  pausingId: null,
   respondingId: null,
   respondErrors: {},
 
@@ -69,6 +76,19 @@ export const useTasksStore = create<TasksState>((set, get) => ({
     } catch (e) {
       if (silent) return; // keep the last good list
       set({ error: String(e), isLoading: false });
+    }
+  },
+
+  pauseTask: async (id: string) => {
+    set({ pausingId: id });
+    try {
+      const res = await tasksApi.pause(id);
+      // Stays "Stopping…" while accepted — the paused push + poll reconcile the
+      // row. Not accepted (it just settled) surfaces the backend's own reason.
+      set({ pausingId: null, error: res.accepted ? null : res.detail });
+      await get().loadTasks({ silent: true });
+    } catch (e) {
+      set({ error: String(e), pausingId: null });
     }
   },
 

@@ -126,6 +126,7 @@ from app.agents import (
 )
 from app.agents.agent_registry import GENERAL, AgentSpec
 from app.agents.cancellation import apply_cancellation, log_cancellation
+from app.agents.interruption import apply_pause, log_pause
 from app.agents.narration import narrate_step
 from app.browser import choice, did_you_mean, publicsuffix
 from app.browser import state as browse_state
@@ -2118,6 +2119,37 @@ def _is_affirmative(answer: str) -> bool:
     return bool(_AFFIRMATIVE_RE.match((answer or "").strip()))
 
 
+_CARRY_ON_RE = re.compile(
+    r"^\W*(?:carry\s*on|keep\s*going|keep\s*at\s*it|resume|continue|proceed|"
+    r"go\s*ahead|go\s*on|carry\s*on\s*then|unpause|un-?pause|"
+    r"as\s*(?:you\s*were|planned)|never\s*mind|nvm|"
+    r"yes|yeah|yep|yup|sure|ok|okay|k|fine)\b",
+    re.IGNORECASE,
+)
+# Filler that can trail a bare "carry on" without making it an instruction.
+_CARRY_ON_NOISE = frozenset({
+    "then", "please", "now", "jarvis", "thanks", "thank", "you", "it",
+    "that", "with", "the", "task", "sorry", "sir", "and", "just", "on",
+})
+
+
+def _is_bare_continue(answer: str) -> bool:
+    """True when a reply to a PAUSED plan means "as you were" and carries no
+    correction (2026-08-03) — the typed twin of the card's Continue button, so
+    the phrase the pause message suggests ("say carry on") costs no LLM call.
+
+    Whole-message by construction: "continue" continues, but "continue but use
+    the D drive" has substantive words left over and is a STEER. Erring toward
+    STEER is the safe direction — a misread steer replans, a misread continue
+    would silently ignore what the user asked for."""
+    text = (answer or "").strip()
+    match = _CARRY_ON_RE.match(text)
+    if match is None:
+        return False
+    rest = re.findall(r"[\w'-]+", text[match.end():].lower())
+    return not [w for w in rest if w not in _CARRY_ON_NOISE]
+
+
 def _origin_approval_question(candidate: str) -> PlanQuestion:
     """Code-derived pause text asking the user to approve leaving the sites they
     named for a specific page-derived origin (2026-07-18). The loop found this
@@ -2779,6 +2811,7 @@ class AgentPlanner:
         memory: str = "",
         cancel_check: Optional[Callable[[], bool]] = None,
         agent: Optional[AgentSpec] = None,
+        pause_check: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.db = db
         self.provider = provider
@@ -2800,6 +2833,11 @@ class AgentPlanner:
         # finishes; a tool call is never killed mid-write. None = not
         # cancellable (inline plans use the approval-gate Cancel instead).
         self.cancel_check = cancel_check
+        # Cooperative PAUSE (2026-08-03): the same between-steps contract, but
+        # the plan HOLDS instead of dying — pending steps stay pending and the
+        # user's next message steers the remainder. Always consulted AFTER
+        # cancel_check: a user who cancelled outranks a stale pause.
+        self.pause_check = pause_check
         # Frequently-used-folders signal (Phase 6, Part 6): a learned save/move
         # suggestion, rendered once per run and injected as planner DATA. Loaded
         # lazily by _load_folder_signal so every entry point (start/resume/
@@ -3007,8 +3045,15 @@ class AgentPlanner:
         """Continue a plan the user just approved or cancelled. Approval covers
         exactly the pending steps as they stand — their signatures. Cancelling
         also works on a plan paused at a clarifying question; 'approving' one
-        does not (a question has no steps to approve — use answer())."""
-        if plan.status not in (PlanStatus.AWAITING_APPROVAL, PlanStatus.AWAITING_CHOICE):
+        does not (a question has no steps to approve — use answer()).
+
+        A PAUSED plan resumes here too (2026-08-03) — that IS the Continue
+        button — but it grants NO approval; see the signature set below."""
+        if plan.status not in (
+            PlanStatus.AWAITING_APPROVAL,
+            PlanStatus.AWAITING_CHOICE,
+            PlanStatus.PAUSED,
+        ):
             logger.warning(f"resume called on plan in status {plan.status} — ignored")
             return plan
         if not approved:
@@ -3052,7 +3097,20 @@ class AgentPlanner:
 
         await self._load_folder_signal()
         await self._load_fill_profile()
-        signatures = {s.signature() for s in plan.pending_steps()}
+        # ⚠️ A PAUSED plan grants NO approval (2026-08-03). Continue means
+        # "pick up where you stopped", not "approve everything still queued":
+        # a plan can pause BEFORE it ever reached the approval gate (the user
+        # stopped it during a read), and approving its pending signatures here
+        # would run a write/destructive step whose approval card they were
+        # never shown. With an empty set the gate re-applies exactly as it
+        # would have, so the worst case is one approval click on a step that
+        # was already approved before the pause — and the best case is not
+        # deleting something on a button labelled "Carry on".
+        signatures = (
+            set()
+            if plan.status == PlanStatus.PAUSED
+            else {s.signature() for s in plan.pending_steps()}
+        )
         plan.status = PlanStatus.EXECUTING
         state = await self._graph.ainvoke(self._initial_state(plan, signatures))
         return state["plan"]
@@ -3060,10 +3118,59 @@ class AgentPlanner:
     async def answer(self, plan: AgentPlan, answer: str) -> AgentPlan:
         """Continue a plan the user just answered a clarifying question for.
         The answer only feeds the next planning round — any write/destructive
-        step it produces still pauses for approval with fresh signatures."""
-        if plan.status != PlanStatus.AWAITING_CHOICE:
+        step it produces still pauses for approval with fresh signatures.
+
+        A PAUSED plan is answered here too (2026-08-03): the user's correction
+        IS the answer to the implicit question "what should I do differently?".
+        None of the browse hand-off branches below are armed on a pause, so it
+        falls through to the ordinary revise tail with the correction appended
+        to user_answers as authoritative planner input — which is exactly the
+        behaviour wanted, with no separate steer machinery.
+
+        …and so is an AWAITING_APPROVAL plan (2026-08-03). "That's not right,
+        use the D drive one" typed at an approval card is a correction, not a
+        new task: the completed reads are kept, the pending write is replanned,
+        and whatever comes back pauses again with a FRESH signature. An
+        approval card carries no `question`, so the browse hand-off branches
+        are not armed here either.
+
+        ⚠️ ONE ASYMMETRY, and it is deliberate: a PAUSED plan can be CONTINUED
+        by typing ("carry on"), an approval-pending one CANNOT be APPROVED by
+        typing. Continue grants nothing — the gate re-applies. Approval grants
+        signatures. The router refuses a typed approval before this is ever
+        reached, so the plan is not even consumed."""
+        if plan.status not in (
+            PlanStatus.AWAITING_CHOICE,
+            PlanStatus.PAUSED,
+            PlanStatus.AWAITING_APPROVAL,
+        ):
             logger.warning(f"answer called on plan in status {plan.status} — ignored")
             return plan
+
+        # "carry on" — the typed twin of the card's Continue button. Decided in
+        # code so the phrase the pause message itself suggests costs no LLM
+        # call and cannot be re-interpreted by a revise round into a replan.
+        if plan.status == PlanStatus.PAUSED and _is_bare_continue(answer):
+            logger.info(f"Paused plan {plan.id} continued unchanged by the user")
+            return await self.resume(plan, approved=True)
+
+        # …and the opposite: "stop" / "cancel" / "forget it" to a plan that is
+        # ALREADY stopped means drop it, not "replan with the word stop as an
+        # authoritative instruction". Same code-owned decline detector the
+        # target-choice hand-off uses, so "no, use the D drive" (a word follows)
+        # is still a correction and not a cancel.
+        #
+        # A typed decline at an APPROVAL card drops it too (2026-08-03) — the
+        # typed twin of the Cancel button. Safe in a way its mirror image is
+        # not: declining can only ever do LESS than the card asked for, so a
+        # misread costs a re-ask, while a misread approval would run a delete.
+        if (
+            plan.status in (PlanStatus.PAUSED, PlanStatus.AWAITING_APPROVAL)
+            and _declined_choice(answer)
+        ):
+            logger.info(f"Plan {plan.id} ({plan.status.value}) dropped by the user")
+            return await self.resume(plan, approved=False)
+
         await self._load_folder_signal()
         plan.user_answers.append((answer or "").strip())
         plan.question = None
@@ -3330,7 +3437,12 @@ class AgentPlanner:
         )
         # Statuses that end the graph from draft/revise: failure, an open
         # question, or a cooperative cancellation applied before the round.
-        _paused = (PlanStatus.FAILED, PlanStatus.AWAITING_CHOICE, PlanStatus.CANCELLED)
+        _paused = (
+            PlanStatus.FAILED,
+            PlanStatus.AWAITING_CHOICE,
+            PlanStatus.CANCELLED,
+            PlanStatus.PAUSED,
+        )
         g.add_conditional_edges(
             "draft_plan",
             lambda s: END if s["plan"].status in _paused else "reflect",
@@ -3899,6 +4011,13 @@ class AgentPlanner:
                 apply_cancellation(plan)
                 await log_cancellation(self.db, plan)
                 return {"plan": plan, "pause_reason": None}
+            # Cooperative PAUSE (2026-08-03): same moment, same rule, but the
+            # plan HOLDS — the remaining steps stay pending so the user's next
+            # message can steer them. Checked after cancel: a cancel wins.
+            if self.pause_check is not None and self.pause_check():
+                apply_pause(plan)
+                await log_pause(self.db, plan)
+                return {"plan": plan, "pause_reason": None}
 
             step = plan.steps[idx]
             approved = step.signature() in signatures
@@ -4345,6 +4464,15 @@ class AgentPlanner:
         if self.cancel_check is not None and self.cancel_check():
             apply_cancellation(plan)
             await log_cancellation(self.db, plan)
+            return {"plan": plan, "pause_reason": None}
+        # And the same for a PAUSE — a replan round is "between steps" too, so
+        # a paused run never spends an LLM call planning work the user is about
+        # to redirect. This is also the branch a user-stopped browse arrives on:
+        # the step failed, execute broke here, and the pause is applied before
+        # any replan budget is spent.
+        if self.pause_check is not None and self.pause_check():
+            apply_pause(plan)
+            await log_pause(self.db, plan)
             return {"plan": plan, "pause_reason": None}
 
         # `pause_failure` is "execution just broke on a step" — it alone drives
