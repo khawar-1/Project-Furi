@@ -3054,3 +3054,90 @@ async def test_disarm_drops_an_unconsumed_permit(context_browser):
         method="POST",
         navigation=True,
     ) == "abort"
+
+
+# --------------------------------------------- releasing a tab to the user
+# THE 2026-08-03 eBay CAPTCHA. An interstitial challenge closed the agent session
+# and called open_login_window, whose first act is _window.close_all(). Under
+# one-tab-per-window that cost nothing — the session WAS the window. Under the
+# shared window it demolished the browser: junaidjamshed.com was open beside
+# eBay, eBay showed a CAPTCHA, and BOTH tabs closed so a clean window could
+# reopen eBay alone. release_to_user() is the non-destructive alternative.
+
+
+async def test_releasing_a_tab_to_the_user_lifts_the_rules_without_reloading(
+    context_browser,
+):
+    """A challenge is handed over by LIFTING, not by closing — and never by
+    reloading: re-fetching a challenge can issue a new one or spend a one-time
+    token, so the page the user is looking at must be the page they solve."""
+    session = await BrowserSession.open({"example.com"})
+    cdp = context_browser.cdp_sessions[0]
+
+    assert await session.release_to_user() is True
+
+    assert "Fetch.disable" in cdp.methods       # our rules are out of their way
+    assert session._playback is True            # and the tab is marked the user's
+    assert (
+        session.page.reload_calls == 0
+    ), "a released challenge page must never be re-fetched"
+
+
+async def test_a_released_tab_is_re_armed_before_it_is_driven_again(context_browser):
+    """The safety half. A released tab comes back only through
+    resume_agent_control(), which is what acquire_browse_tab enforces — so
+    handing a tab over can never leave it drivable unguarded (the 2026-08-01
+    add-to-cart incident, which is exactly what would recur otherwise)."""
+    session = await BrowserSession.open({"example.com"})
+    await session.release_to_user()
+
+    assert await session.resume_agent_control() is True
+    assert session._read_only is True
+    assert await _verdict(
+        session,
+        url="https://example.com/cart/add",
+        method="POST",
+        navigation=True,
+    ) == "abort"
+
+
+# --------------------------------- in-place first, the clean window when earned
+def test_the_first_challenge_for_a_site_is_handed_over_in_place():
+    """No memory of a site ⇒ the cheap, non-destructive path."""
+    browser_session.reset_challenge_handoffs()
+    assert browser_session.challenge_handed_over_recently("ebay.com") is False
+
+
+def test_a_second_challenge_from_the_same_site_earns_the_clean_window():
+    """Turnstile and Google re-issue the check however often a human solves it
+    (2026-07-19). One failed in-place hand-over is the whole signal — there is
+    no threshold to tune."""
+    browser_session.reset_challenge_handoffs()
+    browser_session.note_challenge_handoff("ebay.com")
+
+    assert browser_session.challenge_handed_over_recently("ebay.com") is True
+    assert browser_session.challenge_handed_over_recently("EBAY.COM") is True
+    # A different site has its own history and starts cheap.
+    assert browser_session.challenge_handed_over_recently("shop.test") is False
+
+
+def test_the_escalation_memory_expires_so_a_later_check_starts_cheap(monkeypatch):
+    """Self-expiring, so there is no clear-path to forget: a challenge from the
+    same site an hour later is a genuinely new one, not a solve that failed to
+    stick."""
+    browser_session.reset_challenge_handoffs()
+    browser_session.note_challenge_handoff("ebay.com")
+    assert browser_session.challenge_handed_over_recently("ebay.com") is True
+
+    later = time.monotonic() + browser_session._CHALLENGE_HANDOFF_TTL_SECONDS + 1
+    monkeypatch.setattr(browser_session.time, "monotonic", lambda: later)
+
+    assert browser_session.challenge_handed_over_recently("ebay.com") is False
+
+
+def test_a_blank_site_never_pins_the_escalation_memory():
+    """An unnamed site must not become a key that escalates every later
+    challenge — the fail-safe direction is the cheap path."""
+    browser_session.reset_challenge_handoffs()
+    browser_session.note_challenge_handoff("")
+    assert browser_session.challenge_handed_over_recently("") is False

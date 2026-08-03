@@ -50,6 +50,7 @@ HONEST LIMITS (read before trusting this)
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -67,6 +68,21 @@ from app.browser.state import (  # noqa: F401
 )
 from app.browser import trace as browse_trace
 from app.browser import window as _window
+
+# Chars of the site's response quoted back in a commit confirmation. Sized for
+# what a response actually IS — "Thank you for your order", "Please enter a
+# valid email" — not for a page. It applies to prose _response_prose has
+# ALREADY reduced to what the submission produced, so the budget is spent on
+# the informative lines; clipping the raw page instead spends it on navigation.
+_COMMIT_RESPONSE_MAX_CHARS = 400
+
+# A response worth quoting is a MESSAGE. Measured on the incident: the only line
+# a Shopify cart-add changes is the bag counter, so the diff came back as the
+# single character "3" — the truest signal on the page and completely useless as
+# prose ("The page shows: 3"). A length floor would be the wrong instrument (it
+# would drop "Posted!" too); what separates a message from a counter tick is
+# whether it contains WORDS. One run of two or more letters is enough.
+_RESPONSE_WORD_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
 
 
 def _trace_pre_loop_failure(session: Any, goal: str, error: str) -> None:
@@ -110,6 +126,78 @@ def _submitted_url(session: Any) -> str:
         return str(session.commit_submitted_url() or "")
     except Exception:
         return ""
+
+
+def _observed_prose(observation: Any) -> str:
+    """An observation's prose as CAPTURED, not as clipped for a prompt.
+
+    `page_text` is the 4k prompt budget; `text_full` is the 24k capture. The
+    documented reader idiom is `text_full or page_text` (observe.py) — a diff
+    computed over the clipped half would call everything past 4k "new"."""
+    return str(
+        getattr(observation, "text_full", "") or getattr(observation, "page_text", "") or ""
+    ).strip()
+
+
+def _page_moved(before_url: str, after_url: str) -> bool:
+    """Did the submission take us somewhere else? Fragment-insensitive."""
+    if not before_url or not after_url:
+        return False
+    return before_url.split("#", 1)[0].rstrip("/") != after_url.split("#", 1)[0].rstrip("/")
+
+
+def _response_prose(before: str, after: str, *, page_changed: bool) -> str:
+    """The prose the SUBMISSION PRODUCED — never the page it was submitted from.
+
+    WHY THIS EXISTS (2026-08-02, the third wall of text in this stack). This
+    used to be the whole post-submit page's prose, clipped at 1500 chars. That
+    was written against the-internet.herokuapp.com/upload, whose ENTIRE visible
+    text is "File Uploaded! / dummy_upload.txt" — so the clip never bit and the
+    quote was always the confirmation. On a real site the page's prose is
+    overwhelmingly navigation chrome: an approved add-to-cart on
+    junaidjamshed.com reported ~1500 chars of "WOMEN / MEN / FRAGRANCE & BEAUTY
+    / …" plus the product description the user was already looking at.
+
+    ⚠️ A SMALLER CLIP IS THE WRONG FIX AND IS MEASURABLY WORSE. The chrome is at
+    the TOP, so clipping harder keeps the nav and drops the confirmation. The
+    problem was never the budget; it was that "the page's text" is not the same
+    thing as "the site's response".
+
+    So the question is asked directly, in code: which lines are NEW since the
+    page the user approved? On a classic form that navigates, the shared chrome
+    diffs out and the "Thank you" survives. On a Shopify AJAX cart-add — where
+    the page never moves — almost nothing is new, which is the honest answer:
+    that page said nothing back, and quoting it was grounding theatre. An
+    inline error banner ("Please enter a valid email") is new, and is exactly
+    what a user needs to see.
+
+    No LLM, and it cannot fabricate: every line returned is a slice of `after`
+    (the extract.py property).
+
+    WITHOUT A BASELINE we cannot tell new from old, so we fall back to the
+    coarser fact we always have: if the page NAVIGATED, its prose is a response
+    page and is worth quoting; if it did not, we stay quiet rather than dump the
+    page the user was already on."""
+    after = (after or "").strip()
+    if not after:
+        return ""
+    if before.strip():
+        seen = {line.strip() for line in before.splitlines() if line.strip()}
+        text = "\n".join(
+            line.strip()
+            for line in after.splitlines()
+            if line.strip() and line.strip() not in seen
+        )
+    elif page_changed:
+        text = after
+    else:
+        return ""
+    text = text.strip()
+    if not _RESPONSE_WORD_RE.search(text):
+        return ""
+    if len(text) > _COMMIT_RESPONSE_MAX_CHARS:
+        text = text[:_COMMIT_RESPONSE_MAX_CHARS].rstrip() + "\n…"
+    return text
 
 
 def _fired_unconfirmed(form_found: Any) -> bool:
@@ -228,6 +316,17 @@ class CommitDiscovery:
     # did_you_mean.py for why suggesting is not the same as guessing.
     site_unresolved: bool = False
     unresolved_host: str = ""
+    # Several things on the page match the user's words EQUALLY well (2026-08-02)
+    # — several products on a listing, or several values in a size/colour control
+    # — so their words cannot say which one they meant. The planner asks with the
+    # page's own labels as options and the answer is enforced in code on the
+    # resumed run. The live session is HELD, so the user is looking at the very
+    # page the question is about. See browser/choice.py.
+    target_choice_required: bool = False
+    choice_kind: str = ""
+    choice_target: str = ""
+    choice_field: str = ""
+    choice_options: list = field(default_factory=list)
 
 
 async def _load_vision_config():
@@ -256,16 +355,20 @@ _DISCOVERY_HOLD_REASONS = {
     Handoff.FILL_FIELD: "fill",
     Handoff.AUTH_OFFER: "auth",
     Handoff.ORIGIN_APPROVAL: "origin",
+    # "which one did you mean?" resumes in-window like a fill: the user is being
+    # asked about the very page in front of them, and the answer only unblocks
+    # the next click. Nothing to navigate to, so the re-attach stays put.
+    Handoff.TARGET_CHOICE: "choice",
 }
 
 
 async def _hold_for_handoff(session: Any, goal: str, payload: HandoffPayload) -> bool:
     """Park the live session for the pauses that resume IN-WINDOW. Returns True
     when a registry now owns the session (the finally must not close it):
-    fill/auth/origin → the discovery hold; an EMBEDDED challenge → the challenge
-    hold with the vendor carve-out armed so the human's solve can complete.
-    A hard login wall and an interstitial challenge return False — those resume
-    in a separate user-driven window, so this session closes normally."""
+    fill/auth/origin → the discovery hold; a challenge of EITHER mode → the
+    challenge hold, an interstitial one released to the user first.
+    Only a hard login wall returns False — signing in genuinely needs a separate
+    clean process (Google refuses an automated window), so that session closes."""
     from app.core import browser_session
 
     reason = payload.reason
@@ -274,8 +377,21 @@ async def _hold_for_handoff(session: Any, goal: str, payload: HandoffPayload) ->
             session, meta={"goal": goal, "reason": _DISCOVERY_HOLD_REASONS[reason]}
         )
         return True
-    if reason is Handoff.CHALLENGE and payload.challenge_mode == "embedded":
+    if reason is Handoff.CHALLENGE:
         kind = payload.challenge_kind or "CAPTCHA"
+        # AN INTERSTITIAL CHALLENGE HOLDS TOO (2026-08-03). It used to fall
+        # through and close the discovery — so the page the user was being asked
+        # to solve was torn down as the question appeared, and (unlike the read
+        # browse) nothing was opened in its place, while the pause text still
+        # defaulted to claiming a window had been opened. The page IS the
+        # challenge here, so it is released to the user rather than left armed:
+        # a whole-page check is a long human interaction and our rules have no
+        # business in the middle of it. The embedded widget keeps its proven
+        # posture (held, interception on) — the carve-out it once needed was
+        # removed on 2026-07-21 and it has worked in the agent's own window
+        # since 2026-07-19.
+        if payload.challenge_mode != "embedded":
+            await session.release_to_user()
         try:
             session.browse_history.append(
                 f"- paused for the user to complete the {kind} "
@@ -337,7 +453,8 @@ def _discovery_from_handoff(
         kind = payload.challenge_kind or "CAPTCHA"
         site = payload.site or "the site"
         mode = payload.challenge_mode or "interstitial"
-        where = " in the open browser window" if mode == "embedded" else ""
+        # Both modes now keep their window (2026-08-03), so both can say where.
+        where = " in the open browser window"
         return CommitDiscovery(
             challenge_required=True,
             challenge_kind=kind,
@@ -355,6 +472,23 @@ def _discovery_from_handoff(
             origin_candidate=host,
             origin_url=payload.url or "",
             error=f"needs your approval to visit {host}",
+        )
+    if reason is Handoff.TARGET_CHOICE:
+        where = (
+            f"for {payload.choice_field}"
+            if payload.choice_kind == "option" and payload.choice_field
+            else "on this page"
+        )
+        return CommitDiscovery(
+            target_choice_required=True,
+            choice_kind=payload.choice_kind or "item",
+            choice_target=payload.choice_target,
+            choice_field=payload.choice_field,
+            choice_options=list(payload.choice_options),
+            error=(
+                outcome_error
+                or f"several things {where} match — needs you to choose one"
+            ),
         )
     return CommitDiscovery(error=outcome_error or "unexpected browse hand-off")
 
@@ -462,6 +596,21 @@ async def discover(
                 await browser_session.discard_challenge()
                 await browser_session.discard_discovery()
                 session = None
+            if session is not None and not await session.resume_agent_control():
+                # A RE-ATTACHED SESSION IS RE-ARMED BEFORE IT IS DRIVEN
+                # (2026-08-03). acquire_browse_tab has enforced this since the
+                # 2026-08-01 add-to-cart incident, but the two re-attach branches
+                # above reach into a held session directly and bypassed it — safe
+                # only for as long as nothing ever hands one to the user with
+                # interception lifted, which an interstitial challenge now does.
+                # A no-op on a session that was never lifted (resume_agent_control
+                # returns True immediately), so this costs today's paths nothing
+                # and removes a standing way to drive an unguarded tab.
+                logger.warning(
+                    "browse-commit: the re-attached session could not be "
+                    "re-armed — leaving it to the user and starting fresh"
+                )
+                session = None
             if session is None:
                 # A commit runs in the tab for ITS site (2026-08-01) — reusing
                 # one already there, or opening a new one beside whatever else is
@@ -497,6 +646,11 @@ async def discover(
                 vision=vision,
                 vision_first=bool(getattr(vision_config, "vision_first", False)),
                 auth_resolved=set(auth_resolved or set()),
+                # The item / option the user picked on a previous target-choice
+                # pause. The planner stamps these onto the step; the loop applies
+                # them in CODE, never by re-asking the model (browser/choice.py).
+                chosen_target=str(params.get("chosen_target") or "").strip(),
+                chosen_option=str(params.get("chosen_option") or "").strip(),
             )
 
             # Every non-commit stop is a HAND-OFF: derive its payload once and
@@ -673,6 +827,19 @@ async def perform(
                         "submit. Ask me to prepare it again."
                     ),
                 }
+            # BASELINE — the page as it was when the user approved it. Read
+            # BEFORE the submit so the confirmation below can quote what the
+            # submission PRODUCED rather than the page it was produced from
+            # (2026-08-02; see _response_prose). Best-effort: no baseline just
+            # means we fall back to the coarser "did the page navigate?" test.
+            before_text, before_url = "", ""
+            try:
+                baseline = await dom_observe.observe(session.page)
+                before_text = _observed_prose(baseline)
+                before_url = str(getattr(baseline, "url", "") or "")
+            except Exception as exc:
+                logger.debug(f"commit pre-observe: {type(exc).__name__}: {exc}")
+
             session.arm_commit(
                 str(approved.get("method") or "POST"),
                 str(approved.get("url") or ""),
@@ -690,12 +857,15 @@ async def perform(
 
             fired = session.commit_fired()
             response_text = ""
+            page_changed = False
             try:
                 observation = await dom_observe.observe(session.page)
                 summary = dom_observe.summarize(observation)
-                # The page's own visible prose — the "File Uploaded! / <name>"
-                # text — clipped. This is what grounds the confirmation.
-                response_text = str(getattr(observation, "page_text", "") or "").strip()
+                page_changed = _page_moved(before_url, str(summary.get("url") or ""))
+                # Only what the SUBMISSION produced — see _response_prose.
+                response_text = _response_prose(
+                    before_text, _observed_prose(observation), page_changed=page_changed
+                )
             except Exception as exc:
                 logger.debug(f"commit post-observe: {type(exc).__name__}: {exc}")
                 summary = {"url": "", "title": "", "rendered": ""}
@@ -716,7 +886,14 @@ async def perform(
                 "url": summary.get("url", ""),
                 "title": summary.get("title", ""),
                 "rendered": summary.get("rendered", ""),
-                "response_text": response_text[:1500],
+                # Already bounded by _COMMIT_RESPONSE_MAX_CHARS. The old 1500
+                # clip was over the page's WHOLE prose, which on any real site
+                # is mostly navigation chrome.
+                "response_text": response_text,
+                # Did the submission move us off the page it was made from? Read
+                # by rendering._one_commit_block: a page that never moved did not
+                # "respond", and saying it did is an overclaim.
+                "page_changed": page_changed,
                 "window_open": False,
                 "next_commit_required": False,
                 "commits_done": commits_done,

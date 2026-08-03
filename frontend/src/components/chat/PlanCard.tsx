@@ -433,7 +433,17 @@ export function PlanCard({
                     <button
                       key={i}
                       onClick={() => onAnswer?.(option)}
-                      className="text-left px-3 py-2 rounded-lg border border-surface-border bg-surface-2 text-xs font-mono text-slate-200 hover:border-cyan-500/40 hover:bg-cyan-500/10 transition-colors break-all"
+                      // Typography follows what the option IS. A path or a
+                      // hostname is a machine string: monospace, and break-all so
+                      // a long one cannot overflow the card. A "which one did you
+                      // mean?" option is the PAGE'S OWN PROSE ("JANAN SPORT -
+                      // 100ml — Rs. 4,500"), where break-all splits words mid-way
+                      // and monospace is the wrong register.
+                      className={`text-left px-3 py-2 rounded-lg border border-surface-border bg-surface-2 text-xs text-slate-200 hover:border-cyan-500/40 hover:bg-cyan-500/10 transition-colors ${
+                        plan.question?.kind === 'target_choice'
+                          ? 'break-words'
+                          : 'font-mono break-all'
+                      }`}
                     >
                       {option}
                     </button>

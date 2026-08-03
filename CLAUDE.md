@@ -742,7 +742,9 @@ npm run dev
 
 # After stopping dev with Ctrl+C, sweep any stranded processes (the uvicorn
 # --reload parent holding port 8000, a stray Vite/Electron, an orphaned
-# sensing helper) — scripts/stop-dev.ps1 reports exactly what it killed.
+# sensing helper) — scripts/stop-dev.ps1 reports exactly what it killed, then
+# RE-CHECKS the ports and exits 1 if one is still held (2026-08-02: it printed
+# "Clean" about a :8000 it had not freed — see the target-choice round).
 npm run stop
 # Manual check: netstat -ano | findstr ":8000"   and   Get-Process python,node,electron -ErrorAction SilentlyContinue
 
@@ -3804,10 +3806,22 @@ real site — why can't Jarvis?*
 - `task_router._NAV_TLDS` moved into `publicsuffix.KNOWN_TLDS` (+ `has_known_tld`):
   the site gate needs the identical fact, and two private copies of "what is a
   TLD" drift — the `registry.mutates` lesson.
-- **NOT a code change, and the highest-leverage config fix:** `.env` has
-  `TAVILY_API_KEY` and no `GOOGLE_SEARCH_API_KEY`/`GOOGLE_SEARCH_CX`. Google CSE
-  is the one provider in the chain that spell-corrects a query — the exact
-  mechanism the user's screenshot shows. `_real_search` already prefers it.
+- **⚠️ THE OBVIOUS CONFIG FIX IS A DEAD END — DO NOT RETRY IT.** The natural
+  reading of this incident is "Google spell-corrects, so add the Google CSE key
+  `_real_search` already prefers". That was recommended, attempted, and
+  FALSIFIED the same day (2026-08-02), verified against Google's own docs:
+  **"Search the entire web" was DISCONTINUED in March 2026** (the toggle reads
+  *"This feature is being deprecated and can no longer be enabled"*), so a new
+  Programmable Search Engine can only search a list of sites you name — useless
+  for finding an official site by a misspelled name; the **JSON API is "closed to
+  new customers"**, so a new key cannot be obtained at all; and it **RETIRES
+  1 Jan 2027**, with Vertex AI Search (~$2/1k queries, ≤50 domains) offered as a
+  replacement that is a different product, not a drop-in. The `google-cse`
+  provider stays in the chain (a pre-cut engine works until retirement; unset
+  makes it a no-op), and the constraint is now recorded in `config.py` and
+  `.env.example` beside the keys. **So the deterministic tier-2 title reader is
+  not a stopgap for a config change — it IS the fix**, which is the reverse of
+  how it was framed when it shipped.
 - Tests: NEW `test_site_question_gate.py` (29 — the incident frozen; the suggester
   asked about the GOAL's host; reject/strip; a partial death drops only the
   fabrication; **a question with no addresses costs ZERO DNS lookups**, including
@@ -3848,6 +3862,482 @@ real site — why can't Jarvis?*
   reduce to `_extract_search_term → None`, so the destination change is
   structurally incapable of touching any of them.
 
+### A page is not a response — the commit wall of text (2026-08-02)
+The did-you-mean fix worked (the suggester offered the real site, the user
+answered, the perfume went in the cart). The COMPLETION message was ~1800 chars,
+of which the confirmed facts were about 220: the rest was the product page's own
+prose — `Skip to content / PROFILE / WOMEN / MEN / FRAGRANCE & BEAUTY / …`, the
+breadcrumb, the fragrance notes — presented as *"The page shows:"*. The user:
+*"almost 99% of things in the reply when task is done are unnecessary."*
+- **⚠️ ROOT CAUSE: `response_text` was the whole post-submit page's prose**
+  (`observation.page_text`, clipped at 1500). It was written on 2026-07-18
+  against the-internet.herokuapp.com/upload, whose ENTIRE visible text is
+  *"File Uploaded! / dummy_upload.txt"* — so the clip never bit and the quote
+  was always the confirmation. **Every fake in `test_browser_commit.py` had that
+  same shape** (`"Posted!"`, `"Application 1 received"`, `"Added to cart"`), so
+  40+ green tests described a world in which a page's prose IS its response.
+  Third wall of text in this stack (media dump 2026-07-25, destination-only DOM
+  dump 2026-08-01), and the same test-shape blindness as 2026-07-17 and
+  2026-07-30.
+- **⚠️ THE OBVIOUS FIX IS MEASURABLY WORSE. Do not clip harder.** The navigation
+  chrome is at the TOP of a page's prose, so a smaller budget keeps
+  `WOMEN / MEN / FRAGRANCE & BEAUTY` and drops whatever confirmation follows it.
+  The budget was never the problem: **"the page's text" is not "the site's
+  response"**, and no cap can turn one into the other.
+- **THE PREDICATE, ASKED DIRECTLY IN CODE** (`commit_flow._response_prose`):
+  *which lines are NEW since the page the user approved?* `perform` observes
+  once BEFORE arming (after `verify_commit`, so a mismatched form pays nothing)
+  and diffs line-sets. A classic form that navigates diffs its shared chrome away
+  and keeps the "Thank you"; a Shopify AJAX cart-add — where the page never
+  moves — yields almost nothing, **which is the honest answer: that page said
+  nothing back, and quoting it was grounding theatre.** An inline error banner
+  ("Please enter a valid email") is new, and is exactly what a user needs. No
+  LLM; every line returned is a slice of the observation (the `extract.py`
+  property). Cost: one extra `observe()` per submit — MEASURED at 135ms on this
+  very page by `browse_observe_profile.py` the same day.
+- **WITHOUT A BASELINE it falls back to `_page_moved`** (did we navigate?) and
+  fails toward brevity: a page that never moved is not quoted rather than dumped.
+- **A COUNTER TICK IS NOT A MESSAGE.** MEASURED: the only line a cart-add changes
+  is the bag counter, so the first cut of the diff returned the single character
+  `3` and rendered *"The page shows: 3"*. A length floor would be the wrong
+  instrument — it would drop `"Posted!"` (7 chars) too. What separates a message
+  from a counter is having WORDS, so `_RESPONSE_WORD_RE` requires one run of ≥2
+  letters.
+- **The head overclaimed too.** *"The site responded: **JANAN SPORT - 100ml**"*
+  was the page we were still ON — an AJAX submit never navigated. Same class as
+  "unconfirmed is not didn't happen" (2026-08-01): it now reads *"The page stayed
+  on …"* unless `page_changed`, which rides through `planner._record_commit` and
+  the tool output to the renderer.
+- **MEASURED on the incident's own page text: 1832 → 321 chars (82% less)**, with
+  the 2026-07-18 upload grounding preserved in both tiers (baseline diff and
+  no-baseline navigation).
+- Tests: `test_browser_commit.py` (+6 — the incident end-to-end through `perform`
+  with the storefront prose, asserting the nav menu is absent and
+  `page_changed is False`; a navigating submit still quotes the server; the
+  new-prose/counter/no-baseline/bound matrices), `test_plan_rendering.py` (+2 —
+  the confirmation renders under 500 chars against the incident's 1832; the head
+  claims a response only when the page moved). **The fake was fixed to model the
+  contract** (form page before the submit, response page after) — a bare
+  `object()` page could not express it. Every behavioural test was proven to FAIL
+  by reverting the specific line IN PLACE (5 on the diff, 1 on the word floor,
+  1 on the head).
+- **HONEST LIMIT:** the diff is line-level, so a page that rewrites a line
+  cosmetically (a rotating banner, a timestamp) contributes noise, bounded by
+  `_COMMIT_RESPONSE_MAX_CHARS = 400` and the word floor. And a site that confirms
+  ONLY by a counter now says nothing in the quote — the header's confirmed facts
+  (the interceptor observed the approved request leave) carry it instead, which
+  is the stronger evidence anyway.
+
+### "Which one did you mean?" — the loop could not ask about a THING (2026-08-02)
+Asked *"add janan perfume to cart"* on a storefront selling **Janan Sports, Janan
+Oud and Janan Leather**, each in 100/50/20ml, the loop picked one and carried on.
+The question was raised as a design review, not an incident, and the audit is
+what made it real: the `Handoff` enum is the COMPLETE pause taxonomy — eleven
+reasons, none of them item ambiguity — `_handle_browse_handoff` ends in
+`else: return False`, and the decision prompt's action vocabulary has no "ask"
+verb. **Neither code nor the model could raise the question.** The one
+downstream checkpoint did fire, and named the choice
+`properties[_Barcode]: PM135415-100-999-M` (the real 2026-08-01 card).
+- **THE GAP WAS CONSPICUOUS BECAUSE ASKING IS WHAT THIS CODEBASE DOES.**
+  `folder_resolver` asks which `downloads`; `did_you_mean` asks which domain;
+  `lookup_contact` asks which contact; `_origin_approval` asks about an origin.
+  Every point where several PAGE items could match resolved by deferring to the
+  model instead — `_top_result_action` (`# strictly greater → first DOM element
+  wins a tie`), `_fast_path_action`, `_latest_series_action`, and `_memory_block`,
+  which literally instructs the model to "compare these to choose". The doctrine
+  those comments cite is *"code never picks when the match is unclear"* — but the
+  fallback was always the MODEL, never the USER.
+- **THE TEST IS A TIE IN THE USER'S OWN WORDS** (`app/browser/choice.py`, PURE —
+  imports nothing from `app.*`, the extract.py rule). Score each candidate by how
+  many of the user's significant tokens its label carries: **one clear leader ⇒
+  their words discriminate, proceed silently; two or more tied ⇒ their words
+  cannot tell those apart, and the difference between the tied labels is exactly
+  what they did not say.** `{janan, perfume}` ties Sports/Oud/Leather 1-1-1 → ask;
+  `{janan, sports, 100ml}` scores 3-1-1 → **a specific user is never
+  interrupted**. NOTHING IN IT KNOWS WHAT A "SIZE" OR AN "ML" IS: the same
+  comparison ties `{black, chinos}` across 30W/32W/34W and `{macbook, air}` across
+  storage tiers. A per-domain vocabulary would be the `_WEB_QUESTION_MARKER_RE`
+  shape falsified three times — this classifies nothing, it compares the user's
+  words against the page's own. Stray goal words cannot break it: a token in NO
+  candidate adds 0 to every score and one in ALL adds 1 to every score; only a
+  DISCRIMINATING token can move the verdict, and a stray that matches SOME
+  candidates produces a spurious unique leader, i.e. it fails toward NOT asking —
+  the pre-feature behaviour. Every failure direction is that one.
+- **⚠️ A FUZZY RATIO FLOOR CANNOT DO THIS, AND THE MEASUREMENT IS THE WHOLE
+  REASON THE RULE LOOKS ODD.** The obvious way to let "sports" match "sport" is
+  `rapidfuzz.ratio` over a floor — the `did_you_mean.SIMILARITY_FLOOR` /
+  `MIN_SCORE = 81` shape. Tried first; killed by measurement:
+  `watch/watches 83.3` must MATCH while `pants/paints 90.9`, `short/shirt 80.0`,
+  `small/stall 80.0`, `large/lager 80.0`, `olive/alive 80.0` must NOT — **the
+  worst false pair OUTSCORES the weakest true one, so no floor exists.** Edit
+  distance measures how BIG a difference is; what matters is WHERE it falls (an
+  inflection changes the END of a word, a different word changes the INSIDE). So
+  the rule is positional and needs no tunable number: **equal, or the shorter is a
+  PREFIX of the longer, ≥`_MIN_STEM_CHARS`, adding ≤`_MAX_INFLECTION_CHARS`.**
+  Verified 12/13 true and **25/25 false** over 38 measured pairs (the one miss,
+  `kid`/`kids`, is a false NEGATIVE — it can only cause an extra question). The
+  4-char gate is measured too: EVERY dangerous pair in the sample is ≤3 chars
+  (`oud/loud`, `tan/tank`, `cap/cape`, `bag/bags`, `pro/pros`, all 85.7 AND all a
+  prefix relation), so three-letter tokens get no allowance at all.
+- **WHERE IT FIRES: the model's OWN choice, commit mode only.** The gate sits
+  beside the action-approval gate and triggers when the model's click COMMITS to
+  one of the tied candidates — a click on a filter, a nav link or "next page"
+  scores nothing, commits to nothing and is never caught. So it fires at the
+  exact moment the run picks one interpretation, and ordinary browsing is
+  untouched.
+- **⚠️ IT SHIPPED WITH ONE WAY TO COMMIT AND THE LIVE PAGE USED THE OTHER
+  (2026-08-02, same day).** First live run: *"go to junaidjamshed.com and add
+  janan to cart"* reached `/search?q=janan` and **asked nothing**. The gate ran —
+  it is ahead of `_act` in `run_browse`, not behind it — and declined, because its
+  test was `picked_index ∈ tied` and the model had clicked a card's **quick-add
+  button**. On a listing grid the element that NAMES a product and the element
+  that COMMITS to it are SIBLINGS with different indices, and a quick-add can
+  never be a candidate at all: `_LABEL_NOISE_RE` strips "add to cart" (correctly —
+  it names no product) and `candidates_of` then drops the empty label. So the
+  click fell through to `_act`'s submit-gesture backstop, which refused it, and
+  the run died on *"couldn't work out a safe next action on this page"*. Trace
+  `ab4aeb2673a7` step 1 is the whole diagnosis: `click index 27` → `FAILED` →
+  finish, `steps: 2`. **The tie DETECTION was right; the identity test for "which
+  element is the commitment" was wrong.** Fixed with TWO conditions — the click
+  lands ON a tied candidate (opening one by its title), OR it is an
+  `_is_action_gesture` while several tie (a quick-add/buy control, committing to
+  one card in place). (b) costs nothing to evaluate: `_act` computes the same
+  predicate on the same click moments later, and in commit mode that gesture is
+  going to be REFUSED whatever the gate does — so when the page holds several
+  equally-matching items, asking which one is strictly better than the dead end it
+  produced live. **KNOWN COST, accepted:** an unrelated action gesture on a
+  listing page (a footer "Subscribe") now asks which ITEM rather than dead-ending
+  — a confusing question beats a silent wrong purchase, and narrowing it by label
+  would be the keyword-list shape measured at zero three times.
+- **⚠️ AND 64 GREEN TESTS COULD NOT SEE IT — THE THIRD TIME THIS EXACT
+  TEST-SHAPE HAS SHIPPED HERE.** Every page fake in the file was built by
+  `_obs_payload`, one title LINK per product, so the clicked element was always
+  the titled candidate — a shape the target site does not serve. Same blindness as
+  the fan-out tests that bypassed the planner (2026-07-17), the bulk tests that
+  drove the singular tool (2026-07-30) and the fake returning one page object
+  twice (2026-08-01); the lesson was written down after two of those and
+  reproduced anyway. NEW `_grid_payload` models the real card (title link +
+  sibling quick-add), and the incident test drives the BUTTON's index. **Rule, for
+  the next person: a fake page is a claim about the live DOM. Before trusting a
+  pausing feature, name the element the model will actually reach for on the real
+  site and check the fixture contains it as a distinct element.** **Read-only browses are deliberately excluded** (owner's call): they
+  act on nothing, their world-acting gestures already stop at
+  `Handoff.ACTION_APPROVAL`, and pausing a search/media run would interrupt the
+  paths that work. The read-mode mitigation is one line — `_describe_action` now
+  names the PAGE, so the card reads `select "Add to Cart" on "JANAN SPORT -
+  100ml"` instead of a button label that is identical on every variant.
+- **A COMMIT-MODE `select_option` WAS NEVER GROUNDED AT ALL** — a latent hole
+  found while building this, and the size half of the report. `type` faced
+  `fill_violation`; the control that carries the variant faced nothing, so the
+  loop could put a value into the form tracing to nothing the user said. Now it
+  faces the same corpus, and **only a FAILING value costs anything**: on that path
+  the control's real `<option>` labels are read, and if the user's words single
+  one out CODE TAKES IT (the model picking "50 ML" when they said 100ml is
+  overridden, silently and correctly); only when their words genuinely cannot
+  choose does it ask, with the page's own labels. Unreadable options fall through
+  to the pre-existing free-text ask — a new pause must never REPLACE a working one
+  when it has nothing better to say.
+- **THE APPROVAL CARD STOPS SPEAKING IN BARCODES** (Part 3, the backstop tier for
+  when detection cannot fire — a pure-JS swatch writing a hidden input).
+  `_FORM_CONTRACT_JS_BODY` now also captures a human `label` where the page has
+  one (a `<select>`'s selected option text, a checked radio's label) and
+  `_render_commit_detail` renders `id: JANAN SPORT - 100 ML  (41234567890)` —
+  **the raw value KEPT beside it, because the label is what a person checks and
+  the value is what is actually sent.** ⚠️ VERIFIED rather than assumed:
+  `_commit_fingerprint` reads NAMED KEYS ONLY (`(name, value)`, `(name, path)`),
+  so an added key is fingerprint-invariant *by construction* — a cosmetic label
+  can never refuse an approved submit. Pinned by a test.
+- **THE ANSWER IS ENFORCED, NEVER TRUSTED.** `choice.locate` turns the picked
+  option back into an element and CLICKS IT IN CODE (zero LLM calls, pinned by a
+  bounded-run `provider.calls == 0`); `answer()` re-enters EXECUTE directly; and
+  `_inject_target_choices` replays the pick onto every re-drafted step each revise
+  round — because `plan.goal` is STILL the ambiguous sentence, so a revise round
+  handed it would re-supply the very ambiguity that caused the question (the
+  2026-07-12 folder_resolver lesson, and the `_inject_site_corrections` pattern).
+  Reply matching is `_match_site_choice`'s shape: decline first (with the negative
+  lookahead, so *"no, the oud one"* is a choice), then the user's own words, then
+  a clicked option — and **fail-closed**: `"janan"` matches all three, so it
+  answers nothing and the plan cancels honestly rather than code breaking the tie.
+- **Bounded and terminal**: `_MAX_TARGET_CHOICES = 2` (SERIALIZED — the ask parks
+  the plan), charged to `browse_handoffs` not `MAX_QUESTIONS` (structural, not LLM
+  confusion), and the answer JOINS the user's words so the same page is no longer
+  ambiguous on the next pass. The window is HELD across the pause
+  (`_DISCOVERY_HOLD_REASONS[TARGET_CHOICE] = "choice"`, not `"origin"`, so the
+  re-attach stays on the page being asked about — the 2026-08-02 vanishing-tab
+  lesson). Every failure path returns "no ambiguity": this can only ever ADD a
+  question, never turn a working path into a failing one.
+- **⚠️ TWO REAL DEFECTS CAUGHT BY SELF-REVIEW, both after the tests were green.**
+  (1) `target_tokens` tokenized the WHOLE URL, so a results page at `?q=janan`
+  filed the user's own word under "the site's name" and dropped the one token that
+  discriminates — the exact inverse of the function's job. Caught because the
+  incident test uses a REALISTIC results URL. (2) The gate learned which site to
+  discount from `session.start_url`, **an attribute the real `BrowserSession` does
+  not have** — so that filtering silently never ran in production while passing
+  every test whose fake set the field by hand. Both now read the page's own
+  `obs.url`; the fake had its `start_url` REMOVED to match reality, and the
+  regression test is falsified against the defect.
+- Tests: `test_browser_target_choice.py` (66 — the incident frozen; the LIVE MISS
+  frozen through `_grid_payload` with `page.acted == []`, plus its never-interrupt
+  twin (one match on the same grid shape does NOT pause), both falsified against
+  the pre-fix gate with the correct signature — incident fails, regression passes;
+  a 5-case
+  never-interrupt matrix and a 3-domain generality matrix; the measured token
+  pairs pinned, each labelled with the ratio that defeats a floor; no-fabrication;
+  the loop pausing with `page.acted == []`; the code-enforced click at zero LLM
+  cost; both select_option directions; the planner pause/answer/decline/
+  fail-closed; the cost assertion that the resume spends no planning call; the
+  held-window leak test). **All 8 behavioural changes proven to FAIL by reverting
+  the specific line IN PLACE** (never `git show :file` — the 2026-08-01 rule),
+  each with the correct signature: behavioural fails, regression passes. One
+  falsification came back GREEN first time and was the useful one — the direct
+  EXECUTE re-entry, whose outcome the revise path reproduces, so the test was
+  measuring nothing until it asserted the property that actually differs (the
+  LLM-call count).
+- **NOT run, and why:** `browse_bench.py` is unaffected BY CONSTRUCTION, verified
+  rather than assumed — all six tasks drive `BrowseTool`, which never passes
+  `commit=True`, so both new gates are unreachable there; `target_choice_required`
+  was added to `_HANDOFFS` anyway so a future commit-mode task scores *blocked*,
+  not failed. Gates met: **2958 passing, 14 skipped, 0 failed** — the first
+  all-green suite since the rot began (every recorded run from 2026-08-01 onward
+  carried exactly two `test_multi_name_facts.py` failures; 2026-07-30 recorded
+  2618 passing with none), because those two turned out to be an EXPIRING test
+  rather than background noise — next bullet. Typecheck and `vite build` clean.
+- **⚠️ ALSO FIXED, AND IT IS NOT THIS ROUND'S FEATURE: a test that hardcodes a
+  FUTURE date is a test with an EXPIRY DATE.** The two `test_multi_name_facts.py`
+  failures that the last four rounds each recorded as "pre-existing,
+  date-sensitive" were not background noise — they were a real regression test
+  that had stopped testing anything. `FISHING_FACT` hardcoded
+  `event_date: "2026-08-01"` and both end-to-end tests asserted the future-dated
+  rewrite fired (`"Went to fishing…"` → `"Planning to go to fishing…"`); on
+  2026-08-01 that date became today, `normalize_future_phrasing` correctly
+  declined, and the pair went red **permanently** — so any genuine regression in
+  the shared-fact phrasing path would have landed in an already-red file and been
+  read as the known rot. Each round diagnosed it correctly and none fixed it,
+  which is how a dated failure becomes furniture. The date is now
+  `date.today() + timedelta(days=30)`, computed once at module level: the engine
+  path CANNOT take an injected clock (`store_shared_fact` →
+  `store_semantic_memory` calls `normalize_future_phrasing` with the real
+  `date.today()`), so the date has to move instead. Its hermetic sibling
+  `test_future_fact_rewritten_as_plan` never rotted precisely because it passes
+  its own `today=` — that is the pattern wherever a clock CAN be injected.
+  Falsified before being accepted (the 2026-07-30 rule): flipping the offset to
+  `-30 days` fails exactly those two tests and no others, so they are once again
+  load-bearing rather than decorative. Checked for the same latent expiry across
+  every other test touching `normalize_future_phrasing` — the rest feed
+  ALREADY-plan-phrased text ("Planning to…"), which is untouched at any date.
+- **⚠️ `npm run stop` REPORTED "Clean" ABOUT A PORT IT HAD NOT FREED**, found
+  while clearing the machine for the live check. A previous session's Ctrl+C had
+  killed the uvicorn `--reload` PARENT (PID 10828) while its `multiprocessing`
+  worker (18500) kept the INHERITED listening socket — and Windows still names
+  the DEAD parent as that socket's owner, so `stop-dev.ps1` looked 10828 up,
+  `Get-Process` threw, its `catch {}` swallowed the throw, and the sweep declared
+  the machine clean while `:8000` was demonstrably still LISTENING. Measured, not
+  reasoned: `Get-Process`/`tasklist` both say 10828 does not exist, `curl
+  /health` returns NOTHING (so it is a held-but-dead socket, and `npm run dev`
+  would hang on its `wait-on http-get://localhost:8000/health` rather than launch
+  Electron against stale code), and killing 18500 freed the port immediately.
+  Two fixes: an unresolvable owner now falls through to sweeping that owner's
+  LIVE CHILDREN, and — the part that matters — the script RE-CHECKS both ports
+  after sweeping and exits 1 naming what is still held. "Clean" is a claim about
+  the world, not about what the script managed to do; this is
+  `_unroute_intercept`'s own lesson (2026-07-27) in a dev script: **a no-op that
+  reports success is worse than a failure, because nothing ever looks again.**
+  Verified both paths (clean machine → "Clean", exit 0; a real listener on 8000 →
+  killed, named, port free).
+- **HONEST LIMITS, stated not discovered:** a variant chosen by pure-JS swatches
+  exposes no option list, so Part 2 cannot ask about it (Part 3 is the
+  mitigation); the tie test sees only the observation's element window, so a
+  candidate past the render budget is not compared until `more` pages it in; and a
+  `<select>`'s placeholder row ("Select a size") is offered like any other option,
+  because `get_attribute("value")` returns None for the ordinary
+  `<option>Small</option>` too and filtering on it would silently discard real
+  sizes — an extra row nobody picks beats a missing one.
+- **LIVE ACCEPTANCE IS USER-DRIVEN AND OUTSTANDING**: `npm run dev`, then
+  *"go to junaidjamshed.com and add janan perfume to cart"* (must ask, with the
+  real titles, and the card must name the size in words), *"add janan sports 100ml
+  to cart"* (must NOT ask), and a read browse (unchanged).
+
+### It asked, was answered, and asked again on the next page (2026-08-02)
+Live, minutes after the fix above: *"go to junaidjamshed.com and add janan to
+cart"* asked which Janan, the user answered **JANAN SPORT - 30ML**, the pick was
+enforced in code — and on the product page it **asked again**, offering the
+"you may also like" rail (200ML / GIFT SET / 100ML), three things the user had
+just declined to choose. Root-caused from the two traces before any code moved
+(`80da37b030ab` → `9ee36900e6e0`).
+- **THE ENFORCEMENT WORKED PERFECTLY, WHICH IS WHAT MAKES THE DIAGNOSIS EXACT.**
+  Run 2 step 0 is `source: "fast-path"`, `decide_ms: 3`, zero LLM calls, landing
+  on `/products/janan-sport-30ml`, title `JANAN SPORT - 30ml – J.` — `choice.locate`
+  turning the answer back into a click, as designed. Step 1, ON that page, fires
+  the gate again. So the defect is downstream of the answer, not in it.
+- **⚠️ AND THE ANSWER WAS IN THE CORPUS THE WHOLE TIME — the obvious fix is a
+  dead end.** The log line prints `target_words[:4]`, which is identical across
+  both runs and reads like the answer never arrived. MEASURED, it had:
+  `[find, product, named, janan, …, sport, 30ml, janansport, sport30ml]`. It
+  cannot break this tie and no corpus fix can, because **the answer discriminates
+  the chosen item from its siblings while the siblings stay equal to EACH OTHER**:
+  200ML / GIFT SET / 100ML all score exactly 3. Adding the user's words to a
+  comparison between three things they didn't pick changes nothing.
+- **ROOT CAUSE: condition (b) from this morning reads a gesture as "committing to
+  one of the tied cards", which is true on a listing grid and FALSE on a detail
+  page.** There the gesture belongs to the page's own product and the tie is a
+  related-items rail. Same predicate, two page shapes, opposite meanings — and
+  the morning's round only had the grid in view.
+- **THE FIX IS THE SAME COMPARISON, ASKED OF THE PAGE** (`choice.page_is_the_target`).
+  "Which of these did you mean?" is only meaningful while the run is SELECTING;
+  once it has selected — by navigating INTO a thing — it is ACTING, and a rail is
+  navigation. The test for which situation we are in is direct rather than a
+  proxy: score the page's own identity with the SAME scorer, and if the user's
+  words point at it strictly harder than at anything listed on it, the page is
+  the answer. **MEASURED on the incident:**
+
+      search page   title 1 vs candidates 1  ->  not greater  ->  ASK  (right)
+      product page  title 5 vs candidates 3  ->  greater      ->  act  (right)
+
+  **⚠️ STRICTLY IS LOAD-BEARING**: a listing page's title echoes the query or the
+  category, so it TIES with the products it lists — `>=` silences the one question
+  that must be asked. Pinned by a test that fails on `>=`.
+- **REJECTED, and each for a reason already recorded here.** *Ancestry/geometry*
+  ("is the gesture inside the same card as a candidate?") — `Element` carries no
+  parent, and rect proximity is the fragile heuristic this stack keeps unpicking.
+  *A URL-shape list* (`/products/…` = detail page) — the keyword-list shape
+  measured at zero three times. *Making the resolution sticky* ("never ask twice
+  in a plan") — blunter than the defect, and it would silence a genuine second
+  question in a multi-item flow. The chosen rule needs no new fact about the
+  world: it reuses the scorer the gate already trusts, so it cannot disagree with
+  the tie test it guards.
+- **`page_subject` NEVER READS THE QUERY STRING** — the mirror of `target_tokens`'
+  host-only rule, and the same failure inverted. A results page carries the user's
+  own words in `?q=janan`, so counting them would let *every* search page claim to
+  BE whatever was searched for: the request scored against itself. Title + URL
+  PATH only (the site's own naming of the resource).
+- **SUPPRESSION LANDS THE FLOW WHERE IT BELONGS, verified rather than assumed.**
+  With the question gone, the model's click on Add-to-Cart is refused by `_act`'s
+  submit-gesture backstop — and a refusal is NOT terminal (trace `ab4aeb2673a7`
+  shows it appended to history and the run continuing), so the model's next step
+  is `submit`, which is what arms commit discovery and the approval card. Checked
+  before shipping the suppression, because silencing a question into a dead end
+  would have been the same bug wearing different clothes.
+- **THE QUESTION ALSO STOPPED READING BACK MACHINE NOISE.** It said it was
+  matching *'find product named janan findproduct productnamed'* — the browse goal
+  is LLM-authored prose, so its plumbing nouns leak in beside the user's words,
+  and `target_tokens` carries adjacent-joined pairs ("100 ml" ↔ "100ml") that are
+  an internal matching device. `_GOAL_STOPWORDS` gained the plumbing (which also
+  serves as `page_subject`'s path filter) and `plain_words` strips the pairs for
+  DISPLAY only — the verdict is never computed from it. Now reads `janan`.
+  A test pins that dropping the plumbing changes no verdict.
+- Tests: `test_browser_target_choice.py` (66 → **75**) — the incident frozen at
+  unit level with its own numbers (3/3/3 vs 5) and end-to-end through the loop
+  (`chosen_target` set, rail present, no second pause); the results-page
+  strictness case; a category page tying with its own products; the query-string
+  circularity guard; both display tests. **All four behavioural changes were
+  proven to FAIL when reverted IN PLACE** (the 2026-08-01 rule — never
+  `git show :file` in a tree with a large uncommitted baseline), each with the
+  correct signature: behavioural fails, regression passes.
+- **⚠️ A COLLIDING TEST CONSTANT MADE TWO NEW TESTS MEASURE THE WRONG GOAL.** The
+  file already binds `_GOAL` further down, so a module-level `_GOAL` added near
+  the top is silently rebound at import and every test using it runs the OTHER
+  goal. It surfaced as a confusing failure (`'janan perfume' != 'janan'`) rather
+  than a false pass, but the same collision in the other direction is a test that
+  passes while measuring nothing. Renamed `_STEP_GOAL`.
+- **HONEST LIMIT:** the rule reads the page's title and path, so a site that
+  titles every page identically ("Shop – Brand") gives the subject a score of 0
+  and the rail question can still fire. That fails toward asking, which is the
+  safe direction, and the answer then costs one extra click rather than a wrong
+  purchase.
+
+### A CAPTCHA demolished the browser — hand over the tab, don't close the window (2026-08-03)
+Live: eBay was open in one tab, junaidjamshed.com in another. A search on eBay hit
+a CAPTCHA, and **both tabs closed**; a new window opened with eBay alone; then that
+closed and a third window opened. The user's report — "jarvis closed the whole
+browser then opened browser again but with only ebay tab, others were gone" — is
+exactly what the log says, line for line.
+
+- **ROOT CAUSE, read out of `backend.log` before any code moved.** The read
+  browse's `challenge_required` branch closed its session and called
+  `open_login_window`, **whose first act is `_window.close_all()`**. The log
+  sequence is unambiguous: `CAPTCHA interstitial challenge at www.ebay.com (step 2)
+  — stopping for the user` → `window: closed a tab (1 still open)` → a SECOND
+  session summary (`commits=1` — the junaidjamshed tab, which had nothing to do
+  with eBay) → `window: last tab closed — closing the shared window` → `opened
+  CLEAN sign-in/verification window`. The third window is the resume re-running the
+  browse. Three windows, two destroyed tabs, for a check sitting on a page that was
+  already on screen.
+- **⚠️ THE BRANCH WAS CORRECT WHEN IT WAS WRITTEN, AND THAT IS THE LESSON.** Under
+  one-tab-per-window "close the session" cost nothing — the session WAS the window.
+  The 2026-08-01 multi-tab round changed the cost of that sentence everywhere and
+  fixed the three places it found (context-level routing, opener-null adoption,
+  context-level unroute); the 2026-08-02 keep-the-page round fixed two of the four
+  pause branches and recorded that `login`/`challenge` still close. **This is the
+  same defect class as 2026-07-30's "adding a preferred form turns every
+  name-keyed predicate into a hole", one level up: a change that alters what an
+  operation COSTS leaves every caller that was written when it was free.**
+- **The justification for the clean window did not survive reading the code next
+  to it.** `_hold_for_handoff`'s own comment says an EMBEDDED widget is solved by
+  the user **"in the very window the agent was driving"** (2026-07-19), and the
+  vendor-traffic carve-out that path once needed was **REMOVED on 2026-07-21** as
+  unnecessary under the action-level policy. So a human can already complete a
+  check in the agent's window; nothing about an interstitial makes that untrue. The
+  interstitial branch was using a separate window because its clearance is a cookie
+  and therefore *could* transfer — not because it had to.
+- **THE FIX: `BrowserSession.release_to_user()`** — the mirror of
+  `resume_agent_control()`. It lifts interception (the `enter_playback_mode`
+  posture, `reload=False` because re-fetching a challenge can issue a new one or
+  spend a one-time token) and leaves the tab in the site-keyed browse registry, so
+  the resume REUSES it and `acquire_browse_tab` re-arms it before anything drives
+  it. Every other tab is untouched. That re-arm is not a new promise: it is the
+  2026-08-01 guarantee, and it is the only reason lifting here is safe.
+- **⚠️ THE CLEAN WINDOW IS KEPT, AND EARNED.** Deleting it would trade this defect
+  for the live-observed 2026-07-19 one: Turnstile and Google fingerprint the
+  automated browser and re-issue the check however often a human solves it ("I fill
+  the box and it unchecks again and again"). So: hand over in place; if the SAME
+  site challenges again while that hand-over is still fresh
+  (`_CHALLENGE_HANDOFF_TTL_SECONDS = 600`, memory-only, self-expiring, keyed by
+  site), the in-place solve did not stick and we escalate — **paying the tabs only
+  once the cheap path has been tried and observed to fail.** The
+  `evidence_resolver` escalation shape, and there is no threshold to tune: one
+  failed attempt is the whole signal. A restart forgets and starts on the
+  non-destructive path, which is the safe default.
+- **The commit path had the same shape and a lie on top of it.**
+  `_hold_for_handoff` returned False for an interstitial, so the discovery closed
+  the page the user was being asked to solve — and, unlike the read browse, opened
+  nothing in its place while `challenge_window_opened` still defaulted True, so the
+  pause text claimed a window had been opened. Both modes hold now; the interstitial
+  is released to the user first (a whole-page check is a long human interaction);
+  the embedded widget keeps its proven posture, held with interception on.
+- **A latent hole closed in passing.** `discover()`'s two re-attach branches
+  (`take_challenge`/`take_discovery`) drive a held session **without**
+  `resume_agent_control()` — safe only for as long as nothing ever hands one to the
+  user with interception lifted, which an interstitial challenge now does. That is
+  the 2026-08-01 unguarded-tab incident waiting to happen on the commit path, so
+  the re-attach re-arms and a session that cannot be re-armed is left to the user
+  while the flow starts fresh. A no-op on a session that was never lifted, so it
+  costs today's paths nothing.
+- **THE PAUSE TEXT IS PART OF THE FIX, not decoration.** It is the only instruction
+  the user gets, and "I've opened the page" about a tab already in front of them
+  sends them hunting for a window that never appeared — the same class as an
+  approval card naming one site while acting on another (2026-08-01). Three worlds,
+  three sentences: in place / opened / open it yourself.
+- Tests: `test_browser_login.py` (+4 — the incident frozen: nothing closed, nothing
+  opened, the tab released, the text pointing at it; the escalation earning the
+  clean window on a repeat; the failed-lift fallback via a parameterized harness;
+  the planner's three-way text), `test_browser_commit.py` (+1, 1 REWRITTEN —
+  `test_discover_interstitial_challenge_closes_and_never_holds` was **pinning the
+  defect**, and its own docstring said "the interstitial path is UNCHANGED"; the
+  re-attach re-arm), `test_browser_session.py` (+6 — the lift without a reload, the
+  re-arm behaviour, the escalation memory incl. TTL expiry and a blank site).
+  **All five behavioural changes were proven to FAIL when reverted IN PLACE**, each
+  with the correct signature.
+- **⚠️ AND ONE FALSIFICATION LIED — the third time a harness has, in this project.**
+  Patching `release_to_user` to reload came back "4 passed". Re-running it with the
+  patch VERIFIED on disk (`grep` for the changed line) between the write and the
+  test failed correctly. **A falsification that comes back green proves nothing
+  until you have seen the patched line in the file** — the 2026-08-01 rule
+  ("`git show :file` is not the code before this change") generalises: verify the
+  revert landed, not that the command ran.
+- The fakes were extended to model the new contract (`released` vs `closed`,
+  `resume_agent_control`, `rearm_ok`) — a fake that cannot tell releasing from
+  closing passes whichever way the code goes.
+
 ### Browser stack — CURRENT STATE (authoritative; supersedes the log above)
 
 Everything above this heading is the build log. This section is what the code does
@@ -3865,7 +4355,8 @@ staleness contract, cross-frame union, challenge probe, screenshots) ·
 act, fast paths, wall detectors, budgets) · `commit_flow.py` (discover → approve →
 submit, multi-commit) · `grounding.py` (origin/fill/upload grounding) ·
 `registry.py` (one generic `HeldSessionRegistry`) · `state.py` (the `Handoff`
-vocabulary) · **`trace.py`** (per-run JSONL trace) · `publicsuffix.py`.
+vocabulary) · **`choice.py`** (which of several matching things did you mean —
+pure, no LLM) · **`trace.py`** (per-run JSONL trace) · `publicsuffix.py`.
 The old `app/core/browser_*` and `app/agents/browser_*` paths are `sys.modules`
 self-replacement shims (~100 test monkeypatches target them; Phase 8 of the refactor
 deliberately did not delete them).
@@ -3903,6 +4394,19 @@ does:
   attached file). Never a raw click. The permit is one-shot, and only FIRING
   consumes it — a submit the site never issued is dropped explicitly by
   `disarm_commit()`, because the tab may now outlive the run (2026-08-01).
+- **A COMMIT NEVER PICKS BETWEEN EQUALLY-MATCHING THINGS** (2026-08-02,
+  `browser/choice.py`). When several items on the page — or several values in a
+  size/colour control — match the user's words EQUALLY well, the run STOPS and
+  asks with the page's own labels as options (`Handoff.TARGET_CHOICE`); the
+  window is held so they are looking at the page in question, and their pick is
+  enforced in CODE on the resume. A user whose words single one out is never
+  interrupted. Read-only browses are excluded by design. A commit-mode
+  `select_option` is grounded in the same corpus as `type`, which it was not
+  before. **It asks once, about the thing being selected**: on a page that IS
+  the thing the user named — its own title/path matching their words strictly
+  better than anything listed on it (`choice.page_is_the_target`) — the run acts
+  instead of re-asking, so a "you may also like" rail can never re-open a
+  question the user already answered.
 - **A TAB IS GUARDED BEFORE IT IS DRIVEN** (2026-08-01). `enter_playback_mode`
   deliberately lifts interception when a tab is handed to the user, so a tab
   coming back has to be re-armed: `acquire_browse_tab` never reuses a tab HELD in
@@ -3921,6 +4425,16 @@ does:
 - **CLOSING A TAB IS THE USER'S CALL.** `release_after_run()` closes only a tab
   the run OPENED (`tab_reused`); an inherited window is handed back, including
   after a failure or an exception.
+- **A CAPTCHA NEVER DEMOLISHES THE BROWSER** (2026-08-03). A challenge is handed
+  over on the tab it is already showing on — `release_to_user()` lifts
+  interception so our rules cannot interfere, the tab stays in the site-keyed
+  registry, and `acquire_browse_tab` re-arms it on the resume. Every other tab is
+  untouched. The separate clean window (which needs the single profile and
+  therefore every tab) is still there for a site that fingerprints the automated
+  browser and re-challenges anyway, but it is now EARNED: only a repeat challenge
+  from the same site within 10 minutes escalates to it. Both challenge modes keep
+  their window in the commit flow too, and a re-attached held session is re-armed
+  before it is driven.
 - **Grounding** is unchanged and is the exfiltration bound: origins, fill values and
   upload paths must trace to the user's words or their curated profile — never to
   page content. Autofill secrets are DPAPI-encrypted at rest and never enter a

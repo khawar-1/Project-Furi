@@ -278,6 +278,31 @@ class AgentPlan(BaseModel):
     # the user chooses, that page is added to auth_resolved_urls and never
     # re-asks. SERIALIZED beside pending_auth_offer; defaulted.
     pending_auth_url: Optional[str] = None
+    # "Which one did you mean?" — several things on the page matched the user's
+    # words EQUALLY well (2026-08-02, browser/choice.py). `pending_target_kind`
+    # is "item" (a product on a listing) or "option" (a value in a size/colour
+    # control); `pending_target_field` names the control for an option ask; the
+    # OPTIONS are kept because the pause PARKS the plan and an excluded list
+    # would leave the answer with nothing to be matched against (the
+    # pending_site_candidates lesson). All SERIALIZED; defaulted for old payloads.
+    pending_target_choice: Optional[str] = None
+    pending_target_kind: str = ""
+    pending_target_field: str = ""
+    pending_target_options: list[str] = Field(default_factory=list)
+    # What the user picked, per kind — replayed onto every browse step by
+    # _inject_target_choices so a later revise round (which re-drafts pending
+    # steps from the goal, and the goal is still the ambiguous sentence) cannot
+    # quietly lose the answer. ENFORCE, NEVER TRUST — the _inject_site_corrections
+    # pattern. SERIALIZED; defaulted.
+    chosen_target: str = ""
+    chosen_option: str = ""
+    # How many "which one did you mean?" pauses this plan has spent. Its own
+    # small budget on top of browse_handoffs, for the _MAX_SITE_CORRECTIONS
+    # reason: a third round means the answers are not narrowing anything, and
+    # chaining guesses off guesses is how a pause loop starts. SERIALIZED — the
+    # ask parks the plan, so a counter that did not survive would restart at zero
+    # on every resume and never terminate.
+    target_choices: int = 0
     # STRUCTURAL browse hand-offs made so far (missing form value / optional
     # sign-in offer / off-site origin approval) — counted SEPARATELY from
     # questions_asked because a real application legitimately needs many, and the

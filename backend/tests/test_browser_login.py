@@ -276,22 +276,34 @@ async def test_a_re_issuing_challenge_stops_honestly_instead_of_looping(
 
 
 # --------------------------------------------------------------- tool wiring
-async def test_browse_tool_opens_the_window_and_signals_a_captcha(monkeypatch):
-    """The BrowseTool closes its agent session, opens a USER-DRIVEN window at the
-    challenge (solving nothing itself), and returns a STRUCTURED challenge result
-    the planner can pause on."""
+def _captcha_tool_harness(monkeypatch, *, release_ok: bool = True):
+    """The BrowseTool driven to a Cloudflare interstitial, with every window
+    operation recorded. Returns (opened, created, run) — `run` executes the tool.
+
+    The fake session models the two things that matter here: whether it was
+    CLOSED, and whether it was RELEASED to the user. A fake that could not tell
+    those apart would pass either way."""
     opened: list[str] = []
     created: list = []
 
     class FakeBrowseSession:
         def __init__(self):
             self.closed = False
+            self.released = False
+            self.tab_reused = False
 
         async def goto(self, url):
             pass
 
+        async def release_to_user(self):
+            self.released = release_ok
+            return release_ok
+
         async def close(self):
             self.closed = True
+
+        async def release_after_run(self):
+            pass
 
     async def fake_session_open(allowlist):
         s = FakeBrowseSession()
@@ -335,18 +347,80 @@ async def test_browse_tool_opens_the_window_and_signals_a_captcha(monkeypatch):
 
     from app.tools.browser_agent_tools import BrowseTool
 
-    result = await BrowseTool().execute(
-        goal="open the shop",
-        start_url="https://shop.test",
-        allowed_origins=["shop.test"],
-    )
+    async def run():
+        return await BrowseTool().execute(
+            goal="open the shop",
+            start_url="https://shop.test",
+            allowed_origins=["shop.test"],
+        )
+
+    return opened, created, run
+
+
+async def test_a_captcha_hands_over_the_tab_instead_of_closing_the_browser(monkeypatch):
+    """THE 2026-08-03 INCIDENT, frozen. A CAPTCHA must not demolish the browser.
+
+    Live: eBay showed a CAPTCHA while junaidjamshed.com was open in another tab.
+    The tool closed its session and called open_login_window, whose first act is
+    _window.close_all() — so BOTH tabs went, a clean window reopened eBay alone,
+    and the resume closed that and launched a third window.
+
+    The check is on a page already on screen, so it is handed to the user there:
+    nothing closed, no separate window opened, and the pause text says where to
+    look rather than claiming a window was opened."""
+    opened, created, run = _captcha_tool_harness(monkeypatch)
+
+    result = await run()
 
     assert result.success is False
     assert result.output["challenge_required"] is True
     assert result.output["challenge_kind"] == "Cloudflare"
     assert result.output["challenge_site"] == "shop.test"
+    # The incident, in three assertions.
+    assert opened == []                              # no separate window
+    assert created and created[0].closed is False    # the tab is still there
+    assert created[0].released is True               # and it is the user's now
+    assert result.output["challenge_in_place"] is True
+    assert result.output["window_open"] is True
+    # The user is told where the check actually is.
+    assert "already on your screen" in result.error
+    assert "I've opened the page" not in result.error
+
+
+async def test_a_site_that_challenges_again_escalates_to_the_clean_window(monkeypatch):
+    """The clean window is not deleted, it is EARNED (2026-08-03).
+
+    Turnstile and Google fingerprint the automated browser and re-issue the check
+    however often a human solves it (live 2026-07-19). So a second challenge from
+    the same site, while the in-place hand-over is still fresh, escalates to the
+    separate clean window — paying the tabs only once the cheap path has been
+    tried and observed to fail."""
+    opened, created, run = _captcha_tool_harness(monkeypatch)
+
+    first = await run()
+    assert first.output["challenge_in_place"] is True
+    assert opened == []
+
+    second = await run()
+
+    assert second.output["challenge_in_place"] is False
     assert opened == ["https://shop.test/"]          # user-driven window at the challenge
-    assert created and created[0].closed is True     # agent session freed
+    assert created[-1].closed is True                # agent session freed for the profile
+    assert "I've opened the page" in second.error
+
+
+async def test_a_failed_hand_over_falls_back_to_the_clean_window(monkeypatch):
+    """release_to_user() returning False must not strand the user with a check
+    nobody can reach: the old destructive path is still the fallback, because a
+    window that costs tabs beats no window at all."""
+    opened, created, run = _captcha_tool_harness(monkeypatch, release_ok=False)
+
+    result = await run()
+
+    assert result.output["challenge_in_place"] is False
+    assert opened == ["https://shop.test/"]
+    assert created[-1].closed is True
+    assert "I've opened the page" in result.error
 
 
 async def test_browse_tool_opens_the_sign_in_window_and_signals_login(monkeypatch):
@@ -416,3 +490,38 @@ async def test_browse_tool_opens_the_sign_in_window_and_signals_login(monkeypatc
     assert result.output["login_site"] == "accounts.google.com"
     assert opened == ["https://accounts.google.com/"]       # sign-in window opened
     assert created and created[0].closed is True            # agent session freed
+
+
+async def test_the_pause_text_points_at_the_tab_it_was_handed_over_on(monkeypatch):
+    """WHAT THE USER READS must match what happened (2026-08-03).
+
+    The pause text is the only instruction they get. Claiming "I've opened the
+    page" about a check sitting on the tab already in front of them sends them
+    hunting for a window that never appeared — the same class of defect as an
+    approval card naming one site while acting on another."""
+    from app.agents.planner import _challenge_wall_question
+
+    in_place = _challenge_wall_question(
+        {
+            "challenge_site": "www.ebay.com",
+            "challenge_kind": "CAPTCHA",
+            "challenge_mode": "interstitial",
+            "challenge_window_opened": True,
+            "challenge_in_place": True,
+        }
+    )
+    assert "already open in front of you" in in_place.text
+    assert "I've opened the page" not in in_place.text
+    assert in_place.kind == "captcha"
+
+    # The escalated hand-off still says a window was opened, because one was.
+    escalated = _challenge_wall_question(
+        {
+            "challenge_site": "www.ebay.com",
+            "challenge_kind": "CAPTCHA",
+            "challenge_mode": "interstitial",
+            "challenge_window_opened": True,
+            "challenge_in_place": False,
+        }
+    )
+    assert "I've opened the page" in escalated.text

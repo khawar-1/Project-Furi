@@ -885,7 +885,25 @@ _FORM_CONTRACT_JS_BODY = """
     if ((type === 'checkbox' || type === 'radio') && !c.checked) continue;
     let v = (c.value == null) ? '' : String(c.value);
     if (v.length > 300) v = v.slice(0, 300) + '…';
-    fields.push({ name: String(c.name), value: v });
+    // THE HUMAN-READABLE LABEL, where the control has one (2026-08-02). A
+    // storefront's variant field carries an opaque id — the live approval card
+    // read `properties[_Barcode]: PM135415-100-999-M`, which nobody can check.
+    // Only two sources, both the page's OWN text: the selected <option>'s
+    // caption, and a checked radio's label. DISPLAY ONLY — the approval
+    // fingerprint is (name, value), so this can never change what was approved.
+    let label = '';
+    try {
+      if (c.tagName === 'SELECT' && c.selectedOptions && c.selectedOptions.length) {
+        label = String(c.selectedOptions[0].text || '').trim();
+      } else if (type === 'radio') {
+        const lab = (c.labels && c.labels.length) ? c.labels[0] : null;
+        label = String((lab && lab.innerText) || c.getAttribute('aria-label') || '').trim();
+      }
+    } catch (e) {}
+    if (label.length > 120) label = label.slice(0, 120) + '…';
+    const entry = { name: String(c.name), value: v };
+    if (label && label !== v) entry.label = label;
+    fields.push(entry);
   }
   return { action: String(action), method: method, fields: fields, has_password: hasPassword };
 """
@@ -1807,6 +1825,47 @@ class BrowserSession:
         self._playback = False
         logger.info("browser: interception RE-ARMED — the tab is the agent's again")
         return True
+
+    async def release_to_user(self) -> bool:
+        """Hand THIS tab to the user and stop driving it — the mirror of
+        resume_agent_control, and the non-destructive way to pause on something
+        only a human can do.
+
+        WHY THIS EXISTS (live 2026-08-03, the eBay CAPTCHA): an interstitial
+        challenge closed the agent session and called open_login_window, whose
+        first act is _window.close_all(). Under one-tab-per-window that cost
+        nothing — the session WAS the window. Under the shared window it
+        destroyed every unrelated tab: the user had junaidjamshed.com open
+        beside eBay, eBay showed a CAPTCHA, and both tabs vanished so a clean
+        window could reopen eBay alone.
+
+        The escape is that the human does not need a different window to solve a
+        challenge that has ALREADY RENDERED in this one. That is not a new
+        claim: the embedded-widget hand-off has worked this way since
+        2026-07-19 ("the user solves the widget by hand in the very window the
+        agent was driving"), and the vendor traffic carve-out it once needed was
+        REMOVED on 2026-07-21 as unnecessary. Lifting interception here removes
+        the last way our rules could interfere with their solve.
+
+        Safe because it is the same posture enter_playback_mode establishes and
+        the same one acquire_browse_tab already refuses to drive: a released tab
+        comes back only through resume_agent_control(), and a tab that cannot be
+        re-armed is left to the user rather than driven.
+
+        False only when the lift itself explodes — the caller then falls back to
+        the separate clean window, which is destructive but at least works."""
+        try:
+            # reload=False: re-fetching a challenge can issue a NEW one (or spend
+            # a one-time token), so the page the user is looking at is the page
+            # they must solve.
+            await self.enter_playback_mode(reload=False)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "browser: could not release the tab to the user "
+                f"({type(exc).__name__}: {exc})"
+            )
+            return False
 
     async def _install_interception(self, page: Any) -> None:
         """Put the interceptor on `page` by the fastest route that still enforces
@@ -3311,6 +3370,62 @@ async def discard_challenge() -> bool:
 def pending_challenge() -> Optional[dict[str, Any]]:
     """{kind, site, url} for the held challenge session, or None. Cheap, no I/O."""
     return _CHALLENGE.peek()
+
+
+# ------------------------------------------------- challenge hand-off escalation
+# In-place FIRST, the clean window only when in-place is MEASURED to have failed
+# (2026-08-03). Handing the challenge tab straight to the user costs nothing and
+# keeps every other tab, so it is always tried first. But the clean window is not
+# decoration: Cloudflare Turnstile and Google fingerprint the AUTOMATED browser
+# and re-issue the challenge however many times a human solves it (live
+# 2026-07-19, "I fill the box and it unchecks again and again"). Dropping it to
+# save the tabs would trade one live-observed defect for another.
+#
+# So: hand over in place; if the SAME site challenges again within the window
+# below, the in-place solve did not stick and we escalate — paying the tabs only
+# once the cheap path has been tried and observed to fail. This is the
+# evidence_resolver escalation shape, and it is why there is no threshold to
+# tune: one failed attempt is the whole signal.
+#
+# Memory-only, keyed by site, self-expiring — no clear-path plumbing to forget.
+# A restart forgets and starts with the NON-destructive path, which is the safe
+# default. A second challenge on the same site more than this far apart is a
+# genuinely new one, not a solve that failed to stick.
+_CHALLENGE_HANDOFF_TTL_SECONDS = 600.0
+_challenge_handoffs: dict[str, float] = {}
+
+
+def _challenge_key(site: str) -> str:
+    return (site or "").strip().lower().lstrip(".")
+
+
+def note_challenge_handoff(site: str) -> None:
+    """Record that this site's challenge was handed over IN PLACE, so a repeat
+    inside the TTL escalates to the clean window instead of asking the user to
+    solve the same uncooperative check twice in the same tab."""
+    key = _challenge_key(site)
+    if key:
+        _challenge_handoffs[key] = time.monotonic()
+
+
+def challenge_handed_over_recently(site: str) -> bool:
+    """True when an in-place hand-over for this site is still fresh — i.e. the
+    user already solved it there and the site is challenging again anyway."""
+    key = _challenge_key(site)
+    if not key:
+        return False
+    stamped = _challenge_handoffs.get(key)
+    if stamped is None:
+        return False
+    if time.monotonic() - stamped > _CHALLENGE_HANDOFF_TTL_SECONDS:
+        _challenge_handoffs.pop(key, None)
+        return False
+    return True
+
+
+def reset_challenge_handoffs() -> None:
+    """Test/shutdown hook — the reset_context_store precedent."""
+    _challenge_handoffs.clear()
 
 
 # ------------------------------------------------------- discovery sessions

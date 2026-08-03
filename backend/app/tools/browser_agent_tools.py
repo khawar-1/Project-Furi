@@ -510,27 +510,88 @@ class BrowseTool(BaseTool):
                     return output
 
                 # A CAPTCHA / verification challenge (15.4): the loop hit a human
-                # check it must NEVER solve. Close the agent session (free the
-                # single-profile lock) and open a USER-DRIVEN window at the
-                # challenge, so the user completes it by hand — Jarvis solves
-                # nothing and touches nothing on the challenge. The persistent
-                # ~/.jarvis/browser profile keeps the clearance cookie, so the
-                # resumed browse continues. The planner turns challenge_required
-                # into an AWAITING_CHOICE pause ("complete the check, then say
-                # continue"); answering re-runs this browse.
+                # check it must NEVER solve. The user completes it by hand —
+                # Jarvis solves nothing and touches nothing on the challenge. The
+                # planner turns challenge_required into an AWAITING_CHOICE pause
+                # ("complete the check, then say continue"); answering re-runs
+                # this browse, which reuses this same tab by site key.
+                #
+                # ⚠️ THE TAB STAYS, AND SO DO THE OTHERS (2026-08-03). This branch
+                # used to close the session and call open_login_window, whose
+                # first act is _window.close_all(). Under one-tab-per-window that
+                # cost nothing — the session WAS the window, and this code was
+                # written then. Under the shared window it demolished the whole
+                # browser: live, the user had junaidjamshed.com open beside eBay,
+                # eBay showed a CAPTCHA, and BOTH tabs closed so a clean window
+                # could reopen eBay alone — then the resume closed that and
+                # launched a third window. Three windows, two lost tabs, for a
+                # check sitting on a page that was already on screen.
+                #
+                # It is the 2026-08-01 multi-tab lesson in a branch that round did
+                # not reach, and the 2026-08-02 keep-the-page rule in the one
+                # pause branch that still closed: a shared context turns
+                # "close the session" from free into destructive.
+                #
+                # In place is not a downgrade. The embedded-widget hand-off has
+                # been solved by hand in the agent's own window since 2026-07-19,
+                # and the vendor carve-out it once needed was REMOVED on
+                # 2026-07-21 as unnecessary — so a human CAN complete a check
+                # here. release_to_user() lifts interception so our rules cannot
+                # interfere, and resume_agent_control() re-arms before anything
+                # drives it again.
                 if outcome.challenge_required:
-                    await session.close()
-                    session = None  # the finally must not double-close it
-                    challenge_opened = True
-                    try:
-                        await browser_session.open_login_window(
-                            outcome.challenge_url or start_url
+                    challenge_site = outcome.challenge_site or site
+                    # The clean window is still the answer for a site that
+                    # fingerprints the automated browser and re-issues the check
+                    # however often a human solves it (2026-07-19). We just stop
+                    # PRESUMING that: hand over in place, and escalate only if
+                    # the same site challenges again while that hand-over is
+                    # still fresh.
+                    escalate = browser_session.challenge_handed_over_recently(
+                        challenge_site
+                    )
+                    challenge_in_place = False
+                    if not escalate:
+                        challenge_in_place = await session.release_to_user()
+                    if challenge_in_place:
+                        browser_session.note_browse_tab(
+                            session,
+                            title=output["title"],
+                            url=output["url"],
+                            goal=goal,
                         )
-                    except Exception as exc:
-                        challenge_opened = False
-                        logger.warning(
-                            f"could not open challenge window: {type(exc).__name__}: {exc}"
+                        browser_session.note_challenge_handoff(challenge_site)
+                        handed_off = True  # the finally must not close it
+                        challenge_opened = True
+                        output["window_open"] = True
+                        logger.info(
+                            f"browser: {outcome.challenge_kind or 'CAPTCHA'} at "
+                            f"{challenge_site} — handed this tab to the user "
+                            "(every other tab left alone)"
                         )
+                    else:
+                        # Escalation, or the lift failed: the separate clean
+                        # window, which needs the single profile and therefore
+                        # every tab. Destructive, and now only ever paid once the
+                        # cheap path has been tried.
+                        if escalate:
+                            logger.info(
+                                f"browser: {challenge_site} is challenging again "
+                                "after an in-place hand-over — escalating to a "
+                                "clean window (this closes the browser tabs)"
+                            )
+                        await session.close()
+                        session = None  # the finally must not double-close it
+                        challenge_opened = True
+                        try:
+                            await browser_session.open_login_window(
+                                outcome.challenge_url or start_url
+                            )
+                        except Exception as exc:
+                            challenge_opened = False
+                            logger.warning(
+                                f"could not open challenge window: {type(exc).__name__}: {exc}"
+                            )
                     output["challenge_required"] = True
                     output["challenge_kind"] = outcome.challenge_kind
                     output["challenge_site"] = outcome.challenge_site
@@ -541,6 +602,10 @@ class BrowseTool(BaseTool):
                     # around it); passed through for the uniform contract.
                     output["challenge_mode"] = outcome.challenge_mode or "interstitial"
                     output["challenge_window_opened"] = challenge_opened
+                    # WHERE the user should look. The pause text must not say
+                    # "I've opened the page" about a tab that was already open —
+                    # they would go looking for a window that never appeared.
+                    output["challenge_in_place"] = challenge_in_place
                     return output
 
                 # An off-site navigation hand-off (2026-07-18): the loop would
@@ -820,7 +885,16 @@ class BrowseTool(BaseTool):
             site = output.get("challenge_site") or "the site"
             kind = output.get("challenge_kind") or "CAPTCHA"
             opened = output.get("challenge_window_opened", True)
-            where = "I've opened the page" if opened else "Open the Jarvis browser window"
+            # Three different worlds, three different sentences (2026-08-03). The
+            # check is normally on a tab that is ALREADY on screen, and telling
+            # the user "I've opened the page" about it sends them hunting for a
+            # window that never appeared.
+            if output.get("challenge_in_place"):
+                where = "It's open in the browser window already on your screen"
+            elif opened:
+                where = "I've opened the page"
+            else:
+                where = "Open the Jarvis browser window"
             error = (
                 f"A {kind} verification at {site} needs to be completed, and I never "
                 f"solve these. {where} — please complete the check there yourself, "
@@ -835,6 +909,10 @@ class BrowseTool(BaseTool):
                     "challenge_url": output.get("challenge_url", ""),
                     "challenge_mode": output.get("challenge_mode", "interstitial"),
                     "challenge_window_opened": opened,
+                    # The tab was handed over in place, so the window is still
+                    # open and the planner's pause text must point AT it.
+                    "challenge_in_place": bool(output.get("challenge_in_place")),
+                    "window_open": bool(output.get("window_open")),
                 },
                 error=error,
                 permission_level=self.permission_level,
@@ -1088,6 +1166,7 @@ class BrowseCommitTool(BaseTool):
                 "title": result.get("title", ""),
                 "rendered": result.get("rendered", ""),
                 "response_text": result.get("response_text", ""),
+                "page_changed": result.get("page_changed", False),
                 "window_open": result.get("window_open", False),
                 "blocked": result.get("blocked", {}),
                 # MULTI-COMMIT (15.1): the planner reads these to re-arm this step

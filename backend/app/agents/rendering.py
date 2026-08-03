@@ -720,7 +720,18 @@ def _one_commit_block(commit: dict, *, label: str = "") -> str:
     head = (f"{label}: " if label else "") + "Submitted the form" + (
         f" to {url}" if url else ""
     )
-    head += f". The site responded: **{title}**" if title else "."
+    # "The site responded: X" is only true when the submission MOVED us — on an
+    # AJAX submit that never navigates, X is the page we were already on, and
+    # calling it a response is the same class of overclaim as reporting an
+    # unconfirmed submit as a failure (2026-08-02).
+    if title:
+        head += (
+            f". The site responded: **{title}**"
+            if commit.get("page_changed")
+            else f". The page stayed on **{title}**"
+        )
+    else:
+        head += "."
     # When the site carried the submission on a different url than the form's
     # declared action (a `.js`/`.json` twin — the Shopify add-to-cart idiom), the
     # record says so. The user approved a contract; the honest confirmation names

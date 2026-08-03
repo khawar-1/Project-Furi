@@ -127,7 +127,7 @@ from app.agents import (
 from app.agents.agent_registry import GENERAL, AgentSpec
 from app.agents.cancellation import apply_cancellation, log_cancellation
 from app.agents.narration import narrate_step
-from app.browser import did_you_mean, publicsuffix
+from app.browser import choice, did_you_mean, publicsuffix
 from app.browser import state as browse_state
 from app.agents.schemas import (
     AgentPlan,
@@ -182,6 +182,14 @@ _MAX_FOLDER_HANDOFFS = 4
 # and the reason this cannot become the pathology _MAX_BROWSE_HANDOFFS = 25
 # would otherwise permit.
 _MAX_SITE_CORRECTIONS = 2
+# How many times a plan may stop to ask WHICH of several equally-matching things
+# on a page was meant (2026-08-02, browser/choice.py). Same reasoning as the
+# site-correction budget: the first ask is the one that matters, a second is a
+# courtesy when the answer narrowed the field without settling it, and a third
+# means the answers are not narrowing anything — at which point asking again is
+# chaining guesses off guesses. Deliberately far below _MAX_BROWSE_HANDOFFS = 25,
+# which exists for a different shape of question (one per real form field).
+_MAX_TARGET_CHOICES = 2
 _RESULT_TRUNC = 1200  # chars of a step ERROR shown to the revise LLM
 _ACTION_DETAIL_MAX_PATHS = 20  # paths listed verbatim on a batch approval card
 # Chars of RESULTS in the revise prompt, split fairly across executed steps.
@@ -651,7 +659,17 @@ def _render_commit_detail(state: dict[str, Any]) -> str:
             continue
         name = str(field.get("name") or "").strip()
         value = str(field.get("value") or "")
-        lines.append(f"  {name}: {value}")
+        # A variant's real caption when the page had one (2026-08-02). The live
+        # card read `properties[_Barcode]: PM135415-100-999-M` for a 100ml
+        # perfume — technically the complete contract, and unreadable, so the
+        # one checkpoint that always exists could not be used. The raw value is
+        # KEPT beside it: the label is what a person checks, the value is what
+        # is actually sent, and the approval binds to the value.
+        label = str(field.get("label") or "").strip()
+        if label and label != value:
+            lines.append(f"  {name}: {label}  ({value})")
+        else:
+            lines.append(f"  {name}: {value}")
     # Attached files (14.6): name each file being uploaded on the approval card,
     # so the user approves exactly which file leaves the machine — the LLM's
     # description can never hide it (the send_email full-contract rule).
@@ -1323,6 +1341,53 @@ def _inject_site_corrections(plan: AgentPlan) -> None:
                     )
 
 
+def _inject_target_choices(plan: AgentPlan) -> bool:
+    """Stamp the item / option the user picked onto every pending browse step,
+    and say whether any step took it.
+
+    THE SIBLING OF _inject_site_corrections, needed for the same reason. The
+    answer settles which of several equally-matching things was meant, but the
+    GOAL still says "add janan perfume to cart" — so a revise round re-drafts a
+    step from the ambiguous sentence and the choice is silently lost, and the
+    next run asks the same question again. Called from answer() (to resume
+    immediately) and from every revise round (so a re-drafted step keeps it).
+
+    An approval-bound step is deliberately skipped: its contract is what the user
+    said yes to, and a discovered form is already past the point where a choice
+    could change anything. Enforce, never trust — the 2026-07-12 lesson."""
+    chosen_target = (getattr(plan, "chosen_target", "") or "").strip()
+    chosen_option = (getattr(plan, "chosen_option", "") or "").strip()
+    if not chosen_target and not chosen_option:
+        return False
+    stamped = False
+    for step in plan.pending_steps():
+        if step.tool not in browser_grounding._BROWSE_TOOLS:
+            continue
+        if browse_state.commit_contract(step.parameters) is not None:
+            continue
+        if chosen_target:
+            step.parameters["chosen_target"] = chosen_target
+        if chosen_option:
+            step.parameters["chosen_option"] = chosen_option
+        stamped = True
+    return stamped
+
+
+def _declined_choice(answer: str) -> bool:
+    """True when the reply to a "which one did you mean?" is a refusal rather
+    than a pick. Checked BEFORE any matching, with a negative lookahead so
+    "no, the oud one" is a choice and not a decline — the _DECLINE_SITE_RE
+    shape."""
+    return bool(_DECLINE_CHOICE_RE.match((answer or "").strip()))
+
+
+_DECLINE_CHOICE_RE = re.compile(
+    r"^(none|none of these|neither|no thanks?|nothing|cancel|stop|forget it|"
+    r"n[o']?t? (?:of )?(?:these|them)|no)\b(?!\s*[,;:-]?\s*\w)",
+    re.IGNORECASE,
+)
+
+
 def _step_targets_host(step: PlanStep, host: str) -> bool:
     """True when a browse step's start_url or allowlist still names `host`."""
     if not host:
@@ -1886,6 +1951,9 @@ def _record_browse_commit(step: PlanStep, result: ToolResult) -> None:
             "submitted_url": str(out.get("submitted_url") or ""),
             "title": str(out.get("title") or ""),
             "response_text": str(out.get("response_text") or ""),
+            # Whether the submission moved us off the form's page — the renderer
+            # will not claim the site "responded" when it did not (2026-08-02).
+            "page_changed": bool(out.get("page_changed")),
             "window_open": bool(out.get("window_open")),
         }
     )
@@ -1968,8 +2036,11 @@ def _challenge_wall_question(info: dict) -> PlanQuestion:
       embedded — the widget sits ON the form in the AGENT'S OWN window, which is
         being held open with the form filled; its token cannot transfer from any
         other window, so the user must tick the box THERE.
-      interstitial — the page is the challenge; solving it in the separate
-        opened window banks the clearance cookie into the shared profile."""
+      interstitial — the page IS the challenge. Normally it is handed over on
+        the tab it is already showing on (2026-08-03), so the user solves it
+        where they are looking; only a site that re-challenges after that gets
+        the separate clean window, whose solve banks the clearance cookie into
+        the shared profile."""
     site = str(info.get("challenge_site") or "the site")
     kind = str(info.get("challenge_kind") or "CAPTCHA")
     if str(info.get("challenge_mode") or "") == "embedded":
@@ -1982,7 +2053,15 @@ def _challenge_wall_question(info: dict) -> PlanQuestion:
         )
     else:
         opened = info.get("challenge_window_opened", True)
-        lead = "I've opened the page" if opened else "Open the Jarvis browser window"
+        if info.get("challenge_in_place"):
+            # The check is on the tab it was already showing on, and every other
+            # tab is untouched (2026-08-03). Saying "I've opened the page" here
+            # would send the user hunting for a window that never appeared.
+            lead = "It's on the browser tab already open in front of you"
+        elif opened:
+            lead = "I've opened the page"
+        else:
+            lead = "Open the Jarvis browser window"
         # The clean window often passes the check INVISIBLY (the vendor challenges
         # the automated browser, not a human one) — live 2026-07-21: the page
         # loaded normally, the user saw nothing to complete, and read the pause as
@@ -2206,6 +2285,41 @@ def _fill_wall_question(field: str) -> PlanQuestion:
             "ask again. (Or add it in Settings yourself and say 'continue'.)"
         ),
         options=[],
+    )
+
+
+_DECLINE_CHOICE = "None of these"
+
+
+def _target_choice_question(payload: Any, options: list[str]) -> PlanQuestion:
+    """Code-derived pause text when several things on the page match the user's
+    words equally well (2026-08-02): "add janan perfume to cart" on a site
+    selling Janan Sports, Janan Oud and Janan Leather.
+
+    THE OPTIONS ARE THE PAGE'S OWN LABELS, verbatim — browser/choice.py builds
+    every one of them out of the observation it was handed, so this can never
+    offer a product the site does not sell (the _validated_question rule, which
+    exists because a draft once offered two INVENTED paths and the plan died on
+    the one the user clicked). The last option is an explicit decline, so backing
+    out is one click rather than a Cancel."""
+    kind = str(getattr(payload, "choice_kind", "") or "item")
+    target = str(getattr(payload, "choice_target", "") or "").strip()
+    field = str(getattr(payload, "choice_field", "") or "").strip()
+    if kind == "option":
+        where = f"'{field}'" if field else "this option"
+        text = (
+            f"This page needs {where} chosen, and nothing you've told me says "
+            "which. Pick one, or tell me in your own words."
+        )
+    else:
+        about = f" match '{target}'" if target else " match what you asked for"
+        text = (
+            f"{len(options)} things on this page{about} equally well — I don't "
+            "want to guess which one you meant. Pick one, or tell me in your own "
+            "words."
+        )
+    return PlanQuestion(
+        text=text, options=[*options, _DECLINE_CHOICE], kind="target_choice"
     )
 
 
@@ -2977,6 +3091,49 @@ class AgentPlanner:
         if pending_auth is not None:
             return await self._handle_auth_offer_answer(plan, pending_auth, answer)
 
+        # "Which one did you mean?" (2026-08-02): several things on the page
+        # matched the user's words equally well and we offered the page's own
+        # labels. Decide HERE, in code, and then ENFORCE it — the goal string is
+        # still the ambiguous sentence ("add janan perfume to cart"), so handing
+        # it to a revise round would re-supply the very ambiguity that caused the
+        # question, and the 2026-07-12 folder_resolver lesson is that the model
+        # then keeps its original pick. Fail-closed: a reply that still cannot
+        # single out one option cancels honestly rather than guessing.
+        pending_choice = getattr(plan, "pending_target_choice", None)
+        if pending_choice:
+            kind = getattr(plan, "pending_target_kind", "") or "item"
+            offered = list(getattr(plan, "pending_target_options", None) or [])
+            plan.pending_target_choice = None
+            plan.pending_target_kind = ""
+            plan.pending_target_field = ""
+            plan.pending_target_options = []
+            picked = "" if _declined_choice(answer) else choice.pick_by_answer(answer, offered)
+            if picked:
+                if kind == "option":
+                    plan.chosen_option = picked
+                else:
+                    plan.chosen_target = picked
+                logger.info(f"user chose {picked!r} for the ambiguous {kind}")
+                self._note_expired_window(plan)
+                if _inject_target_choices(plan):
+                    plan.status = PlanStatus.EXECUTING
+                    state = await self._graph.ainvoke(self._initial_state(plan, set()))
+                    return state["plan"]
+                # No pending browse step to stamp (an old payload, or the step
+                # was replanned away) — fall through to the ordinary revise path,
+                # where the answer is authoritative prompt text.
+            else:
+                for step in plan.pending_steps():
+                    step.status = StepStatus.SKIPPED
+                plan.status = PlanStatus.CANCELLED
+                plan.message = (
+                    "Understood — I won't guess which one you meant, so nothing "
+                    "was added or submitted. Tell me which one and I'll go "
+                    "straight to it."
+                )
+                logger.info(f"user declined every offered {kind} choice")
+                return plan
+
         # "Did you mean…?" hand-off (2026-08-01): the site the user named does
         # not exist and we offered verified alternatives. Decide HERE, in code —
         # this widens where a browse may go, so it is FAIL-CLOSED exactly like
@@ -3475,6 +3632,22 @@ class AgentPlanner:
                     ),
                 }
             )
+        elif reason is browse_state.Handoff.TARGET_CHOICE:
+            # Its own small budget on top of the shared one: a second round that
+            # still cannot narrow anything means the answers are not helping, and
+            # asking a third time is chaining guesses off guesses
+            # (_MAX_SITE_CORRECTIONS' reasoning). Spent → return False, which is
+            # the caller's "no pause is possible" and leaves the step's own honest
+            # failure in place, exactly as before this existed.
+            options = [str(o) for o in (payload.choice_options or []) if str(o).strip()]
+            if plan.target_choices >= _MAX_TARGET_CHOICES or len(options) < 2:
+                return False
+            plan.target_choices += 1
+            plan.pending_target_choice = payload.choice_target or "what you asked for"
+            plan.pending_target_kind = payload.choice_kind or "item"
+            plan.pending_target_field = payload.choice_field or ""
+            plan.pending_target_options = options
+            question = _target_choice_question(payload, options)
         elif reason is browse_state.Handoff.ORIGIN_APPROVAL:
             plan.pending_origin_approval = payload.origin or ""
             plan.pending_origin_url = payload.url or ""
@@ -3713,6 +3886,10 @@ class AgentPlanner:
         # user CORRECTED — a re-drafted step must not aim back at the dead host
         # the goal string still names.
         _inject_site_corrections(plan)
+        # "Which one did you mean?" (2026-08-02): and the same again for the item
+        # or option the user PICKED — the goal is still the ambiguous sentence,
+        # so a re-drafted step would otherwise lose the answer entirely.
+        _inject_target_choices(plan)
 
         while (idx := plan.next_pending_index()) is not None:
             # Cooperative cancel (Part 6): checked BETWEEN steps, before

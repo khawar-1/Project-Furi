@@ -307,6 +307,31 @@ class FakeHandle:
                     return e.get("href") or ""
         return None
 
+    async def query_selector_all(self, selector):
+        """A <select>'s own <option>s, the way a real ElementHandle returns them.
+
+        Modelled rather than stubbed because the distinction MATTERS: the
+        2026-08-02 option-choice gate reads these to offer the page's real
+        labels, and a fake that always returned [] could not tell "this control
+        offers 100/50/20 ML" from "this control is unreadable" — which are the
+        two branches of that gate."""
+        if selector != "option":
+            return []
+        for e in self.page._current().get("elements", []):
+            if e["index"] == self.index:
+                return [FakeOption(t) for t in (e.get("options") or [])]
+        return []
+
+
+class FakeOption:
+    """One <option> node — only inner_text() is ever read off it."""
+
+    def __init__(self, text):
+        self.text = text
+
+    async def inner_text(self):
+        return self.text
+
 
 class ScriptedPage:
     """A page that advances to the NEXT scripted payload whenever an action
@@ -405,10 +430,12 @@ class FakeProvider:
         return LLMResponse(content=content, model="fake", provider="fake")
 
 
-def _el(index, role="link", name="x", value="", href="", form=None):
+def _el(index, role="link", name="x", value="", href="", form=None, options=None):
     item = {"index": index, "role": role, "name": name, "value": value, "href": href}
     if form is not None:
         item["form"] = form
+    if options is not None:
+        item["options"] = list(options)
     return item
 
 

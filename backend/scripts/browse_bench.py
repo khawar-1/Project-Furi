@@ -125,6 +125,7 @@ _HANDOFFS = (
     ("action_approval_required", "waiting for the user to approve a world-acting gesture"),
     ("origin_approval_required", "waiting for the user to approve an off-site jump"),
     ("commit_required", "waiting for the user to approve a form submit"),
+    ("target_choice_required", "waiting for the user to pick which item was meant"),
     ("site_unreachable", "the site was unreachable (DNS / certificate / refused)"),
 )
 

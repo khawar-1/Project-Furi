@@ -9,7 +9,7 @@ are going to fishing on the 1st of next month" → "i meant hamil and ali raza")
    the LLM's flip ("Khawar went to fishing with Khawar and Khawar").
 3. Future-dated facts are stored as plans, not past events.
 """
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -24,12 +24,25 @@ from sqlalchemy import select
 from app.db.models import ContactInteraction, SemanticMemory
 
 
+# The fishing fact is FUTURE-dated, and that is the whole point of it: rule 3
+# above only fires when the event is still ahead ("Went…" -> "Planning to go…").
+# It must therefore be in the future on the day the suite RUNS. A literal cannot
+# do that — this file hardcoded 2026-08-01, both end-to-end tests went red on
+# 2026-08-01 and would have stayed red forever, masking any real regression in
+# the shared-fact phrasing path. The engine path cannot take an injected clock
+# (store_shared_fact -> store_semantic_memory calls normalize_future_phrasing
+# with the real date.today()), so the DATE moves instead. Its hermetic sibling
+# test_future_fact_rewritten_as_plan never rotted because it passes its own
+# today= — that is the pattern where a clock can be injected.
+_FUTURE_ISO = (date.today() + timedelta(days=30)).isoformat()
+
+
 FISHING_FACT = {
-    "fact_user_perspective": "Went to fishing with {CONTACT:ali} and {CONTACT:jamil} on 2026-08-01",
-    "fact_contact_perspective": "Went to fishing with {USER} and {USER} on 2026-08-01",  # LLM misfill, must be ignored
+    "fact_user_perspective": f"Went to fishing with {{CONTACT:ali}} and {{CONTACT:jamil}} on {_FUTURE_ISO}",
+    "fact_contact_perspective": f"Went to fishing with {{USER}} and {{USER}} on {_FUTURE_ISO}",  # LLM misfill, must be ignored
     "subject": "shared",
     "related_contacts": ["ali", "jamil"],
-    "event_date": "2026-08-01",
+    "event_date": _FUTURE_ISO,
     "category": "personal",
 }
 
@@ -150,16 +163,16 @@ async def test_fishing_flow_writes_every_perspective_correctly(engine, db_sessio
             saved_texts.append(text)
 
     # User's About Me: future event phrased as a plan, both real names, once
-    assert saved_texts == ["Planning to go to fishing with Ali Raza and hamil on 2026-08-01"]
+    assert saved_texts == [f"Planning to go to fishing with Ali Raza and hamil on {_FUTURE_ISO}"]
     assert await _semantic_contents(db_session) == saved_texts
 
     # Each contact's log: the OTHER participants from their point of view —
     # never their own name, never the user's name more than once
     assert await _log_for(db_session, contacts["hamil"].id) == [
-        "Planning to go to fishing with Ali Raza and Khawar on 2026-08-01"
+        f"Planning to go to fishing with Ali Raza and Khawar on {_FUTURE_ISO}"
     ]
     assert await _log_for(db_session, contacts["Ali Raza"].id) == [
-        "Planning to go to fishing with Khawar and hamil on 2026-08-01"
+        f"Planning to go to fishing with Khawar and hamil on {_FUTURE_ISO}"
     ]
     # Nothing pending, nothing leaked to the wrong jamils
     assert get_session(session_id).pending_resolution is None
@@ -206,12 +219,12 @@ async def test_partial_answer_reparks_only_remaining_name(engine, db_session, se
         for f in parked2
     ]
 
-    assert saved == ["Planning to go to fishing with Ali Raza and hamil on 2026-08-01"]
+    assert saved == [f"Planning to go to fishing with Ali Raza and hamil on {_FUTURE_ISO}"]
     assert await _log_for(db_session, contacts["hamil"].id) == [
-        "Planning to go to fishing with Ali Raza and Khawar on 2026-08-01"
+        f"Planning to go to fishing with Ali Raza and Khawar on {_FUTURE_ISO}"
     ]
     assert await _log_for(db_session, contacts["Ali Raza"].id) == [
-        "Planning to go to fishing with Khawar and hamil on 2026-08-01"
+        f"Planning to go to fishing with Khawar and hamil on {_FUTURE_ISO}"
     ]
 
 

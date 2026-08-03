@@ -134,16 +134,25 @@ class Settings(BaseSettings):
     # a fresh clone works with no signup). Get a free key at https://tavily.com.
     TAVILY_API_KEY: str = ""
 
-    # Optional. Google Programmable Search (Custom Search JSON API). When BOTH are
-    # set, web_search PREFERS Google — its index is fresher than the aggregator
-    # snippets Tavily/DDG return, which matters for "latest episode / newest / today"
-    # facts (2026-07-25: Tavily reported Black Clover's latest as a stale 131 vs the
-    # true 170). Falls through to Tavily → DuckDuckGo when unset or when Google
-    # returns nothing. Free tier: 100 queries/day. Create a key at
-    # https://developers.google.com/custom-search/v1/introduction and an engine
-    # (set to "search the entire web") at https://programmablesearchengine.google.com
-    # — CX is the engine id. Direct google.com/search scraping is deliberately NOT
-    # used: it violates Google's ToS and is CAPTCHA-blocked for automated clients.
+    # Google Programmable Search (Custom Search JSON API). When BOTH are set,
+    # web_search PREFERS Google — a fresher index than the aggregator snippets
+    # Tavily/DDG return, which matters for "latest episode / newest / today" facts
+    # (2026-07-25: Tavily reported Black Clover's latest as a stale 131 vs the true
+    # 170) — falling through to Tavily → DuckDuckGo when it returns nothing.
+    #
+    # ⚠️ DO NOT RECOMMEND THIS TO A NEW INSTALL (verified 2026-08-02 against
+    # Google's own docs, while setting one up). "Search the entire web" was
+    # DISCONTINUED in March 2026 — the toggle reads "This feature is being
+    # deprecated and can no longer be enabled" — so a new engine can only search
+    # sites you list, which is the opposite of what a web search is for. The JSON
+    # API is separately "closed to new customers", and it RETIRES 1 Jan 2027.
+    # Google points at Vertex AI Search (~$2/1k queries, ≤50 domains), a different
+    # product, not a drop-in.
+    #
+    # The code path is KEPT ON PURPOSE: an engine created before the cut still
+    # works until retirement, and unset means `_google_cse_search` returns [] with
+    # no request, so a default install never touches it. Direct google.com/search
+    # scraping remains out of the question — ToS, and CAPTCHA-blocked anyway.
     GOOGLE_SEARCH_API_KEY: str = ""
     GOOGLE_SEARCH_CX: str = ""
 

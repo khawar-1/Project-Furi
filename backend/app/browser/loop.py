@@ -100,6 +100,7 @@ from urllib.parse import urljoin, urlparse
 from loguru import logger
 
 from app.agents import browser_grounding
+from app.browser import choice
 from app.browser import extract as browser_extract
 from app.browser import publicsuffix
 from app.browser import trace as browse_trace
@@ -306,11 +307,19 @@ def _is_action_gesture(action: dict, element: Any) -> bool:
     return False
 
 
-def _describe_action(action: dict, element: Any, goal: str) -> str:
+def _describe_action(action: dict, element: Any, goal: str, page_title: str = "") -> str:
     """A short, human phrase for what the loop is about to do — shown to the user
     in the approval question. Grounded in the gesture + the element's own label,
-    never invented."""
+    never invented.
+
+    The PAGE is named too (2026-08-02) because a control's label alone does not
+    say what it acts on: "Add to Cart" is the same words on Janan Sports and
+    Janan Oud, and a read browse's approval card was the only place that choice
+    ever surfaced. The title is the page's own text, so this stays grounded."""
     name = (getattr(element, "name", "") or "").strip()
+    where = " ".join((page_title or "").split())
+    if len(where) > 70:
+        where = where[:70].rsplit(" ", 1)[0] + "…"
     if action.get("action") == "type" and action.get("submit"):
         text = (action.get("text") or "").strip()
         if text:
@@ -319,7 +328,7 @@ def _describe_action(action: dict, element: Any, goal: str) -> str:
         return "submit this form"
     if name:
         clipped = name if len(name) <= 80 else name[:80] + "…"
-        return f'select "{clipped}"'
+        return f'select "{clipped}" on "{where}"' if where else f'select "{clipped}"'
     return "submit this form"
 
 _DECISION_PROMPT = """You are operating a real web browser to accomplish a goal. You see the current page as a numbered list of its interactive elements and its text. Choose the ONE next action.
@@ -593,6 +602,18 @@ class BrowseOutcome:
     auth_offer_signup: bool = False
     auth_offer_site: str = ""
     auth_offer_url: str = ""
+    # Several things on the page match the user's words EQUALLY well, so their
+    # words cannot say which one they meant (2026-08-02, browser/choice.py).
+    # COMMIT mode only: the loop is about to act on one of them, and picking
+    # blind is how "add janan perfume to cart" became a barcode on an approval
+    # card nobody could read. `choice_kind` is "item" (a product on a listing)
+    # or "option" (a value in a form control); `choice_options` are VERBATIM
+    # page labels, so the question can never offer something the page lacks.
+    target_choice_required: bool = False
+    choice_kind: str = ""
+    choice_target: str = ""
+    choice_field: str = ""
+    choice_options: list = field(default_factory=list)
 
     @property
     def url(self) -> str:
@@ -2993,6 +3014,49 @@ async def _element_href(handle: Any) -> str:
         return ""
 
 
+# How many option labels are worth reading off one control. A select with
+# hundreds of entries (a country list) is not a choice the user should be handed
+# as buttons — it falls through to the free-text ask, which is the right shape
+# for "type your country".
+_MAX_OPTION_LABELS = 12
+
+
+async def _option_labels(session: Any, obs: dom_observe.Observation, index: Any) -> list[str]:
+    """The visible labels of a <select>'s own <option>s, in page order.
+
+    [] when the control has none, has too many to offer as a question, or cannot
+    be read at all — every one of which falls through to the existing free-text
+    ask. Called ONLY on the path where a chosen value already failed grounding,
+    so an ordinary commit pays nothing for it. Best-effort by construction: a DOM
+    read must never be what breaks a browse.
+
+    HONEST LIMIT: a placeholder row ("Select a size") is offered like any other
+    option. Dropping it would need a reliable placeholder signal and there isn't
+    one — `get_attribute("value")` returns None for the perfectly ordinary
+    `<option>Small</option>` as well as for a real placeholder, so filtering on it
+    would silently discard real sizes. An extra row the user simply does not pick
+    is a far smaller cost than a missing one, so this stays as it is."""
+    try:
+        handle = await dom_observe.resolve(session.page, obs, int(index))
+        if handle is None:
+            return []
+        nodes = await handle.query_selector_all("option")
+    except Exception:  # noqa: BLE001 — unreadable is a normal answer here
+        return []
+    labels: list[str] = []
+    for node in nodes or ():
+        try:
+            text = " ".join(str(await node.inner_text() or "").split())
+        except Exception:  # noqa: BLE001
+            continue
+        if not text or text in labels or len(text) > 80:
+            continue
+        labels.append(text)
+        if len(labels) > _MAX_OPTION_LABELS:
+            return []
+    return labels
+
+
 async def _act(
     session: Any,
     obs: dom_observe.Observation,
@@ -3306,6 +3370,12 @@ async def run_browse(
     approved_gesture: str = "",
     skip_login_wall: bool = False,
     keep_open: bool = False,
+    # The item / option the user picked when a previous run stopped on a
+    # target-choice question (2026-08-02). Applied in CODE — the model is never
+    # asked to re-read a goal that was already proven ambiguous. See
+    # browser/choice.py::locate and the ENFORCE-NEVER-TRUST rule it cites.
+    chosen_target: str = "",
+    chosen_option: str = "",
 ) -> BrowseOutcome:
     """Drive `session` toward `goal`, observing and acting until the model says
     done, the action budget is spent, or a dead-loop is detected. Read-only by
@@ -3406,6 +3476,25 @@ async def run_browse(
     # Upload is offered ONLY when this is a commit task AND a grounded file was
     # supplied — so the model can never request an "upload" with nothing behind it.
     can_upload = bool(commit and (upload_path or "").strip())
+
+    # TARGET CHOICE (2026-08-02). The user's own vocabulary the page's items are
+    # scored against; the answer to a previous choice question joins it, which is
+    # what BREAKS the tie on the resumed run and makes the pause terminal.
+    #
+    # Derived from the CURRENT page's url each time it is needed, not once from
+    # the session: the site's own name has to be dropped (every candidate on a
+    # site mentions it, so it can only add noise) and the session has no
+    # start_url attribute at all — reading one would have silently skipped that
+    # filtering in production while passing every test that set the field by hand.
+    def _target_words(url: str) -> list[str]:
+        return choice.target_tokens(
+            goal, url, extra=[t for t in (chosen_target, chosen_option) if t]
+        )
+
+    # The one-shot enforcement: the picked item is clicked in CODE on the first
+    # page that still shows it, then never again (a second click of the same
+    # thing would be a loop).
+    choice_pending = (chosen_target or "").strip()
 
     # FILL GROUNDING corpus (15.2, commit mode). A value typed into a form must
     # trace to the user's PROFILE or their own words (goal + fill_grounding =
@@ -3753,6 +3842,27 @@ async def run_browse(
                 action = top
                 clicked_result = True
                 logger.info(f"browse: intent-search top result → {action}")
+
+        # THE USER'S PICKED ITEM, ENFORCED IN CODE (2026-08-02). A previous run
+        # stopped because several things matched their words equally well; they
+        # chose one. Clicking it is not a decision — it is the answer — so it
+        # costs no LLM call, exactly like _episode_action. Re-asking the model
+        # would hand it the same goal that was already PROVEN ambiguous, and the
+        # 2026-07-12 folder_resolver lesson is that the model then keeps its
+        # original pick. Fires on the first page that still shows the item and is
+        # then spent; if the page no longer shows it (we already navigated into
+        # it), locate() returns None and the run carries on normally.
+        if action is None and choice_pending:
+            picked = choice.locate(
+                choice_pending, obs.elements, find_price=browser_extract.find_price
+            )
+            if picked is not None:
+                action = {"action": "click", "index": picked.index}
+                logger.info(
+                    f"browse: clicking the item the user chose ({picked.label!r}) "
+                    "— no LLM call"
+                )
+            choice_pending = ""
 
         # The fast path fills a single search box with the goal's TITLE — a
         # search, not a form submission — so it is disabled in commit mode (the
@@ -4198,6 +4308,88 @@ async def run_browse(
             out.origin_url = target_url
             return out
 
+        # WHICH ONE DID YOU MEAN? (2026-08-02) — COMMIT MODE ONLY. The loop is
+        # about to open ONE of several things that match the user's words EQUALLY
+        # well, on a task that ends in a submit. Asked to "add janan perfume to
+        # cart" it used to pick one of Janan Sports / Oud / Leather and carry on;
+        # the only downstream checkpoint then named the choice by its barcode.
+        #
+        # THE GATE IS THE MODEL'S OWN CHOICE, not the page: it fires only when
+        # the model's click COMMITS to one of several tied candidates. A click on
+        # "next page", a filter, or a nav link scores nothing, commits to nothing
+        # and is never caught, so ordinary browsing is untouched — and it fires at
+        # the exact moment the run picks one interpretation.
+        #
+        # Read-only browses are deliberately excluded: they act on nothing, their
+        # world-acting gestures already stop at the action-approval gate below,
+        # and pausing a search/media run would interrupt the paths that work.
+        #
+        # ⚠️ TWO WAYS TO COMMIT, because the first shipped alone and MISSED THE
+        # LIVE CASE (2026-08-02, trace ab4aeb2673a7: "add janan to cart" reached
+        # /search?q=janan, the model clicked a card's quick-add, and the run
+        # dead-ended on the submit-gesture backstop with "couldn't work out a safe
+        # next action"). On a listing grid the element that NAMES a product and
+        # the element that COMMITS to it are SIBLINGS with different indices — and
+        # a quick-add can never be a candidate at all, because `_LABEL_NOISE_RE`
+        # strips "add to cart" and `candidates_of` drops the empty label. So:
+        #   (a) the click lands ON a tied candidate — opening one by its title;
+        #   (b) the click is an ACTION GESTURE while several candidates tie —
+        #       a quick-add/buy control, i.e. committing to one card in place.
+        # (b) reuses `_is_action_gesture`, the same predicate `_act`'s backstop
+        # already applies to this click: in commit mode that gesture is going to
+        # be REFUSED whatever we do here, so when the page holds several
+        # equally-matching items, asking which one is strictly better than the
+        # dead end it produced live.
+        #
+        # KNOWN COST, accepted: an unrelated action gesture on a listing page
+        # (a footer "Subscribe") now asks which ITEM rather than dead-ending.
+        # A confusing question beats a silent wrong purchase — the asymmetry this
+        # whole feature is built on — and narrowing it by label would be the
+        # keyword-list shape this codebase has measured at zero three times.
+        if commit and action["action"] == "click":
+            target_words = _target_words(obs.url)
+            tied = choice.tied_candidates(
+                target_words, obs.elements, find_price=browser_extract.find_price
+            )
+            picked_index = action.get("index")
+            commits_to_one = any(c.index == picked_index for c in tied) or (
+                _is_action_gesture(action, obs.index_map().get(picked_index))
+            )
+            # …UNLESS THIS PAGE IS ITSELF THE THING (2026-08-02b). (b) reads a
+            # gesture as "committing to one of the tied cards", which is true on
+            # a listing grid and FALSE on a detail page, where the gesture
+            # belongs to the page's own product and the tie is a related-items
+            # rail. Live: the user answered "JANAN SPORT - 30ML", the pick was
+            # enforced, the run reached that product's page — and it asked AGAIN
+            # from the rail, offering three things they had not chosen. See
+            # choice.page_is_the_target for the measured numbers and for why the
+            # comparison must be strict.
+            on_the_target = choice.page_is_the_target(
+                target_words, obs.title, obs.url, tied
+            )
+            if len(tied) > 1 and commits_to_one and on_the_target:
+                logger.info(
+                    f"browse: {len(tied)} things tie, but this page IS "
+                    f"{obs.title!r} — acting on it rather than re-asking"
+                )
+            elif len(tied) > 1 and commits_to_one:
+                said = choice.plain_words(target_words)
+                logger.info(
+                    f"browse: {len(tied)} things match "
+                    f"{' '.join(said[:4])!r} equally well (step {step}) "
+                    "— pausing to ask which one"
+                )
+                out = _outcome(
+                    False, step, obs, session,
+                    error="several items match — needs the user to choose",
+                    llm_calls=llm_calls, vision_calls=vision_calls,
+                )
+                out.target_choice_required = True
+                out.choice_kind = "item"
+                out.choice_target = " ".join(said[:6])
+                out.choice_options = [c.option() for c in tied]
+                return out
+
         # ACTION-APPROVAL HAND-OFF (2026-07-22): a READ browse never SENDS,
         # POSTS, SUBMITS, UPLOADS, LIKES, DELETES, or BUYS on a live site without
         # the user's yes. When the model's chosen gesture would ACT on the world
@@ -4226,7 +4418,7 @@ async def run_browse(
                     # a second gesture never reaches _act, because this gate pauses
                     # first.
                     gesture_spent = True
-                    performed = _describe_action(action, act_element, goal)
+                    performed = _describe_action(action, act_element, goal, obs.title)
                     logger.info(
                         f"browse: performing the ONE approved gesture (step {step}) "
                         f"— {performed}"
@@ -4250,7 +4442,9 @@ async def run_browse(
                         llm_calls=llm_calls, vision_calls=vision_calls,
                     )
                     out.action_approval_required = True
-                    out.action_description = _describe_action(action, act_element, goal)
+                    out.action_description = _describe_action(
+                        action, act_element, goal, obs.title
+                    )
                     out.action_site = urlparse(obs.url).hostname or "this site"
                     # The permit the planner must hand back to let THIS gesture —
                     # and only this one — through on the resume.
@@ -4326,6 +4520,68 @@ async def run_browse(
                     out.fill_required = True
                     out.fill_field = (element.name if element else "") or "a form field"
                     out.fill_value = typed
+                    return out
+
+        # WHICH SIZE / COLOUR / WAIST? (2026-08-02) — the same rule as `type`
+        # above, for the control that carries a variant. A commit-mode
+        # `select_option` was NEVER grounded: the loop could put a value into the
+        # form that traced to nothing the user said, which is precisely how a
+        # size gets chosen for them. The value now faces the same corpus (profile
+        # + their own words), and only a FAILING value costs anything extra.
+        #
+        # Failing does not mean asking. The model picking "50 ML" when the user
+        # said 100ml fails grounding, and at that point the control's own options
+        # are readable — so if the user's words single one out, code TAKES it
+        # (enforce, never trust). Only when their words genuinely cannot choose
+        # do we stop and offer the page's real labels. Unreadable options fall
+        # through to the free-text ask that existed before this.
+        if commit and action["action"] == "select_option":
+            chosen_value = action.get("value", "")
+            reason = browser_grounding.fill_violation(
+                chosen_value, fill_values, goal, fill_grounding
+            )
+            if reason is not None:
+                element = obs.index_map().get(action.get("index"))
+                field = (element.name if element else "") or "this option"
+                labels = await _option_labels(session, obs, action.get("index"))
+                wanted = choice.pick_by_answer(chosen_option or goal, labels) if labels else ""
+                if wanted:
+                    if wanted != chosen_value:
+                        logger.info(
+                            f"browse: your words name {wanted!r} for {field[:40]!r} "
+                            f"— choosing it over the model's {chosen_value!r}"
+                        )
+                    act_action = {**action, "value": wanted}
+                elif len(labels) > 1:
+                    logger.info(
+                        f"browse: {field[:40]!r} offers {len(labels)} values and "
+                        "nothing you said picks one — pausing to ask"
+                    )
+                    out = _outcome(
+                        False, step, obs, session,
+                        error=f"needs you to choose a value for {field}",
+                        llm_calls=llm_calls, vision_calls=vision_calls,
+                    )
+                    out.target_choice_required = True
+                    out.choice_kind = "option"
+                    out.choice_field = field
+                    out.choice_target = " ".join(
+                        choice.plain_words(_target_words(obs.url))[:6]
+                    )
+                    out.choice_options = labels
+                    return out
+                else:
+                    logger.info(
+                        f"browse: option value not grounded and its choices are "
+                        f"unreadable — asking for {field[:40]!r}"
+                    )
+                    out = _outcome(
+                        False, step, obs, session, error=reason,
+                        llm_calls=llm_calls, vision_calls=vision_calls,
+                    )
+                    out.fill_required = True
+                    out.fill_field = field
+                    out.fill_value = chosen_value
                     return out
 
         # (Per-action dedupe moved UP to the repeat guard, above every handler.

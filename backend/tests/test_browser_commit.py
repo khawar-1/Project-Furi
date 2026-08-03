@@ -16,6 +16,7 @@ The interceptor's one-shot arming — the security core — is pinned in
 test_browser_session.py.
 """
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -610,7 +611,9 @@ class StubCommitSession:
         self.closed = False
         self.waited = False
         self.playback = False  # set iff enter_playback_mode is ever called
-        self.page = object()
+        # Back-references this session so _fake_observe can tell "before the
+        # submit" from "after" — a bare object() could not.
+        self.page = SimpleNamespace(session=self)
         self.stats = browser_session.InterceptStats()
         self.commits_done = 0  # multi-commit budget counter (15.1)
         # Only the run that OPENED a tab may close it (2026-08-01) — a commit
@@ -665,16 +668,33 @@ class StubCommitSession:
         self.closed = True
 
 
-async def _fake_observe(page):
+def _obs(url, title, text):
     return dom_observe.Observation(
-        observation_id="o",
-        url="https://example.com/thanks",
-        title="Thanks",
-        elements=[],
-        element_total=0,
-        page_text="Posted!",
-        text_truncated=False,
+        observation_id="o", url=url, title=title, elements=[], element_total=0,
+        page_text=text, text_truncated=False,
     )
+
+
+# The form as the user approved it, and what the site returns after the submit.
+_FORM_PAGE = _obs(
+    "https://example.com/comment", "Leave a comment", "Leave a comment\nName\nEmail",
+)
+_RESPONSE_PAGE = _obs("https://example.com/thanks", "Thanks", "Posted!")
+
+
+async def _fake_observe(page):
+    """⚠️ THIS FAKE USED TO RETURN THE RESPONSE PAGE ON EVERY CALL, which made it
+    structurally incapable of expressing the difference between the page a form
+    was submitted FROM and the page the site returned — the exact distinction a
+    grounded confirmation rests on. That is why a real storefront's entire
+    navigation menu could ship as "the site's response" with every test green
+    (2026-08-02). Same shape as the 2026-08-01 FakeBrowser whose new_page()
+    handed back one shared page object.
+
+    It now models the contract: before the submit you are on the form, after it
+    you are on whatever the site did."""
+    submitted = bool(getattr(getattr(page, "session", None), "submitted", False))
+    return _RESPONSE_PAGE if submitted else _FORM_PAGE
 
 
 @pytest.fixture
@@ -1447,9 +1467,18 @@ async def test_an_upload_submit_is_blocked_without_approval(db_session):
 # asked again" loop). discover() therefore HOLDS the live session across the
 # pause (vendor traffic armed) and the resumed discovery re-attaches to it.
 class _ChalSession:
+    """A held session, modelling the four things that matter across a challenge
+    pause: closed, released to the user, re-armed on the way back, and whether
+    the re-arm is even possible. A fake that could not tell releasing from
+    closing would pass whichever way the code went (the 2026-08-02 lesson: a
+    fake page is a claim about the live DOM)."""
+
     def __init__(self):
         self.closed = False
         self.armed = False
+        self.released = False
+        self.resumed = False
+        self.rearm_ok = True
         self.browse_history: list = []
         self.goto_calls: list = []
 
@@ -1461,6 +1490,14 @@ class _ChalSession:
 
     def disarm_challenge_traffic(self):
         self.armed = False
+
+    async def release_to_user(self):
+        self.released = True
+        return True
+
+    async def resume_agent_control(self):
+        self.resumed = True
+        return self.rearm_ok
 
     async def close(self):
         self.closed = True
@@ -1593,23 +1630,75 @@ async def test_discover_discards_a_stale_hold_from_another_goal(
     assert len(_discover_rig) == 1                  # a fresh session was opened
 
 
-async def test_discover_interstitial_challenge_closes_and_never_holds(
+async def test_discover_interstitial_challenge_keeps_the_page_and_hands_it_over(
     _discover_rig, monkeypatch
 ):
-    """The interstitial path is UNCHANGED: the session closes (the clean-window
-    hand-off works there — the clearance cookie lives in the shared profile) and
-    nothing is held."""
+    """An INTERSTITIAL challenge keeps its window too (2026-08-03).
+
+    It used to fall through and close the discovery — so the page the user was
+    being asked to solve was torn down as the question appeared, and (unlike the
+    read browse) nothing was opened in its place while the pause text still
+    claimed a window had been opened.
+
+    The page IS the challenge here, so it is RELEASED to the user rather than
+    left armed: a whole-page check is a long human interaction and our rules
+    have no business in the middle of it."""
     async def fake_run_browse(session, goal, provider, **kwargs):
         return _challenge_outcome(mode="interstitial", kind="Cloudflare")
 
     monkeypatch.setattr(browser_loop, "run_browse", fake_run_browse)
-    discovery = await browser_commit.discover(dict(_CHAL_PARAMS))
+    try:
+        discovery = await browser_commit.discover(dict(_CHAL_PARAMS))
 
-    assert discovery.challenge_required is True
-    assert discovery.challenge_mode == "interstitial"
-    assert _discover_rig[0].closed is True
-    assert _discover_rig[0].armed is False
-    assert browser_session.pending_challenge() is None
+        assert discovery.challenge_required is True
+        assert discovery.challenge_mode == "interstitial"
+        session = _discover_rig[0]
+        assert session.closed is False              # held, never closed
+        assert session.released is True             # and it is the user's now
+        pending = browser_session.pending_challenge()
+        assert pending is not None
+        assert pending["goal"] == _CHAL_PARAMS["goal"]
+        # Both modes can now honestly say where the check is.
+        assert "in the open browser window" in discovery.error
+    finally:
+        await browser_session.discard_challenge()
+
+
+async def test_a_reattached_session_is_rearmed_before_it_is_driven(
+    _discover_rig, monkeypatch
+):
+    """A RE-ATTACHED HELD SESSION IS RE-ARMED (2026-08-03).
+
+    acquire_browse_tab has refused to drive an un-re-armable tab since the
+    2026-08-01 add-to-cart incident, but the two re-attach branches in discover()
+    reach into a held session directly and bypassed it — safe only for as long as
+    nothing ever handed one to the user with interception lifted, which an
+    interstitial challenge now does. A session that cannot be re-armed is left to
+    the user and the flow starts fresh, rather than driving an unguarded tab."""
+    held = _ChalSession()
+    held.rearm_ok = False
+    await browser_session.hold_challenge(
+        held, meta={"kind": "Cloudflare", "site": "example.com",
+                    "url": "x", "goal": _CHAL_PARAMS["goal"]},
+    )
+
+    async def fake_run_browse(session, goal, provider, **kwargs):
+        assert session is not held      # never driven un-re-armed
+        return browser_loop.BrowseOutcome(
+            success=True, actions_taken=1, commit_required=True,
+            commit_state={"url": "https://example.com/apply", "method": "POST",
+                          "fields": [], "uploads": []},
+        )
+
+    monkeypatch.setattr(browser_loop, "run_browse", fake_run_browse)
+    try:
+        discovery = await browser_commit.discover(dict(_CHAL_PARAMS))
+
+        assert discovery.state is not None
+        assert _discover_rig != []      # a fresh tab was opened instead
+        assert held.resumed is True     # the re-arm was at least attempted
+    finally:
+        await browser_session.discard_commit()
 
 
 # ----------------------- planner hand-off texts, mode-aware (2026-07-19)
@@ -2020,3 +2109,172 @@ async def test_a_submit_that_could_not_have_happened_still_replans(
     await planner.resume(plan, approved=True)
 
     assert provider.calls > 1, "a submission ruled out is safe to replan"
+
+
+# ============================================================================
+# 2026-08-02 — "why is the message so long?"
+#
+# An approved add-to-cart on junaidjamshed.com completed and reported ~1500
+# chars of the product page's prose as "the site's response": the whole
+# navigation menu, the breadcrumb, the fragrance notes. The submit itself was
+# correct; the confirmation was a wall of text.
+#
+# `response_text` was the post-submit page's WHOLE prose. That was written
+# against the-internet.herokuapp.com/upload, whose entire visible text IS
+# "File Uploaded! / dummy_upload.txt" — so the clip never bit and the quote was
+# always the confirmation. Every fake in this file had that shape too.
+# ============================================================================
+
+# The incident's own page text (fragrance-note paragraphs abridged; the
+# navigation chrome — the actual noise — is verbatim).
+_STOREFRONT = """Skip to content
+PROFILE
+TRACKING INFO
+GIFTING
+WOMEN
+MEN
+FRAGRANCE & BEAUTY
+TEENS
+SEARCH
+WISHLIST
+0
+BAG
+2
+PAK
+NEW IN
+READY TO WEAR
+UNSTITCHED
+FORMALS
+FOOTWEAR
+ACCESSORIES
+SYNCC
+SALE
+GROOMS
+CAST & CREW
+FRAGRANCES
+MAKEUP
+SKINCARE
+TEEN GIRLS
+TEEN BOYS
+KID GIRLS
+KID BOYS
+INFANTS
+HOME
+/
+FRAGRANCES
+/
+JANAN SPORT - 100ML
+JANAN SPORT - 100ML
+Product ID: PM135415
+Sale price
+PKR.6,800
+Limited Stock Alert: Get Yours Before They're Gone
+ADD TO BAG
+Add to Wishlist
+PRODUCT DETAILS
+Discover the new exquisite variant of our popular Janan family; Janan Sport.
+Category: Chypre, Amber, Woody, Citrusy, Musky
+Size:  100ml Bottle
+CARE & USAGE
+SHIPPING & RETURNS INFO
+SHARE THIS"""
+
+# A Shopify cart-add is an in-page fetch: the page never navigates, so the only
+# thing that changes is the bag counter.
+_STOREFRONT_AFTER = _STOREFRONT.replace("BAG\n2", "BAG\n3")
+
+_PRODUCT_URL = (
+    "https://www.junaidjamshed.com/collections/fragrances/products/janan-sport"
+    "?variant=56957187915936"
+)
+
+
+async def test_an_ajax_submit_does_not_quote_the_page_it_was_submitted_from(
+    _direct_browser_runtime, monkeypatch
+):
+    """THE INCIDENT, END TO END. The page the submission was made from is not a
+    response to it — quoting it back was grounding theatre, and on a real site it
+    is a wall of navigation.
+
+    ⚠️ A SMALLER CLIP WOULD BE MEASURABLY WORSE, not better: the chrome is at the
+    TOP of the prose, so clipping harder keeps "WOMEN / MEN / FRAGRANCE & BEAUTY"
+    and drops whatever confirmation might follow it."""
+    async def storefront_observe(page):
+        submitted = bool(getattr(getattr(page, "session", None), "submitted", False))
+        return _obs(
+            _PRODUCT_URL, "JANAN SPORT - 100ml",
+            _STOREFRONT_AFTER if submitted else _STOREFRONT,
+        )
+
+    monkeypatch.setattr(dom_observe, "observe", storefront_observe)
+    stub = StubCommitSession(verify=True, fired=True)
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    result = await browser_commit.perform(dict(_STATE))
+
+    assert result["submitted"] is True          # the submit itself was always fine
+    assert result["page_changed"] is False      # an in-page fetch never navigates
+    assert result["response_text"] == ""
+    # The specific text the user was shown.
+    for noise in ("FRAGRANCE & BEAUTY", "Skip to content", "PRODUCT DETAILS",
+                  "Add to Wishlist", "PKR.6,800"):
+        assert noise not in result["response_text"]
+
+
+async def test_a_navigating_submit_still_quotes_what_the_site_returned(
+    _direct_browser_runtime,
+):
+    """The 2026-07-18 grounding is the reason this field exists and must survive:
+    a form that navigates to a confirmation page still quotes it, and the shared
+    chrome (there is none on that page) is what gets diffed away, not the
+    confirmation."""
+    stub = StubCommitSession(verify=True, fired=True)
+    await browser_session.hold_commit(stub, state=dict(_STATE))
+
+    result = await browser_commit.perform(dict(_STATE))
+
+    assert result["response_text"] == "Posted!"
+    assert result["page_changed"] is True
+
+
+def test_response_prose_keeps_what_the_submission_produced():
+    """The diff strips the chrome a page shares with itself and keeps what is new
+    — a confirmation, or an inline error, which is the case a user most needs."""
+    before = "Home\nAbout\nContact\nName\nEmail\nSend"
+    after = "Home\nAbout\nContact\nName\nEmail\nSend\nPlease enter a valid email"
+    assert browser_commit._response_prose(
+        before, after, page_changed=False
+    ) == "Please enter a valid email"
+
+
+def test_response_prose_drops_a_bare_counter_tick():
+    """MEASURED on the incident: the one line a cart-add changes is the bag
+    counter, so the diff came back as "3" — the truest signal on the page and
+    useless as prose. A length floor would be the wrong instrument (it would drop
+    "Posted!"); what separates a message from a counter is having WORDS."""
+    assert browser_commit._response_prose(
+        "BAG\n2\nCheckout", "BAG\n3\nCheckout", page_changed=False
+    ) == ""
+    # ...and the floor is not merely a length: a short real message survives.
+    assert browser_commit._response_prose(
+        "Send", "Send\nPosted!", page_changed=False
+    ) == "Posted!"
+
+
+def test_response_prose_without_a_baseline_falls_back_to_did_we_navigate():
+    """A failed pre-observe leaves us unable to tell new from old, so we fall back
+    to the coarser fact we always have. It fails toward brevity: a page that never
+    moved is not quoted, rather than dumped."""
+    assert browser_commit._response_prose(
+        "", "Thanks for your order", page_changed=True
+    ) == "Thanks for your order"
+    assert browser_commit._response_prose("", _STOREFRONT, page_changed=False) == ""
+
+
+def test_response_prose_is_bounded_and_cannot_fabricate():
+    """Every line returned is a slice of the observed page (the extract.py
+    property), and a genuinely new page is still capped."""
+    after = "\n".join(f"line {i} of a brand new page" for i in range(200))
+    out = browser_commit._response_prose("", after, page_changed=True)
+    assert len(out) <= browser_commit._COMMIT_RESPONSE_MAX_CHARS + 2
+    assert out.rstrip("…\n") in after

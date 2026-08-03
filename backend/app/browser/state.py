@@ -49,6 +49,7 @@ class Handoff(str, Enum):
     SIGNUP = "signup"                    # hard account-creation wall
     AUTH_OFFER = "auth_offer"            # optional sign-in/up; guest possible
     FILL_FIELD = "fill_field"            # a form value nothing grounds
+    TARGET_CHOICE = "target_choice"      # several page items match equally well
     ORIGIN_APPROVAL = "origin_approval"  # page-derived off-site origin
     ACTION_APPROVAL = "action_approval"  # a world-acting gesture in READ mode
     CHALLENGE = "challenge"              # CAPTCHA — never solved by Jarvis
@@ -75,6 +76,14 @@ class HandoffPayload:
     challenge_mode: str = ""      # CHALLENGE: "interstitial" | "embedded"
     auth_signin: bool = False     # AUTH_OFFER: the page offers sign-in
     auth_signup: bool = False     # AUTH_OFFER: the page offers sign-up
+    # TARGET_CHOICE: which kind of thing is ambiguous ("item" = a product on a
+    # listing, "option" = a value in a form control), what the user asked for in
+    # their own words, the control's name when it is an option, and the real
+    # labels to offer. Options are verbatim page text — see browser/choice.py.
+    choice_kind: str = ""
+    choice_target: str = ""
+    choice_field: str = ""
+    choice_options: list = dataclasses.field(default_factory=list)
     # dataclasses.field spelled out: the attribute named `field` above shadows
     # the bare name inside this class body.
     commit_state: dict = dataclasses.field(default_factory=dict)
@@ -95,6 +104,10 @@ class HandoffPayload:
             "challenge_mode": self.challenge_mode,
             "auth_signin": self.auth_signin,
             "auth_signup": self.auth_signup,
+            "choice_kind": self.choice_kind,
+            "choice_target": self.choice_target,
+            "choice_field": self.choice_field,
+            "choice_options": list(self.choice_options),
             "commit_state": dict(self.commit_state),
             "commits_done": self.commits_done,
         }
@@ -120,6 +133,10 @@ class HandoffPayload:
             challenge_mode=str(data.get("challenge_mode") or ""),
             auth_signin=bool(data.get("auth_signin")),
             auth_signup=bool(data.get("auth_signup")),
+            choice_kind=str(data.get("choice_kind") or ""),
+            choice_target=str(data.get("choice_target") or ""),
+            choice_field=str(data.get("choice_field") or ""),
+            choice_options=[str(o) for o in (data.get("choice_options") or [])],
             commit_state=dict(data.get("commit_state") or {}),
             commits_done=int(data.get("commits_done") or 0),
         )
@@ -142,6 +159,22 @@ def handoff_from_outcome(outcome: Any) -> Optional[HandoffPayload]:
         return HandoffPayload(
             reason=Handoff.SITE_UNRESOLVED,
             site=str(getattr(outcome, "unresolved_host", "") or ""),
+            url=str(getattr(outcome, "url", "") or ""),
+        )
+    # BEFORE the fill ask, because the two are the same question asked with and
+    # without a list to choose from: when code can show the real options, a
+    # pick-list beats "type the value yourself". They are mutually exclusive in
+    # practice (one stop sets one flag); the order states which wins if that
+    # ever stops being true.
+    if getattr(outcome, "target_choice_required", False):
+        return HandoffPayload(
+            reason=Handoff.TARGET_CHOICE,
+            choice_kind=str(getattr(outcome, "choice_kind", "") or "item"),
+            choice_target=str(getattr(outcome, "choice_target", "") or ""),
+            choice_field=str(getattr(outcome, "choice_field", "") or ""),
+            choice_options=[
+                str(o) for o in (getattr(outcome, "choice_options", None) or [])
+            ],
             url=str(getattr(outcome, "url", "") or ""),
         )
     if getattr(outcome, "fill_required", False):

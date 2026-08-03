@@ -539,3 +539,34 @@ async def test_reuse_marks_the_tab_as_inherited(contexts):
 
     again, _ = await browser_session.acquire_browse_tab({"a.example"}, site="a.example")
     assert again.tab_reused is True, "we inherited this one"
+
+
+async def test_a_tab_released_for_a_captcha_is_reused_and_re_armed(contexts):
+    """THE 2026-08-03 ROUND TRIP, end to end and with nothing set by hand.
+
+    The CAPTCHA fix rests entirely on this: a challenge tab is RELEASED to the
+    user (interception lifted so their solve is unimpeded), left in the
+    site-keyed registry, and the resumed browse picks up THAT tab — re-armed —
+    instead of relaunching. If reuse or the re-arm ever stopped working, the fix
+    would silently become either "a second tab every time" or the 2026-08-01
+    unguarded-tab incident."""
+    challenged, _ = await browser_session.acquire_browse_tab(
+        {"ebay.com"}, site="ebay.com"
+    )
+    # A second, unrelated tab: the whole point is that it survives.
+    other, _ = await browser_session.acquire_browse_tab(
+        {"junaidjamshed.com"}, site="junaidjamshed.com"
+    )
+
+    assert await challenged.release_to_user() is True
+    assert challenged._playback is True
+
+    resumed, reused = await browser_session.acquire_browse_tab(
+        {"ebay.com"}, site="ebay.com"
+    )
+
+    assert reused is True and resumed is challenged   # same page, solved check
+    assert resumed._read_only is True                 # guarded before driven
+    assert resumed._playback is False
+    assert not other.page.closed                      # the bystander is untouched
+    assert window.tab_count() == 2                    # no third window, no relaunch

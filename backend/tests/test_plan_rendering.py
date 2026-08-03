@@ -817,3 +817,55 @@ def test_a_page_with_no_prose_still_falls_back_to_the_full_render():
         },
     )))
     assert 'button "Start"' in text
+
+
+# ==================================== the commit wall of text (2026-08-02)
+#
+# Live: an approved add-to-cart completed and the reply carried ~1500 chars of
+# the product page — the whole navigation menu — as "the site's response". Third
+# wall of text in this stack (the media dump 2026-07-25, the destination-only
+# DOM dump 2026-08-01, this).
+#
+# Two claims were wrong at once: the prose was the page the form was submitted
+# FROM rather than anything the submission produced, and the head asserted the
+# site had "responded" with a title that was just where we still were.
+
+_JJ_URL = (
+    "https://www.junaidjamshed.com/collections/fragrances/products/janan-sport"
+    "?variant=56957187915936"
+)
+
+
+def test_a_commit_confirmation_is_not_a_copy_of_the_page():
+    """The reply the user got, rendered from what the tool now returns. It states
+    the confirmed facts and stops."""
+    text = _fmt_browse_commit({
+        "submitted": True,
+        "url": _JJ_URL,
+        "submitted_url": "https://www.junaidjamshed.com/cart/add.js",
+        "title": "JANAN SPORT - 100ml",
+        "response_text": "",          # nothing the submission produced
+        "page_changed": False,
+        "window_open": True,
+    })
+    # MEASURED: the incident rendered 1832 chars.
+    assert len(text) < 500, text
+    assert "Submitted the form" in text
+    assert "https://www.junaidjamshed.com/cart/add.js" in text   # what carried it
+    assert "window is left open" in text
+
+
+def test_a_commit_that_never_navigated_does_not_claim_the_site_responded():
+    """"The site responded: X" is only true when the submission MOVED us. On an
+    AJAX submit X is the page we were already on, and calling it a response is
+    the same class of overclaim as reporting an unconfirmed submit as a failure."""
+    stayed = _fmt_browse_commit(
+        {"url": _JJ_URL, "title": "JANAN SPORT - 100ml", "page_changed": False}
+    )
+    assert "The site responded" not in stayed
+    assert "stayed on" in stayed
+
+    moved = _fmt_browse_commit(
+        {"url": "https://shop.test/thanks", "title": "Thanks", "page_changed": True}
+    )
+    assert "The site responded: **Thanks**" in moved

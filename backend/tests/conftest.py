@@ -321,6 +321,10 @@ def _hermetic_browser_session():
     # REUSED by the next — no factory call, a dead handle, and a cross-test leak
     # of exactly the kind reset_host_cache exists to stop. Drop it both sides.
     browser_window.reset_for_tests()
+    # Which sites have had a challenge handed over in place is module state with
+    # a 10-minute TTL (2026-08-03), so one test's hand-over would otherwise make
+    # the next test's first challenge escalate to the clean window.
+    browser_session.reset_challenge_handoffs()
     browser_session._login_browser = None
     browser_session._clean_login_proc = None
     yield
@@ -333,6 +337,10 @@ def _hermetic_browser_session():
     browser_session.reset_host_cache()
     browser_registry.reset_for_tests()
     browser_window.reset_for_tests()
+    # Which sites have had a challenge handed over in place is module state with
+    # a 10-minute TTL (2026-08-03), so one test's hand-over would otherwise make
+    # the next test's first challenge escalate to the clean window.
+    browser_session.reset_challenge_handoffs()
     browser_session._login_browser = None
     browser_session._clean_login_proc = None
 
