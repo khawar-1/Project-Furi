@@ -82,6 +82,12 @@ MAX_SECTIONS = 5
 # the model the most recent fact in a category is the current truth, so keeping
 # the tail is also the reading that rule assumes.
 MAX_FACTS_PER_CONTACT = 8
+# The consolidated digest of everything the line above clips (2026-08-04, see
+# app/memory/consolidate.py). Larger than MAX_CONTACT_TEXT because this one
+# field stands in for the whole of a contact's older history — but still capped
+# here as the belt: consolidate.py bounds what it writes, and this bounds what
+# is rendered whatever ends up in the column.
+MAX_CONTACT_DIGEST = 600
 # Free-text contact fields. `summary` and `notes` are `Text` columns with no
 # length limit anywhere in the write path.
 MAX_CONTACT_TEXT = 300

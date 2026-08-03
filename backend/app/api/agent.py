@@ -77,9 +77,30 @@ class SpokenApproval(BaseModel):
 class ApproveRequest(BaseModel):
     plan_id: str
     approved: bool
-    # Absent = approved on the card, which needs no echo: the card IS the
-    # contract. Present = approved off-card and must prove what it saw.
+    # Absent = approved on the DESKTOP card, which needs no echo: the card is
+    # push-updated, so it IS the contract. Present = approved off-card and must
+    # prove what it saw.
     spoken: Optional[SpokenApproval] = None
+    # ⚠️ THE SAME BINDING WITHOUT THE VOICE (2026-08-04). The remote phone
+    # surface renders a plan from `Task.plan_payload`, which is a POLLED
+    # SNAPSHOT — it can lag behind the parked plan when a steer or a replan
+    # re-parks it under the same id. So the phone echoes the hash of the
+    # contract it drew, and the server refuses if the steps have moved since.
+    #
+    # Three places already promised this and the phone did not do it
+    # (`remote_manifest`'s own docstring, `rendering.serialize_plan_for_api`,
+    # CLAUDE.md) — the "BACKEND_HOST was decorative" shape: a documented claim
+    # the code did not make. Optional, so the desktop card path is unchanged.
+    contract_hash: Optional[str] = Field(default=None, min_length=16, max_length=128)
+
+    def echoed_contract_hash(self) -> Optional[str]:
+        """The hash this client claims it was shown, from EITHER channel.
+
+        One accessor so the pre-pop check and the post-pop re-derivation cannot
+        drift into disagreeing about what was echoed."""
+        if self.spoken is not None:
+            return self.spoken.contract_hash
+        return self.contract_hash
 
 
 class ChooseRequest(BaseModel):
@@ -214,11 +235,20 @@ _CONTRACT_CHANGED = (
 
 
 async def _guard_spoken_approval(db: AsyncSession, request: "ApproveRequest") -> None:
-    """The three conditions an OFF-CARD approval must meet. Raises, never
-    returns a verdict — so a caller cannot forget to check one.
+    """The two conditions specific to a SPOKEN approval: are these words consent
+    at all, and is voice permitted to approve this plan. Raises, never returns a
+    verdict — so a caller cannot forget to check one.
+
+    The third condition, the contract hash, lives in `_check_contract_hash`
+    because the phone echoes one WITHOUT speaking (2026-08-04) and both callers
+    must ask exactly the same question.
 
     Ordered cheapest-first, and every failure leaves the plan untouched."""
-    from app.agents.spoken import is_spoken_approval, plan_needs_screen
+    from app.agents.spoken import (
+        is_spoken_approval,
+        plan_needs_screen,
+        spoken_approval_level,
+    )
     from app.core.app_settings import get_voice_config
 
     # 1. Is it consent at all? Fails CLOSED on anything unrecognised.
@@ -237,21 +267,33 @@ async def _guard_spoken_approval(db: AsyncSession, request: "ApproveRequest") ->
         return  # the pop below will 404 with the right message
 
     # 2. Is voice allowed to approve THIS plan? Checked server-side so a stale
-    #    or hostile client cannot approve by voice while the setting is off.
+    #    or hostile client cannot approve by voice while the setting is off —
+    #    and `spoken_approval_level` folds in the voice MASTER switch, which
+    #    this check read straight past until 2026-08-04.
     config = await get_voice_config(db)
-    if plan_needs_screen(plan, config.spoken_approval):
+    if plan_needs_screen(plan, spoken_approval_level(config)):
         raise HTTPException(
             status_code=403,
             detail=(
                 "This one needs approving on the card, sir — nothing has run. "
-                "Spoken approval is either turned off or limited to non-"
-                "destructive steps in Settings."
+                "Voice or spoken approval is turned off, or spoken approval is "
+                "limited to non-destructive steps, in Settings."
             ),
         )
 
-    # 3. Is it consent to THESE steps? The binding that makes the whole thing
-    #    honest: a client can only hold this hash if it received the contract.
-    if plan.contract_hash() != request.spoken.contract_hash:
+
+def _check_contract_hash(plan: Optional[AgentPlan], request: "ApproveRequest") -> None:
+    """Is this consent to THESE steps? The binding that makes an off-card
+    approval honest: a client can only hold this hash if it received the
+    contract, and a plan whose pending steps changed produces a different one.
+
+    A client that echoed nothing is not checked — that is the desktop card,
+    which is push-updated and is itself the contract. `plan is None` skips too:
+    the caller's own 404 says the right thing about a plan that is gone."""
+    echoed = request.echoed_contract_hash()
+    if plan is None or echoed is None or not request.approved:
+        return
+    if plan.contract_hash() != echoed:
         raise HTTPException(status_code=409, detail=_CONTRACT_CHANGED)
 
 
@@ -267,6 +309,9 @@ async def approve_plan(
     # plan on a mis-heard word and turn it into a LOST approval.
     if request.spoken is not None and request.approved:
         await _guard_spoken_approval(db, request)
+    # The hash check runs for BOTH off-card channels — spoken and the phone's
+    # bare echo — against a non-consuming peek.
+    _check_contract_hash(get_plan(request.plan_id), request)
 
     plan = await pop_plan(db, request.plan_id)
     if plan is None:
@@ -280,13 +325,11 @@ async def approve_plan(
     # Re-derive from the plan we ACTUALLY popped, not the one we peeked at.
     # The peek is the courtesy that keeps the card alive on a mismatch; THIS is
     # the guarantee — the peek reads a hot cache and the pop reads the truth.
-    if (
-        request.spoken is not None
-        and request.approved
-        and plan.contract_hash() != request.spoken.contract_hash
-    ):
+    try:
+        _check_contract_hash(plan, request)
+    except HTTPException:
         await put_plan(db, plan)  # un-consume: nothing was decided
-        raise HTTPException(status_code=409, detail=_CONTRACT_CHANGED)
+        raise
     # Phase 4, Part 5: a task-owned plan the user just approved goes back to
     # BACKGROUND execution — this response is only a snapshot; the outcome
     # arrives by push. Cancels stay inline (no LLM, no tools). If the Task

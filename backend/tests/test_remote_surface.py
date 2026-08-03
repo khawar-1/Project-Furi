@@ -452,3 +452,49 @@ def test_the_phone_reads_the_tasks_own_plan_id():
     # The old form read the payload alone. A fallback to it is fine; reading
     # ONLY it is the defect.
     assert 'data-plan="${esc(p.id || \'\')}"' not in REMOTE_PAGE
+
+
+# ------------------------------------- the phone echoes its contract (2026-08-04)
+
+
+def test_the_phone_sends_the_hash_of_the_contract_it_drew():
+    """⚠️ THREE PLACES PROMISED THIS AND THE PHONE DID NOT DO IT. The manifest's
+    own docstring, `rendering.serialize_plan_for_api` and CLAUDE.md all said an
+    off-card approval echoes the contract hash; `remote_page.py` posted only
+    `{plan_id, approved}` — the "BACKEND_HOST was decorative" shape, a
+    documented claim the code did not make.
+
+    It matters here specifically because the phone renders `Task.plan_payload`,
+    which is a POLLED SNAPSHOT: it can lag behind the parked plan when a steer
+    or a replan re-parks it under the same id."""
+    from app.core.remote_page import REMOTE_PAGE
+
+    assert "p.contract_hash" in REMOTE_PAGE, "the hash is never read off the plan"
+    assert "body.contract_hash = contractHash" in REMOTE_PAGE, "it is never sent"
+
+
+def test_the_phone_does_not_gate_a_cancel_on_the_hash():
+    """Cancelling is safe whatever the steps are now, and refusing one over a
+    stale hash would strand the card with no way to answer it."""
+    from app.core.remote_page import REMOTE_PAGE
+
+    assert "act === 'approve' && contractHash" in REMOTE_PAGE
+
+
+def test_an_echoed_hash_is_read_from_either_channel():
+    """One accessor, so the pre-pop check and the post-pop re-derivation cannot
+    drift into disagreeing about what the client echoed."""
+    from app.api.agent import ApproveRequest
+
+    spoken = ApproveRequest(
+        plan_id="p", approved=True,
+        spoken={"contract_hash": "a" * 64, "utterance": "approve"},
+    )
+    bare = ApproveRequest(plan_id="p", approved=True, contract_hash="b" * 64)
+    card = ApproveRequest(plan_id="p", approved=True)
+
+    assert spoken.echoed_contract_hash() == "a" * 64
+    assert bare.echoed_contract_hash() == "b" * 64
+    # The DESKTOP card echoes nothing and is deliberately not checked: it is
+    # push-updated, so it IS the contract.
+    assert card.echoed_contract_hash() is None

@@ -140,6 +140,25 @@ class Contact(Base):
     # serialized to the API. sync_contact_birthday_job keeps it current.
     birthday_job_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)  # scheduled_jobs.id
     important_dates: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON dictionary or list
+
+    # --- consolidation (2026-08-04, Tier 2 item 7) ---
+    # A composed digest of this contact's OLDER fact-log entries, so the prompt
+    # carries their substance instead of "… 192 older fact(s) not shown".
+    # `budget.MAX_FACTS_PER_CONTACT` clips the log in EVERY prompt, and without
+    # this everything learned about a person outside the recent window is in the
+    # database, on the API, in the UI — and invisible to the model forever.
+    #
+    # ⚠️ DELIBERATELY NOT `summary`. That field is written by extraction and by
+    # the user; overwriting it would destroy data. This one is owned entirely by
+    # app/memory/consolidate.py, which never deletes a ContactInteraction row —
+    # the digest is ADDITIVE, and every fact it summarises is still there.
+    history_digest: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The interaction_date of the newest fact the digest covers. Doubles as the
+    # recompose watermark (only facts past it are uncovered) and as the date
+    # the prompt renders ("Earlier (summarised through <date>): …"), which says
+    # more about what the digest is worth than a "composed on" would.
+    history_digest_upto: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
     last_interaction: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     interaction_count: Mapped[int] = mapped_column(Integer, default=0)
     qdrant_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
@@ -219,6 +238,44 @@ class Preference(Base):
     occurrence_count: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+# ============================================================
+# Memory Conflicts — two facts that may disagree (2026-08-04, Tier 2 item 7)
+# ============================================================
+class MemoryConflict(Base):
+    """A fact the extractor asked to supersede, where the replacement did NOT
+    cover it (`engine.supersede_is_covered`) — so the old fact was kept.
+
+    ⚠️ WHY THIS TABLE EXISTS. Before it, that branch was a `logger.info` and
+    nothing else: the extractor's judgement that two facts collide was DETECTED
+    and then discarded, so "moved to Lahore" and "lives in Karachi" both lived
+    forever with no way to read the disagreement back. Same defect as the one
+    `plan_traces` fixed one layer up — the symptom persisted, the diagnosis died
+    with the run.
+
+    ⚠️ A ROW IS A CLAIM, NOT A FACT. It records what an LLM extractor thought,
+    so nothing here resolves itself: automatic contradiction detection is a
+    judgement with no comparator, and acting on it can silently destroy a true
+    fact. The row is a QUEUE ENTRY for the user, and every surface says "these
+    may conflict", never "this one is wrong". Resolving is a user click, which
+    routes through the already-sanctioned hard-delete path.
+    """
+    __tablename__ = "memory_conflicts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    # The OLDER fact — the one the extractor wanted gone, and the only one a
+    # resolution ever deletes. Not a ForeignKey: a hard delete of the memory
+    # (from About Me) must not cascade this row out of existence before the
+    # sweep settles it, and the content below is what makes it readable anyway.
+    memory_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    old_content: Mapped[str] = mapped_column(Text, nullable=False)
+    # The newer fact that prompted the supersede request. Stored as text
+    # because the supersede path works in content, not ids.
+    new_content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)  # open | resolved | dismissed
+    detected_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 # ============================================================

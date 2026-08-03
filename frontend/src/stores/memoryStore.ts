@@ -4,7 +4,7 @@
  * Fetches SemanticMemory where subject IN ('user', 'shared').
  */
 import { create } from 'zustand';
-import type { SemanticMemory } from '@/types';
+import type { MemoryConflict, SemanticMemory } from '@/types';
 import { memoryApi } from '@/lib/api';
 
 interface AboutMeState {
@@ -18,6 +18,13 @@ interface AboutMeState {
    * data loss.
    */
   archived: SemanticMemory[];
+  /**
+   * Pairs of facts the extractor thought collide, where the replacement did not
+   * cover the original — so BOTH were kept. Nothing has decided which is right;
+   * this list is the review queue, and it is the only place either fact can be
+   * removed as a result.
+   */
+  conflicts: MemoryConflict[];
   isLoading: boolean;
   searchQuery: string;
   error: string | null;
@@ -26,6 +33,11 @@ interface AboutMeState {
   loadFacts: () => Promise<void>;
   loadArchived: () => Promise<void>;
   restoreFact: (id: string) => Promise<void>;
+  loadConflicts: () => Promise<void>;
+  /** Keep the newer fact — hard-deletes the older one. */
+  resolveConflict: (id: string) => Promise<void>;
+  /** They do not conflict — both stay. */
+  dismissConflict: (id: string) => Promise<void>;
   searchFacts: (q: string) => Promise<void>;
   addFact: (content: string, category?: string) => Promise<void>;
   deleteFact: (id: string) => Promise<void>;
@@ -35,6 +47,7 @@ interface AboutMeState {
 export const useMemoryStore = create<AboutMeState>((set, get) => ({
   memories: [],
   archived: [],
+  conflicts: [],
   isLoading: false,
   searchQuery: '',
   error: null,
@@ -65,6 +78,30 @@ export const useMemoryStore = create<AboutMeState>((set, get) => ({
     await memoryApi.restore(id);
     // Reload both: the fact leaves the archive AND rejoins the live list.
     await Promise.all([get().loadArchived(), get().loadFacts()]);
+  },
+
+  loadConflicts: async () => {
+    try {
+      const result = await memoryApi.conflicts();
+      set({ conflicts: result.conflicts });
+    } catch {
+      // Best-effort, like loadArchived: a review queue that fails to load must
+      // never break the panel showing the user's actual facts.
+      set({ conflicts: [] });
+    }
+  },
+
+  resolveConflict: async (id: string) => {
+    await memoryApi.resolveConflict(id);
+    // Reload the facts too: resolving hard-deletes the older one, so the list
+    // above is now stale.
+    await Promise.all([get().loadConflicts(), get().loadFacts()]);
+  },
+
+  dismissConflict: async (id: string) => {
+    await memoryApi.dismissConflict(id);
+    // Nothing was deleted, so only the queue changed.
+    await get().loadConflicts();
   },
 
   searchFacts: async (q: string) => {

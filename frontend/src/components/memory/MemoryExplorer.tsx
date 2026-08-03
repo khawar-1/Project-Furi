@@ -4,7 +4,7 @@
  * Facts can be searched, added manually, or deleted.
  */
 import { useEffect, useState } from 'react';
-import { User, Plus, Search, Trash2, Brain, RefreshCw, Tag, X, Archive, RotateCcw } from 'lucide-react';
+import { User, Plus, Search, Trash2, Brain, RefreshCw, Tag, X, Archive, RotateCcw, GitCompareArrows } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useMemoryStore } from '@/stores/memoryStore';
 import type { MemoryCategory, SemanticMemory } from '@/types';
@@ -334,7 +334,95 @@ export function MemoryExplorer() {
           />
         ))}
 
+        <ConflictingFacts />
         <ArchivedFacts />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Two facts that may disagree — the extractor asked for one to replace the
+ * other, the replacement did not cover it, and BOTH were kept.
+ *
+ * ⚠️ NOTHING HAS DECIDED WHICH ONE IS RIGHT, and the wording here must never
+ * imply otherwise. Judging that "moved to Lahore" invalidates "lives in
+ * Karachi" is a judgement about meaning with no test behind it, and getting it
+ * wrong destroys a true fact permanently. So this is a QUESTION, not a
+ * notification — and it is the only place in the feature where a fact can be
+ * deleted, by a human clicking it. Hidden entirely when the queue is empty,
+ * which is the normal state.
+ */
+function ConflictingFacts() {
+  const { conflicts, loadConflicts, resolveConflict, dismissConflict } = useMemoryStore();
+  const [busy, setBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadConflicts();
+  }, [loadConflicts]);
+
+  if (conflicts.length === 0) return null;
+
+  const act = async (id: string, fn: (id: string) => Promise<void>) => {
+    setBusy(id);
+    try {
+      await fn(id);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="mt-8 pt-6 border-t border-surface-border">
+      <div className="flex items-center gap-2 text-xs text-amber-400/90">
+        <GitCompareArrows size={13} />
+        <span>
+          {conflicts.length} {conflicts.length === 1 ? 'pair' : 'pairs'} of facts that may disagree
+        </span>
+      </div>
+      <p className="mt-2 text-[11px] text-slate-600 leading-relaxed max-w-lg">
+        Jarvis noticed a newer note that might replace an older one, but it did not
+        clearly cover everything the older one said — so it kept both rather than
+        guess. Which is right?
+      </p>
+
+      <div className="mt-3 space-y-3">
+        {conflicts.map(conflict => (
+          <div
+            key={conflict.id}
+            className="px-3 py-3 rounded-lg bg-surface-1/50 border border-amber-500/20"
+          >
+            <div className="space-y-1.5">
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                <span className="text-slate-600">Older — </span>
+                {conflict.old_content}
+              </p>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                <span className="text-slate-600">Newer — </span>
+                {conflict.new_content}
+              </p>
+            </div>
+            <div className="mt-2.5 flex items-center gap-2">
+              <button
+                onClick={() => void act(conflict.id, resolveConflict)}
+                disabled={busy === conflict.id}
+                className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                title="Permanently delete the older fact"
+              >
+                <Trash2 size={11} />
+                The newer one is right
+              </button>
+              <button
+                onClick={() => void act(conflict.id, dismissConflict)}
+                disabled={busy === conflict.id}
+                className="px-2 py-1 rounded text-[11px] text-slate-400 hover:bg-surface-2 transition-colors disabled:opacity-50"
+                title="Both facts stay exactly as they are"
+              >
+                Keep both
+              </button>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );

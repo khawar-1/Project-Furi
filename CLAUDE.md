@@ -3809,6 +3809,178 @@ gap was invisible from the backend because every backend test passed.
   6-case `plan_bench` has not been re-run since the failure-signal fix — the
   20:44 run that scored 5/6 is what FOUND those defects; only the single
   `learns-from-failure` case has been seen green since.
+  *(The contract hash, the spoken-approval master switch, and the `plan_bench`
+  re-run are all CLOSED by the round below — the bench now scores **6/6**. The
+  `package.json` hardcoded `127.0.0.1` is NOT; it is still open.)*
+
+### Memory that stays useful, and the conflict it was throwing away (2026-08-04)
+*(Tier 2 items 5-8: the remainder. Items 5, 6 and 8 shipped in `4290850`;
+item 7 shipped two of its four named parts. This closes the rest.)*
+
+`e1c8d5a3b920` made memory BOUNDED — decay ranking, a fair-share render budget,
+a reversible archive. **Bounding it is exactly what made the older half go
+dark.** `budget.MAX_FACTS_PER_CONTACT = 8` clips a contact's fact log in EVERY
+prompt and renders `… 192 older fact(s) not shown (clipped for length)`: every
+one of those rows is still in SQLite, still on the API, still in the contact
+detail UI, and **the model never sees any of them again**. That is the only
+place in `format_context` where information is lost permanently; everything
+else is bounded by retrieval top-N, which is a ranking, not an amputation.
+
+- **MEASURED, and it is the number that matters.** A contact with 18 facts, of
+  which 9 are load-bearing (peanut allergy, employer, city, wife's name,
+  daughter's name, call-don't-email, no alcohol, the MSc, no calls before
+  10am): **1 of 9 reached the model before, 9 of 9 after, for +426 chars.** The
+  previous round measured SIZE (76,758 → 5,277); size was never the remaining
+  problem.
+- **`app/memory/consolidate.py` — the digest, and the four things it will not
+  do.** (1) It **deletes nothing** — not a row, not a vector, not a field;
+  strictly weaker than `archive.py`, which at least sets `archived_at`. (2) It
+  does **not** touch `Contact.summary`, which extraction and the user both
+  write — the digest owns its own column (`history_digest` +
+  `history_digest_upto`, the watermark, which doubles as the date the prompt
+  renders: `Earlier (summarised through 2026-07-25): …`).
+  (3) **CODE decides, the LLM only composes**: which contact, which facts, and
+  whether the result is kept. (4) A digest that does not rest on its sources is
+  **thrown away** (`digest_is_grounded` — the `_is_fabricated_enumeration`
+  comparator shape, but scoring TOKENS because a digest is prose and has no
+  items to score; `UNGROUNDED_MAX = 0.35` is MEASURED between a realistic
+  faithful digest and a fabricated one and pinned in a test, the
+  `SIMILARITY_FLOOR` precedent).
+- **NO FALLBACK, deliberately.** `daily_briefing` degrades to a template
+  because a briefing that does not arrive is a broken feature. A digest that
+  does not arrive is simply today. A deterministic stand-in ("5 facts about
+  work, 3 about family") reads like knowledge and carries none.
+- **COST: zero LLM calls in the common case.** Housekeeping runs every 15
+  minutes; a contact only qualifies once `CONSOLIDATE_MIN_NEW = 5` further
+  facts have aged out since its last digest, so the usual pass is one
+  `GROUP BY`. One contact per pass, most-clipped-first.
+- **⚠️ ROLLING, THEREFORE IT CAN DRIFT.** Each generation summarises `previous
+  digest + newly-aged-out facts`, which is what keeps the input bounded forever
+  and stops the oldest facts being dropped when a log passes the input cap —
+  but generation N is a summary of a summary. The guard bounds drift WITHIN a
+  generation, not across them. Stated in the module docstring, not buried.
+- **⚠️ THE RUNTIME CHECK FOUND A DEFECT NO HERMETIC TEST COULD.** Against the
+  real provider the first digest came back **cut off mid-sentence** — *"…His
+  wife Sana is a"* — at ~355 chars, nowhere near the 1200-char clip. Cause:
+  `DIGEST_MAX_TOKENS = 320`, and on a thinking model the REASONING tokens come
+  out of the same budget. **This codebase had already learned that and written
+  it down** (`task_router.py:842`, `reading_enumerator.py:477` both pin 512
+  after gemini-2.5 returned ZERO output at `max_tokens=8`) and I sat below the
+  floor anyway. A stub returns whatever it is told, so 21 green tests were
+  blind to it. Fixed twice over: the budget is 700, and `looks_truncated()`
+  now REJECTS a reply that does not end in terminal punctuation — a cut-off
+  digest is worse than none because it reads as complete, the "record lied"
+  class in the memory layer. `_clip_to_sentence` makes sure storage never
+  creates the very half-sentence the guard rejects. Re-verified live: 402
+  chars, ending `distributed systems.`, now carrying *"His wife Sana is a
+  paediatrician; daughter Ayesha was born in March"* — the part the truncated
+  one lost.
+- **THE CONFLICT WAS ALREADY DETECTED AND THROWN INTO A LOG LINE.**
+  `engine.apply_supersede_candidates`'s else-branch was
+  `logger.info("Supersede blocked …")` and nothing else. `supersede_is_covered`
+  is RIGHT to refuse a replacement that does not contain every word of its
+  target — that rule is untouched — but the extractor's judgement that "moved
+  to Lahore" collides with "lives in Karachi" was then discarded, both facts
+  lived forever, and nothing could read the disagreement back. **Same defect as
+  the one `plan_traces` fixed one layer up: the symptom persisted, the
+  diagnosis died with the run.** NEW `memory_conflicts` table +
+  `app/memory/conflicts.py`.
+- **⚠️ NOTHING RESOLVES ITSELF, AND THAT IS THE WHOLE DESIGN.** Deciding that
+  one fact invalidates another is a judgement about MEANING with no substring
+  test behind it, and getting it wrong destroys a true fact silently and
+  permanently. So a row is a **claim, not a verdict** — a queue entry for the
+  one party who can settle it. Every surface says "these may conflict", never
+  "this one is wrong". Resolving hard-deletes the OLDER fact through
+  `delete_semantic_memory`, the path that has been user-initiated-only since
+  Phase 2; **nothing automatic can reach it.** The PROMPT is unchanged: MEMORY
+  RULES already says the newest fact in a category is current, and a
+  "possibly superseded" marker would be an unverified LLM claim leaking into
+  the one block this codebase works hardest to keep grounded.
+- **The two ends must agree.** `record_conflict` refuses to queue a question
+  about a fact that is not live; `list_open_conflicts` now applies the same
+  rule, so a conflict whose fact left by another route (a hard delete in About
+  Me, a LATER covered supersede) stops being asked. Caught in self-review — the
+  inconsistency would have slowly filled the queue with settled questions.
+- **API + UI**: `GET /memory/conflicts` · `POST /memory/conflicts/{id}/resolve`
+  · `/dismiss`, declared BEFORE every `/{memory_id}` route (the
+  `/api/activity/routing` trap, twice recorded; `/memory/archived` is the local
+  precedent) with its own test. `ConflictingFacts` in `MemoryExplorer.tsx`,
+  modelled on `ArchivedFacts` — hidden when empty, which is the normal state.
+- **Item 5 residual closed**: the phone now echoes the contract hash. It
+  renders `Task.plan_payload`, which is a POLLED SNAPSHOT that can lag behind
+  the parked plan when a steer or replan re-parks it under the same id.
+  `ApproveRequest` gained an optional top-level `contract_hash` checked
+  PRE-pop (a stale hash must never consume the plan) and re-derived post-pop,
+  through ONE `echoed_contract_hash()` so the two checks cannot drift. **The
+  desktop card deliberately does NOT change** — `ApproveRequest`'s own comment
+  states the position ("the card IS the contract") and it is push-updated, not
+  polled. A cancel is never gated on the hash: it does less than the card asked
+  for, and refusing one would strand the plan.
+- **Item 8 residual closed**: `_guard_spoken_approval` read
+  `config.spoken_approval` and never `config.enabled`, so with voice switched
+  off entirely a client could still approve a DESTRUCTIVE step by posting a
+  `spoken` block — while the guard's own comment claimed it stopped exactly
+  that. NEW `spoken_approval_level(config)` folds the master switch in, as a
+  FUNCTION rather than one more line at the call site (the second-copy-of-a-
+  fact hole, now recorded seven times here). ⚠️ **The existing test fixture was
+  pinning the defect**: `_set_level` set a level on the default config, whose
+  `enabled` is False, so every spoken-approval test had been granting a level
+  with voice off and passing.
+- **DELIBERATELY NOT DONE, with reasons.** *Episode consolidation* — named in
+  the suggestion, and speculative: episodes are already bounded at render
+  (retrieval top-N, `ep.summary[:120]`) and the real database has **0 rows**;
+  building a period-summariser for an empty table is how machinery ages badly.
+  *Automatic conflict resolution* — see above. *Semantic-memory consolidation*
+  — near-duplicates are handled at write time by the cosine dedup and the
+  section is retrieval-bounded.
+- Migration `b2d7f4a9c531` (head was `e1c8d5a3b920`), idempotent on both the
+  ALTER and the CREATE. Tests: `test_memory_consolidate.py` (26),
+  `test_memory_conflicts.py` (17), plus additions to `test_spoken_approval.py`
+  and `test_remote_surface.py`. **All 17 behavioural changes proven to FAIL by
+  reverting the specific line IN PLACE** (never `git show :file`), each with
+  the correct signature.
+- **⚠️ THREE FALSIFICATIONS CAME BACK GREEN, AND ALL THREE WERE THE HARNESS.**
+  (1) "no LLM call unless there is work" is defended in THREE places (the SQL
+  `HAVING`, the uncovered-count threshold, and `consolidate_contact`'s own
+  guard) — reverting any one left the others holding. (2) "an open conflict is
+  never swept" is defended by three where-clauses, and `resolved_at < cutoff`
+  alone protects it because `NULL < x` is never true. (3) A single-line anchor
+  matched the WRONG function, because `record_conflict` carries the identical
+  liveness clause. **A falsification must remove the GUARANTEE, not one copy of
+  it, and its anchor must be unique** — the harness now takes a LIST of edits
+  and asserts `count(anchor) == 1`. A fourth invalid run was a chosen
+  REGRESSION test that also depended on the reverted gates: a regression that
+  fails too proves nothing.
+- Gates: **3391 passing, 14 skipped, 0 failed** (baseline 3340/14/0 — +51,
+  zero regressions); typecheck and `vite build` clean. The migration was
+  verified on BOTH paths `ensure_schema` handles: the full 21-revision chain on
+  an empty DB, and an upgrade over a schema `create_all` had already built
+  (the race), where the idempotent guards make it a clean no-op. ⚠️ The first
+  race check was worthless and said PASS anyway — `tail` masked alembic's exit
+  code and `create_all` had never run. **Check the exit code, not the last
+  line of output.**
+- **RUNTIME-VERIFIED on the real lifespan** (isolated backend, fresh scratch
+  DB, :8001, REAL DeepSeek): the migration boots and stamps
+  `b2d7f4a9c531`, both columns and the table exist, a real housekeeping pass
+  composes and stores a digest, **all 18 facts survive**, the digest reaches
+  MEMORY CONTEXT carrying `peanut` / `Systems Limited` / `Sana`, and a conflict
+  is captured → listed over HTTP → the older fact confirmed NOT auto-deleted →
+  resolved → hard-deleted with the newer one untouched → queue empty.
+- **⚠️ THE FIRST PROBE RUN REPORTED A FAILURE THAT WAS THE PROBE.**
+  "the newer fact is untouched: 0" — because `apply_supersede_candidates` runs
+  AFTER its caller has written the replacement and never writes one itself, so
+  the seed had only created the older fact. A probe asserting something its own
+  setup never established manufactures defects.
+- **`plan_bench` RE-RUN, closing the debt the previous round recorded: 6/6
+  scored cases pass** (`read-only-listing` · `create-file-pauses` ·
+  `destructive-delete-pauses` · `bulk-move-pdfs` · `ghost-file` ·
+  `learns-from-failure`), median 23.6s, with **`no_unapproved_write` HELD 6/6
+  and `no_escape` HELD 6/6** — the core safety promise measured against a real
+  disk, not a mock. `learns-from-failure` shows both of its numbers green
+  again: run 1 hits the `read_file`-on-a-directory dead end, run 2 of the
+  identical goal reads the record and goes straight to `list_directory` →
+  `read_file`. That the memory round did not disturb the planner is now a
+  measurement rather than an assumption.
 
 ### Universal browser control (Phase 14)
 

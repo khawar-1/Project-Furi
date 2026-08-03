@@ -44,8 +44,14 @@ _sweeper: Optional[asyncio.Task] = None
 
 async def run_housekeeping_pass() -> None:
     """One sweep: drop expired parked plans and pending questions, settle any
-    task row left pointing at a plan that no longer exists, and age out the
-    three audit trails past their retention windows.
+    task row left pointing at a plan that no longer exists, age out the three
+    audit trails past their retention windows, and keep memory tidy — archive
+    long-unused facts, consolidate a contact's older fact log, and sweep settled
+    conflict rows.
+
+    ⚠️ The memory steps are the only ones that touch the user's own data, and
+    neither DELETES anything: the archive sets `archived_at` (one click undoes
+    it) and consolidation is purely additive. See their modules for why.
 
     Ordered like the lifespan's startup block — purge first, so the reconcile
     sees the surviving rows only. Each step is independently best-effort (the
@@ -57,6 +63,8 @@ async def run_housekeeping_pass() -> None:
     from app.core.routing_trace import purge_old_decisions
     from app.db.database import AsyncSessionLocal
     from app.memory.archive import sweep_memory_archive
+    from app.memory.conflicts import purge_settled_conflicts
+    from app.memory.consolidate import consolidate_contact_histories
     from app.memory.session_persistence import purge_expired_pending_state
     from app.tools.registry import purge_old_activity
 
@@ -81,6 +89,18 @@ async def run_housekeeping_pass() -> None:
             # hides a long-unused fact from retrieval and is undone by one click
             # in About Me. See app/memory/archive.py for the four conditions.
             ("memory archive", sweep_memory_archive),
+            # Its sibling, and weaker still — it deletes nothing AND hides
+            # nothing (2026-08-04). Compresses a contact's older fact-log
+            # entries into a digest so the tail the prompt budget clips is still
+            # KNOWLEDGE rather than a count. The only step here that can make an
+            # LLM call, and it makes none unless a contact has actually accrued
+            # CONSOLIDATE_MIN_NEW further facts since its last digest — which is
+            # rare, so the usual cost is one GROUP BY.
+            ("contact consolidation", consolidate_contact_histories),
+            # Settled conflict rows (2026-08-04). OPEN ones are never swept —
+            # they are a queue waiting on the user, and ageing out an unanswered
+            # question would silently drop it.
+            ("memory conflicts", purge_settled_conflicts),
         ):
             try:
                 await step(db)

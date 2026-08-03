@@ -30,6 +30,7 @@ from app.db.models import (
     utc_now,
 )
 from app.memory.budget import (
+    MAX_CONTACT_DIGEST,
     MAX_CONTACT_TEXT,
     MAX_FACTS_PER_CONTACT,
     MAX_PROFILE_FIELD,
@@ -1312,8 +1313,20 @@ class MemoryEngine:
             if supersede_is_covered(old_text, new_text):
                 await self.delete_semantic_memory_by_content(old_text)
             else:
+                # ⚠️ THE REFUSAL IS RIGHT; THROWING IT AWAY WAS NOT. Until
+                # 2026-08-04 this branch was a bare logger.info, so the
+                # extractor's judgement that two facts collide was detected and
+                # then discarded — "moved to Lahore" and "lives in Karachi"
+                # both lived forever with nothing able to read the disagreement
+                # back. Queue it for the user instead; nothing here resolves
+                # itself (app/memory/conflicts.py explains why).
+                from app.memory.conflicts import record_conflict
+
                 logger.info(
                     f"Supersede blocked (new fact does not cover it): '{old_text[:60]}'"
+                )
+                await record_conflict(
+                    self.db, old_content=old_text, new_content=new_text
                 )
 
     async def delete_semantic_memory(self, memory_id: str) -> bool:
@@ -2084,9 +2097,36 @@ class MemoryEngine:
                         for f in shown
                     ]
                     if dropped:
-                        fact_lines.insert(
-                            0, f"    * … {dropped} older fact(s) not shown (clipped for length)"
-                        )
+                        # The clipped tail, in compressed form where one exists
+                        # (2026-08-04, app/memory/consolidate.py). Bounding the
+                        # prompt made the older facts invisible to the model
+                        # forever; this puts their SUBSTANCE back in the ~600
+                        # chars the count line used to occupy. `uncovered` are
+                        # the dropped facts the digest does not reach yet — they
+                        # still get an honest count, because claiming a digest
+                        # covers them would be the "record lied" defect again.
+                        digest_covers = 0
+                        if c.history_digest and c.history_digest_upto:
+                            digest_covers = sum(
+                                1 for f in facts[:-MAX_FACTS_PER_CONTACT]
+                                if f.interaction_date <= c.history_digest_upto
+                            )
+                        uncovered = dropped - digest_covers
+                        if uncovered > 0:
+                            fact_lines.insert(
+                                0,
+                                f"    * … {uncovered} older fact(s) not shown (clipped for length)",
+                            )
+                        if c.history_digest:
+                            through = (
+                                c.history_digest_upto.strftime("%Y-%m-%d")
+                                if c.history_digest_upto else "earlier"
+                            )
+                            fact_lines.insert(
+                                0,
+                                f"    * Earlier (summarised through {through}): "
+                                f"{clip_text(c.history_digest, MAX_CONTACT_DIGEST)}",
+                            )
                     line += "\n  Facts Log:\n" + "\n".join(fact_lines)
 
                 people_lines.append(line)

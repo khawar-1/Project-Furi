@@ -21,6 +21,7 @@ import type {
   GoalThreadStatus,
   HealthResponse,
   InitiativeSettings,
+  MemoryConflict,
   MemorySearchResult,
   MemoryStats,
   Preference,
@@ -189,6 +190,18 @@ export const memoryApi = {
   /** Put an archived fact back into retrieval. The undo half. */
   restore: (id: string): Promise<{ restored: boolean; id: string }> =>
     apiFetch(`/memory/${id}/restore`, { method: 'POST' }),
+
+  /** Pairs of facts that may disagree, awaiting the user's call. */
+  conflicts: (): Promise<{ conflicts: MemoryConflict[]; total: number }> =>
+    apiFetch('/memory/conflicts'),
+
+  /** Keep the newer fact: hard-deletes the older one (row + vector). */
+  resolveConflict: (id: string): Promise<{ resolved: boolean; id: string }> =>
+    apiFetch(`/memory/conflicts/${id}/resolve`, { method: 'POST' }),
+
+  /** They do not conflict: both facts stay untouched. */
+  dismissConflict: (id: string): Promise<{ dismissed: boolean; id: string }> =>
+    apiFetch(`/memory/conflicts/${id}/dismiss`, { method: 'POST' }),
 
   stats: (): Promise<MemoryStats> => apiFetch<MemoryStats>('/memory/stats'),
 };

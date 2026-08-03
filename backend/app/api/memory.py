@@ -11,9 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from app.core.dependencies import get_db, get_qdrant
-from app.db.models import SemanticMemory, Contact, Episode, Preference
+from app.db.models import SemanticMemory, Contact, Episode, Preference, utc_iso
 from app.db.schemas import MemorySearchResult, SemanticMemoryCreate, SemanticMemoryResponse
 from app.memory.archive import list_archived, restore_memory
+from app.memory.conflicts import (
+    dismiss_conflict,
+    list_open_conflicts,
+    resolve_conflict,
+)
 from app.memory.engine import MemoryEngine
 
 router = APIRouter()
@@ -97,6 +102,67 @@ async def list_archived_memories(
         memories=[SemanticMemoryResponse.model_validate(m) for m in memories],
         total=len(memories),
     )
+
+
+# ⚠️ DECLARED BEFORE EVERY `/{memory_id}` ROUTE, and kept that way. FastAPI
+# matches in declaration order, so a literal path registered after a
+# same-shaped parameterised one is read as an id — which does not 500, it
+# returns an empty/404 result that looks exactly like "there are no conflicts".
+# CLAUDE.md records that trap twice (`/api/activity/routing`, `/api/activity/
+# plans`); `/archived` above is the local precedent, and
+# `test_conflict_routes_are_not_shadowed_by_the_id_route` pins it.
+@router.get("/conflicts", summary="Facts that may disagree")
+async def list_conflicts(
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Supersede requests that were REFUSED because the replacement did not
+    cover the fact it claimed to replace, so both were kept.
+
+    A row is the extractor's claim, not a verdict — nothing here has decided
+    which fact is right. See app/memory/conflicts.py."""
+    conflicts = await list_open_conflicts(db, limit=limit)
+    return {
+        "conflicts": [
+            {
+                "id": c.id,
+                "memory_id": c.memory_id,
+                "old_content": c.old_content,
+                "new_content": c.new_content,
+                "detected_at": utc_iso(c.detected_at),
+            }
+            for c in conflicts
+        ],
+        "total": len(conflicts),
+    }
+
+
+@router.post("/conflicts/{conflict_id}/resolve", summary="Keep the newer fact")
+async def resolve_memory_conflict(
+    conflict_id: str,
+    db: AsyncSession = Depends(get_db),
+    qdrant=Depends(get_qdrant),
+) -> dict:
+    """The user says the newer fact replaced the older one: hard-delete the
+    OLDER fact (row + vector), exactly as About Me's trash button does.
+
+    ⚠️ The only destructive action in this feature, and it is reachable only by
+    a human clicking it. Nothing automatic can call this."""
+    engine = MemoryEngine(db=db, qdrant=qdrant)
+    if not await resolve_conflict(db, conflict_id, engine):
+        raise HTTPException(status_code=404, detail="No open conflict with that id")
+    return {"resolved": True, "id": conflict_id}
+
+
+@router.post("/conflicts/{conflict_id}/dismiss", summary="Keep both facts")
+async def dismiss_memory_conflict(
+    conflict_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """The user says they do not conflict. Both facts stay untouched."""
+    if not await dismiss_conflict(db, conflict_id):
+        raise HTTPException(status_code=404, detail="No open conflict with that id")
+    return {"dismissed": True, "id": conflict_id}
 
 
 @router.post("/{memory_id}/restore", summary="Restore an archived memory")

@@ -236,11 +236,32 @@ def is_spoken_approval(utterance: str) -> bool:
     return not [w for w in rest if w not in _SPOKEN_NOISE]
 
 
+def spoken_approval_level(config) -> str:
+    """The level voice may actually approve at, given the WHOLE voice config.
+
+    ⚠️ THE MASTER SWITCH IS PART OF THE ANSWER, AND IT WAS BEING MISSED
+    (2026-08-04). `_guard_spoken_approval` read `config.spoken_approval` alone,
+    so with voice itself switched off a client could still approve a write by
+    posting a `spoken` block — while the guard's own comment claimed it stopped
+    "a stale or hostile client". `output_enabled` is deliberately NOT consulted:
+    that governs whether Jarvis SPEAKS, and a user who reads the contract on
+    screen and answers aloud is still giving consent.
+
+    This exists as a function rather than one more line at the call site
+    because a second place that has to remember the same fact is a hole — the
+    lesson `registry.mutates`, `publicsuffix.KNOWN_TLDS`, `_settle`'s status
+    tuple and `set_voice_config`'s field list have each taught here already."""
+    if not getattr(config, "enabled", False):
+        return "off"
+    return getattr(config, "spoken_approval", "off") or "off"
+
+
 def plan_needs_screen(plan: AgentPlan, level: str) -> bool:
     """Whether this plan may NOT be approved by voice at the configured level.
 
-    `level` is `VoiceConfig.spoken_approval`: "off" (never), "write" (WRITE
-    steps only — anything DESTRUCTIVE still needs eyes on the card), or "all"."""
+    `level` comes from `spoken_approval_level(config)`, never straight off the
+    config: "off" (never), "write" (WRITE steps only — anything DESTRUCTIVE
+    still needs eyes on the card), or "all"."""
     if level == "all":
         return False
     if level != "write":

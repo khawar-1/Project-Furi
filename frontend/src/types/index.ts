@@ -89,6 +89,24 @@ export interface SemanticMemory {
   archived_at?: string | null;
 }
 
+/**
+ * Two of the user's own facts that MAY disagree (2026-08-04): the extractor
+ * asked for `old_content` to be replaced by `new_content`, and the replacement
+ * did not cover it, so both were kept.
+ *
+ * ⚠️ A CLAIM, NOT A VERDICT. Nothing has decided which one is right — that is
+ * why this reaches the user at all. Resolving hard-deletes the OLDER fact and
+ * is the only destructive action in the feature.
+ */
+export interface MemoryConflict {
+  id: string;
+  /** The OLDER fact — the only one a resolution ever deletes. */
+  memory_id: string;
+  old_content: string;
+  new_content: string;
+  detected_at: string;
+}
+
 export interface MemorySearchResult {
   memories: SemanticMemory[];
   total: number;

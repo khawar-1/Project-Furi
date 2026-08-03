@@ -323,10 +323,20 @@ async def api(tmp_path_factory):
     await engine.dispose()
 
 
-async def _set_level(api, level: str) -> None:
+async def _set_level(api, level: str, *, voice_enabled: bool = True) -> None:
+    """Configure what voice may approve.
+
+    ⚠️ `voice_enabled` IS NOT DECORATION. `default_voice_config().enabled` is
+    False (voice is opt-in), and until 2026-08-04 the guard read
+    `spoken_approval` alone — so these tests granted a level with voice itself
+    switched OFF and passed, because the master switch was never consulted.
+    That is the fixture pinning the defect, the shape this project has hit
+    before (`test_media_keep_open_*`). The switch now has its own test below."""
     async with api.factory() as db:
         base = default_voice_config()
-        await set_voice_config(db, VoiceConfig(**{**base.__dict__, "spoken_approval": level}))
+        await set_voice_config(db, VoiceConfig(**{
+            **base.__dict__, "spoken_approval": level, "enabled": voice_enabled,
+        }))
 
 
 async def _park_a_delete(api, tmp_path) -> tuple[dict, "object"]:
@@ -367,6 +377,91 @@ async def test_spoken_approval_is_refused_while_the_setting_is_off(api, tmp_path
     assert target.exists(), "the file was deleted while spoken approval was OFF"
     # And the card is still answerable — a refusal must not consume the plan.
     assert plan_store.get_plan(plan["id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_bare_stale_hash_is_refused_and_nothing_runs(api, tmp_path):
+    """The phone's channel (2026-08-04): a `contract_hash` with no `spoken`
+    block. It is checked exactly like the voice one, because the phone renders
+    a POLLED snapshot that can lag behind the parked plan."""
+    plan, target = await _park_a_delete(api, tmp_path)
+
+    r = await api.post("/api/agent/approve", json={
+        "plan_id": plan["id"], "approved": True, "contract_hash": "0" * 64,
+    })
+
+    assert r.status_code == 409
+    assert target.exists(), "a stale hash deleted the file"
+    assert plan_store.get_plan(plan["id"]) is not None, "the card was consumed"
+
+
+@pytest.mark.asyncio
+async def test_a_matching_bare_hash_approves_without_any_voice_setting(api, tmp_path):
+    """The phone is not voice: no utterance, no consent word set, and the voice
+    settings do not gate it. Only the binding applies."""
+    await _set_level(api, "off", voice_enabled=False)
+    plan, target = await _park_a_delete(api, tmp_path)
+
+    r = await api.post("/api/agent/approve", json={
+        "plan_id": plan["id"], "approved": True,
+        "contract_hash": plan["contract_hash"],
+    })
+
+    assert r.status_code == 200
+    assert not target.exists(), "the approved delete did not run"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_hash_never_blocks_a_cancel(api, tmp_path):
+    """Cancelling does less than the card asked for, so refusing one over a
+    stale hash would strand the plan with no way to answer it."""
+    plan, target = await _park_a_delete(api, tmp_path)
+
+    r = await api.post("/api/agent/approve", json={
+        "plan_id": plan["id"], "approved": False, "contract_hash": "0" * 64,
+    })
+
+    assert r.status_code == 200
+    assert target.exists()
+
+
+@pytest.mark.asyncio
+async def test_the_voice_master_switch_alone_refuses_a_spoken_approval(api, tmp_path):
+    """⚠️ THE RESIDUAL FIXED 2026-08-04. `_guard_spoken_approval` read
+    `config.spoken_approval` and never `config.enabled`, so with voice switched
+    off entirely a client could still approve a DESTRUCTIVE step by posting a
+    `spoken` block — while the guard's own comment claimed it stopped exactly
+    that. The level here is the most permissive one there is; only the master
+    switch is off."""
+    await _set_level(api, "all", voice_enabled=False)
+    plan, target = await _park_a_delete(api, tmp_path)
+
+    r = await api.post("/api/agent/approve", json={
+        "plan_id": plan["id"], "approved": True,
+        "spoken": {"contract_hash": plan["contract_hash"], "utterance": "approve"},
+    })
+
+    assert r.status_code == 403
+    assert target.exists(), "a delete ran by voice while voice was switched OFF"
+    assert plan_store.get_plan(plan["id"]) is not None, "the card was consumed"
+
+
+def test_the_master_switch_is_folded_in_by_one_shared_function():
+    """One function rather than one more line at the call site: a second place
+    that must remember the same fact is the hole `registry.mutates`,
+    `publicsuffix.KNOWN_TLDS` and `_settle`'s status tuple each taught here."""
+    from app.agents.spoken import spoken_approval_level
+
+    class _Cfg:
+        def __init__(self, enabled, level):
+            self.enabled = enabled
+            self.spoken_approval = level
+
+    assert spoken_approval_level(_Cfg(False, "all")) == "off"
+    assert spoken_approval_level(_Cfg(False, "write")) == "off"
+    assert spoken_approval_level(_Cfg(True, "all")) == "all"
+    assert spoken_approval_level(_Cfg(True, "write")) == "write"
+    assert spoken_approval_level(_Cfg(True, "off")) == "off"
 
 
 @pytest.mark.asyncio

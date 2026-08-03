@@ -117,8 +117,14 @@ function taskHtml(t) {
   // 404'd, on exactly the tasks whose snapshot failed to round-trip. The
   // payload's id is kept only as a fallback for an older row that has one.
   const planId = t.plan_id || p.id || '';
+  // ⚠️ THE CONTRACT THIS CARD IS DRAWING (2026-08-04). `serialize_plan_for_api`
+  // stamps it on every AWAITING_APPROVAL payload; we echo it back on approve so
+  // the server can refuse if the steps moved since this snapshot was polled —
+  // the phone renders `Task.plan_payload`, which is a POLL, not a live card.
+  // Absent (a paused plan, an older row) means no echo and no check.
+  const contractHash = p.contract_hash || '';
   return `<div class="card ${waiting || asking ? 'approve' : ''}" data-task="${esc(t.id)}"
-              data-plan="${esc(planId)}">
+              data-plan="${esc(planId)}" data-contract="${esc(contractHash)}">
     <p class="goal">${esc(t.goal)}</p>
     <div class="dim">${esc(t.agent || 'Jarvis')} · ${esc(t.status)}</div>
     ${waiting ? pending.map(stepHtml).join('') : ''}
@@ -162,6 +168,7 @@ app.addEventListener('click', async (ev) => {
   if (!btn || busy) return;
   const card = btn.closest('[data-task]');
   const taskId = card.dataset.task, planId = card.dataset.plan;
+  const contractHash = card.dataset.contract;
   const err = card.querySelector('[data-err]');
   busy = true;
   card.querySelectorAll('button').forEach(b => (b.disabled = true));
@@ -169,10 +176,11 @@ app.addEventListener('click', async (ev) => {
   try {
     const act = btn.dataset.act;
     if (act === 'approve' || act === 'cancel') {
-      await api('/api/agent/approve', {
-        method: 'POST',
-        body: JSON.stringify({ plan_id: planId, approved: act === 'approve' }),
-      });
+      const body = { plan_id: planId, approved: act === 'approve' };
+      // Only on approve: cancelling is always safe whatever the steps are now,
+      // and refusing a cancel over a stale hash would strand the card.
+      if (act === 'approve' && contractHash) body.contract_hash = contractHash;
+      await api('/api/agent/approve', { method: 'POST', body: JSON.stringify(body) });
     } else if (act === 'answer') {
       const answer = card.querySelector('[data-answer]').value.trim();
       if (!answer) throw new Error('Type an answer first.');
