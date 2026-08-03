@@ -528,83 +528,125 @@ async def chat_stream(
     from app.core.timing import TurnTimer
     timer = TurnTimer("chat turn", session_id)
 
-    # --- Phase 3.5: resurrect a cold session's parked questions from SQLite
-    # BEFORE anything peeks at the session — the task gate below defers to an
-    # open memory question, so it must see a restored one too.
-    from app.memory.session_persistence import restore_pending_state, save_pending_state
-    with timer.stage("restore"):
-        await restore_pending_state(db, session_id)
+    # --- 2026-08-03: the routing audit trail (app/core/routing_trace.py).
+    # TurnTimer's persisting sibling: one row per turn saying which router took
+    # it and, when none did, WHY. Routing fails OPEN by design, so until this
+    # existed a message that should have become a task and instead became a
+    # chat reply left zero evidence anywhere — the not-doing was the one
+    # unaudited event, and a live miss on 2026-07-17 could not be root-caused
+    # because of it. Started BEFORE the chain so every router below can stamp
+    # it; written once in the finally.
+    from app.core import routing_trace
+    _user_msgs = [m.content for m in request.messages if m.role == "user"]
+    trace = routing_trace.begin(
+        session_id,
+        _user_msgs[-1] if _user_msgs else "",
+        # Mirrors what conversation_context() actually renders, so "was the
+        # classifier judging this in a conversation?" is answerable from the row.
+        has_conversation=any(
+            (m.content or "").strip() for m in request.messages[:-1]
+        ),
+    )
 
-    # --- Phase 4 Part 4: reminder detection (app/api/reminder_router.py).
-    # Runs BEFORE task routing — "remind me to delete my temp files at 6" is
-    # a reminder, not an instruction to delete anything right now. Returns a
-    # response for a recognized reminder trigger (clean or ambiguous alike);
-    # None falls through unchanged to task routing then Phase 2 chat.
-    from app.api.reminder_router import maybe_handle_reminder
-    with timer.stage("reminder_route"):
-        reminder_response = await maybe_handle_reminder(request=request, session_id=session_id, db=db)
-    if reminder_response is not None:
-        timer.log()
-        return reminder_response
+    # ⚠️ The chain lives inside try/finally so the row is written on EVERY exit
+    # — including the five early returns below, and including a router that
+    # raises. A sixth router added here is covered by construction; a per-return
+    # flush would be a sixth copy of the same call, and this project has been
+    # bitten four times by a second copy of one fact drifting from the first.
+    try:
+        # --- Phase 3.5: resurrect a cold session's parked questions from SQLite
+        # BEFORE anything peeks at the session — the task gate below defers to an
+        # open memory question, so it must see a restored one too.
+        from app.memory.session_persistence import restore_pending_state
+        with timer.stage("restore"):
+            await restore_pending_state(db, session_id)
 
-    # --- Phase 6 Part 5: routine routing (app/api/routine_router.py). Runs
-    # BETWEEN reminders and tasks — a bare routine name ("clean my desktop")
-    # must be intercepted here before the task gate re-plans it as a one-off.
-    # TEACH is deterministic (no planner); RUN starts a background Task, so the
-    # approval gate and path guards re-apply on the fresh plan automatically.
-    from app.api.routine_router import maybe_handle_routine
-    with timer.stage("routine_route"):
-        routine_response = await maybe_handle_routine(
-            request=request, session_id=session_id, db=db, provider=provider
-        )
-    if routine_response is not None:
-        timer.log()
-        return routine_response
+        # --- Phase 4 Part 4: reminder detection (app/api/reminder_router.py).
+        # Runs BEFORE task routing — "remind me to delete my temp files at 6" is
+        # a reminder, not an instruction to delete anything right now. Returns a
+        # response for a recognized reminder trigger (clean or ambiguous alike);
+        # None falls through unchanged to task routing then Phase 2 chat.
+        from app.api.reminder_router import maybe_handle_reminder
+        with timer.stage("reminder_route"):
+            reminder_response = await maybe_handle_reminder(request=request, session_id=session_id, db=db)
+        if reminder_response is not None:
+            routing_trace.note_outcome(routing_trace.OUTCOME_REMINDER)
+            timer.log()
+            return reminder_response
 
-    # --- 2026-07-29: task continuation (app/api/continuation_router.py). Runs
-    # between routines and tasks. A short correction right after a task settled
-    # ("look again", "that's not all of them") re-runs the ORIGINAL goal with
-    # the correction attached, instead of falling into chat (which cannot act)
-    # or drafting a new plan whose goal is literally "look again" — which
-    # silently disarms every guard that keys on the goal string.
-    from app.api.continuation_router import maybe_handle_continuation
-    with timer.stage("continuation_route"):
-        continuation_response = await maybe_handle_continuation(
-            request=request, session_id=session_id, db=db, provider=provider
-        )
-    if continuation_response is not None:
-        timer.log()
-        return continuation_response
+        # --- Phase 6 Part 5: routine routing (app/api/routine_router.py). Runs
+        # BETWEEN reminders and tasks — a bare routine name ("clean my desktop")
+        # must be intercepted here before the task gate re-plans it as a one-off.
+        # TEACH is deterministic (no planner); RUN starts a background Task, so the
+        # approval gate and path guards re-apply on the fresh plan automatically.
+        from app.api.routine_router import maybe_handle_routine
+        with timer.stage("routine_route"):
+            routine_response = await maybe_handle_routine(
+                request=request, session_id=session_id, db=db, provider=provider
+            )
+        if routine_response is not None:
+            routing_trace.note_outcome(routing_trace.OUTCOME_ROUTINE)
+            timer.log()
+            return routine_response
 
-    # --- 2026-08-03: mid-run interrupt (app/api/interrupt_router.py). Runs
-    # between continuation and tasks. An explicit stop word while an agent is
-    # WORKING pauses it cooperatively instead of falling into chat (which can
-    # only reassure) or — worse — passing the task gate and starting a SECOND
-    # agent alongside the one doing the wrong thing. Fires only when this
-    # session has a live running task, so "wait" and "stop" keep their ordinary
-    # meaning the rest of the time.
-    from app.api.interrupt_router import maybe_handle_interrupt
-    with timer.stage("interrupt_route"):
-        interrupt_response = await maybe_handle_interrupt(
-            request=request, session_id=session_id, db=db
-        )
-    if interrupt_response is not None:
-        timer.log()
-        return interrupt_response
+        # --- 2026-07-29: task continuation (app/api/continuation_router.py). Runs
+        # between routines and tasks. A short correction right after a task settled
+        # ("look again", "that's not all of them") re-runs the ORIGINAL goal with
+        # the correction attached, instead of falling into chat (which cannot act)
+        # or drafting a new plan whose goal is literally "look again" — which
+        # silently disarms every guard that keys on the goal string.
+        from app.api.continuation_router import maybe_handle_continuation
+        with timer.stage("continuation_route"):
+            continuation_response = await maybe_handle_continuation(
+                request=request, session_id=session_id, db=db, provider=provider
+            )
+        if continuation_response is not None:
+            routing_trace.note_outcome(routing_trace.OUTCOME_CONTINUATION)
+            timer.log()
+            return continuation_response
 
-    # --- Phase 3: task-request routing (app/api/task_router.py). Returns a
-    # response ONLY for confirmed task requests; None (the overwhelmingly
-    # common case — the deterministic gate makes no LLM call) continues into
-    # the Phase 2 path below, which is untouched. When the gate fires, this
-    # stage's duration is dominated by the classify∥memory gather.
-    from app.api.task_router import maybe_handle_task
-    with timer.stage("task_route"):
-        task_response = await maybe_handle_task(
-            request=request, session_id=session_id, db=db, provider=provider
-        )
-    if task_response is not None:
-        timer.log()
-        return task_response
+        # --- 2026-08-03: mid-run interrupt (app/api/interrupt_router.py). Runs
+        # between continuation and tasks. An explicit stop word while an agent is
+        # WORKING pauses it cooperatively instead of falling into chat (which can
+        # only reassure) or — worse — passing the task gate and starting a SECOND
+        # agent alongside the one doing the wrong thing. Fires only when this
+        # session has a live running task, so "wait" and "stop" keep their ordinary
+        # meaning the rest of the time.
+        from app.api.interrupt_router import maybe_handle_interrupt
+        with timer.stage("interrupt_route"):
+            interrupt_response = await maybe_handle_interrupt(
+                request=request, session_id=session_id, db=db
+            )
+        if interrupt_response is not None:
+            routing_trace.note_outcome(routing_trace.OUTCOME_INTERRUPT)
+            timer.log()
+            return interrupt_response
+
+        # --- Phase 3: task-request routing (app/api/task_router.py). Returns a
+        # response ONLY for confirmed task requests; None (the overwhelmingly
+        # common case — the deterministic gate makes no LLM call) continues into
+        # the Phase 2 path below, which is untouched. When the gate fires, this
+        # stage's duration is dominated by the classify∥memory gather. It stamps
+        # its own outcome (task_inline / task_background / plan_answer /
+        # approval_refused) and, on a fall-through, the fail_open_reason —
+        # which is the whole point of the trail.
+        from app.api.task_router import maybe_handle_task
+        with timer.stage("task_route"):
+            task_response = await maybe_handle_task(
+                request=request, session_id=session_id, db=db, provider=provider
+            )
+        if task_response is not None:
+            timer.log()
+            return task_response
+    except Exception:
+        routing_trace.note_outcome(routing_trace.OUTCOME_ERROR)
+        raise
+    finally:
+        # Best-effort by contract: logs, rolls back, never raises. Observability
+        # must never be able to cost a turn.
+        await routing_trace.flush(db, trace)
+
+    from app.memory.session_persistence import save_pending_state
 
     # --- Phase 2: Build memory context and update state
     from app.memory.conversation_state import get_session, touch_session, ActiveEntity
@@ -1084,6 +1126,14 @@ async def chat_stream(
                     last_user_msg, request, session_id, db, provider
                 ):
                     yield sse
+                # A fired rescue IS a routing miss with a name: routing sent this
+                # turn to chat, and the chat model itself said it needed the web.
+                # Recorded by CLOSURE over `trace`, deliberately not through the
+                # ContextVar — a StreamingResponse's generator is not guaranteed
+                # to run in the request's context.
+                await routing_trace.note_stream_outcome(
+                    db, trace, rescue_fired=True, rescue_ok=True
+                )
                 timer.log()
                 # The plan path sent its own done chunk and persisted its own
                 # outcome. The chat prefix is deliberately NOT persisted: it
@@ -1096,6 +1146,9 @@ async def chat_stream(
                 # honest deterministic text below, which at least does not
                 # send the user hunting for a magic word.
                 logger.error(f"Web rescue failed: {e}")
+                await routing_trace.note_stream_outcome(
+                    db, trace, rescue_fired=True, rescue_ok=False
+                )
                 full_response.append(_DEAD_END_FALLBACK)
                 fallback_chunk = StreamChunk(
                     delta=_DEAD_END_FALLBACK, done=False, session_id=session_id,
@@ -1104,6 +1157,12 @@ async def chat_stream(
                 yield f"data: {fallback_chunk.model_dump_json()}\n\n"
 
         if impersonation:
+            # The chat LLM fabricated a task/reminder lifecycle. That is what a
+            # routing miss looks like from the user's seat, so it belongs on the
+            # same row as the routing decision that produced this turn.
+            await routing_trace.note_stream_outcome(
+                db, trace, impersonation_cut=True
+            )
             full_response.append(_IMPERSONATION_CORRECTION)
             correction_chunk = StreamChunk(
                 delta=_IMPERSONATION_CORRECTION,

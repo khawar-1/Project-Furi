@@ -4,7 +4,7 @@
  * Facts can be searched, added manually, or deleted.
  */
 import { useEffect, useState } from 'react';
-import { User, Plus, Search, Trash2, Brain, RefreshCw, Tag, X } from 'lucide-react';
+import { User, Plus, Search, Trash2, Brain, RefreshCw, Tag, X, Archive, RotateCcw } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useMemoryStore } from '@/stores/memoryStore';
 import type { MemoryCategory, SemanticMemory } from '@/types';
@@ -333,7 +333,71 @@ export function MemoryExplorer() {
             onDelete={deleteFact}
           />
         ))}
+
+        <ArchivedFacts />
       </div>
+    </div>
+  );
+}
+
+/**
+ * Facts the housekeeping pass set aside — long unused, hidden from what Jarvis
+ * recalls, and NEVER deleted.
+ *
+ * ⚠️ THIS SECTION IS THE REASON THE ARCHIVE IS ACCEPTABLE AT ALL. An automatic
+ * process that quietly stops Jarvis recalling things, with no way to see what
+ * it took or put it back, is indistinguishable from data loss. Collapsed by
+ * default (it is housekeeping, not the user's actual facts) and hidden entirely
+ * when nothing has been archived — which is the normal state.
+ */
+function ArchivedFacts() {
+  const { archived, loadArchived, restoreFact } = useMemoryStore();
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    loadArchived();
+  }, [loadArchived]);
+
+  if (archived.length === 0) return null;
+
+  return (
+    <div className="mt-8 pt-6 border-t border-surface-border">
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="flex items-center gap-2 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+      >
+        <Archive size={13} />
+        <span>
+          {archived.length} archived {archived.length === 1 ? 'fact' : 'facts'}
+        </span>
+        <span className="text-slate-600">{open ? '−' : '+'}</span>
+      </button>
+
+      {open && (
+        <div className="mt-3 space-y-2">
+          <p className="text-[11px] text-slate-600 leading-relaxed max-w-lg">
+            Jarvis stopped recalling these because nothing needed them for a long
+            while. Nothing was deleted — restore any of them and it goes straight
+            back into what Jarvis remembers.
+          </p>
+          {archived.map(memory => (
+            <div
+              key={memory.id}
+              className="flex items-start gap-3 px-3 py-2 rounded-lg bg-surface-1/50 border border-surface-border"
+            >
+              <p className="flex-1 text-xs text-slate-500 leading-relaxed">{memory.content}</p>
+              <button
+                onClick={() => void restoreFact(memory.id)}
+                className="shrink-0 flex items-center gap-1 px-2 py-1 rounded text-[11px] text-cyan-400 hover:bg-cyan-500/10 transition-colors"
+                title="Put this back into what Jarvis remembers"
+              >
+                <RotateCcw size={11} />
+                Restore
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

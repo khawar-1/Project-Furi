@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from app.core.app_settings import (
     VOICE_DEVICES,
+    VOICE_SPOKEN_APPROVAL_LEVELS,
     VOICE_STT_COMPUTE_TYPES,
     VOICE_STT_MODELS,
     VOICE_TTS_VOICE_IDS,
@@ -115,6 +116,9 @@ class VoiceUpdate(BaseModel):
     # Phase 12 ambient fields — defaulted so an older-shaped PUT stays valid.
     continuous_conversation: bool = False
     wake_word: bool = False
+    # How far spoken consent may go: off | write | all. Defaulted to the
+    # SAFE end so an older-shaped PUT can never widen it by omission.
+    spoken_approval: str = "off"
 
 
 async def _voice_payload(db) -> dict:
@@ -137,10 +141,12 @@ async def _voice_payload(db) -> dict:
         "stt_compute_type": config.stt_compute_type,
         "continuous_conversation": config.continuous_conversation,
         "wake_word": config.wake_word,
+        "spoken_approval": config.spoken_approval,
         "stt_models": list(VOICE_STT_MODELS),
         "voices": [{"id": vid, "label": label} for vid, label in VOICE_TTS_VOICES],
         "devices": list(VOICE_DEVICES),
         "stt_compute_types": list(VOICE_STT_COMPUTE_TYPES),
+        "spoken_approval_levels": list(VOICE_SPOKEN_APPROVAL_LEVELS),
         "stt_status": stt_status(),
         "tts_status": tts_status(),
     }
@@ -171,6 +177,13 @@ async def put_voice(update: VoiceUpdate, db=Depends(get_db)) -> dict:
         if update.stt_compute_type in VOICE_STT_COMPUTE_TYPES
         else "auto"
     )
+    # An unknown level falls back to "off" — the safe end, matching the
+    # coercer. Consent settings never fail open.
+    spoken_approval = (
+        update.spoken_approval
+        if update.spoken_approval in VOICE_SPOKEN_APPROVAL_LEVELS
+        else "off"
+    )
     await set_voice_config(db, VoiceConfig(
         enabled=update.enabled,
         stt_model=update.stt_model,
@@ -186,6 +199,7 @@ async def put_voice(update: VoiceUpdate, db=Depends(get_db)) -> dict:
         stt_compute_type=stt_compute,
         continuous_conversation=update.continuous_conversation,
         wake_word=update.wake_word,
+        spoken_approval=spoken_approval,
     ))
     # Enabling (or switching device) kicks the model load NOW — the FileIndexCard
     # enable-flow lesson: a toggle that silently does nothing until some later

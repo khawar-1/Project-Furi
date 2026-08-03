@@ -1,0 +1,27 @@
+What is built (verified against the tree): 20 DB models, 27 API routers, ~36 tools, 3057 tests. Memory engine with identity resolution · agent planner with a structural approval gate · reminders, scheduler, background domain agents with pause/steer/cancel · Gmail + Calendar + daily briefing · web search with fan-out and fabrication guards · file + conversation semantic index · routines with schedules · initiative engine · context layer · voice in and out on GPU with a wake word · and a real multi-tab browser that fills forms and submits them behind per-gesture approval.
+
+That is further than most "AI assistant" projects get. The gaps left are not mostly features.
+
+Tier 1 — the things that stop this being Jarvis rather than a very good local agent
+
+1. It cannot be installed. package.json build.files lists only dist-electron and frontend/dist — the backend is not packaged — and electron/main.ts:74-78 spawns the system python -m uvicorn from app.getAppPath()/backend. So npm run build produces an app that cannot start. No auto-update, no signing, no bundled Python. Right now it runs on exactly one machine because it was built there.
+
+2. It stops thinking when one API is down. factory.py picks one provider from .env and there is no fallback chain anywhere — no ladder, no local degradation, even though Ollama is already implemented. The 2026-07-26 DNS round proved the failure is legible now; it is still fatal. Jarvis never says the provider is unreachable.
+
+3. Routing is unaudited — your own recorded open gap. ActivityLog captures tool calls, so a fail-open to chat leaves zero evidence. CLAUDE.md says it plainly: for a system whose main failure mode is it did not do the thing, the not-doing is the one thing unaudited — and on 2026-07-17 a live miss genuinely could not be root-caused because of it. This is the highest leverage item on the list: it converts future incidents from archaeology into a query.
+
+4. Nothing outside the browser is measurable. browse_bench.py is a scored gate with real numbers; there is no equivalent for routing, planning or memory. Given how many rounds in CLAUDE.md end with measured at ZERO, a scored task suite for the router and planner is what makes every future prompt or model change provable instead of hopeful.
+
+Tier 2 — reach and judgement
+
+5. One machine, one room. BACKEND_HOST stays 127.0.0.1 and should — it runs shell commands. But that means no phone, no away-from-desk, and film Jarvis is ambient. The honest version is a narrow authenticated remote surface (read + approve + ask, never a shell), designed with the same care the auth-token round used.
+
+6. Nothing learns from failure. file_intelligence learns folders and routines learn procedures — both narrow. Every failed plan, every rejected revision, every dead end is already in ActivityLog and nothing reads it back. That is the closest available thing to it gets better at working for you.
+
+7. Memory only grows. No decay, no consolidation, no summarising of old episodes, and conflict handling is supersede-only. At year three the MEMORY CONTEXT block is the bottleneck.
+
+8. Approval needs a screen. Voice is a first-class input, but a destructive step still requires eyes on a card. Reading the full contract aloud and taking a spoken yes — with the same one-shot, signature-bound semantics — is what makes hands-free real.
+
+Tier 3 — capability breadth (the visible half, and the cheapest)
+
+Messaging beyond email (WhatsApp/Slack/Telegram — the browser stack can already reach WhatsApp Web under the existing gates) · real documents and spreadsheets rather than create_file · music/media control · home and IoT, the single most iconic Jarvis capability and entirely absent · and a guided first run, because today a new user gets a chat box with indexing, voice, sensing and initiative all correctly off.

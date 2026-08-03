@@ -10,12 +10,22 @@ import { memoryApi } from '@/lib/api';
 interface AboutMeState {
   // State
   memories: SemanticMemory[];
+  /**
+   * Facts the housekeeping pass set aside — long unused, hidden from retrieval,
+   * NEVER deleted. Kept as its own list rather than mixed into `memories`,
+   * because that separation is what "archived" means. This is the trust
+   * surface: an automatic tidy-up nobody can inspect is indistinguishable from
+   * data loss.
+   */
+  archived: SemanticMemory[];
   isLoading: boolean;
   searchQuery: string;
   error: string | null;
 
   // Actions
   loadFacts: () => Promise<void>;
+  loadArchived: () => Promise<void>;
+  restoreFact: (id: string) => Promise<void>;
   searchFacts: (q: string) => Promise<void>;
   addFact: (content: string, category?: string) => Promise<void>;
   deleteFact: (id: string) => Promise<void>;
@@ -24,6 +34,7 @@ interface AboutMeState {
 
 export const useMemoryStore = create<AboutMeState>((set, get) => ({
   memories: [],
+  archived: [],
   isLoading: false,
   searchQuery: '',
   error: null,
@@ -37,6 +48,23 @@ export const useMemoryStore = create<AboutMeState>((set, get) => ({
     } catch (e) {
       set({ error: String(e), isLoading: false });
     }
+  },
+
+  loadArchived: async () => {
+    try {
+      const result = await memoryApi.archived();
+      set({ archived: result.memories });
+    } catch (e) {
+      // Best-effort: the archived list is an audit view, and failing to load it
+      // must never break the panel that shows the user's actual facts.
+      set({ archived: [] });
+    }
+  },
+
+  restoreFact: async (id: string) => {
+    await memoryApi.restore(id);
+    // Reload both: the fact leaves the archive AND rejoins the live list.
+    await Promise.all([get().loadArchived(), get().loadFacts()]);
   },
 
   searchFacts: async (q: string) => {

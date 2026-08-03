@@ -51,6 +51,16 @@ results — the same data the revise LLM would have been shown:
   — never from read email content — which keeps the planner's recipient-
   grounding rule true on the code path too.
 
+⚠️ ONE PART OF THIS MODULE IS NOT ABOUT PLACEHOLDERS AT ALL. The bulk-mutation
+scope rules — `mutation_scope`, and `scope_concrete_list` / `apply_list_scope`
+on top of it — apply to a batch file list HOWEVER it was authored, including
+one a revise/refine round wrote out concretely with no `PENDING:` anywhere.
+They live here because they belong with `partition_by_depth` and the pool
+logic, but `planner._execute_node` calls them on every pass, independently of
+whether a placeholder was ever present. That independence IS the fix: from
+2026-07-29 to 2026-08-03 they were reachable only through `resolve()`, and
+scripts/plan_bench.py reproduced the consequence 5/5 runs.
+
 Resolution is CONSERVATIVE: anything ambiguous returns None and the existing
 LLM replan path takes over (unchanged behavior). Extension tokens inside a
 placeholder ("PENDING: .txt file paths") filter the candidate files — except
@@ -62,7 +72,7 @@ long-term memory is data, and data must never narrow the user's request).
 import os
 import re
 from pathlib import PurePath
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from loguru import logger
 
@@ -98,8 +108,15 @@ _BATCH_TOOLS = {
 }
 
 # The batch tools' own list parameters — for when the LLM drafts move_files
-# directly with a PENDING placeholder instead of the singular form.
+# directly with a PENDING placeholder instead of the singular form, and (since
+# 2026-08-03) for scoping a list the model wrote out concretely.
 _LIST_PARAMS = {"move_files": "sources", "delete_files": "paths"}
+
+# A mutating tool that takes a list of strings but NOT a list of files. Written
+# down rather than implied, so `test_every_bulk_list_param_is_covered_or_exempt`
+# can walk the registry and fail when a new one belongs to neither map — the
+# shape that caught `read_file.path` on its first run in folder_resolver.
+_EXEMPT_LIST_PARAMS = {("browse_commit", "allowed_origins")}
 
 def _mutates(tool: str) -> bool:
     """Does this template CHANGE the filesystem? Two rules ride on the answer:
@@ -339,6 +356,62 @@ def partition_by_depth(
     return top, nested
 
 
+def _mutation_source(completed: list[PlanStep]) -> Optional[PlanStep]:
+    """The completed step whose results a mutation's file list came from."""
+    return next((s for s in reversed(completed) if paths_from_step(s)[0]), None)
+
+
+def mutation_scope(
+    plan: AgentPlan,
+    tool: str,
+    pool: list[str],
+    source: Optional[PlanStep],
+    grounding: str = "",
+) -> tuple[Optional[list[str]], list[str]]:
+    """The two rules that make a bulk file mutation safe, in ONE place.
+
+    Returns (kept, deferred); `kept is None` means the source cannot be
+    trusted to describe the whole set and the caller must refuse.
+
+      1. A source search that hit its own result cap describes only PART of
+         what is there. Acting on it moves or deletes a subset and reports
+         success — silently, and on the destructive path.
+      2. search_files recurses to unlimited depth, which is right for FINDING
+         and wrong as a default for MUTATING. "The PDFs in Downloads" means
+         the ones in Downloads; anything deeper is a separate, explicit ask,
+         and the user's own words ("include subfolders") are what overrides it.
+
+    ⚠️ THIS FUNCTION EXISTS BECAUSE THE RULES KEPT BEING REACHABLE FROM ONLY
+    ONE SHAPE OF THE OPERATION. 2026-07-30 they keyed on a hand-listed set of
+    SINGULAR tool names and the planner had just been told to draft the plural
+    ones. 2026-08-03 scripts/plan_bench.py reproduced the identical OUTCOME
+    5/5 runs from a completely different direction: they lived inside
+    `_file_pool`, which only `resolve()` calls, so a revise round that wrote
+    the CONCRETE list itself — no `PENDING:` placeholder anywhere, and the
+    logs show `_revise_node … (refine)` and never "Placeholder resolved in
+    code" — skipped both rules AND the "excluded N nested files" note. Third
+    instance of one defect class. So the rules now take a POOL rather than a
+    step, and both entry points (`_file_pool` for a placeholder, and
+    `scope_concrete_list` for a list the model wrote) are thin callers.
+    """
+    if not _mutates(tool):
+        return pool, []
+    output = source.result.output if source is not None and source.result else None
+    if isinstance(output, dict) and output.get("truncated"):
+        return None, []
+    corpus = " ".join(
+        [plan.goal or "", grounding or "", " ".join(plan.user_answers or [])]
+    )
+    if _RECURSIVE_CUE_RE.search(corpus):
+        return pool, []  # the user asked for the nested ones
+    top, nested = partition_by_depth(
+        pool, _searched_roots(source) if source is not None else []
+    )
+    # Narrowing to nothing is worse than the default: a search that returned
+    # only nested files was scoped that way on purpose.
+    return (top, nested) if top else (pool, [])
+
+
 def _file_pool(
     plan: AgentPlan,
     template: PlanStep,
@@ -352,7 +425,7 @@ def _file_pool(
     replan path. `[]` means the source genuinely found nothing, which is an
     outcome rather than a failure. Shared by the per-file and batch branches so
     the goal-fidelity rules cannot drift between them."""
-    source = next((s for s in reversed(completed) if paths_from_step(s)[0]), None)
+    source = _mutation_source(completed)
     if source is None:
         # No completed step produced any file. If a search/list DID run and
         # found nothing, "each found file" is honestly zero steps — the plan
@@ -360,16 +433,6 @@ def _file_pool(
         if any(s.tool in ("search_files", "list_directory") for s in completed):
             return [], []
         return None, []  # nothing to draw from — the LLM replan path decides
-
-    # A source that hit its own result cap describes only PART of what is
-    # there. Expanding a mutation over it would move/delete a subset and
-    # report success — silently, and on the destructive path. Refuse; the
-    # replan sees the "(more exist — the list was truncated)" line the
-    # renderer already emits and can re-scope.
-    output = source.result.output if source.result else None
-    mutates = _mutates(template.tool)
-    if mutates and isinstance(output, dict) and output.get("truncated"):
-        return None, []
 
     pool = paths_from_step(source)[0]
     placeholder_text = str(template.parameters.get(key) or "")
@@ -387,18 +450,7 @@ def _file_pool(
             return None, []  # the filter matches nothing found — ask the LLM
         pool = filtered
 
-    deferred: list[str] = []
-    if mutates:
-        corpus = " ".join(
-            [plan.goal or "", grounding or "", " ".join(plan.user_answers or [])]
-        )
-        if not _RECURSIVE_CUE_RE.search(corpus):
-            top, nested = partition_by_depth(pool, _searched_roots(source))
-            # Narrowing to nothing is worse than the default: a search that
-            # returned only nested files was scoped that way on purpose.
-            if top:
-                pool, deferred = top, nested
-    return pool, deferred
+    return mutation_scope(plan, template.tool, pool, source, grounding)
 
 
 def _human_bytes(total: int) -> str:
@@ -446,6 +498,37 @@ def _describe_batch(
     )
 
 
+def stamp_batch_contract(
+    step: PlanStep,
+    tool: str,
+    list_key: str,
+    paths: list[str],
+    deferred: list[str],
+) -> None:
+    """Write a batch step's file list AND everything the user reads about it.
+
+    ⚠️ The list, the description and the action_detail are ONE contract, and
+    every one of them has to move together. `action_detail` is what binds the
+    approval, but `description` is the sentence on the card, and 2026-08-01
+    shipped a substitution that changed only the parameters — the card said
+    "into C:\\Users\\DELL\\Downloads" above a step moving files to D:. Same
+    class as the browse round one day later, where the card named one site
+    while acting on another. So there is one function and both callers use it.
+
+    Scalars keep their order and the LIST GOES LAST: `planner._missing_target`
+    walks parameters.values() in insertion order, so a missing `destination`
+    must be the path-like candidate it finds — not the first of 85 sources.
+    """
+    from app.agents.planner import _step_action_detail  # runtime import — no cycle
+
+    scalars = {k: v for k, v in step.parameters.items() if k != list_key}
+    scalars[list_key] = list(paths)
+    step.parameters = scalars
+    destination = str(step.parameters.get("destination") or "")
+    step.description = _describe_batch(tool, paths, destination, deferred)
+    step.action_detail = _step_action_detail(tool, step.parameters)
+
+
 def _batch_step(
     template: PlanStep,
     tool: str,
@@ -461,27 +544,24 @@ def _batch_step(
     permission level comes from the REGISTRY, never copied from the template:
     `schemas.py` puts that trust boundary in the registry, and a copy would
     silently under-classify a batch tool the day one is reclassified."""
-    from app.agents.planner import _step_action_detail  # runtime import — no cycle
-    from app.tools.registry import registry             # ditto
+    from app.tools.registry import registry  # runtime import — no cycle
 
     spec = registry.get(tool)
     level = spec.permission_level if spec is not None else template.permission_level
-    # Scalars FIRST, the list LAST: planner._missing_target walks
-    # parameters.values() in insertion order, so a missing `destination` must
-    # be the path-like candidate it finds — not the first of 85 sources.
     parameters: dict[str, Any] = {
         k: v for k, v in template.parameters.items() if k != single_key
     }
-    parameters[list_key] = list(paths)
-    destination = str(parameters.get("destination") or "")
-    return PlanStep(
-        description=_describe_batch(tool, paths, destination, deferred),
+    step = PlanStep(
+        description="",
         tool=tool,
         parameters=parameters,
         permission_level=level,
         requires_approval=level != PermissionLevel.READ,
-        action_detail=_step_action_detail(tool, parameters),
     )
+    # The list, the description and the action_detail are one contract —
+    # written in one place so the two callers cannot drift.
+    stamp_batch_contract(step, tool, list_key, paths, deferred)
+    return step
 
 
 def _expand_files(
@@ -765,6 +845,84 @@ def _placeholder_list_key(template: PlanStep) -> Optional[str]:
     ):
         return key
     return None
+
+
+class ListScope(NamedTuple):
+    """The scope rules' verdict on a batch step's ALREADY-CONCRETE file list.
+
+    `refuse` non-empty ⇒ fail the step with that reason. Otherwise `kept` is
+    the list the step should carry and `deferred` is what was left out.
+    """
+
+    kept: list[str]
+    deferred: list[str]
+    refuse: str = ""
+
+
+_TRUNCATED_SOURCE_ERROR = (
+    "The search that produced this file list stopped at its result cap, so the "
+    "list describes only part of what is there. Acting on a knowingly partial "
+    "set and reporting success would be wrong. Narrow the search — a more "
+    "specific folder, or a filter — so it returns everything, then act on that."
+)
+
+
+def scope_concrete_list(
+    plan: AgentPlan, index: int, grounding: str = ""
+) -> Optional[ListScope]:
+    """Apply the bulk-mutation scope rules to a list the MODEL wrote itself.
+
+    `resolve()` above only ever runs on a step still carrying a `PENDING:`
+    placeholder. A revise/refine round that fills the concrete list instead
+    reaches execution with no placeholder at all — so `mutation_scope` was
+    never consulted, and scripts/plan_bench.py reproduced the consequence 5/5
+    runs on 2026-08-03: "move all the pdf files in downloads into pdfs" moved
+    all 14 matches including two from inside `downloads/project-src/assets`,
+    with no partition, no truncated-source refusal, and no "excluded N nested
+    files" note on the approval card.
+
+    Returns None when there is nothing to say — not a batch mutation, no list,
+    a list still holding placeholders (that is `resolve()`'s job), or a list
+    the rules leave exactly as it is. Returning None on an unchanged list is
+    what makes this safe to run on EVERY pass of the execute loop: the second
+    pass must not re-stamp a description whose "N more sit inside subfolders"
+    note it can no longer derive, because by then the nested files are gone
+    from the list.
+
+    Never raises — scope is best-effort, like every other pre-execution guard.
+    """
+    try:
+        step = plan.steps[index]
+        list_key = _LIST_PARAMS.get(step.tool)
+        if list_key is None:
+            return None
+        current = step.parameters.get(list_key)
+        if not isinstance(current, list) or not current:
+            return None
+        if not all(isinstance(p, str) and p for p in current):
+            return None
+        if any(_PLACEHOLDER_MARK in p.upper() for p in current):
+            return None  # resolve() owns the placeholder shape
+        completed = [
+            s for s in plan.steps[:index] if s.status == StepStatus.COMPLETED
+        ]
+        kept, deferred = mutation_scope(
+            plan, step.tool, list(current), _mutation_source(completed), grounding
+        )
+        if kept is None:
+            return ListScope([], [], refuse=_TRUNCATED_SOURCE_ERROR)
+        if not deferred and kept == list(current):
+            return None
+        return ListScope(kept, deferred)
+    except Exception as e:  # pragma: no cover — belt: never break the planner
+        logger.warning(f"Bulk-mutation scoping crashed (leaving the step as-is): {e}")
+        return None
+
+
+def apply_list_scope(step: PlanStep, scope: ListScope) -> None:
+    """Narrow a batch step to the scoped list and refresh its whole contract."""
+    list_key = _LIST_PARAMS[step.tool]
+    stamp_batch_contract(step, step.tool, list_key, scope.kept, scope.deferred)
 
 
 def resolve(

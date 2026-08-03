@@ -230,6 +230,9 @@ const MAX_SYNTH_IN_FLIGHT = 2;
 let segmenter: SentenceSegmenter | null = null;
 let speakingTurn = false;
 let nextTurnVoice = false;
+/** An approval contract was spoken for this turn — the rest of the turn is
+ *  deliberately NOT spoken (see speakContractInsteadOfTurn). */
+let contractSpoken = false;
 let queue: QueueItem[] = [];
 let playing = false;
 /** The item currently being played — no longer in `queue`, but barge-in must
@@ -277,15 +280,37 @@ export function beginTurn(): void {
     !!settings.output_enabled &&
     (voiceInitiated || !!settings.speak_all_responses);
   segmenter = speakingTurn ? new SentenceSegmenter() : null;
+  contractSpoken = false;
 }
 
 /** One streamed delta (the single chatStore tap). Plan chunks never reach
  *  this — the plan branch returns before the delta append. */
 export function onDelta(delta: string): void {
-  if (!speakingTurn || !segmenter || !delta) return;
+  if (!speakingTurn || !segmenter || !delta || contractSpoken) return;
   for (const sentence of segmenter.push(delta)) {
     enqueue(sentence);
   }
+}
+
+/**
+ * Speak an approval contract INSTEAD of the rest of this turn.
+ *
+ * ⚠️ THE SUPPRESSION IS THE POINT. An approval pause streams its
+ * `deterministic_plan_text` as an ordinary delta, so today the VISUAL contract
+ * is what gets read aloud — a numbered list of full paths that
+ * `sanitize_for_speech` reduces to a run of bare filenames with no shape. The
+ * spoken form says the same facts in words a person can hold. Speaking BOTH
+ * would be worse than either.
+ *
+ * Reset by beginTurn/endTurn/cancelTurn, so the suppression can never leak
+ * into the next turn.
+ */
+export function speakContractInsteadOfTurn(text: string): void {
+  const trimmed = text.trim();
+  if (!speakingTurn || !trimmed) return;
+  contractSpoken = true;
+  segmenter = null; // nothing more from this turn is spoken
+  enqueue(trimmed.slice(0, MAX_SPEAK_CHARS));
 }
 
 /** The stream finished — speak the remainder. */
@@ -296,6 +321,7 @@ export function endTurn(): void {
   }
   speakingTurn = false;
   segmenter = null;
+  contractSpoken = false;
 }
 
 /** The stream errored — stop queueing new sentences; anything already
@@ -303,6 +329,7 @@ export function endTurn(): void {
 export function cancelTurn(): void {
   speakingTurn = false;
   segmenter = null;
+  contractSpoken = false;
 }
 
 /** The server's /speak limit — a longer request would 400 and be skipped. */

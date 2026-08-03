@@ -26,6 +26,8 @@ import type {
   Preference,
   Reminder,
   ReminderStatus,
+  RemotePairResult,
+  RemoteStatus,
   Routine,
   RoutineSchedule,
   Suggestion,
@@ -180,6 +182,14 @@ export const memoryApi = {
   delete: (id: string): Promise<{ deleted: string }> =>
     apiFetch(`/memory/${id}`, { method: 'DELETE' }),
 
+  /** Facts the housekeeping pass set aside — long unused, never deleted. */
+  archived: (limit = 100): Promise<MemorySearchResult> =>
+    apiFetch<MemorySearchResult>(`/memory/archived?limit=${limit}`),
+
+  /** Put an archived fact back into retrieval. The undo half. */
+  restore: (id: string): Promise<{ restored: boolean; id: string }> =>
+    apiFetch(`/memory/${id}/restore`, { method: 'POST' }),
+
   stats: (): Promise<MemoryStats> => apiFetch<MemoryStats>('/memory/stats'),
 };
 
@@ -228,6 +238,29 @@ export const agentApi = {
     apiFetch<AgentPlan>('/api/agent/approve', {
       method: 'POST',
       body: JSON.stringify({ plan_id: planId, approved }),
+    }),
+
+  /**
+   * Approve a plan OFF the card — by voice, echoing the hash of the contract
+   * that was read aloud plus what the user actually said.
+   *
+   * ⚠️ The server decides everything: whether the words are consent, whether
+   * the setting permits it, and whether the hash still matches the pending
+   * steps. A refusal (403 / 409 / 422) leaves the plan parked and the card
+   * clickable, so the caller must fall through to the normal chat path.
+   */
+  approveSpoken: (
+    planId: string,
+    contractHash: string,
+    utterance: string
+  ): Promise<AgentPlan> =>
+    apiFetch<AgentPlan>('/api/agent/approve', {
+      method: 'POST',
+      body: JSON.stringify({
+        plan_id: planId,
+        approved: true,
+        spoken: { contract_hash: contractHash, utterance },
+      }),
     }),
 
   /** Answer a plan's clarifying question ("which notes.txt?"). Also consumes
@@ -404,6 +437,29 @@ export const integrationsApi = {
   /** Revokes at Google (best-effort) and deletes the local token. */
   googleDisconnect: (): Promise<{ disconnected: boolean; revoked: boolean }> =>
     apiFetch('/api/integrations/google/disconnect', { method: 'POST' }),
+};
+
+// ============================================================
+// Remote surface (Tier 2 item 5 — pair a phone)
+// ============================================================
+/** ⚠️ These routes live on the LOCAL app only — they are in
+ *  `remote_manifest.DENIED`, so a paired phone can neither pair another device
+ *  nor undo its own revocation. Pairing happens at the machine, by design. */
+export const remoteApi = {
+  /** Listener state + the paired devices. Purely local (config + a k/v row). */
+  status: (): Promise<RemoteStatus> => apiFetch<RemoteStatus>('/api/remote'),
+
+  /** Creates a device. ⚠️ The response carries the token, its link and the QR
+   *  ONCE — only the hash is stored, and nothing can reissue them. */
+  pair: (name: string): Promise<RemotePairResult> =>
+    apiFetch<RemotePairResult>('/api/remote/pair', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
+  /** Takes effect on the device's very next request. */
+  revoke: (deviceId: string): Promise<{ revoked: boolean; id: string }> =>
+    apiFetch(`/api/remote/${deviceId}`, { method: 'DELETE' }),
 };
 
 // ============================================================
@@ -621,6 +677,7 @@ export interface VoiceUpdateBody {
   stt_compute_type: string;
   continuous_conversation: boolean;
   wake_word: boolean;
+  spoken_approval: string;
 }
 
 /** Build the complete PUT body from the current settings plus a patch — the
@@ -646,6 +703,7 @@ export function voiceUpdatePayload(
     stt_compute_type: settings.stt_compute_type,
     continuous_conversation: settings.continuous_conversation,
     wake_word: settings.wake_word,
+    spoken_approval: settings.spoken_approval,
     ...patch,
   };
 }

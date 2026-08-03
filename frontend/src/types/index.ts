@@ -81,6 +81,12 @@ export interface SemanticMemory {
   confidence: number;
   is_active: boolean;
   created_at: string;
+  // Reversible archive (2026-08-03). `archived_at` set = long unused, hidden
+  // from retrieval, NOT deleted — the row and its vector are untouched and one
+  // click restores it. Distinct from `is_active: false`, which is a soft delete
+  // meaning a newer fact replaced this one.
+  last_used_at?: string | null;
+  archived_at?: string | null;
 }
 
 export interface MemorySearchResult {
@@ -243,6 +249,14 @@ export interface AgentPlan {
    *  "…then tell me how many" was never delivered (live bug 2026-07-12).
    *  Null while paused/cancelled (the card carries those states live). */
   outcome_text?: string | null;
+  /** The approval contract in SPOKEN form — the same facts as the card, in
+   *  words a person can hold by ear. Present only while awaiting approval. */
+  spoken_contract?: string;
+  /** Hash of the pending steps' signatures (2026-08-03). A client that heard
+   *  the contract echoes this back to approve OFF the card; the server
+   *  re-derives it and refuses a stale one, so consent stays bound to the
+   *  exact steps that were presented. Present only while awaiting approval. */
+  contract_hash?: string;
 }
 
 /** Payload of a "task" push event (Phase 4, Part 5) — a background task
@@ -450,6 +464,45 @@ export type GoogleConnectResult =
   | 'in_progress'
   | 'not_configured';
 
+// ============================================================
+// Remote surface (Tier 2 item 5 — approve from your phone)
+// ============================================================
+export interface RemoteDevice {
+  id: string;
+  name: string;
+  created_at: string;
+  expires_at: string;
+  last_seen_at: string | null;
+  revoked: boolean;
+  /** Not revoked AND not expired. The server decides this — never re-derive
+   *  it from `expires_at` here, or the two answers can disagree. */
+  live: boolean;
+}
+
+export interface RemoteStatus {
+  /** From .env, NOT a runtime setting — the card can report it, never flip it. */
+  enabled: boolean;
+  /** The BIND host, normally the 0.0.0.0 wildcard. Not typeable; show
+   *  `address` instead. */
+  host: string;
+  port: number;
+  /** Where a phone would actually reach it, resolved server-side. */
+  address: string;
+  max_devices: number;
+  devices: RemoteDevice[];
+}
+
+/** ⚠️ `token`, `url` and `qr` exist in this response and NOWHERE ELSE — only
+ *  the token's hash is stored. There is no route that regenerates them. */
+export interface RemotePairResult extends RemoteDevice {
+  token: string;
+  url: string;
+  /** A data: URI SVG, or null when the optional `segno` package is absent —
+   *  in which case the link alone still completes pairing. */
+  qr: string | null;
+  note: string;
+}
+
 // Phase 5 Part 6 — daily briefing settings
 export interface BriefingSettings {
   enabled: boolean;
@@ -523,6 +576,9 @@ export interface VoiceSettings {
   voice: string;
   /** Part 5: speak server-initiated pushes (reminders, briefings). */
   speak_proactive: boolean;
+  /** How far spoken consent may go: 'off' | 'write' | 'all'. Default 'off'.
+   *  The SERVER enforces this — the client only renders the control. */
+  spoken_approval: string;
   /** Part 4: speak TYPED turns too (voice-initiated turns always speak). */
   speak_all_responses: boolean;
   /** Part 5: start a hands-free recording when the global hotkey summons

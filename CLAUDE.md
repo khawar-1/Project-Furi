@@ -2907,6 +2907,909 @@ the Initiative Engine as new gatherers/candidates; only 11.3 adds a store.
   + mark-nudged). 1398 tests green; runtime-verified live: boot + migration,
   `/api/threads` create/dedupe/resolve/400, `next_check = event_date + 1 day`.
 
+### The not-doing is now audited, and routing has a number (2026-08-03)
+Two recorded gaps, closed together because they are one problem seen from two
+sides: **routing was unaudited**, and **nothing outside the browser was
+measurable**. `ActivityLog` records every tool call, so every path where Jarvis
+*acts* leaves evidence — but routing fails OPEN by design, five routers each
+`return None` silently, and `maybe_handle_task` had two exits that produced an
+ordinary chat reply and no row anywhere. `logger.info("Chat message routed to…")`
+fires AFTER the CHAT return, so only successes were ever logged. On 2026-07-17 a
+live miss genuinely could not be root-caused from data.
+
+- **THE LOAD-BEARING MOVE: `task_router.decide_route()`.** `maybe_handle_task`
+  interleaved deciding and dispatching. Split: `decide_route(goal, conversation,
+  provider, *, memory_loader, defer_check) -> RouteDecision` decides;
+  `maybe_handle_task` dispatches. The audit row IS the decision, and
+  `route_bench.py` calls **the same function the chat turn calls**. That second
+  point is the whole reason for the refactor — a bench scoring a
+  *re-implementation* of routing would be this project's FIFTH "the test drove a
+  shape the product doesn't use" defect (2026-07-17 fan-out tests that bypassed
+  the planner, 07-30 bulk tests that drove the singular tool, 08-01 a page fake
+  returning one object twice, 08-02 grid fakes with no quick-add). `memory_loader`
+  keeps the production classify∥memory gather intact while letting the bench pay
+  for neither; `defer_check` keeps the parked-question check BETWEEN the gate and
+  the classifier, where moving it later would spend an LLM call on a turn owed
+  elsewhere. Behaviour-identical: `test_task_router.py`/`test_approval_steer.py`/
+  `test_continuation_router.py` (335 tests) pass UNTOUCHED.
+- **`gate_tier()` replaces the body of `looks_like_task()`**, which is now
+  `bool(gate_tier(text))` — one implementation, so the audited reason can never
+  drift from the decision it explains (the `registry.mutates` lesson).
+- **⚠️ `fail_open_reason` IS THE POINT.** Three causes of a chat outcome were
+  indistinguishable from outside and need three different fixes: `gate_closed`
+  (the gate never fired — unfixable downstream, the classifier is never asked),
+  `classifier_chat` (the model judged it conversation), `classifier_error` (the
+  call failed and CHAT is the fail-open default). A fourth distinction inside
+  the last one: a reply starting with CHAT is a real judgement, while a blank or
+  garbled reply is a FAILURE wearing the same clothes — on a thinking model an
+  empty reply once made EVERY message fall open and Jarvis silently stopped
+  doing tasks (2026-07-13). **LIVE-PROVEN, all three, on a real backend**:
+  `how are you today` → `gate_closed`, 64ms, zero LLM calls · `i finally
+  organized my desktop` → `classifier_chat`, gate `strong_domain`, 1306ms ·
+  and with a deliberately invalid key, `delete all the tmp files…` →
+  `classifier_error` + `"RuntimeError: deepseek could not be reached … (ConnectTimeout)"`,
+  10024ms. Two identical-looking chat replies, now one SQL query apart.
+- **The column is `label`, NOT `classifier_label`** — the bare-navigation
+  shortcut decides BROWSE in code without calling the model, and a column named
+  for a component that did not run is the kind of lie this codebase keeps having
+  to unpick. `classifier_ms IS NULL` is the precise test for "no LLM call".
+  `classifier_model` is recorded so "did routing regress when we changed models?"
+  is answerable (deepseek-chat → deepseek-v4-flash, 2026-07-24).
+- **`app/core/routing_trace.py` is `timing.py`'s persisting sibling** — one
+  object per turn, stamped as it progresses, best-effort throughout. **⚠️ THE
+  CONTEXTVAR RULE: set it ONCE at the top of the turn, then only ever MUTATE the
+  object it points at.** `_classify_message` runs inside an `asyncio.gather`, and
+  a child task gets a COPY of the context — a `.set()` there would not propagate
+  back out while mutating the shared object does. If that ever breaks, every
+  `classifier_*` field silently stops being recorded on real turns while every
+  other test still passes, so it has its own test. Stamping is a NO-OP with no
+  trace current, so every router stays callable from tests and scripts with no
+  fixture. Writing follows `db/persist.py` exactly: log, ROLL BACK, return
+  False — never raise (a poisoned session is the 2026-07-12 incident).
+- **Instrumentation is TWO files.** `chat.py` wraps the router chain in
+  `try/finally` and flushes there, so all five early returns and a raising router
+  are covered *by construction* — a sixth router added inside is covered too,
+  where a per-return flush would be a sixth copy of one fact. The streaming
+  generator records `rescue_fired`/`impersonation_cut` by CLOSURE over the trace,
+  deliberately not through the ContextVar (a StreamingResponse's generator is not
+  guaranteed to run in the request's context). Those two are the known
+  miss-symptoms: a fired rescue means routing missed a web turn and the backstop
+  caught it; an impersonation cut means the chat LLM fabricated a task lifecycle.
+- Retention: `housekeeping.py` gains a fourth step, 30 days
+  (`scheduled_jobs` precedent). API: `GET /api/activity/routing` — **declared
+  BEFORE `/{session_id}`**, or "routing" is read as a session id and the endpoint
+  returns `[]`, which looks exactly like "nothing has been routed". Migration
+  `c7f2a5e91d84` (head was `b8e1d3f0a2c5`). `scripts/routing_report.py`
+  summarises, and `--export-cases` turns CONFIRMED misses into bench cases — a
+  fired rescue is a WEB turn by construction, so those export FULLY LABELLED.
+- **`scripts/route_bench.py` reports THREE numbers, never one**, because the
+  decomposition IS the diagnostic: a single accuracy figure would have hidden the
+  2026-07-17 finding entirely (gate 1/8, classifier 8/8). **MEASURED baseline,
+  67 cases × 3 runs, deepseek-v4-flash: GATE RECALL 48/53 · GATE COST 5/14 (36%
+  of conversational turns cost a temp-0 call — the deliberate recall-first price,
+  never previously measured) · LABEL ACCURACY 62/67 · MODE 4/4 · END-TO-END 62/67
+  · STABILITY 62 always right, 0 FLAKY, 5 always wrong · classifier p50 1600ms,
+  max 3746ms.** All five failures are gate misses; **the classifier got 62/62 of
+  everything that reached it** — the gate is the bottleneck, not the model.
+  `--repeat` is not polish (CLAUDE.md records this exact classifier returning
+  "CHAT, BROWSE, CHAT" on one input); `--gate-only` is deterministic and free.
+  The corpus is the incident log: every message frozen here is a live failure
+  recorded above.
+- **`scripts/plan_bench.py` runs the REAL planner on a real disk**, scoring two
+  things the hermetic suite can only assert about mocks: **`no_unapproved_write`**
+  (no non-READ tool ever SUCCEEDED before approval — checked in ActivityLog AND,
+  via `files_at_pause`, on the filesystem at the moment the card appears) and
+  **`no_escape`**. Both run on EVERY case and a `known_gap` can never waive them.
+  Sandbox safety is structural: a goal without `{SANDBOX}` is REFUSED not run,
+  and USERPROFILE/HOME, `file_tools.TRASH_DIR`, `question_gate.SEARCH_ROOTS` and
+  `folder_resolver.HOME`/`DRIVES` are all repointed (a script gets none of
+  conftest's autouse fixtures). **MEASURED: every scored case passes, 1 known
+  gap, and `no_unapproved_write` HELD 5/5 — including at the pause, on disk.**
+  `ghost-file` is legitimately VARIABLE (sometimes completes with "nothing to
+  do", sometimes pauses to ask "where is it?" — the documented ask-not-fail
+  recovery); BLOCKED is reported as a hand-off, not a failure, per the
+  browse_bench precedent.
+- **⚠️ ONE OF ITS FIRST "FINDINGS" WAS THE TEST BEING WRONG, and that is worth
+  recording.** `ghost-file` asserted `status_any=[failed, awaiting_choice]` for a
+  delete whose target does not exist, and the plan came back COMPLETED — which
+  READS like the 2026-07-29 "reported Done having done nothing" incident.
+  Checking the message before reporting it settled it: *"No matching files were
+  found … nothing to do."* is `placeholder_resolver`'s DOCUMENTED behaviour ("an
+  outcome, not a failure") and is honest. The case now pins the guarantee
+  (`tools_none_of` — no delete ever ran; `pauses_for_approval: false` — the user
+  was never asked to approve a guessed path; `message_contains` — they were told
+  plainly) instead of an incidental status. **A bench that asserts the wrong
+  thing manufactures defects, which is worse than measuring nothing.**
+- **⚠️ FINDING 1 — semantic file search is unreachable from chat.** MEASURED:
+  `find the FILE about X` fires the gate; `find the PDF about X`, `find the
+  DOCUMENT about X`, `find my NOTES about X`, `find the resume pdf` and `what did
+  we discuss about X` are all CLOSED. So Phase 6 Part 3/4 — the file index and
+  conversation search, and plan rule 17's own example phrasing — cannot be
+  reached unless the user happens to say the literal word file/folder/desktop.
+  This is the "users invent verbs endlessly" lesson applied to NOUNS. Recorded as
+  four `known_gap` cases; NOT FIXED (this round measures routing, it does not
+  change it).
+- **⚠️ FINDING 2 — the bulk-mutation top-level default is bypassed when the
+  planner writes the list itself.** REPRODUCED 5/5 runs: "move all the pdf files
+  in downloads into pdfs" moved all 14 including two inside
+  `downloads/project-src/assets`. ROOT CAUSE confirmed in code:
+  `partition_by_depth` is reachable ONLY from `placeholder_resolver.resolve()`,
+  i.e. only while the step still carries a `PENDING:` placeholder. Here the
+  revise/refine round fills the CONCRETE list (logs show `_revise_node … (refine)`
+  and never `Placeholder resolved in code`), so the partition, the
+  truncated-source refusal AND the "excluded N nested files" note are all
+  skipped. **Same defect CLASS as 2026-07-30 (a guard keyed to one shape of the
+  operation) and 2026-08-01 (`_DIR_KEY` covering reads but not writes) — third
+  instance.** The approval card does list all 14 paths, so it is disclosed, but
+  the documented default ("recursion is right for FINDING and wrong as a default
+  for MUTATING") does not hold. NOT FIXED — changing the planner's bulk-mutation
+  path needs its own falsification round.
+- **A `known_gap` never turns a gate red.** A defect that is measured and written
+  down is printed in full on every run and excluded from the exit code, because a
+  permanently red gate stops being read — the same failure as a no-op that
+  reports success, in the other direction. A case that starts passing is called
+  out so the flag gets retired.
+- Tests: `test_routing_trace.py` (21) + `test_routing_api.py` (6).
+  **All 10 behavioural changes proven to FAIL by reverting the specific line IN
+  PLACE** (never `git show :file` — the 2026-08-01 rule), each with the correct
+  signature (behavioural fails, regression passes), and the harness re-reads the
+  patched file to confirm the revert landed before trusting a green result.
+  Gates: **3085 passing, 14 skipped** (baseline 3058/14); typecheck clean; no
+  frontend change.
+
+### The benches found two real defects, and both are now closed (2026-08-03)
+The round above shipped `route_bench.py` and `plan_bench.py` and immediately
+recorded two `known_gap` findings — measured, reproduced, deliberately unfixed
+because that round was about being able to SEE them. This round fixes both.
+Nothing here was speculative: every change was measured before and after
+against a written corpus, and **all 11 behavioural changes were proven to FAIL
+by reverting the specific line IN PLACE** (never `git show :file`), with the
+harness re-reading the patched file to confirm the revert landed before
+trusting any result — and asserting the restore afterwards.
+
+- **⚠️ FINDING 1 — the gate knew the word for a CONTAINER and no word for what
+  is kept inside it.** `find the FILE about X` fired `strong_domain`; `find the
+  PDF about X`, `find the DOCUMENT about X`, `find my NOTES about X` and `find
+  the resume pdf` were all CLOSED. So `semantic_file_search` — Phase 6 Parts
+  2/3/4, the entire file index, the conversation index, and plan rule 17's own
+  example phrasing — was unreachable from chat unless the user happened to say
+  file/folder/desktop. **MEASURED: 12 of 19 ordinary phrasings closed; after,
+  1 of 19.** The 2026-07-10 lesson ("users invent VERBS endlessly, but a task
+  NAMES ITS OBJECT") had been applied to verbs and never re-checked against
+  the object vocabulary the whole gate rests on.
+- **`_DOCUMENT_NOUN_RE` is WEAK, not strong, and that placement is measured
+  rather than cautious.** These words appear in ordinary autobiography far more
+  than "terminal" or "directory" do: as strong nouns (firing alone) they fired
+  on *"my resume is finally done"*, *"that presentation was painful"* and *"he
+  sent me an invoice last week"*. Requiring an action verb drops all three at
+  ZERO recall cost, because a request for a document is imperative or
+  interrogative by nature. **Deliberately NOT derived from
+  `file_extract.INDEXABLE_EXTS`, and no invariant test binds them** — every
+  extension is *already* covered, because `_WEAK_DOMAIN_RE` ends in
+  `\.\w{1,4}\b`, so ".rst"/".log"/".md" reach the classifier in dotted form
+  whatever they are. The list only carries the DOTLESS forms people speak,
+  which is why bare `md` and `log` are absent: one means a doctor and the other
+  is half of "log in".
+- **A past conversation is STORED CONTENT and had no word at all.** *"what did
+  we discuss about the database migration"* fired nothing: `is_external_question`
+  refuses it (its subject is "we" — correctly, it is not an external-FACT
+  question) and no other tier had a vocabulary for it, so Phase 6 Part 4 — every
+  message embedded into Qdrant specifically to answer this — could not be
+  reached, and the chat model answered from its 30-message window or not at all.
+  New `stored_recall` tier: a first/second-person recall verb ("what did WE
+  DISCUSS", "when did I MENTION") or the conversation named literally ("the
+  CONVERSATION WHERE we talked about X"). **Its own tier, not a line inside the
+  weak one**, because `gate_tier` is now the audited reason AND what
+  `route_bench` scores recall on — a vocabulary whose cost has never been
+  measured needs its own name, or the day it turns out expensive nothing can
+  tell it apart from the tier it was hiding in.
+- **⚠️ AN EXISTING TEST CAUGHT THE FIRST DRAFT, AND IT WAS RIGHT.**
+  `test_gate_stays_closed_for_self_referential_questions` failed on *"do you
+  remember what i told you about jamil"*. That is stored-content recall by every
+  test the new tier applies — and routing it would be a WORSE ANSWER, not merely
+  a wasted call: `MemoryEngine.retrieve_context()` runs on EVERY chat turn and
+  injects the facts/contacts/episodes bundle, so chat already holds what the
+  question wants. There is **no deterministic line between "recall the fact you
+  know about Jamil" and "search our conversations about the migration"** — both
+  are stored content, and telling a PERSON from a TOPIC by keyword is the
+  judgement this file has measured at zero three times. Naming the FACULTY is a
+  different test entirely: the user said "remember", so they are asking the
+  thing that already has the answer loaded. `_MEMORY_ADDRESS_RE` drops 4 of 4
+  memory phrasings. **The test was not edited; the code was.** KNOWN COST,
+  pinned by its own test: it also closes *"do you remember what WE DISCUSSED
+  about the migration"*, which IS a conversation search — kept closed because a
+  memory question answered as a background TASK is worse than a phrasing the
+  user can restate, and because the classifier is unmeasured on memory
+  questions. Revisit WITH A MEASUREMENT, not on instinct.
+- **A recall phrase alone is not a request.** *"we discussed this already"*,
+  *"i say we ship it"* and *"i talked to my brother yesterday"* all contain one
+  and are plain conversation. Requiring an action verb or a bare wh-word
+  alongside drops all three at zero recall cost. This is a REQUEST-SHAPE test
+  over seven closed-class words, **not** the intent-keyword shape falsified
+  three times here: it never asks what the message is about, only whether it is
+  asking.
+- **⚠️ A DEMONSTRATIVE IS NOT ALWAYS A POINTER** (found while measuring, same
+  class, fixed). `_DEICTIC_SUBJECT_RE`'s own comment already claimed a
+  determiner "still reaches the classifier" — true only by accident, when the
+  demonstrative is not adjacent to the question word. *"where is that
+  spreadsheet with the budget"* and *"what is that movie everyone is talking
+  about"* both matched and were refused: one a file question, one a plain WEB
+  question. The split is grammatical, not a judgement — it/they/them/he/she/
+  him/her/there can never determine a noun; this/that/these/those can, and do
+  whenever a content word follows. **MEASURED: 5 wrong of 18 before, 0 after.**
+- **`_ACTION_VERB_RE` was missing past tenses it had promised to carry** —
+  its own comment says "common inflections listed explicitly", and `save|saves|
+  saving` had no `saved`, so *"where is that pdf I SAVED yesterday"* fired
+  nothing. They matter in a relative clause, which is exactly how people
+  describe a document they are hunting: "the report I WROTE", "the doc he
+  SHOWED me". MEASURED: recall 4/5 → 5/5 on that shape, one extra temp-0 call
+  in 8 conversational controls.
+- **ACCEPTED COST, stated rather than discovered later:** the gate now fires on
+  *"i need to write a report at some point"* and *"she wrote a lovely note"* —
+  one temperature-0 call each, answering CHAT. That is the documented
+  recall-first trade, and `route_bench`'s GATE COST number is what makes it
+  visible if it ever stops being worth it.
+- **⚠️ FINDING 2 — the bulk-mutation scope rules were reachable from only ONE
+  SHAPE of the operation, for the THIRD time.** `plan_bench` reproduced it 5/5
+  runs: *"move all the pdf files in downloads into pdfs"* moved all 14 matches
+  including two inside `downloads/project-src/assets` — a checked-out source
+  tree the user never mentioned. ROOT CAUSE: `partition_by_depth` and the
+  truncated-source refusal lived inside `_file_pool`, which only `resolve()`
+  calls — i.e. only while the step still carries a `PENDING:` placeholder. A
+  revise/refine round that writes the CONCRETE list arrives with no placeholder
+  at all (the logs show `_revise_node … (refine)` and never "Placeholder
+  resolved in code"), so nothing consulted them, and the approval card carried
+  no "excluded N nested files" note. Same class as 2026-07-30 (keyed on the
+  singular tool NAMES while rule 4 steered the planner to the plural ones) and
+  2026-08-01 (`_DIR_KEY` covered reads but not writes).
+- **THE FIX IS TO STOP KEYING ON THE SHAPE.** `mutation_scope(plan, tool, pool,
+  source, grounding)` takes a POOL rather than a step, and both entry points are
+  thin callers: `_file_pool` for a placeholder, `scope_concrete_list` for a list
+  the model wrote. `planner._execute_node` consults it on EVERY pass and BEFORE
+  the approval gate, so the card the user first sees already carries the scoped
+  list and says what was left out.
+- **⚠️ IDEMPOTENCE IS LOAD-BEARING, AND NOT FOR THE OBVIOUS REASON.** Returning
+  None on an unchanged list is not an optimisation: by the second pass the
+  nested files are already out of the list, so a re-stamp could no longer derive
+  them and would **silently delete the very sentence telling the user what was
+  left out.** Frozen by its own test.
+- **The whole contract moves together.** `stamp_batch_contract` writes the list,
+  the description AND the `action_detail` in one place, used by both the
+  placeholder path and the scoping path — because 2026-08-01 shipped a
+  substitution that changed only the parameters and left a card reading "into
+  `C:\Users\DELL\Downloads`" above a step moving files to D:. The list also
+  stays LAST in `parameters` so `planner._missing_target` still finds
+  `destination` rather than the first of 85 sources.
+- **A truncated source refuses to become a bulk write however the list was
+  authored** — the concrete path fails the step into the replan loop with a
+  code-authored reason, rather than acting on a knowingly partial set and
+  reporting success.
+- **`test_every_bulk_list_param_is_covered_or_exempt`** walks the REGISTRY: a
+  mutating tool taking a list of strings is either a bulk file list the scope
+  rules know (`_LIST_PARAMS`) or written down as exempt (`_EXEMPT_LIST_PARAMS`
+  — `browse_commit.allowed_origins`). Same shape as folder_resolver's coverage
+  test, which found `read_file.path` on its first run. A new batch tool is now a
+  decision, never a silent hole — which is the only thing that stops a fourth
+  instance of this defect class.
+- **MEASURED FINDING, recorded and deliberately NOT fixed:** `ground_origins`
+  reads *"what did we agree ON FOR the release date"* through the nav-cue rule
+  and grounds the bare word **"for"** as a site name (likewise "six" in "we
+  agreed to meet at six"), so `browse_intent` claims the turn before
+  `stored_recall` can. `_NAV_STOPWORDS` is a hand-kept list of everyday words
+  and carries no function words. The gate still FIRES, so nothing is missed and
+  the cost is one temp-0 call — but it MIS-LABELS the audit row, which is
+  exactly the diagnostic the round above exists to make trustworthy. The fix
+  belongs in the security-critical grounding module with its own falsification
+  round. Pinned by a comment on the test that had to route around it.
+- **⚠️ THE GATE FIX ALONE DID NOT DELIVER THE FEATURE, and only running the
+  bench end-to-end showed it.** With the gate opened, *"what did we discuss
+  about cloud computing"* still routed **CHAT 3/3** against the real model —
+  because `_CLASSIFY_PROMPT`'s tool catalog listed no way to search past
+  conversations and its CHAT line claimed *"talking ABOUT the user's own
+  past"*. **The model was answering correctly for what it had been told.** Same
+  defect class as the gate hole, one layer down: a capability shipped (Phase 6
+  Part 4 embeds every message into Qdrant) and the component that must route to
+  it was never informed. Naming it in the catalog + one judge-the-intent bullet
+  (with the counter-example *"we discussed this already"* is CHAT) took it
+  **0/3 → 3/3**. This is NOT the prompt-hardening shape falsified three times
+  here: those asked a component to evaluate a predicate it could not evaluate;
+  this tells a router that a tool exists, which is what a routing prompt is
+  FOR. Pinned by a prompt-contract test.
+- **MEASURED AFTER, on the benches that found them**, with the baseline's own
+  methodology (67 cases × 3 runs) so the numbers compare like with like:
+  **GATE RECALL 48/53 → 52/53**, **LABEL ACCURACY 62/67 → 65/67**,
+  **END-TO-END 62/67 → 65/67**, **MODE 4/4**, and **GATE COST UNCHANGED at
+  5/14** — the four retired gaps pass and not one control case started paying a
+  call. Always-wrong cases 5 → 1, the survivor being the accepted `fifa-typo`.
+  Two cases now read FLAKY (`next-iphone` 2/3, `invite-friday` 2/3); a single
+  full pass had reported `next-iphone` as a flat regression, and measuring it
+  alone **5/5 on the current code** is what identified it as the model variance
+  the bench's `--repeat` flag exists to separate. `invite-friday` is recorded in
+  its own case file as genuinely ambiguous. `plan_bench`: **5/5
+  scored cases pass, zero known gaps** (was 3/4 + 1 gap + 1 blocked), with
+  `no_unapproved_write` and `no_escape` HELD 5/5. The bulk case's own log is the
+  proof of mechanism: `Plan revised (refine): 2 remaining step(s)` — the defect's
+  precondition, reproduced live against the real model — immediately followed by
+  `Bulk mutation scoped in code: 12 file(s) kept, 2 left in subfolders`.
+- Also fixed in the bench scripts themselves: their reports print prose straight
+  out of the case files, and on a legacy cp1252 console the em-dashes rendered
+  as mojibake — in the KNOWN GAPS block, i.e. the line you most need to read.
+  `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` plus ASCII-only
+  literals in the scripts' own text, so the fixed part always reads correctly
+  whatever the console does.
+- Tests: `test_bulk_scope_concrete.py` (NEW, 13 — the incident frozen at unit
+  level AND end-to-end through the REAL planner on a real filesystem, drafting
+  the concrete list with no placeholder anywhere; the truncated refusal; the
+  idempotence/note-survival property; the contract refresh; the four cases it
+  must NOT touch — an explicit "including subfolders", a hand-named list with
+  no search behind it, an all-nested list, a list still holding a placeholder;
+  a read tool's string list; the registry coverage invariant; and the
+  DESTRUCTIVE twin, `delete_files`, because a fix fitted to one tool is how this
+  defect class reached its third instance) + `test_task_router.py` (+7
+  parametrized blocks). **The four retired `known_gap` entries in
+  `route_cases.json` / `plan_cases.json` were rewritten into `why` prose
+  recording the fix — a gap flag that outlives its gap is how a red gate stops
+  being read.** Gates: **3150 passing, 14 skipped, 0 failed** (baseline
+  3085/14); typecheck clean; no frontend change.
+- **NOT fixed, and NOT this round's subject:** the `next-iphone` /
+  `invite-friday` flakiness is model variance on an unchanged prompt path, and
+  the CLAUDE.md rule applies — measure it, do not "fix" it with a prompt edit.
+
+### The failure symptom was audited; the diagnosis died with the run (2026-08-03)
+*(Tier 2, item 6 of `suhhestionsfromclaude.txt` — "nothing learns from failure")*
+
+The suggestion this round was built from says *"every failed plan, every rejected
+revision, every dead end is already in ActivityLog and nothing reads it back."*
+**Half of that is false, and the false half is the expensive half** — which
+changed what the round had to be. Verified in the tree before any code moved:
+
+- `ActivityLog` (`models.py:573-588`) has **no `plan_id`, no `task_id`, no step
+  index**. The only join key to a plan is `session_id`. It records the failure
+  SYMPTOM: one row per failed tool call, carrying the tool's own error.
+- **Every structural rejection was in-memory only.** The reject chain in
+  `_generate_steps` — `_repeated_failure`, `_scope_violation`,
+  `_recipient_violation`, `_event_id_violation`, `_browse_origin_violation`,
+  `_upload_path_violation`, `_fill_violation`, `_browse_downgrade_violation` —
+  produces a feedback string that is handed to the LLM and **discarded**.
+  `failed_signatures` and `replan_count` live in the LangGraph state dict for
+  one run. Of the eleven `PlanStatus.FAILED` sites, only two log anything.
+- `Task.plan_payload` is a JSON snapshot that `models.py:353` itself calls *"a
+  display/audit snapshot, never resumed from"* — never queried, never parsed by
+  any consumer — and **an INLINE plan writes no Task row at all**.
+
+So there was nothing to read back. "Why did that plan give up?" was archaeology,
+exactly as routing was before `routing_decisions` one day earlier. **This is that
+fix one layer down**, and it is deliberately two halves with very different
+confidence.
+
+- **`app/core/plan_trace.py` (the certain half)** — `routing_trace.py`'s sibling,
+  copied structurally: a **mutable** dataclass with its id assigned up front, a
+  `ContextVar`, **explicitly named stamps** rather than `note(**kwargs)` (a
+  mistyped keyword silently records nothing — the "no-op that reports success"
+  failure already on record), and a `flush` that follows `persist.py`: log, ROLL
+  BACK, return False, never raise.
+- **⚠️ THE CONTEXTVAR RULE IS LOAD-BEARING HERE, and it is what
+  `test_a_structural_rejection_survives_the_run` exists to prove.** The stamps
+  fire from inside LangGraph nodes — a different task from the entry point that
+  began the trace — and a child task gets a *copy* of the context. Set once,
+  then only ever MUTATE. If that were wrong the rejections list would be empty
+  and **every other test in the file would still pass**.
+- **`fail_class` is a CLOSED SET**, one constant per FAILED site, stamped at the
+  site. `test_every_failed_site_in_the_planner_stamps_a_fail_class` counts the
+  `PlanStatus.FAILED` assignments against the `note_failed(` calls and fails
+  loudly when they diverge — the coverage-test discipline that found
+  `read_file.path` on its first run. `FAIL_UNCLASSIFIED` exists so a site that
+  slips through is VISIBLE in the data rather than silent.
+- **ONE ROW PER INVOCATION, not per plan.** A plan that pauses for approval and
+  is resumed is two planning episodes with two different sets of rejections;
+  collapsing them loses the thing worth knowing. `plan_id` joins them, `entry`
+  (start | resume | answer) says which was which.
+- **The `try/finally` is at the three public entry points**, so every early
+  return, every pause and an exception are covered *by construction* — the
+  `chat.py` lesson from the routing round: a per-return flush is one more
+  hand-kept copy of the same fact, and the return someone forgets is the one
+  that mattered. `_first_rejection` replaced the `or` chain with lambdas,
+  preserving the short-circuit exactly while naming which guard refused.
+- **⚠️ A NESTED TRACE WOULD HAVE BLINDED THE OUTER ONE.** `_answer` continues a
+  paused plan by calling resume; routing that through the PUBLIC `resume` begins
+  a second trace whose `finally` calls `reset()`, so every stamp after it in the
+  outer invocation becomes a silent no-op and two rows describe one action. It
+  calls `_resume`. Frozen by
+  `test_a_typed_carry_on_writes_one_row_not_two`.
+- **`app/core/failure_intelligence.py` (the honest half)** — `file_intelligence`'s
+  shape verbatim (frozen dataclass → one flat SELECT → Python aggregation → sort
+  → `format_*()` returning `""` when empty), surfaced through the existing
+  `_folders` plumbing: one field, one loader, one block, three splats, governed
+  by new plan **RULE 23**. A recurrence threshold keeps it quiet, with ONE
+  deliberate exception: a failure of **this same goal** is surfaced at count 1
+  and outranks a more frequent unrelated one, because "the last time you asked
+  for exactly this" is the most actionable thing the record can say. Goal
+  matching reuses `routines.normalize_goal` — the ONE normalizer, not a second
+  copy.
+- **⚠️ THE SIGNAL IS A PROMPT, AND THE MODULE SAYS SO IN ITS OWN DOCSTRING.**
+  Everything real in the planner's safety story is a comparator computed
+  independently of the model's output; this cannot be one, because "avoid the
+  approach that failed last time" is a judgement about a plan that does not
+  exist yet. This codebase has measured prompt-only rules at **ZERO three
+  separate times**. It ships anyway for one reason: the audit half makes it
+  MEASURABLE for the first time. **The recorded instruction, so it is not
+  rediscovered: if it REGRESSES to zero, do not rewrite the wording — find a
+  comparator or delete the block.**
+- **`plan_bench.py` gained `repeat: N`** — the same goal, the same sandbox, the
+  same database, so run 2 can read what run 1 recorded. It reports **TWO
+  numbers, never one**: `retry_signal_present` (did the mechanism ENGAGE?) and
+  `retry_no_repeat_failure` (did it CHANGE ANYTHING?). Conflating those is how
+  the 2026-07-17 fan-out shipped a feature that never fired while 1,578 tests
+  stayed green. NEW case `learns-from-failure`: `notes` is a DIRECTORY, so run 1
+  dead-ends on `read_file` — rule 23's own worked example.
+- **⚠️ THE BENCH'S FIRST RUN FOUND TWO REAL DEFECTS, BOTH MINE, WHICH IS THE
+  ENTIRE ARGUMENT FOR MEASURING BEFORE CLAIMING.**
+  (1) **A DEAD END IS NOT THE SAME THING AS A FAILED PLAN.** Run 1 drafted
+  `read_file` on the directory, the step failed, the replan loop routed around
+  it with `list_directory`, and the plan **COMPLETED**. `recent_failures`
+  filtered on `status == "failed"`, so it saw nothing — and run 2 walked into
+  the identical wall and paid another ~24s replan round while the lesson sat in
+  the record the whole time. The recovered kind is the COMMON kind and the
+  cheapest lesson available; the query now reads failed STEPS as well as failed
+  plans (`STEP_RECOVERED`, derived at read time and deliberately NOT added to
+  `plan_trace.FAIL_CLASSES`, which is the closed enum of FAILED *sites*).
+  (2) **THE EXPECTATION WAS UNANSWERABLE.** It asked `retry_avoids_tools:
+  [read_file]` — but `read_file` on the DIRECTORY is the dead end and
+  `read_file` on the file inside it is the answer, so the goal legitimately
+  needs the tool. **A bench that asserts the wrong thing manufactures defects**
+  — the same lesson `ghost-file` already records. It now pins the narrow,
+  checkable claim: the retry did not walk into a failed step at all.
+- **⚠️ A DEFECT I INTRODUCED AND CAUGHT IN SELF-REVIEW, worth recording because
+  the failure mode is the nastiest kind.** The audit trail is shared across runs
+  by design, so run 2's unscoped `no_unapproved_write` read would have seen run
+  1's *perfectly approved* write and convicted it. **A safety check that fires
+  on the feature working is worse than no check at all** — it trains you to
+  ignore it. Every audit reading is now scoped to its own run.
+- **Retention, and a coupling found in passing.** `plan_traces` joins the
+  housekeeping tuple at 30 days. **`activity_log` had NO retention policy at all
+  and was unbounded** — a latent bug independent of this round — but it is not
+  just a UI feed: `file_intelligence.frequent_folders` ranks folder habits by
+  counting rows over ALL time with no date filter, so purging it tightly would
+  silently shrink a signal the planner uses (rule 18). `ACTIVITY_RETENTION_DAYS
+  = 365` bounds the table without moving the ranking, the reasoning is written
+  at the constant, and a test pins the floor so a future tidy-up cannot quietly
+  become a behaviour change.
+- **`GET /api/activity/plans`**, filterable by `fail_class` / `failed_tool` /
+  `plan_id`. ⚠️ Declared BEFORE `/{session_id}` — otherwise "plans" is read as a
+  session id and it returns `[]`, which looks exactly like "no plan has ever
+  failed". The same trap `/routing` documents, pinned by its own test.
+- Migration `d9b3e4f70a15` (head was `c7f2a5e91d84`), idempotent `has_table`
+  guard. Verified end to end on scratch DBs: the full chain builds the table
+  with all 6 indexes, and the create_all-race path (create_all first, then
+  stamp + upgrade) does not collide.
+- Tests: `test_plan_trace.py` (18), `test_plan_trace_api.py` (8),
+  `test_failure_intelligence.py` (17). **All 18 behavioural changes were proven
+  to FAIL by reverting the specific line IN PLACE** (never `git show :file` —
+  the 2026-08-01 rule), each with the correct signature, with the harness
+  re-reading the patched file to confirm the revert landed and asserting the
+  restore afterwards. Gates: **3196 passing, 14 skipped, 0 failed** (baseline
+  3150/14/0 — +46, zero regressions); no frontend change this round.
+- **⚠️ ONE FALSIFICATION WAS INVALID ON ITS FIRST RUN AND SAID SO.** The anchor
+  for the coverage test was a substring of a MORE-INDENTED line, so the "revert"
+  left stray spaces and an IndentationError — every test failed, for the wrong
+  reason, which is indistinguishable from a passing falsification if you only
+  read the exit code. **An anchor must be a whole line including its exact
+  indentation.** The harness caught it because it checks the regression test
+  too: a revert that breaks both is not a falsification.
+- **MEASURED, and it is NOT a zero.** `plan_bench learns-from-failure`, **4
+  consecutive runs, both numbers 4/4**: run 1 hits the dead end (1 failed step,
+  1 replan round), run 2 of the identical goal reads the record and hits none.
+  `plan_bench` overall **6/6 scored**, with `no_unapproved_write` and `no_escape`
+  HELD 6/6.
+- **RUNTIME-VERIFIED on the REAL `main.py` lifespan** (isolated backend, scratch
+  DB, :8001 — a hermetic test cannot tell you the wiring boots): the first run of
+  "read the file at &lt;a DIRECTORY&gt;" recorded `steps=3, 1 failed,
+  tool=read_file, replans=1, ms=7856` with the real error text; `GET
+  /api/activity/plans` returned it and its `failed_tool` filter worked; and the
+  **second run of the identical goal over real HTTP came back `steps=1, 0
+  failed, 0 replans`** — straight to the right plan. Nothing was approved.
+- **⚠️ HONEST LIMITS, both observed rather than reasoned.** (1) The block can
+  OVER-CORRECT: in 1 of the 4 bench runs the retry avoided the dead end by
+  dropping `read_file` entirely, so it listed the folder and never read the file
+  — it answered a narrower question than was asked. The plan still COMPLETED, so
+  no gate and no check fires on it; watch for it. (2) Four runs is four runs.
+  This is a PROMPT against a nondeterministic model, and the codebase's own rule
+  applies to good news as well as bad: **if it regresses, MEASURE — do not
+  rewrite the wording.**
+
+### Memory only grew, and the growth was all in one place (2026-08-03)
+*(Tier 2, item 7 of `suhhestionsfromclaude.txt` — "memory only grows")*
+
+Confirmed by exhaustive search before writing anything: **no decay, no
+consolidation, no summarisation, anywhere in the memory layer.** The only things
+that ever removed a memory were user-initiated deletion (a hard delete of the
+row AND the Qdrant point) and the near-identical-text dedup. Everything else was
+append-only in practice.
+
+- **THE GROWTH WAS CONCENTRATED IN ONE SECTION, not spread across the engine.**
+  `format_context` had exactly ONE `[:5]` and ONE `[:120]` in the whole
+  function. `PEOPLE YOU KNOW` selected `ContactInteraction` for every bundled
+  contact with **no LIMIT, no date filter and no clip**, plus the contact's full
+  `summary` and `notes`. A contact with 200 logged facts put 200 lines into
+  every prompt that mentioned them, and the fact log is append-only by design.
+- **AND THE ONE COMPONENT THE TRANSCRIPT BUDGET LEANS ON HAD NO BUDGET.**
+  `_provider_history` caps the conversation at 30 messages / 24k chars, and its
+  own comment says that is safe **precisely because** "long-range recall is the
+  memory engine's job". That job had no cap at all.
+- **⚠️ A GLOBAL SYSTEM-PROMPT CAP WAS CONSIDERED AND REJECTED.** The plan called
+  for one; reading the code killed it. The base prompt IS the IDENTITY /
+  CAPABILITIES / honesty rules — the block that stops Jarvis claiming actions it
+  never took — and a cap that could clip those is a safety regression wearing a
+  tidy-up's clothes. Checked instead of assumed: `screen_note` is bounded at its
+  source (`CONDENSE_MAX_CHARS = 600`), `background_note` at `_MAX_TASKS = 8`,
+  and the disambiguation blocks by their candidate counts. **Memory was the only
+  unbounded input.** Bound the input that grows; never the rules.
+
+**`app/memory/budget.py`** — sections carry their ITEMS, so a cut drops whole
+facts and never half a line, and it is always MARKED. Allocation reuses
+`rendering.fair_shares`, the public seam that exists so a caller with its own
+budget does not write a second allocator: position must never decide survival,
+and in `format_context` the last sections are PREFERENCES and PAST CONTEXT.
+- **⚠️ A DEAD CONSTANT, CAUGHT BY THE TEST WRITTEN TO PROVE IT WORKED.** The
+  first draft had `MIN_SECTION_SHARE = 400`, which could never bind —
+  `fair_shares` already floors every share at its own `_MIN_STEP_SHARE = 800`.
+  It is deleted, and the borrowed floor is now pinned by
+  `test_the_section_count_cannot_overflow_the_floor`: N sections are guaranteed
+  N × 800 chars *regardless of the cap*, which is safe only while N stays small,
+  so a sixth section fails the test rather than silently letting the floor beat
+  the budget.
+
+**`app/memory/decay.py`** — freshness as a RANKING term, not a filter. Purely
+additive over candidates a search already returned, so the worst it can do is
+reorder. **Relevance still dominates by construction**: cosine over the
+threshold runs 0.5–1.0 and the boosts total 0.25, which is the property to
+re-check if the weights ever move — a decay that could float an irrelevant fact
+over a relevant one would be a silent deletion. `last_used_at` distinguishes
+"old" from "stale". Reference frames are stated (naive UTC both sides — the
+mistake `semantic_file_tools._recency_boost` documents).
+
+**`app/memory/archive.py`** — the only part that hides anything, so it is the
+part written most conservatively. It sets `archived_at`; it issues no DELETE and
+never touches Qdrant, so a restore is instant and needs no re-embed.
+- **⚠️ `archived_at` IS NOT `is_active=False`.** The latter is a soft DELETE
+  written by dedup and supersede — a claim the content is now WRONG.
+  `archived_at` claims only "nothing has needed this in a long time". One is a
+  correction, the other a tidy-up, and code that blurred them would either
+  resurrect superseded facts or present a tidy-up as a correction.
+- Four conditions, ALL required: older than 180 days, `last_used_at IS NULL`,
+  still `is_active`, and not a PROTECTED category. **The deny-list is the case
+  that justifies itself**: "I am allergic to penicillin" can go a year unmentioned
+  and must still be there the day it matters — being unused is exactly what those
+  facts look like when everything is fine. Capped per pass so a first run over
+  years of history is gradual and visible.
+- **`last_used_at` is stamped at RENDER time, not search time**, because a fact
+  a search returned and the budget then clipped was never put in front of the
+  model. The write is best-effort and rolls back: stale timestamps only ever
+  make a fact look LESS used, which keeps it in play rather than archiving one
+  that is in use.
+- The About Me "Archived" section + `POST /memory/{id}/restore` are the trust
+  surface. **An automatic tidy-up nobody can inspect is indistinguishable from
+  data loss** — without the undo this would be a delete with extra steps.
+
+**DELIBERATELY NOT DONE: conflict handling.** `apply_supersede_candidates`
+requires the new fact to contain EVERY word of the old (`supersede_is_covered`),
+so "moved to Lahore" never supersedes "lives in Karachi" and both survive
+forever. Fixing that needs contradiction detection, which is an LLM judgement
+with no comparator and can silently destroy a true fact. Recorded as a known
+gap, not attempted.
+
+- **MEASURED** (synthetic, because the real database holds 19 memories / 46
+  interactions / 0 episodes and cannot exercise a budget — the shape is wrong,
+  not the current size): a year-three shape of 50 contacts × 200 facts + 500
+  memories rendered **76,758 chars before, 5,277 after (93% smaller)**, and the
+  bound holds flat regardless of input size. Migration `e1c8d5a3b920`.
+- Tests: `test_memory_budget.py` (21), `test_memory_archive.py` (18). All 10
+  behavioural changes proven to FAIL by reverting the specific line IN PLACE.
+  Gates: **3235 passing, 14 skipped, 0 failed** (3196 before this round, +39,
+  zero regressions); typecheck and `vite build` clean.
+- **RUNTIME-VERIFIED on the real lifespan** (isolated backend, fresh scratch DB,
+  :8001): the migration boots, the real housekeeping sweep runs all six steps,
+  and its SQL is the contract in one line — `is_active IS 1 AND archived_at IS
+  NULL AND last_used_at IS NULL AND created_at < cutoff LIMIT 200`, followed by
+  an **UPDATE, never a DELETE**. The stale fact left the live list (2 → 1),
+  appeared under `GET /memory/archived` with its text intact, and
+  `POST /{id}/restore` put it back (1 → 2, archived 0).
+- **⚠️ TWO FALSIFICATIONS CAME BACK WITH THE WRONG SIGNATURE, BOTH MY TESTS.**
+  (1) The fair-share test PASSED against a deliberately-reverted
+  first-come-first-served allocator: `_fit` reserves room for its marker, so the
+  greedy section stopped short and left crumbs enough for a 16-char neighbour.
+  **A test that cannot fail on the defect proves nothing** — the second section
+  is now big enough to need a real share. (2) The chosen "regression" for the
+  restore-stamp change asserted that same stamp, so it was behavioural too.
+  A regression test that also fails proves nothing either.
+
+### Approval needed a screen; now it needs a binding instead (2026-08-03)
+*(Tier 2, item 8 — "approval needs a screen")*
+
+⚠️ **THIS ROUND REVERSES A REFUSAL THIS CODEBASE BUILT ON PURPOSE, EARLIER THE
+SAME DAY.** `task_router._is_typed_approval` exists ONLY to refuse a typed "yes"
+and nudge the user back to the card, because *consent to a write is consent to a
+SIGNATURE SET* and a bare word is bound to nothing. That reasoning is not
+weakened here. It is SATISFIED through another channel.
+
+**What was already true, and is not rebuilt.** `deterministic_plan_text` has
+always been LLM-free and code-derived, and `plan_run_events` yields it as an
+ordinary delta right after the plan chunk — so `voiceOutput.onDelta` receives it
+and an INLINE approval contract is *already spoken today*. The gap was never
+that the text did not exist; it is written FOR EYES. Read aloud, a numbered list
+of paths becomes a run of bare filenames (`sanitize_for_speech` strips the
+directories) with no count, no shape and no sense of what changes.
+
+- **`app/agents/spoken.py`** — a SECOND RENDERING of the same facts (tool,
+  parameters, code-derived `action_detail`), never a second source of truth and
+  with no LLM anywhere near it (pinned structurally: the module imports no
+  provider). Counts over recitals — past three items it says "20 files" rather
+  than reading twenty names, because speech is linear and unskimmable. It names
+  the risk in the word "destructive", and it **ends by teaching its own phrase**,
+  since a contract that refuses a bare "yes" without saying what to say is the
+  "magic word" dead end the 2026-07-17 round exists to kill.
+  `test_every_non_read_tool_has_a_spoken_form` walks the REGISTRY: 16 non-READ
+  tools, all covered, and a new one is a decision rather than a silent gap.
+- **`AgentPlan.contract_hash()`** — sha256 over the ORDERED pending-step
+  `signature()`s, so it inherits exactly what approval already means, and a
+  reshuffle is a different contract. Completed steps do not change it: approval
+  is about what is still to run.
+- **THE BINDING.** The client echoes the hash of the contract it was GIVEN; the
+  server RE-DERIVES it from the plan it popped. A client can only hold the hash
+  if it received the contract, and a plan whose steps changed produces a
+  different one. That is the card's guarantee delivered through a different
+  sense — **not a password, not a secret, and not a defence against a hostile
+  client** (which could POST to the same authed endpoint anyway): it is proof
+  that the thing approved is the thing that was presented.
+- **THREE guards, all server-side, ordered cheapest-first, every failure leaving
+  the plan parked and the card clickable** (`_guard_spoken_approval`): is it
+  consent at all → is voice allowed to approve THIS plan → is it consent to
+  THESE steps. Checked BEFORE the pop, so a mis-heard word is never a *lost*
+  approval.
+- **⚠️ ITS OWN WORD SET — the third, and they must not be merged.**
+  `_CARRY_ON_RE` accepts "never mind"/"nvm", which at a pause mean *carry on*
+  and at an approval card mean the OPPOSITE; `_is_typed_approval` is used only
+  to REFUSE. This one is the only one that can GRANT, and it is **NARROWER than
+  the typed set**: a bare "yes"/"ok"/"sure" does NOT approve by voice, because a
+  typed "yes" was at least aimed at the card while a spoken one may be ambient —
+  said to someone in the room while the mic is open. Frozen by
+  `test_the_carry_on_word_set_would_have_flipped_a_delete_on`.
+- **`VoiceConfig.spoken_approval`** (`off` | `write` | `all`), **default off**,
+  enforced server-side so a stale or hostile client cannot approve by voice
+  while the user has it disabled. `write` still sends anything DESTRUCTIVE to
+  the card. An unknown value falls back to `off` — consent settings never fail
+  open.
+- **Frontend**: `speakContractInsteadOfTurn` suppresses the visual contract's
+  deltas for that turn, so the user hears ONE contract rather than two;
+  `spokenApproval.ts` remembers which contract was read aloud (90s TTL — "approve"
+  two minutes later is a coincidence, not consent) and forwards the utterance.
+  It decides nothing. A refusal falls through to the normal chat path, where the
+  words become a steer or the typed nudge — never silently swallowed. The
+  `outputRouter` speaks the CONTRACT for a pushed `awaiting_approval` task,
+  which is where writes actually live.
+- **⚠️ A BUG THIS ROUND SHIPPED AND CAUGHT: `set_voice_config` was the FOURTH
+  copy of the field list** (dataclass, default, coercer, writer). Adding
+  `spoken_approval` updated three of them and the WRITE silently dropped it — a
+  consent level the user had set read back as its default with nothing anywhere
+  saying so. It serializes the dataclass now (`asdict`), and a test asserts the
+  WHOLE config round-trips so the next field is caught too. Sixth instance of
+  the second-copy-of-a-list hole.
+- **`agent._plan_response` was a second copy of `serialize_plan_for_api`** and
+  would have been the ONE surface without the contract. It delegates now.
+- Tests: `test_spoken_approval.py` (57 — the word-set matrices, the spoken
+  shape, the hash properties, and the three guards driven over REAL HTTP against
+  a REAL planner and a REAL file on disk, so "nothing has run" is a claim about
+  the filesystem). All 9 behavioural changes proven to FAIL by reverting the
+  specific line IN PLACE. Gates: **3292 passing, 14 skipped, 0 failed** (3235
+  before this round, +57, zero regressions); typecheck and `vite build` clean.
+- **⚠️ TWO FALSIFICATIONS CAME BACK WRONG, AND ONE TAUGHT SOMETHING.** (1)
+  Reverting the post-pop hash check left the test GREEN — because the binding is
+  enforced TWICE (a peek before the pop, a re-derive after) and the peek still
+  refused. **A falsification must remove the GUARANTEE, not one of its copies.**
+  (2) The first "revert" of the bare-yes rule was not an inverse at all: it kept
+  the required approval verb, so a bare "yes" was still refused and the test
+  passed against the "broken" code.
+
+### One machine, one room — a surface that cannot run a shell (2026-08-03)
+*(Tier 2, item 5 — the last of the four)*
+
+**⚠️ `BACKEND_HOST` WAS DECORATIVE, AND THE COMMENT ABOVE IT WAS A CLAIM THE
+CODE DID NOT MAKE.** It appeared in exactly ONE place — the startup log line —
+and nothing bound it. Loopback held only because uvicorn DEFAULTS to
+`127.0.0.1` and no `--host` was passed in `package.json`, `electron/main.ts` or
+the README. Setting it in `.env` changed nothing **in either direction**, which
+is the worst kind of config: one that reads as a guarantee and is not. It is now
+passed explicitly at both launch sites, and a test asserts that.
+
+**THE SHAPE OF THE FEATURE.** A second `uvicorn.Server` inside the SAME process,
+lifespan-owned beside `start_housekeeping()`, serving a second FastAPI app built
+by copying ONLY the routes on `app/core/remote_manifest.py`. Default OFF. No
+second backend to package, no Electron change.
+
+- **⚠️ THE SAFETY IS THAT THE ROUTES ARE NOT THERE, NOT THAT A CHECK REFUSES
+  THEM.** The alternative — one app, a scoped principal, a 403 on anything
+  off-list — works right up until a middleware ordering change, a route
+  registered before the gate, or an early-returning exception path. Here
+  `/chat/stream` 404s on the remote port for the same reason it 404s on a
+  webserver that never heard of Jarvis. Same move as `registry.execute_tool`
+  refusing structurally rather than by prompt: prefer the guarantee you cannot
+  code your way around. **The tests assert ABSENCE from the mounted route
+  table, not response codes** — a 403 would mean a check ran and worked; a 404
+  means there was nothing to check.
+- **`/chat/stream` is denied and that is the whole "never a shell" line.** It
+  fans into five routers and can start an approval-gated background Task that
+  runs shell commands, deletes files, sends mail and drives a browser. On a LAN
+  port it would mean the phone can start anything the desktop can, however the
+  words are arranged. The four ACTIONS allowed are all *answers to something
+  Jarvis already asked* about work started at the desk: approve, choose, pause,
+  cancel. None can begin anything, and approve still runs the plan through the
+  full gate + locks — plus, off-card, the Tier-2-item-8 contract hash.
+- **DEFAULT DENY WITH A WRITTEN REASON FOR EVERY ROUTE.**
+  `test_every_route_is_allowed_or_denied` walks the REAL app: each of ~90 routes
+  is in `REMOTE_ROUTES` or in `DENIED` with prose. **It earned its keep twice on
+  its first run** — it caught that `POST /api/threads` needed denying while
+  `GET /api/threads` was allowed (so `DENIED` is keyed by path while
+  `REMOTE_ROUTES` is keyed by *method* and path, and a path can be in both), and
+  it caught the pairing routes the moment they were registered. Those are the
+  most tempting thing to leave allowed and the most dangerous: **a paired device
+  that can pair another, or revoke its own revocation, is a credential that
+  cannot be taken away.** Pairing happens at the machine.
+- **Device tokens are stored HASHED**, and that is not ceremony: the local token
+  must be readable (Electron hands it to the renderer), but a device token is
+  only ever COMPARED, so sha256 makes a leaked `jarvis.db`, backup or sync copy
+  useless for getting in. **When you can verify without reading, store the
+  hash.** Expiring (30d), revocable with immediate effect, capped, and every
+  unparseable field fails CLOSED. No migration — the list lives in the existing
+  `app_settings` k/v table.
+- **The route OBJECTS are shared, not re-declared** (`test_the_handlers_are_the_
+  SAME_objects_not_a_second_implementation`), so the remote surface cannot drift
+  into a second implementation of approve — two approval paths, one of them less
+  tested, would be the worst of all worlds. The LIFESPAN is deliberately NOT
+  shared: the app is mounted into an already-running process and must not re-run
+  migrations, the scheduler or the model warm-up.
+- **The phone page** is one self-contained HTML document served only by the
+  remote listener (the desktop frontend has essentially zero responsive
+  breakpoints and cannot be reused; a second build pipeline would cost more than
+  four screens earn). It loads WITHOUT a token because it is where the token is
+  installed — from the QR link's `#t=` fragment, which is never sent to a server
+  and never lands in a log — and it is inert until it has one. There is no
+  compose box, because there is no route to send it to; a test asserts every
+  endpoint the page calls is on the manifest.
+- Tests: `test_remote_surface.py` (37). All 9 behavioural changes proven to FAIL
+  by reverting the specific line IN PLACE. Gates: **3329 passing, 14 skipped, 0
+  failed** (3292 before this round, +37, zero regressions); frontend and
+  electron typechecks clean.
+- **RUNTIME-VERIFIED with BOTH listeners live** (isolated scratch DB, main on
+  :8001, remote on :8766): the page loads token-free (7.3 KB) and an unpaired
+  device gets 401; a paired device reads tasks/activity/reminders/routines/
+  threads at 200; and **with a VALID device token every dangerous route answers
+  404 NOT MOUNTED** — `/chat/stream`, `/api/agent/execute`, `/api/browser/login`,
+  `/api/routines/{id}/run`, `/api/initiative/run-now`, `/api/index/rebuild`,
+  `/api/context/world`, `/api/agent/tools`, `/api/autofill`, `/memory/stats`,
+  `/api/browser/media`, `/api/remote/pair`, `/docs`. Revocation flips 200 → 401
+  immediately; the main app still serves all of those; and **the LOCAL machine
+  token does NOT work on the remote listener** (401) — the two credentials are
+  genuinely separate. End to end: a write parked on the desktop
+  (`awaiting_approval`, file absent) was **approved from the phone surface** and
+  the file appeared with the right contents.
+- **⚠️ A FIRST PROBE RUN PRODUCED ALL-401s AND WAS WORTHLESS.** The device token
+  had been written to a temp file that did not survive between shell
+  invocations, so every request went out with an EMPTY token. "Everything
+  denied" reads like success and proved nothing — the pairing/probe sequence has
+  to run in ONE invocation with the token in a variable. A negative result is
+  only evidence if the positive control passes in the same breath.
+- **⚠️ THE FALSIFICATION HARNESS REFUSED TO REPORT ONE, CORRECTLY.** It verifies
+  the patched line landed before trusting a green result, and its check was
+  "`new` present AND `old` absent" — which is wrong for an ADDITIVE revert
+  (adding a line to a set legitimately leaves `old` on disk). It reported "REVERT
+  DID NOT LAND" rather than a verdict it could not stand behind, which is exactly
+  the behaviour three lying falsifications earlier in this project argued for.
+  The check now recognises the additive shape.
+
+### The remote surface existed and no human could reach it (2026-08-04)
+*(the walk from "the feature is built" to "a person can use it")*
+
+The listener, the manifest, the device tokens and the phone page all shipped
+correct the day before — and the feature was unusable. `POST /api/remote/pair`
+returned the literal string `http://<this-machine>:8765`, **nothing in the repo
+resolved the machine's LAN address**, there was no `remoteApi`, no Settings card
+and no device list, and `remote_page.py` told an unpaired user to *"scan the QR
+code in Settings"* — a QR that did not exist, pointing at a panel that did not
+exist. Pairing meant curl, a copied token, and hand-typing an address the user
+had to go and find. **A capability nobody can invoke is not shipped**, and the
+gap was invisible from the backend because every backend test passed.
+
+- **`app/core/remote_link.py`** — three pure never-raising functions.
+  `lan_address()` uses the stdlib UDP routing probe: open a `SOCK_DGRAM` and
+  `connect()` it. **NO PACKET IS SENT** — `connect()` on UDP is a purely local
+  operation that fixes the peer, and its side effect is that the kernel consults
+  the routing table and binds a source address; `getsockname()` reads it back.
+  That is how you ask "which interface would reach the outside world?" with no
+  traffic, no DNS and no dependency. The probe target is RFC 5737 TEST-NET-3,
+  deliberately not `8.8.8.8`: if this is ever changed such that a packet IS
+  sent, a documentation-reserved address goes nowhere and tells nobody anything.
+- **⚠️ `listen_address()` EXISTS BECAUSE THE BIND HOST IS NOT AN ADDRESS.**
+  `REMOTE_HOST` defaults to `0.0.0.0` — correct for binding (every interface, so
+  the phone arrives on whichever one the wifi uses) and **useless in a URL**.
+  Only a pinned host is echoed back; a wildcard sends us looking for the real
+  one. Putting the bind value in a link is how you ship `http://0.0.0.0:8765`.
+- **⚠️ THE TOKEN RIDES IN THE FRAGMENT, AND THAT IS NOT COSMETIC.** `#t=<token>`
+  never reaches a server, a log or a proxy — the browser keeps it client-side
+  and `remote_page.py` reads `location.hash`. A query string would write a live
+  credential into every access log between here and the phone. Frozen by a test
+  asserting the token appears nowhere before the `#`.
+- **The QR is a `data:` URI, not SVG markup**, so the card renders it with a
+  plain `<img>` and there is no path by which it becomes live DOM — no
+  `dangerouslySetInnerHTML` anywhere. `segno==1.6.6` is pure Python with ZERO
+  transitive deps, imported LAZILY: without it pairing still returns a working
+  copyable link and only the scan-it convenience is lost (the
+  `rapidocr-onnxruntime` convention).
+- **NO NEW ROUTE, deliberately.** The QR rides the EXISTING pair response, so
+  `REMOTE_ROUTES`/`DENIED` are untouched and `test_every_route_is_allowed_or_
+  denied` keeps its meaning. A pairing route reachable remotely would be a key
+  that cannot be taken back — a paired device that can pair another, or undo its
+  own revocation. Pinned by a test asserting no `/api/remote` path is on the
+  manifest.
+- **The card cannot turn the feature on, and says so.** `REMOTE_ENABLED` is a
+  `.env` setting read at startup, because opening a port is a decision that
+  belongs with the process, not with a toggle a page can flip. The card reports
+  the state and names the fix — the `GoogleAccountCard` unconfigured-with-a-hint
+  precedent (`SettingsPanel.tsx:199`).
+- **⚠️ THE PHONE POSTED AN EMPTY PLAN ID.** `remote_page.py` read the id off the
+  *parsed plan payload* (`p.id`) while `tasks.py:66` serializes `plan_id`
+  explicitly AND sets `plan = None` when `plan_payload` is missing or
+  unparseable — so approve 404'd on exactly the tasks whose snapshot failed to
+  round-trip. Now `t.plan_id || p.id`.
+- **⚠️ A VOICE-APPROVED INLINE PLAN SAID NOTHING BACK.** `voiceStore.ts`
+  DISCARDED the plan returned by a successful spoken approval: the card kept
+  offering Approve for a plan the backend had already consumed (clicking it
+  404'd), `outcome_text` was never rendered, and — in the one feature whose
+  entire point is not needing a screen — Jarvis went silent. The card path has
+  done both since 2026-07-12 (`chatStore.respondToPlan`). New
+  `chatStore.applyApprovedPlan(plan)` reuses `receiveTaskEvent`'s patch-by-plan-id
+  (keyed by PLAN id because a voice approval has no message id) and the same
+  `appendOutcomeText`; `voiceStore` speaks the returned outcome. **No
+  double-speak, structurally:** `agent.py` finalizes only inline plans, so a
+  background plan comes back as an executing snapshot with no `outcome_text` and
+  its outcome arrives by push — the no-op is a property of the API, not a check.
+- **⚠️ MY FALSIFICATION HARNESS BECAME THE BUG IT WAS HUNTING, TWICE.** (1) It
+  named a test that did not exist; pytest ran nothing, and "no tests ran" scored
+  identically to "test failed" — a typo read as a code defect. It reads pytest's
+  EXIT CODE now (5 = nothing collected) and refuses rather than guessing; my
+  first attempt at that check scraped the summary text and misread `47
+  deselected` as nothing-ran. (2) That refusal fired via `SystemExit` **between
+  the revert and the restore**, leaving `remote.py` holding the reverted line on
+  disk — which then broke the next case and read as a second code defect. The
+  restore is in a `try/finally` now. **A harness that edits source must restore
+  under every exit, or it is indistinguishable from the defect.** Both cost real
+  minutes and neither was a code problem: suspect the harness before the code.
+- **VERIFIED LIVE on the REAL lifespan** (isolated scratch DB, main `:8001`,
+  remote `:8766`, `REMOTE_ENABLED=true`): pairing returns
+  `http://10.17.245.222:8766/#t=<token>` — a real LAN address — and **the QR was
+  decoded with OpenCV back to that exact URL, fragment intact**, which is the
+  only thing that proves it scans. The page loads token-free (200, 7.7 KB); an
+  unpaired device and a made-up token both 401; a paired device reads
+  tasks/reminders/routines/threads at 200; the LOCAL machine token is refused on
+  the remote port (401 — genuinely separate credentials); **eleven dangerous
+  routes answer 404 NOT MOUNTED** with a valid device token; revocation flips
+  200 → 401 immediately. End to end: a write parked on the desktop
+  (`awaiting_approval`, **file absent**) was **approved from the phone surface**
+  and the file appeared with the right contents.
+- Tests: `test_remote_surface.py` 37 → **48**. All 7 behavioural changes proven
+  to FAIL by reverting the specific line IN PLACE, each with the correct
+  signature. Gates: **3340 passing, 14 skipped, 0 failed** (baseline 3329/14/0 —
+  +11, zero regressions); typecheck and `vite build` clean.
+- **STILL OPEN, recorded rather than quietly dropped:** the phone does not echo
+  the Tier-2-item-8 contract hash though `remote_manifest.py:52`,
+  `rendering.py:957` and this file all say it does — the
+  `BACKEND_HOST`-was-decorative pattern again, and it should be sent or the
+  claim withdrawn. `package.json` still hardcodes `127.0.0.1` rather than
+  reading `BACKEND_HOST`, so the dev path still ignores `.env`. Spoken-approval
+  guard 2 checks `spoken_approval` but never `config.enabled`. And the full
+  6-case `plan_bench` has not been re-run since the failure-signal fix — the
+  20:44 run that scored 5/6 is what FOUND those defects; only the single
+  `learns-from-failure` case has been seen green since.
+
 ### Universal browser control (Phase 14)
 
 > **⚠️ HISTORICAL FROM HERE TO "Browser stack — CURRENT STATE".** Everything from

@@ -13,7 +13,7 @@ daily briefing "on by default at 08:00" true before the user ever opens
 Settings.
 """
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -274,6 +274,11 @@ VOICE_TTS_VOICE_IDS = tuple(v for v, _ in VOICE_TTS_VOICES)
 DEFAULT_VOICE_ID = "af_heart"
 
 #: Speaking-speed bounds (Kokoro `speed`; 1.0 = natural).
+# How far spoken consent may go. "off" = never (the default); "write" =
+# WRITE steps only, so anything DESTRUCTIVE still needs eyes on the card;
+# "all" = both, bound by the contract hash. Order matters only for the UI.
+VOICE_SPOKEN_APPROVAL_LEVELS = ("off", "write", "all")
+
 VOICE_TTS_MIN_SPEED = 0.5
 VOICE_TTS_MAX_SPEED = 2.0
 
@@ -319,6 +324,7 @@ class VoiceConfig:
     stt_compute_type: str
     continuous_conversation: bool
     wake_word: bool
+    spoken_approval: str
 
 
 def default_voice_config() -> VoiceConfig:
@@ -337,6 +343,9 @@ def default_voice_config() -> VoiceConfig:
         stt_compute_type="auto",
         continuous_conversation=False,
         wake_word=False,
+        # OFF by default. Voice approval is a real change to how consent
+        # is given, so it is opted into like every other new capability.
+        spoken_approval="off",
     )
 
 
@@ -371,6 +380,11 @@ def _coerce_voice(raw: Any) -> VoiceConfig:
     stt_compute_type = raw.get("stt_compute_type", default.stt_compute_type)
     if stt_compute_type not in VOICE_STT_COMPUTE_TYPES:
         stt_compute_type = default.stt_compute_type
+    # An out-of-whitelist value falls back to "off" — the SAFE end. A
+    # corrupt or hand-edited row must never widen who may approve a write.
+    spoken_approval = raw.get("spoken_approval", default.spoken_approval)
+    if spoken_approval not in VOICE_SPOKEN_APPROVAL_LEVELS:
+        spoken_approval = default.spoken_approval
     return VoiceConfig(
         enabled=bool(raw.get("enabled", default.enabled)),
         stt_model=stt_model,
@@ -388,6 +402,7 @@ def _coerce_voice(raw: Any) -> VoiceConfig:
             raw.get("continuous_conversation", default.continuous_conversation)
         ),
         wake_word=bool(raw.get("wake_word", default.wake_word)),
+        spoken_approval=spoken_approval,
     )
 
 
@@ -399,22 +414,19 @@ async def get_voice_config(db: AsyncSession) -> VoiceConfig:
 
 
 async def set_voice_config(db: AsyncSession, config: VoiceConfig) -> None:
-    await set_setting(db, VOICE_CONFIG_KEY, {
-        "enabled": config.enabled,
-        "stt_model": config.stt_model,
-        "review_before_send": config.review_before_send,
-        "output_enabled": config.output_enabled,
-        "voice": config.voice,
-        "speak_proactive": config.speak_proactive,
-        "speak_all_responses": config.speak_all_responses,
-        "listen_on_summon": config.listen_on_summon,
-        "tts_speed": config.tts_speed,
-        "stt_device": config.stt_device,
-        "tts_device": config.tts_device,
-        "stt_compute_type": config.stt_compute_type,
-        "continuous_conversation": config.continuous_conversation,
-        "wake_word": config.wake_word,
-    })
+    """⚠️ SERIALIZES THE DATACLASS, not a hand-listed dict.
+
+    This used to name all fourteen fields by hand, which made it the FOURTH
+    place the field list lived (dataclass, default, coercer, writer). Adding
+    `spoken_approval` on 2026-08-03 updated three of them, and the write
+    silently DROPPED the new field — a config the user had set read back as its
+    default, and nothing anywhere said so. That is a second copy of a list, the
+    hole this codebase has now recorded six times.
+
+    `asdict` cannot drift. The coercer stays hand-written on purpose: it is
+    where the DEFENCE lives (unknown keys ignored, out-of-whitelist values
+    coerced to the safe end), and that has to be explicit."""
+    await set_setting(db, VOICE_CONFIG_KEY, asdict(config))
 
 
 # ---------------------------------------------------- context config (Phase 8)

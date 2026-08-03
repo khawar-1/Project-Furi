@@ -78,6 +78,12 @@ class SemanticMemoryResponse(BaseModel):
     confidence: float
     is_active: bool
     created_at: datetime
+    # Reversible-archive fields (2026-08-03). `archived_at` set = hidden from
+    # retrieval, still stored, restorable; `last_used_at` is when the fact was
+    # last actually rendered into a prompt. Both default None so a response
+    # built from a pre-migration row still validates.
+    last_used_at: Optional[datetime] = None
+    archived_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

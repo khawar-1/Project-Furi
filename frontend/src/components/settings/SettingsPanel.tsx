@@ -22,13 +22,16 @@ import {
   Mic,
   Monitor,
   Plus,
+  QrCode,
   RotateCw,
   Send,
   Settings as SettingsIcon,
   ShieldCheck,
+  Smartphone,
   Sparkles,
   Square,
   Sunrise,
+  Trash2,
   Volume2,
   X,
 } from 'lucide-react';
@@ -39,6 +42,7 @@ import {
   indexApi,
   initiativeApi,
   integrationsApi,
+  remoteApi,
   settingsApi,
   voiceApi,
   voiceUpdatePayload,
@@ -57,6 +61,8 @@ import type {
   FrequentFolder,
   GoogleIntegrationStatus,
   InitiativeSettings,
+  RemotePairResult,
+  RemoteStatus,
   SttStatus,
   TtsStatus,
   WorldModel,
@@ -69,6 +75,14 @@ const SCOPE_SUMMARY = [
   'Read and search your Gmail inbox',
   'Create drafts and send email (each send needs your approval)',
   'Create and manage calendar events',
+];
+
+/** What a paired phone can do — and, just as importantly, what it cannot.
+ *  Kept blunt: this is the copy someone reads before opening a port. */
+const REMOTE_SUMMARY = [
+  'See what Jarvis is working on, from your phone',
+  'Approve, answer, pause or cancel work already under way',
+  'Never starts anything — no chat, no shell, no new task',
 ];
 
 function GoogleAccountCard() {
@@ -209,6 +223,255 @@ function GoogleAccountCard() {
             </button>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** Local date+time, or an em dash. Device timestamps are UTC ISO from the
+ *  backend (the `utc_iso` convention), so `new Date` reads them correctly. */
+function shortWhen(iso: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString();
+}
+
+/**
+ * Remote access (Tier 2 item 5) — pair a phone that can approve, answer,
+ * pause and cancel, and can start nothing.
+ *
+ * ⚠️ THIS CARD CANNOT TURN THE FEATURE ON, and that is deliberate rather than
+ * an omission: `REMOTE_ENABLED` is a `.env` setting read at startup, because
+ * opening a port is a decision that belongs with the process, not with a
+ * toggle a page can flip. So the card reports the state and tells you how to
+ * change it — the GoogleAccountCard's unconfigured-with-a-hint precedent.
+ */
+function RemoteAccessCard() {
+  const [status, setStatus] = useState<RemoteStatus | null>(null);
+  const [paired, setPaired] = useState<RemotePairResult | null>(null);
+  const [name, setName] = useState('phone');
+  const [error, setError] = useState<string | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setStatus(await remoteApi.status());
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not reach the backend');
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const handlePair = async () => {
+    setIsBusy(true);
+    setError(null);
+    try {
+      // ⚠️ The ONLY moment the token exists — hold the whole response in state
+      // and never re-fetch it. Nothing on the backend can reissue it.
+      setPaired(await remoteApi.pair(name.trim() || 'phone'));
+      setCopied(false);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Pairing failed');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleRevoke = async (deviceId: string) => {
+    setIsBusy(true);
+    setError(null);
+    try {
+      await remoteApi.revoke(deviceId);
+      // If the revoked device is the one whose token is on screen, that token
+      // is now dead — stop showing a QR that cannot work.
+      if (paired?.id === deviceId) setPaired(null);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Revoke failed');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleCopy = async () => {
+    if (!paired) return;
+    try {
+      await navigator.clipboard.writeText(paired.url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard can be refused; the URL is on screen and selectable anyway.
+      setError('Could not copy — select the link and copy it by hand.');
+    }
+  };
+
+  const enabled = status?.enabled ?? false;
+  const devices = status?.devices ?? [];
+  const liveCount = devices.filter((d) => d.live).length;
+  const full = !!status && devices.filter((d) => d.live).length >= status.max_devices;
+
+  return (
+    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
+      {/* Card header */}
+      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
+        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
+          <Smartphone size={15} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-sm font-semibold text-slate-200">Remote access</h2>
+          <p className="text-xs text-muted truncate">
+            {enabled
+              ? `Listening on ${status?.address}:${status?.port} · ${liveCount} device${liveCount === 1 ? '' : 's'} paired`
+              : 'Approve work from your phone — currently off'}
+          </p>
+        </div>
+        <span
+          className={clsx(
+            'text-[10px] px-2 py-0.5 rounded-full border font-mono',
+            enabled
+              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+              : 'bg-surface-2 text-slate-500 border-surface-border'
+          )}
+        >
+          {enabled ? 'on' : 'off'}
+        </span>
+      </div>
+
+      {/* Card body */}
+      <div className="px-4 py-3.5 space-y-3">
+        <div className="space-y-1.5">
+          {REMOTE_SUMMARY.map((line) => (
+            <div key={line} className="flex items-center gap-2 text-xs text-slate-400">
+              <ShieldCheck size={12} className="text-cyan-500/60 flex-shrink-0" />
+              {line}
+            </div>
+          ))}
+          <p className="text-[11px] text-slate-600 pt-1">
+            Those routes are not mounted on the remote port at all — they answer 404
+            there whatever token is used. A paired phone also cannot pair another one.
+          </p>
+        </div>
+
+        {!enabled && (
+          <div className="p-2.5 rounded-lg bg-surface-2 border border-surface-border text-xs text-slate-400">
+            Set <code className="text-cyan-400/90 font-mono">REMOTE_ENABLED=true</code> in{' '}
+            <code className="text-cyan-400/90 font-mono">.env</code> and restart Jarvis to
+            switch this on. Unlike the main API, it listens beyond this machine — use it
+            only on a network you trust.
+          </div>
+        )}
+
+        {error && (
+          <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs">
+            {error}
+          </div>
+        )}
+
+        {/* The one-time credential. Shown until this panel is left. */}
+        {paired && (
+          <div className="p-3 rounded-lg bg-cyan-500/5 border border-cyan-500/20 space-y-2.5">
+            <div className="flex items-center gap-2 text-xs font-medium text-cyan-400">
+              <QrCode size={13} />
+              Scan this on the phone
+            </div>
+            {paired.qr ? (
+              <img
+                src={paired.qr}
+                alt="Pairing QR code"
+                className="w-40 h-40 bg-white rounded-lg p-1.5"
+              />
+            ) : (
+              <p className="text-[11px] text-slate-500">
+                No QR — install <code className="font-mono">segno</code> for one. The link
+                below works on its own.
+              </p>
+            )}
+            <div className="flex items-center gap-2">
+              <code className="flex-1 min-w-0 truncate text-[11px] font-mono text-slate-300 bg-surface-2 border border-surface-border rounded px-2 py-1.5">
+                {paired.url}
+              </code>
+              <button
+                onClick={() => void handleCopy()}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 hover:bg-cyan-500/20 transition-colors flex-shrink-0"
+              >
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+            <p className="text-[11px] text-amber-400/90">
+              Shown once. Only its fingerprint is stored, so this cannot be shown again —
+              if you lose it, pair the device afresh.
+            </p>
+          </div>
+        )}
+
+        {/* Pair */}
+        <div className="flex items-center gap-2">
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            maxLength={64}
+            placeholder="Device name"
+            disabled={!enabled}
+            className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-300 placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/30 disabled:opacity-40"
+          />
+          <button
+            onClick={() => void handlePair()}
+            disabled={!enabled || isBusy || full}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 hover:bg-cyan-500/20 transition-colors disabled:opacity-40 flex-shrink-0"
+            title={
+              !enabled
+                ? 'Set REMOTE_ENABLED=true in .env and restart first'
+                : full
+                  ? `That is the limit of ${status?.max_devices} paired devices — revoke one first`
+                  : undefined
+            }
+          >
+            {isBusy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+            Pair a device
+          </button>
+        </div>
+
+        {/* Paired devices */}
+        {devices.length > 0 && (
+          <div className="space-y-1.5 pt-1">
+            <p className="text-[10px] uppercase tracking-wide text-slate-600">
+              Paired devices
+            </p>
+            {devices.map((d) => (
+              <div
+                key={d.id}
+                className="flex items-center gap-2 px-2.5 py-2 rounded-lg bg-surface-2 border border-surface-border"
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs text-slate-300 truncate">{d.name}</p>
+                  <p className="text-[10px] text-slate-600">
+                    {d.live
+                      ? `last seen ${shortWhen(d.last_seen_at)} · expires ${shortWhen(d.expires_at)}`
+                      : d.revoked
+                        ? 'revoked'
+                        : 'expired'}
+                  </p>
+                </div>
+                {d.live && (
+                  <button
+                    onClick={() => void handleRevoke(d.id)}
+                    disabled={isBusy}
+                    className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
+                    title="Revoke — takes effect on this device's next request"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1215,6 +1478,35 @@ function VoiceCard() {
           ))}
         </div>
 
+        {/* Spoken approval — a CONSENT setting, so it gets its own block and
+            says plainly what it changes. Default off. */}
+        {enabled && (
+          <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 space-y-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="text-xs font-medium text-amber-300/90" htmlFor="voice-spoken-approval">
+                Approve out loud
+              </label>
+              <select
+                id="voice-spoken-approval"
+                value={settings?.spoken_approval ?? 'off'}
+                disabled={isBusy || !settings}
+                onChange={(e) => void patch({ spoken_approval: e.target.value })}
+                className="px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-amber-500/40"
+              >
+                <option value="off">Off — always use the card</option>
+                <option value="write">Everything except deletes and sends</option>
+                <option value="all">Everything, including deletes and sends</option>
+              </select>
+            </div>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Jarvis reads out exactly what it is about to do, and you can say
+              “approve” instead of clicking. Your answer is tied to the steps you
+              were read — if the plan changes, it asks again. A plain “yes” is not
+              enough on purpose.
+            </p>
+          </div>
+        )}
+
         {/* Recognition model + speaking voice + speed */}
         <div className="flex flex-wrap items-center gap-3">
           <label className="text-xs text-slate-400" htmlFor="voice-stt-model">
@@ -2030,6 +2322,8 @@ export function SettingsPanel() {
         <VoiceCard />
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Awareness</p>
         <ContextSensingCard />
+        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Remote</p>
+        <RemoteAccessCard />
       </div>
     </div>
   );

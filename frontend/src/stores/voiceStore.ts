@@ -19,7 +19,8 @@ import { create } from 'zustand';
 import type { VoiceSettings } from '@/types';
 import { voiceApi } from '@/lib/api';
 import { startRecording, type RecordingHandle } from '@/lib/voiceInput';
-import { markNextTurnVoice, stopSpeaking } from '@/lib/voiceOutput';
+import { markNextTurnVoice, speakText, stopSpeaking } from '@/lib/voiceOutput';
+import { tryApproveByVoice } from '@/lib/spokenApproval';
 import { useChatStore } from '@/stores/chatStore';
 
 export type VoicePhase = 'idle' | 'recording' | 'transcribing';
@@ -304,6 +305,36 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
           }
           set({ error: 'I didn’t catch anything — try again.' });
           return;
+        }
+        // ⚠️ SPOKEN APPROVAL, and ONLY for a voice-originated turn. If a
+        // contract was read aloud moments ago, offer these words as consent to
+        // it. The SERVER decides — whether they are consent at all, whether the
+        // setting allows it, and whether the hash still matches the pending
+        // steps — so a refusal is not a failure: the words fall through to the
+        // normal chat path and become a steer, or the typed-approval nudge.
+        // Nothing is ever swallowed.
+        //
+        // Deliberately NOT offered for review-mode drafts: those are sent by
+        // Enter later, which makes them typed turns at a screen where the card
+        // is right there.
+        if (!get().settings?.review_before_send) {
+          const spoken = await tryApproveByVoice(text);
+          if (spoken.kind === 'approved') {
+            // ⚠️ THE ANSWER MUST LAND SOMEWHERE. Until 2026-08-04 the returned
+            // plan was DISCARDED here: the card kept offering Approve for a
+            // plan the backend had already consumed (clicking it 404'd), the
+            // outcome text was never rendered, and — in the one feature whose
+            // whole point is not needing a screen — Jarvis said nothing at
+            // all. The card path has done both since 2026-07-12
+            // (chatStore.respondToPlan); this is the same two steps.
+            const outcome = useChatStore.getState().applyApprovedPlan(spoken.plan);
+            // Speak it: this was a voice turn, so the reply has to be audible.
+            // Null for a BACKGROUND task, whose outcome arrives by push and is
+            // spoken by voiceAnnounce — which is what stops a double-speak.
+            if (outcome) speakText(outcome);
+            set({ conversationActive: false });
+            return;
+          }
         }
         const chat = useChatStore.getState();
         // Review mode — and a turn already streaming — both land the words

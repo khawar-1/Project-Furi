@@ -96,6 +96,24 @@ class SemanticMemory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
+    # --- decay + reversible archive (2026-08-03, Tier 2 item 7) ---
+    # When this fact was last actually RENDERED into a MEMORY CONTEXT block.
+    # NULL = never retrieved since the column existed. Stamped at render time
+    # rather than at search time on purpose: "was it ever put in front of the
+    # model?" is the question the archive pass needs, and a fact can be returned
+    # by a search and then clipped out of the block by the budget.
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Set by the housekeeping archive pass. An archived memory is EXCLUDED from
+    # retrieval but is NOT deleted: the row and its vector stay, it is listed
+    # under "Archived" in About Me, and one click restores it.
+    #
+    # ⚠️ DISTINCT FROM is_active ON PURPOSE. `is_active=False` is a soft DELETE
+    # written by dedup and supersede — it means "this fact was replaced". This
+    # means "nothing has needed this in a long time", which is reversible and
+    # carries no claim that the fact is wrong. Collapsing the two would make an
+    # automatic tidy-up indistinguishable from a correction.
+    archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+
 
 # ============================================================
 # Relationship Memory — People the user knows
@@ -618,3 +636,181 @@ class FileIndex(Base):
     indexed_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+# ============================================================
+# Routing decisions — the audit trail for what Jarvis DIDN'T do
+# ============================================================
+class RoutingDecision(Base):
+    """One row per chat turn: which router took it, and — when none did — WHY.
+
+    ActivityLog records every tool call, so every path where Jarvis *acts*
+    leaves evidence. Routing is the opposite: it fails OPEN by design, so a
+    message that should have become a task and instead became a chat reply
+    left ZERO rows anywhere. For a system whose dominant failure mode is "it
+    didn't do the thing", the not-doing was the one unaudited event — and on
+    2026-07-17 a live routing miss genuinely could not be root-caused because
+    of it.
+
+    ``fail_open_reason`` is the column this table exists for. Today the three
+    causes of a chat outcome are indistinguishable from the outside:
+
+      gate_closed      the deterministic gate never fired — unfixable downstream
+      classifier_chat  the gate fired and the LLM judged it conversation
+      classifier_error the LLM call failed and CHAT was the fail-open default
+
+    They need three different fixes, and telling them apart is the difference
+    between a query and archaeology.
+
+    The ONE writer is app/core/routing_trace.py. Written best-effort: a failure
+    logs and rolls back, never costs the turn (the persist.py rule). ``message``
+    is clipped by the writer (ROUTING_MESSAGE_MAX_CHARS) — the full text already
+    lives in `messages`, this copy only has to be recognizable. Rows are swept
+    after ROUTING_RETENTION_DAYS by the housekeeping pass.
+    """
+    __tablename__ = "routing_decisions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    session_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+
+    # What was routed. Clipped by the writer; message_chars keeps the true size,
+    # so "was this a long paste?" survives the clip.
+    message: Mapped[str] = mapped_column(Text, default="")
+    message_chars: Mapped[int] = mapped_column(Integer, default=0)
+    # The classifier judges a message IN its conversation, so whether there WAS
+    # one changes how a verdict should be read.
+    has_conversation: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # The deterministic gate. NULL = never reached (an upstream router — reminder,
+    # routine, continuation, interrupt — took the turn first).
+    gate_fired: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # Which tier fired. The tier names are whatever task_router.gate_tier
+    # returns, plus action_followup / browse_followup for the two conversation-
+    # aware entries, and "" for none. Deliberately NOT enumerated here: this
+    # comment listed seven of them and went stale the day an eighth
+    # (stored_recall) was added, which is the second-copy-of-a-list hole this
+    # codebase has now recorded five times. Read gate_tier for the list.
+    gate_reason: Mapped[str] = mapped_column(String(32), default="")
+
+    # The routing label this turn got, and whether it ran inline or delegated.
+    # NULL when nothing decided one (the gate never fired). Deliberately NOT
+    # named classifier_label: the bare-navigation shortcut decides BROWSE in
+    # code without calling the model at all, and a column named for a component
+    # that did not run is the kind of lie this codebase keeps having to unpick.
+    # classifier_ms IS NULL is the precise test for "no LLM call was made".
+    label: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+    mode: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    classifier_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    classifier_error: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    # Which model produced the label — so "did routing regress when we changed
+    # models?" is answerable (deepseek-chat → deepseek-v4-flash, 2026-07-24).
+    classifier_model: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    # The two code-owned overrides that bypass or force the classifier.
+    bare_navigation: Mapped[bool] = mapped_column(Boolean, default=False)
+    background_intent: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Where it went. agent = the domain agent key (file/email/calendar/research/
+    # browser/general); execution = inline | delegate.
+    agent: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    execution: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    # reminder | routine | continuation | interrupt | plan_answer |
+    # approval_refused | task_inline | task_background | chat | chat_rescued | error
+    outcome: Mapped[str] = mapped_column(String(24), default="chat", index=True)
+    # "" unless outcome is chat/chat_rescued. See the class docstring.
+    fail_open_reason: Mapped[str] = mapped_column(String(24), default="", index=True)
+
+    # The two known miss-symptoms, both recorded from inside the stream:
+    # rescue_web_turn firing means routing missed a web turn and the dead-end
+    # backstop caught it; an impersonation cut means the chat LLM fabricated a
+    # system message, which is what a routing miss looks like from the user's seat.
+    rescue_fired: Mapped[bool] = mapped_column(Boolean, default=False)
+    rescue_ok: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    impersonation_cut: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Turn start → routing decision. classifier_ms above isolates the LLM call
+    # inside it.
+    route_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Joins into the rest of the audit story.
+    task_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    plan_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+
+
+# ============================================================
+# Plan traces — the audit trail for WHY a plan gave up
+# ============================================================
+class PlanTrace(Base):
+    """One row per planner invocation: how it ended, and when it failed, WHY.
+
+    ``ActivityLog`` records the failure SYMPTOM — one row per failed tool call,
+    carrying the tool's own error. It has no plan_id and no task_id, so it
+    cannot answer "why did that plan give up?". The DIAGNOSIS was never recorded
+    at all: every structural rejection from ``_generate_steps``' reject chain is
+    handed to the LLM as retry feedback and discarded, ``replan_count`` lives in
+    a LangGraph state dict, and of the twelve ``PlanStatus.FAILED`` sites only
+    two log anything. ``Task.plan_payload`` is a display snapshot nothing parses,
+    and an inline plan writes no Task row at all.
+
+    ``fail_class`` is the column this table exists for. "The draft LLM returned
+    junk", "a real step failed and no replan routed around it", and "the replan
+    budget ran out" are three different problems with three different fixes, and
+    from outside they were the same event: a plan that said it failed.
+
+    ONE ROW PER INVOCATION, not per plan — a plan that pauses for approval and
+    is resumed is two planning episodes with two different sets of rejections.
+    ``plan_id`` joins them; ``entry`` (start | resume | answer) says which was
+    which.
+
+    The ONE writer is app/core/plan_trace.py. Written best-effort: a failure
+    logs and rolls back, never costs the plan (the persist.py rule). Rows are
+    swept after PLAN_RETENTION_DAYS by the housekeeping pass.
+    """
+    __tablename__ = "plan_traces"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    session_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+
+    # The plan this invocation ran. Indexed because the join that reconstructs a
+    # plan's whole story (start → resume → answer) is the main read.
+    plan_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    task_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+
+    # Clipped by the writer; goal_chars keeps the true size.
+    goal: Mapped[str] = mapped_column(Text, default="")
+    goal_chars: Mapped[int] = mapped_column(Integer, default=0)
+    # Which domain agent drafted it (file/email/calendar/research/browser/general).
+    agent_key: Mapped[str] = mapped_column(String(32), default="general")
+    # start | resume | answer
+    entry: Mapped[str] = mapped_column(String(16), default="start")
+    # inline | background — derived from task_id, not guessed.
+    execution: Mapped[str] = mapped_column(String(16), default="inline")
+
+    # The plan's settled status, and — only when it failed — which of the
+    # FAILED sites fired. See app/core/plan_trace.py for the closed set.
+    status: Mapped[str] = mapped_column(String(24), default="", index=True)
+    fail_class: Mapped[str] = mapped_column(String(32), default="", index=True)
+    message: Mapped[str] = mapped_column(Text, default="")
+
+    steps_total: Mapped[int] = mapped_column(Integer, default=0)
+    steps_completed: Mapped[int] = mapped_column(Integer, default=0)
+    steps_failed: Mapped[int] = mapped_column(Integer, default=0)
+    steps_skipped: Mapped[int] = mapped_column(Integer, default=0)
+
+    replan_count: Mapped[int] = mapped_column(Integer, default=0)
+    questions_asked: Mapped[int] = mapped_column(Integer, default=0)
+
+    # JSON [{"guard": ..., "feedback": ...}] — the retry-feedback strings the
+    # reject chain produces and today throws away. Bounded by the writer;
+    # rejection_count keeps the true total.
+    rejections: Mapped[str] = mapped_column(Text, default="[]")
+    rejection_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # The step that failed. Indexed on tool because "what keeps failing?" is the
+    # question the failure signal asks.
+    failed_tool: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    failed_signature: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    failed_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

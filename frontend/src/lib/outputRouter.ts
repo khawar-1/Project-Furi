@@ -25,6 +25,8 @@ import type { PushEvent, UserState } from '@/types';
 import { onPush } from '@/lib/push';
 import { notificationContent } from '@/lib/notifications';
 import { speakText } from '@/lib/voiceOutput';
+import { rememberSpokenContract } from '@/lib/spokenApproval';
+import type { AgentPlan } from '@/types';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { useContextStore } from '@/stores/contextStore';
 
@@ -151,6 +153,22 @@ export function initOutputRouter(): () => void {
       window.jarvis.notify(content.title, content.body);
     }
     if (decision.voice) {
+      // ⚠️ A BACKGROUND PLAN ASKING FOR APPROVAL SPEAKS ITS CONTRACT, not the
+      // toast body. This is where writes actually live — the router DELEGATEs
+      // them — and `notificationContent` renders a short "task paused" line
+      // that names none of what is about to happen. Remembering the hash is
+      // what lets a spoken "approve" be BOUND to these exact steps.
+      const plan = (event.payload as { plan?: AgentPlan } | undefined)?.plan;
+      if (
+        event.type === 'task' &&
+        plan?.requires_approval &&
+        plan.spoken_contract &&
+        plan.contract_hash
+      ) {
+        speakText(plan.spoken_contract);
+        rememberSpokenContract(plan.id, plan.contract_hash);
+        return;
+      }
       // 'Jarvis' is notificationContent's FALLBACK title, not content — saying
       // it before every announcement is noise. A real title leads the sentence.
       speakText(

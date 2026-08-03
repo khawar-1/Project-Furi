@@ -32,12 +32,14 @@ from app.agents import (
     PlanStatus,
     answer_task_in_background,
     deterministic_plan_text,
+    get_plan,
     planner_memory_context,
     pop_plan,
     put_plan,
     resume_task_in_background,
     settle_cancelled_task,
 )
+from app.agents.rendering import serialize_plan_for_api
 from app.agents.summary import completed_plan_text
 from app.core.dependencies import get_db, get_llm_provider
 from app.db.persist import persist_message_best_effort
@@ -52,9 +54,32 @@ class ExecuteRequest(BaseModel):
     session_id: Optional[str] = None
 
 
+class SpokenApproval(BaseModel):
+    """An approval given OFF the card — by voice, or from the phone surface.
+
+    ⚠️ `contract_hash` IS THE WHOLE POINT. `task_router._is_typed_approval`
+    deliberately REFUSES a typed "yes" because consent to a write is consent to
+    a SIGNATURE SET, and a bare word is bound to nothing. This carries the same
+    binding through a different channel: the client echoes the hash of the
+    contract it was GIVEN, and the server re-derives it from the plan it just
+    popped. It is not a password and it is not a secret — it is proof that the
+    thing being approved is the thing that was presented.
+
+    `utterance` is what the user actually said. THE BACKEND DECIDES whether it
+    is consent, deliberately — putting that word set in the client would make
+    the one consent rule in the system untestable and unfalsifiable, and would
+    be a second copy of a list the moment anything else needed it."""
+
+    contract_hash: str = Field(..., min_length=16, max_length=128)
+    utterance: str = Field(..., min_length=1, max_length=500)
+
+
 class ApproveRequest(BaseModel):
     plan_id: str
     approved: bool
+    # Absent = approved on the card, which needs no echo: the card IS the
+    # contract. Present = approved off-card and must prove what it saw.
+    spoken: Optional[SpokenApproval] = None
 
 
 class ChooseRequest(BaseModel):
@@ -74,9 +99,14 @@ _PARKABLE = (
 
 
 def _plan_response(plan: AgentPlan, outcome_text: Optional[str] = None) -> dict:
-    data = plan.model_dump(mode="json")
-    # Convenience flag so the frontend never string-compares the status enum
-    data["requires_approval"] = plan.status == PlanStatus.AWAITING_APPROVAL
+    # ⚠️ DELEGATES rather than re-implementing. This used to be its own copy of
+    # serialize_plan_for_api's body — model_dump plus the requires_approval
+    # flag — and the day the shared serializer gained the spoken contract and
+    # its hash (2026-08-03), the /api/agent/* endpoints would silently have
+    # been the ONE surface without them. A second copy of a serializer is the
+    # same hole as a second copy of a list, and this codebase has recorded that
+    # one five times.
+    data = serialize_plan_for_api(plan)
     # The readable outcome of an INLINE plan that reached a terminal state
     # through this endpoint (clicked option / Approve button). The chat SSE
     # path streams this text; the endpoints must return it or the answer is
@@ -177,12 +207,67 @@ async def execute_goal(
     return _plan_response(plan)
 
 
+_CONTRACT_CHANGED = (
+    "That approval was for a different set of steps — the plan has changed "
+    "since it was read out. Nothing has run; please review it again."
+)
+
+
+async def _guard_spoken_approval(db: AsyncSession, request: "ApproveRequest") -> None:
+    """The three conditions an OFF-CARD approval must meet. Raises, never
+    returns a verdict — so a caller cannot forget to check one.
+
+    Ordered cheapest-first, and every failure leaves the plan untouched."""
+    from app.agents.spoken import is_spoken_approval, plan_needs_screen
+    from app.core.app_settings import get_voice_config
+
+    # 1. Is it consent at all? Fails CLOSED on anything unrecognised.
+    if not is_spoken_approval(request.spoken.utterance):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "That didn't sound like an approval, so nothing has run. Say "
+                '"approve" to go ahead, "cancel" to drop it, or just tell me '
+                "what to change."
+            ),
+        )
+
+    plan = get_plan(request.plan_id)  # non-consuming peek
+    if plan is None:
+        return  # the pop below will 404 with the right message
+
+    # 2. Is voice allowed to approve THIS plan? Checked server-side so a stale
+    #    or hostile client cannot approve by voice while the setting is off.
+    config = await get_voice_config(db)
+    if plan_needs_screen(plan, config.spoken_approval):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This one needs approving on the card, sir — nothing has run. "
+                "Spoken approval is either turned off or limited to non-"
+                "destructive steps in Settings."
+            ),
+        )
+
+    # 3. Is it consent to THESE steps? The binding that makes the whole thing
+    #    honest: a client can only hold this hash if it received the contract.
+    if plan.contract_hash() != request.spoken.contract_hash:
+        raise HTTPException(status_code=409, detail=_CONTRACT_CHANGED)
+
+
 @router.post("/approve", summary="Approve or cancel a pending plan")
 async def approve_plan(
     request: ApproveRequest,
     db: AsyncSession = Depends(get_db),
     provider: LLMProvider = Depends(get_llm_provider),
 ) -> dict:
+    # ⚠️ EVERY OFF-CARD CHECK RUNS BEFORE THE POP, so a refusal leaves the plan
+    # exactly where it was and the card stays clickable — the ordering
+    # `_is_typed_approval`'s nudge already uses. Popping first would consume the
+    # plan on a mis-heard word and turn it into a LOST approval.
+    if request.spoken is not None and request.approved:
+        await _guard_spoken_approval(db, request)
+
     plan = await pop_plan(db, request.plan_id)
     if plan is None:
         raise HTTPException(
@@ -192,6 +277,16 @@ async def approve_plan(
                 "(plans wait 24 hours for approval) or was already answered."
             ),
         )
+    # Re-derive from the plan we ACTUALLY popped, not the one we peeked at.
+    # The peek is the courtesy that keeps the card alive on a mismatch; THIS is
+    # the guarantee — the peek reads a hot cache and the pop reads the truth.
+    if (
+        request.spoken is not None
+        and request.approved
+        and plan.contract_hash() != request.spoken.contract_hash
+    ):
+        await put_plan(db, plan)  # un-consume: nothing was decided
+        raise HTTPException(status_code=409, detail=_CONTRACT_CHANGED)
     # Phase 4, Part 5: a task-owned plan the user just approved goes back to
     # BACKGROUND execution — this response is only a snapshot; the outcome
     # arrives by push. Cancels stay inline (no LLM, no tools). If the Task

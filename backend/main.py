@@ -27,6 +27,7 @@ from app.api import initiative as initiative_api
 from app.api import threads as threads_api
 from app.api import browser as browser_api
 from app.api import autofill as autofill_api
+from app.api import remote as remote_api
 import app.core.reminders  # noqa: F401 — registers the "reminder" job handler at import time
 import app.core.birthdays  # noqa: F401 — registers the "birthday" job handler at import time
 import app.core.daily_briefing  # noqa: F401 — registers the "daily_briefing" job handler at import time
@@ -311,13 +312,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as e:
         logger.warning(f"⚠️  Housekeeping sweep could not start (non-critical): {e}")
 
+    # The remote surface (Tier 2 item 5): a SECOND listener carrying only the
+    # routes on app/core/remote_manifest.py, so a phone can read what is
+    # happening and answer a pending approval. Default OFF. Its safety is that
+    # the other routes are not mounted there — not that a check refuses them.
+    try:
+        from app.core.remote_server import start_remote_listener
+        await start_remote_listener(app)
+    except Exception as e:
+        logger.warning(f"⚠️  Remote listener could not start (non-critical): {e}")
+
     logger.info(f"🤖 LLM Provider: {settings.LLM_PROVIDER}")
     logger.info(f"🌐 Backend ready at http://{settings.BACKEND_HOST}:{settings.BACKEND_PORT}")
 
     yield
 
     logger.info("🛑 Jarvis OS backend shutting down...")
-    # Stop the sweep FIRST — it opens DB sessions, and a pass starting while
+    # Stop accepting REMOTE requests before anything else is torn down — a
+    # phone approving a plan while the scheduler and browser are closing would
+    # be acting on a machine that is already leaving.
+    try:
+        from app.core.remote_server import stop_remote_listener
+        await stop_remote_listener()
+    except Exception as e:
+        logger.debug(f"remote listener shutdown: {e}")
+    # Then the sweep — it opens DB sessions, and a pass starting while
     # the rest of shutdown runs would race the teardown it cannot see.
     try:
         from app.core.housekeeping import stop_housekeeping
@@ -438,6 +457,11 @@ def create_app() -> FastAPI:
 
     # Autofill profile — the grounded data source for browser form-filling (15.2)
     app.include_router(autofill_api.router, prefix="/api/autofill", tags=["Autofill"])
+
+    # Tier 2 item 5 — pairing devices for the remote surface. LOCAL ONLY:
+    # these routes are absent from the remote manifest, so a paired phone
+    # cannot pair another device or undo its own revocation.
+    app.include_router(remote_api.router, prefix="/api/remote", tags=["Remote"])
 
     return app
 

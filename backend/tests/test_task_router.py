@@ -23,6 +23,7 @@ from app.api.chat import _SYSTEM_VOICE_RE
 from app.api.task_router import (
     _classify_message,
     conversation_context,
+    gate_tier,
     is_action_followup,
     is_browse_followup,
     looks_like_task,
@@ -400,6 +401,171 @@ def test_question_frame_pronouns_do_not_count_as_self_reference():
     assert looks_like_task("i want to know the current gold price") is True
     assert looks_like_task("have you heard of the framework laptop") is True
     assert looks_like_task("what do you know about black clover") is True
+
+
+@pytest.mark.parametrize("message", [
+    # FOUND BY scripts/route_bench.py + scripts/plan_bench.py, 2026-08-03, and
+    # it was not a near miss: "find the FILE about X" fired while "find the PDF
+    # about X" was CLOSED, so semantic_file_search — Phase 6 Parts 2/3, the
+    # whole file index, and plan rule 17's own example phrasing — could not be
+    # reached from chat unless the user happened to say file/folder/desktop.
+    # MEASURED before the fix: 12 of these 19 were closed.
+    "find the pdf about cloud computing",
+    "find the document about the merger",
+    "find my notes about the architecture review",
+    "find the resume pdf",
+    "find the presentation about q3 results",
+    "open the doc about onboarding",
+    "find the invoice from last month",
+    "read the contract about the lease",
+    "look for the report on the outage",
+    "find my cv",
+    "show me the spreadsheet with the budget numbers",
+])
+def test_gate_fires_for_documents_named_by_kind(message):
+    assert looks_like_task(message) is True
+
+
+@pytest.mark.parametrize("message", [
+    # A document noun is WEAK, not strong, and that placement is measured
+    # rather than cautious: as strong nouns (firing alone) these three fired
+    # on the gate. Requiring an action verb drops them and costs no recall,
+    # because a request for a document is imperative or interrogative.
+    "my resume is finally done",
+    "that presentation was painful",
+    "the contract finally came through",
+    "my notes are a mess",
+])
+def test_a_document_noun_alone_is_not_a_task(message):
+    assert looks_like_task(message) is False
+
+
+@pytest.mark.parametrize("message", [
+    # Phase 6 Part 4 embeds every message and semantic_file_search searches
+    # them, but nothing could route the question: is_external_question refuses
+    # it (its subject is "we" — correctly, it is not an external-FACT
+    # question) and no other tier had a word for a past conversation.
+    "what did we discuss about the database migration",
+    "what did we talk about yesterday regarding pricing",
+    "when did i mention my sister's birthday",
+    "find the conversation where we talked about the redesign",
+    "what did you say about the deployment plan",
+    "what did we agree on for the release date",
+])
+def test_gate_fires_for_questions_about_past_conversations(message):
+    assert looks_like_task(message) is True
+
+
+@pytest.mark.parametrize("message", [
+    "what did we discuss about the database migration",
+    "what did we talk about yesterday regarding pricing",
+    "when did i mention my sister's birthday",
+    "find the conversation where we talked about the redesign",
+    "what did you say about the deployment plan",
+])
+def test_conversation_questions_are_attributed_to_stored_recall(message):
+    # The tier name is what the routing audit trail records and what
+    # route_bench scores recall on, so it has to be the right one.
+    #
+    # MEASURED FINDING, recorded and deliberately NOT fixed here: "what did we
+    # agree on for the release date" fires `browse_intent` first, because
+    # grounding.ground_origins reads "…agree ON FOR the release date" through
+    # the nav-cue rule and grounds the bare word "for" as a site name (it does
+    # the same with "six" in "we agreed to meet at six"). _NAV_STOPWORDS is a
+    # hand-kept list of everyday words and does not carry the function words.
+    # The gate still FIRES, so nothing is missed and the cost is one temp-0
+    # call — but it mis-labels the audit row, and the fix belongs in the
+    # security-critical grounding module with its own falsification round.
+    assert gate_tier(message) == "stored_recall"
+
+
+@pytest.mark.parametrize("message", [
+    # A recall phrase alone is not a request. All three of these contain one
+    # and are plain conversation; requiring an action verb or a bare wh-word
+    # alongside drops every one of them at ZERO recall cost (measured).
+    "we discussed this already",
+    "i say we ship it",
+    "i talked to my brother yesterday",
+    "he told me he was leaving",
+    "she said it would rain",
+])
+def test_a_recall_phrase_without_a_request_stays_free(message):
+    assert gate_tier(message) != "stored_recall"
+
+
+@pytest.mark.parametrize("message", [
+    # …and a question that addresses Jarvis's MEMORY is the chat path's own
+    # job: retrieve_context() injects the facts/contacts bundle into EVERY
+    # chat turn, so routing it would be a worse answer, not merely a wasted
+    # call. This is the distinction that
+    # test_gate_stays_closed_for_self_referential_questions found when the
+    # tier's first draft broke it.
+    "do you remember what i told you about jamil",
+    "do you recall what i said about the trip",
+    "remember what i told you about my sister",
+    "do you know what i decided about the job",
+])
+def test_a_question_addressed_to_jarvis_memory_stays_in_chat(message):
+    assert looks_like_task(message) is False
+
+
+def test_the_classifier_knows_conversation_and_content_search_exist():
+    # ⚠️ THE GATE FIX ALONE DID NOT DELIVER THE FEATURE. With the gate opened,
+    # "what did we discuss about cloud computing" still routed CHAT 3/3 against
+    # the real model — because the prompt's tool catalog listed no way to search
+    # past conversations, and its CHAT line claimed "talking ABOUT the user's
+    # own past". The model was answering correctly for what it had been told.
+    # MEASURED: 0/3 -> 3/3 after naming the capability. A prompt contract test,
+    # so a future edit cannot silently drop it again.
+    from app.api.task_router import _CLASSIFY_PROMPT
+
+    assert "past conversations" in _CLASSIFY_PROMPT
+    assert "by its CONTENT or topic" in _CLASSIFY_PROMPT
+    # …and the counter-example that keeps it from swallowing ordinary chat.
+    assert "we discussed this already" in _CLASSIFY_PROMPT
+
+
+def test_the_memory_exclusion_costs_one_conversation_search_phrasing():
+    # The cost, pinned so it is a KNOWN boundary rather than a surprise: this
+    # IS a conversation search, chat will answer it poorly, and it is closed.
+    # Both phrasings wear the same clothes and no deterministic rule separates
+    # them; the working restatement is one line below. Revisit WITH A
+    # MEASUREMENT of the classifier on memory questions, not on instinct.
+    assert looks_like_task("do you remember what we discussed about the migration") is False
+    assert looks_like_task("what did we discuss about the migration") is True
+
+
+@pytest.mark.parametrize("message", [
+    # ⚠️ A DEMONSTRATIVE IS NOT ALWAYS A POINTER. _DEICTIC_SUBJECT_RE treated
+    # "that" as one wherever it followed the question word, so a determiner +
+    # a real noun was refused — one a file question, one a plain web question.
+    # MEASURED: 5 wrong on an 18-case corpus before, 0 after.
+    "where is that spreadsheet with the budget",
+    "what is that error message about",
+    "who is that guy in the photo",
+    "what is that movie everyone is talking about",
+    "where is that pdf i saved yesterday",
+])
+def test_a_demonstrative_determiner_is_not_a_bare_pointer(message):
+    assert looks_like_task(message) is True
+
+
+@pytest.mark.parametrize("message", [
+    # …while a genuinely bare pointer still stays free: context answers it and
+    # the web cannot. A closed-class tail no noun could head counts as bare.
+    "what is that?",
+    "who is this?",
+    "what is this about?",
+    "what was that again",
+    "who are they?",
+    "what are those",
+    "where is it",
+    "who is she",
+    "what is that supposed to mean",
+    "what is this for",
+])
+def test_a_bare_pointer_question_still_stays_free(message):
+    assert looks_like_task(message) is False
 
 
 def test_wider_question_tier_costs_one_call_on_concept_questions():

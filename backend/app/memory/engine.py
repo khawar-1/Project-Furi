@@ -12,7 +12,7 @@ from typing import Optional
 from enum import Enum
 
 from loguru import logger
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qdrant_models
@@ -29,7 +29,16 @@ from app.db.models import (
     EntityEdge,
     utc_now,
 )
+from app.memory.budget import (
+    MAX_CONTACT_TEXT,
+    MAX_FACTS_PER_CONTACT,
+    MAX_PROFILE_FIELD,
+    Section,
+    clip_text,
+    fit_sections,
+)
 from app.memory.contact_validation import normalize_birthday, normalize_email
+from app.memory.decay import OVERFETCH, rank_score
 from app.memory.embedder import embed_text
 
 MIN_SCORE = settings.IDENTITY_MIN_SCORE
@@ -1603,6 +1612,7 @@ class MemoryEngine:
             result = await self.db.execute(
                 select(SemanticMemory)
                 .where(SemanticMemory.is_active == True)
+                .where(SemanticMemory.archived_at.is_(None))
                 .order_by(desc(SemanticMemory.created_at))
                 .limit(limit)
             )
@@ -1614,20 +1624,39 @@ class MemoryEngine:
             search_result = await self.qdrant.search(
                 collection_name="semantic_memory",
                 query_vector=vector,
-                limit=limit,
+                # Overfetch so there is something to re-rank: ordering N
+                # candidates into N slots changes nothing (app/memory/decay.py).
+                limit=limit * OVERFETCH,
                 score_threshold=0.5,
             )
             if not search_result:
                 return []
 
-            ids = [hit.id for hit in search_result]
+            similarity = {str(hit.id): float(hit.score) for hit in search_result}
             result = await self.db.execute(
                 select(SemanticMemory).where(
-                    SemanticMemory.id.in_(ids),
+                    SemanticMemory.id.in_(list(similarity.keys())),
                     SemanticMemory.is_active == True,
+                    # An archived memory is hidden from retrieval but NOT
+                    # deleted — see the model comment on archived_at.
+                    SemanticMemory.archived_at.is_(None),
                 )
             )
-            return list(result.scalars().all())
+            rows = list(result.scalars().all())
+            # Re-rank: cosine plus a small freshness/usage bonus, so that
+            # between two equally-relevant facts the recent one wins. Purely
+            # additive — this can reorder, never exclude.
+            now = utc_now()
+            rows.sort(
+                key=lambda m: rank_score(
+                    similarity.get(str(m.id), 0.0),
+                    created_at=m.created_at,
+                    last_used_at=m.last_used_at,
+                    now=now,
+                ),
+                reverse=True,
+            )
+            return rows[:limit]
         except Exception as e:
             logger.warning(f"Semantic memory search failed: {e}")
             return []
@@ -1892,11 +1921,53 @@ class MemoryEngine:
             ambiguous_mentions=ambiguous_mentions,
         )
 
+    async def _mark_memories_used(
+        self, memories: list, fitted: list[Section]
+    ) -> None:
+        """Record that these facts were actually rendered into a prompt.
+
+        Best-effort in the strongest sense: this is bookkeeping for a tidy-up
+        pass that runs months from now, and a chat turn must never fail — or
+        even slow down noticeably — because of it. On ANY failure it logs and
+        rolls back (the persist.py rule), leaving the timestamps stale, which
+        only ever means a fact looks LESS used than it is. Erring that way keeps
+        an unused-looking fact in play rather than archiving one that is in
+        use."""
+        if not memories:
+            return
+        section = next(
+            (s for s in fitted if s.title.startswith("WHAT I KNOW ABOUT YOU")), None
+        )
+        if section is None:
+            return
+        body = "\n".join(section.items)
+        used = [m.id for m in memories if m.content and m.content in body]
+        if not used:
+            return
+        try:
+            await self.db.execute(
+                update(SemanticMemory)
+                .where(SemanticMemory.id.in_(used))
+                .values(last_used_at=utc_now())
+            )
+            await self.db.commit()
+        except Exception as e:
+            logger.warning(f"Marking memories used failed (non-critical): {e}")
+            try:
+                await self.db.rollback()
+            except Exception as rb:
+                logger.warning(f"Rollback after failed last_used_at write failed: {rb}")
+
     async def format_context(self, bundle: RetrievedContext) -> str:
         """
         Formats a RetrievedContext bundle into a string for the LLM prompt.
+
+        BOUNDED since 2026-08-03 (see app/memory/budget.py): the rendered block
+        is fair-shared across its sections and cut BY ITEM, never mid-string.
+        This is a RENDERING budget only — nothing is deleted or hidden, and
+        every fact left out is still in the database and still on the API.
         """
-        sections: list[str] = []
+        sections: list[Section] = []
 
         if bundle.user_profile:
             profile_parts = []
@@ -1906,10 +1977,16 @@ class MemoryEngine:
                 profile_parts.append(f"Profession: {bundle.user_profile.profession}")
             if bundle.user_profile.location:
                 profile_parts.append(f"Location: {bundle.user_profile.location}")
+            # background/work_style are free-text Text columns with no length
+            # limit on any write path.
             if bundle.user_profile.background:
-                profile_parts.append(f"Background: {bundle.user_profile.background}")
+                profile_parts.append(
+                    f"Background: {clip_text(bundle.user_profile.background, MAX_PROFILE_FIELD)}"
+                )
             if bundle.user_profile.work_style:
-                profile_parts.append(f"Work style: {bundle.user_profile.work_style}")
+                profile_parts.append(
+                    f"Work style: {clip_text(bundle.user_profile.work_style, MAX_PROFILE_FIELD)}"
+                )
             if bundle.user_profile.skills:
                 try:
                     skills = json.loads(bundle.user_profile.skills)
@@ -1918,11 +1995,13 @@ class MemoryEngine:
                 except Exception:
                     pass
             if profile_parts:
-                sections.append("WHO YOU ARE (stable identity - always use this):\n" + "\n".join(profile_parts))
+                sections.append(Section(
+                    "WHO YOU ARE (stable identity - always use this):", profile_parts
+                ))
 
         if bundle.semantic_memories:
             lines = [f"- {m.content}" for m in bundle.semantic_memories]
-            sections.append("WHAT I KNOW ABOUT YOU:\n" + "\n".join(lines))
+            sections.append(Section("WHAT I KNOW ABOUT YOU:", lines))
 
         if bundle.contacts:
             # Collect IDs of active/focus entities for marking
@@ -1968,10 +2047,13 @@ class MemoryEngine:
                             contact_details.append(f"Skills: {', '.join(skills)}")
                     except Exception:
                         pass
+                # Free-text Text columns, unbounded on every write path.
                 if c.summary:
-                    contact_details.append(f"Summary: {c.summary}")
+                    contact_details.append(
+                        f"Summary: {clip_text(c.summary, MAX_CONTACT_TEXT)}"
+                    )
                 if c.notes:
-                    contact_details.append(f"Notes: {c.notes}")
+                    contact_details.append(f"Notes: {clip_text(c.notes, MAX_CONTACT_TEXT)}")
 
                 details_str = f" | {' | '.join(contact_details)}" if contact_details else ""
 
@@ -1987,30 +2069,56 @@ class MemoryEngine:
 
                 facts = facts_by_contact.get(c.id, [])
                 if facts:
+                    # ⚠️ THE ONE UNBOUNDED THING. The fact log is append-only by
+                    # design, and this rendered EVERY row for every bundled
+                    # contact — 200 facts meant 200 prompt lines, forever. Keep
+                    # the most RECENT (the rows arrive oldest-first): the MEMORY
+                    # RULES block tells the model the newest fact in a category
+                    # is the current truth, so the tail is the half that rule
+                    # assumes. Older facts stay in the DB and on the API.
+                    dropped = max(0, len(facts) - MAX_FACTS_PER_CONTACT)
+                    shown = facts[-MAX_FACTS_PER_CONTACT:]
                     # event_date is when it happened; interaction_date is only when it was recorded
                     fact_lines = [
                         f"    * [{f.category}] {f.description} (on {(f.event_date or f.interaction_date).strftime('%Y-%m-%d')})"
-                        for f in facts
+                        for f in shown
                     ]
+                    if dropped:
+                        fact_lines.insert(
+                            0, f"    * … {dropped} older fact(s) not shown (clipped for length)"
+                        )
                     line += "\n  Facts Log:\n" + "\n".join(fact_lines)
-                
+
                 people_lines.append(line)
-            sections.append("PEOPLE YOU KNOW (Ask for clarification if user mentions a similar name or typo. The contact marked [ACTIVE] is the one currently being discussed — when the user says 'he', 'his', 'she', 'her', assume they mean this person):\n" + "\n".join(people_lines))
+            sections.append(Section(
+                "PEOPLE YOU KNOW (Ask for clarification if user mentions a similar name or typo. The contact marked [ACTIVE] is the one currently being discussed — when the user says 'he', 'his', 'she', 'her', assume they mean this person):",
+                people_lines,
+            ))
 
         if bundle.preferences:
             pref_lines = [f"- {p.value}" for p in bundle.preferences[:5]]
-            sections.append("YOUR PREFERENCES:\n" + "\n".join(pref_lines))
+            sections.append(Section("YOUR PREFERENCES:", pref_lines))
 
         if bundle.episodes:
             ep_lines = []
             for ep in bundle.episodes:
                 when = ep.created_at.strftime("%b %d")
                 ep_lines.append(f"- {when}: {ep.title} -- {ep.summary[:120]}")
-            sections.append("RELEVANT PAST CONTEXT:\n" + "\n".join(ep_lines))
+            sections.append(Section("RELEVANT PAST CONTEXT:", ep_lines))
 
-        if not sections:
+        # Fair-share the whole block so one big section cannot starve the rest,
+        # and so the cut never lands on whichever section happens to render last.
+        fitted = fit_sections(sections)
+        rendered = [s.render() for s in fitted]
+        if not rendered:
             return ""
+
+        # Stamp the memories that actually SURVIVED the budget into the block.
+        # Deliberately here and not in search_semantic_memory: the archive pass
+        # asks "has anything needed this?", and a fact that a search returned
+        # and the budget then clipped out was never put in front of the model.
+        await self._mark_memories_used(bundle.semantic_memories, fitted)
 
         header = "=== MEMORY CONTEXT (use naturally, never mention this block) ==="
         footer = "=== END MEMORY CONTEXT ==="
-        return "\n\n" + header + "\n\n" + "\n\n".join(sections) + "\n\n" + footer
+        return "\n\n" + header + "\n\n" + "\n\n".join(rendered) + "\n\n" + footer

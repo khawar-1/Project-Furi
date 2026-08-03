@@ -49,7 +49,9 @@ question — it is the one the user just saw.
 """
 import asyncio
 import re
-from typing import Optional
+import time
+from dataclasses import dataclass
+from typing import Awaitable, Callable, Optional
 
 from fastapi.responses import StreamingResponse
 from loguru import logger
@@ -73,6 +75,7 @@ from app.agents.summary import stream_completed_summary
 from app.api.agent import _PARKABLE, _plan_response
 from app.browser import publicsuffix
 from app.browser.grounding import ground_origins
+from app.core import routing_trace
 from app.db.persist import persist_message_best_effort
 from app.db.schemas import ChatRequest, StreamChunk
 from app.providers.base import LLMMessage, LLMProvider
@@ -159,6 +162,44 @@ _WEAK_DOMAIN_RE = re.compile(
     r"\bprocess(?:es)?\b|[/\\]|~[/\\]?|\.\w{1,4}\b)"
 )
 
+# The file vocabulary above names CONTAINERS — file, folder, directory,
+# desktop, downloads. It never named the things kept INSIDE them, and that is
+# what a user actually says: "find the pdf about cloud computing", "find my
+# notes about the architecture review", "open the doc about onboarding".
+#
+# FOUND BY scripts/route_bench.py + scripts/plan_bench.py, 2026-08-03, and it
+# was not a near-miss: "find the FILE about X" fired while "find the PDF about
+# X" was CLOSED, so semantic_file_search — Phase 6 Parts 2/3, the entire file
+# index, and plan rule 17's own example phrasing — was unreachable from chat
+# unless the user happened to say the literal word file/folder/desktop. The
+# 2026-07-10 lesson ("users invent VERBS endlessly, but a task NAMES ITS
+# OBJECT") was applied to verbs and then never re-checked against the object
+# vocabulary it rests on. MEASURED before/after on a 42-message corpus:
+# recall 2/18 -> 18/18, with ONE new false fire in 24 conversational controls.
+#
+# ⚠️ WEAK, NOT STRONG, and that placement is measured rather than cautious.
+# These words appear in ordinary autobiography far more than "terminal" or
+# "directory" do: as strong nouns (firing alone) they fired on "my resume is
+# finally done", "that presentation was painful" and "he sent me an invoice
+# last week". Requiring an action verb drops all three and costs no recall,
+# because a request for a document is imperative or interrogative by nature.
+#
+# Deliberately NOT derived from file_extract.INDEXABLE_EXTS, and no invariant
+# test binds the two — because EVERY extension is already covered without one.
+# `_WEAK_DOMAIN_RE` above ends in `\.\w{1,4}\b`, so a user who says the format
+# WITH its dot (".rst", ".log", ".md") already reaches the classifier whatever
+# it is. This list only has to carry the DOTLESS forms people actually speak,
+# which is why bare `md` and `log` are absent: they are covered in dotted form
+# and, as bare words, one means a doctor and the other is half of "log in".
+_DOCUMENT_NOUN_RE = re.compile(
+    r"(\bpdfs?\b|\bdocx?\b|\bdocs\b|\bdocuments?\b|\bwrite-?ups?\b|"
+    r"\bspread\s?sheets?\b|\bxlsx?\b|\bcsvs?\b|\btsvs?\b|\btxt\b|"
+    r"\bworkbooks?\b|\bpresentations?\b|\bslide\s?decks?\b|\bslides\b|"
+    r"\bpptx?\b|\bnotes?\b|\breports?\b|\bresumes?\b|\bcvs?\b|"
+    r"\binvoices?\b|\breceipts?\b|\bcontracts?\b|\bessays?\b|"
+    r"\btranscripts?\b|\bmarkdown\b|\breadme\b|\bebooks?\b|\bepub\b)"
+)
+
 # Common inflections listed explicitly — a stem regex either misses forms
 # ("copies") or over-matches. Only consulted for weak-signal messages; a
 # strong noun no longer needs any verb.
@@ -181,12 +222,88 @@ _ACTION_VERB_RE = re.compile(
     r"listing|read|reads|reading|open|opens|opened|opening|show|shows|showing|"
     r"check|checks|checking|look|"
     r"tell|tells|telling|count|counts|counted|counting|"
+    # Past tenses of verbs already listed above, which this list promised to
+    # carry ("common inflections listed explicitly") and did not: `save|saves|
+    # saving` had no `saved`, so "where is that pdf I SAVED yesterday" fired
+    # nothing. They matter in a relative clause, which is how people describe
+    # a document they are looking for — "the report I WROTE", "the doc he
+    # SHOWED me". MEASURED 2026-08-03: recall 4/5 -> 5/5 on that shape, one
+    # extra temperature-0 call in 8 conversational controls.
+    r"saved|wrote|written|showed|shown|checked|looked|listed|told|"
     # Email verbs (Phase 5) — "send"/"reply"/"forward"/"draft" were absent, so
     # a weak-noun email request ("send that mail", "forward it") never fired.
     r"send|sends|sending|sent|reply|replies|replied|replying|"
     r"forward|forwards|forwarded|forwarding|draft|drafts|drafted|drafting|"
     r"del|rm|rmdir|mkdir|mv|cp|trash|trashes|trashed|trashing)\b"
 )
+
+
+# Past conversations are STORED CONTENT, and asking about them names no file
+# noun at all. Phase 6 Part 4 embeds every message into Qdrant and
+# semantic_file_search searches it, but "what did we discuss about the
+# database migration" fired no tier: is_external_question refuses it (its
+# subject is "we", correctly — it is not an external-FACT question) and no
+# other tier has a word for it. So the one feature built to answer it could
+# not be reached, and the chat model — which sees a 30-message window and no
+# further — answered from that window or not at all.
+#
+# The object noun here is the conversation itself, named either by a
+# first/second-person recall verb ("what did WE DISCUSS", "when did I
+# MENTION") or literally ("the CONVERSATION WHERE we talked about X").
+_STORED_RECALL_RE = re.compile(
+    r"\b(?:we|i|u|you)\s+(?:\w+\s+){0,2}?"
+    r"(?:discuss|discussed|talk|talked|mention|mentioned|say|said|told|"
+    r"agree|agreed|decide|decided)\b"
+    r"|\b(?:conversations?|chats?)\s+(?:where|about|in\s+which)\b"
+)
+
+# …EXCEPT when the message addresses Jarvis's MEMORY directly. "do you
+# remember what i told you about jamil" is stored-content recall by every
+# test above, and routing it would be a worse answer rather than merely a
+# wasted call: `MemoryEngine.retrieve_context()` runs on EVERY chat turn and
+# injects the facts, contacts and episodes bundle into the prompt, so the chat
+# path already holds what that question wants and replies conversationally,
+# where the planner would spend a task on it.
+#
+# There is no deterministic line between "recall the fact you know about
+# Jamil" and "search our conversations about the migration" — both are stored
+# content, and trying to tell a PERSON from a TOPIC by keyword is the
+# judgement this file has measured at zero three times. Naming the faculty is
+# a different test entirely: the user said the word "remember", so they are
+# asking the thing that already has the answer loaded.
+#
+# This is the exclusion `test_gate_stays_closed_for_self_referential_questions`
+# pins, and it was written BEFORE this tier existed — the tier's first draft
+# broke it, which is how the distinction got found. MEASURED: the exclusion
+# drops 4 of 4 memory-faculty phrasings.
+#
+# KNOWN COST, measured and accepted rather than discovered later: it also
+# closes "do you remember what WE DISCUSSED about the migration", which IS a
+# conversation search and which chat will answer poorly (a topic discussion is
+# not an extracted memory fact). Both phrasings wear the same clothes and no
+# deterministic rule separates them. Kept closed because the two failure modes
+# are not equal — a memory question answered as a background TASK is worse
+# than a search phrasing the user can restate ("what did we discuss about the
+# migration" routes correctly) — and because the classifier is unmeasured on
+# memory questions, so removing this would be an unmeasured change to a
+# documented boundary. Revisit WITH A MEASUREMENT if it bites.
+_MEMORY_ADDRESS_RE = re.compile(
+    r"\b(?:do|did|does)\s+(?:you|u)\s+(?:remember|recall|know)\b"
+    r"|\bremember\s+(?:when|what|that|how)\b"
+    r"|\b(?:you|u)\s+(?:remember|recall)\b"
+)
+
+# A recall phrase alone is not a request — "we discussed this already", "i say
+# we ship it" and "i talked to my brother yesterday" all contain one and are
+# plain conversation. What separates the real asks is that every one of them
+# is imperative or interrogative, so the tier needs an action verb or a bare
+# wh-word alongside. MEASURED: this single condition drops all three of those
+# false fires and costs ZERO recall across the 18-message ask corpus.
+#
+# This is a REQUEST-SHAPE test over seven closed-class words, NOT the
+# intent-keyword shape falsified three times in this file's history: it never
+# tries to judge what the message is about, only whether it is asking.
+_WH_WORD_RE = re.compile(r"\b(?:what|when|where|which|who|whose|why|how)\b")
 
 
 # Questions about Jarvis's OWN actions ("what have you done today?", "did you
@@ -295,10 +412,30 @@ _SELF_REFERENTIAL_RE = re.compile(
 # only immediately after the question word and its copula — so "what's the
 # latest on that iphone rumour", where "that" is a determiner rather than a
 # pointer, still reaches the classifier.
+#
+# ⚠️ A DEMONSTRATIVE IS NOT ALWAYS A POINTER, and this used to treat it as one.
+# The comment above already claimed a determiner "still reaches the classifier",
+# and that was true only by accident — it holds when the demonstrative is not
+# adjacent to the question word ("what's the latest on that iphone rumour"), and
+# fails the moment it is: "where is that spreadsheet with the budget" and "what
+# is that movie everyone is talking about" both matched and were refused, one a
+# file question and one a plain web question. MEASURED 2026-08-03 on an 18-case
+# corpus: 5 wrong before, 0 after.
+#
+# The split is grammatical, not a judgement: it/they/them/he/she/him/her/there
+# can never determine a noun, so they are always pointers. this/that/these/those
+# can, and do whenever a content word follows — so they count as pointers only
+# when the subject ENDS there, or continues with a closed-class tail that no
+# noun could head ("what is this ABOUT", "what was that AGAIN").
 _DEICTIC_SUBJECT_RE = re.compile(
     r"^(?:who|whos|who's|what|whats|what's|which|where)"
     r"(?:'s|\s+(?:is|are|was|were))?\s+"
-    r"(?:this|that|it|these|those|they|them|he|she|him|her|there)\b"
+    r"(?:"
+    r"(?:it|they|them|he|she|him|her|there)\b"
+    r"|(?:this|that|these|those)"
+    r"(?=\W*$|\s+(?:about|for|then|again|anyway|exactly|really|though|all|"
+    r"even|actually|supposed|mean|means|meant)\b)"
+    r")"
 )
 
 # A one- or two-word question ("really?", "why?", "how come?") is a
@@ -464,28 +601,58 @@ def _is_bare_navigation(text: str) -> bool:
     return bool(tokens) and tokens <= destination
 
 
-def looks_like_task(text: str) -> bool:
-    """Deterministic pre-filter, tuned for RECALL: a strong computer-domain
-    noun fires alone (any verb, any phrasing); an external question fires
-    alone; weak signals need an action verb. Deliberately over-inclusive —
-    the LLM confirmation prunes it."""
+def gate_tier(text: str) -> str:
+    """WHICH tier of the deterministic pre-filter fires, or "" for none.
+
+    Same logic and same order as the bool `looks_like_task` below, which is now
+    a thin wrapper — one implementation, so the audited reason can never drift
+    from the decision it explains (the registry.mutates lesson: a second copy of
+    a rule is a hole). The tier name is what the routing audit trail records and
+    what route_bench.py scores gate recall on, and it is genuinely diagnostic:
+    "the strong-noun tier fired" and "the external-question tier fired" fail in
+    completely different ways.
+    """
     t = text.lower()
     if _STRONG_DOMAIN_RE.search(t):
-        return True
+        return "strong_domain"
     # Own-action questions are checked BEFORE the question tier and must stay
     # that way: "what did you do today" is second-person, so the question
     # tier's self-reference test would refuse it — but it is a real TASK,
     # answered from the audit log by recall_actions.
     if _OWN_ACTION_RE.search(t):
-        return True
+        return "own_action"
     if _OWN_ACTION_AUX_RE.search(t) and _ACTION_VERB_RE.search(t):
-        return True
+        return "own_action_aux"
     if is_external_question(text):
-        return True
+        return "external_question"
     # A named website to navigate to / operate — general, no per-site list.
     if _is_browse_intent(text):
-        return True
-    return bool(_ACTION_VERB_RE.search(t)) and bool(_WEAK_DOMAIN_RE.search(t))
+        return "browse_intent"
+    asking = _ACTION_VERB_RE.search(t)
+    if (
+        (asking or _WH_WORD_RE.search(t))
+        and _STORED_RECALL_RE.search(t)
+        and not _MEMORY_ADDRESS_RE.search(t)
+    ):
+        # Asking about something said in a past conversation (Phase 6 Part 4).
+        # Its own tier rather than a line inside weak_verb_domain: gate_tier is
+        # the audited reason AND what route_bench scores recall on, so a
+        # vocabulary whose cost has never been measured needs its own name —
+        # otherwise the day it turns out to be expensive, nothing can tell it
+        # apart from the weak tier it was hiding in.
+        return "stored_recall"
+    if asking and (_WEAK_DOMAIN_RE.search(t) or _DOCUMENT_NOUN_RE.search(t)):
+        return "weak_verb_domain"
+    return ""
+
+
+def looks_like_task(text: str) -> bool:
+    """Deterministic pre-filter, tuned for RECALL: a strong computer-domain
+    noun fires alone (any verb, any phrasing); an external question fires
+    alone; weak signals — media nouns, paths, and the DOCUMENT vocabulary —
+    need an action verb, as does a question about a past conversation.
+    Deliberately over-inclusive: the LLM confirmation prunes it."""
+    return bool(gate_tier(text))
 
 
 # A short follow-up steering an action under discussion names NO object of its
@@ -570,14 +737,14 @@ def is_browse_followup(goal: str) -> bool:
 # ======================================================== LLM confirmation
 
 _CLASSIFY_PROMPT = """You route messages for Jarvis OS, a personal AI that can act on the user's computer and accounts with exactly these tool groups:
-- FILES/SYSTEM: search/read/list files and folders, create/move/rename/delete files, run terminal commands and scripts, and recall Jarvis's OWN past actions from its audit log (what it created, deleted, moved, sent, or ran).
+- FILES/SYSTEM: search/read/list files and folders, create/move/rename/delete files, run terminal commands and scripts, recall Jarvis's OWN past actions from its audit log (what it created, deleted, moved, sent, or ran), find a saved document by its CONTENT or topic rather than its name, and search the user's OWN past conversations with Jarvis by what was discussed in them.
 - EMAIL: search and read Gmail; draft, send, or reply to email.
 - CALENDAR: list/find Google Calendar events; create, update, or delete events.
 - WEB: search the web and open/read a web page to look up online information.
 - BROWSE: drive a real web browser to ACT on a live site the user names — play or watch a video (YouTube and the like), sign in to a site and navigate it, open something in a web app (a repo on GitHub, a page in an account), or fill in and submit a web form (e.g. apply to jobs).
 
 Reply with EXACTLY one word:
-TASK — asks Jarvis to perform a FILES/SYSTEM action now, OR asks what Jarvis ITSELF did on the machine (the folder/file it created, what it deleted, what it has done today).
+TASK — asks Jarvis to perform a FILES/SYSTEM action now, OR asks what Jarvis ITSELF did on the machine (the folder/file it created, what it deleted, what it has done today), OR asks Jarvis to FIND something it has stored: a document by what it is about, or what was said in an earlier conversation.
 EMAIL — asks Jarvis to search, read, draft, send, or reply to email now.
 CALENDAR — asks Jarvis to look at or change calendar events now.
 WEB — asks Jarvis to search the web or open/read a web page now, OR asks a factual question better answered from the live internet than from stale built-in knowledge. This covers two cases: (a) anything CURRENT or time-sensitive (news, release dates, upcoming seasons or products, prices, scores, weather), and (b) a factual question about a SPECIFIC real-world entity — a person, company, product, place, organization, or a creative work such as a show, anime, movie, game, or book ("what do you know about Black Clover", "who is the CEO of X", "tell me about the Framework laptop"). Jarvis looks these up rather than guessing, promising, or reciting possibly-outdated training data.
@@ -594,6 +761,7 @@ Judge the INTENT, not the vocabulary:
 - "sign in to github and open my oldest repo", "log into linkedin and open my messages", or "apply to the first 3 python jobs on weworkremotely" is BROWSE (act on a live site — signing in, navigating, or submitting a form), while "what is github" or "who founded linkedin" is WEB (just look it up).
 - A question about something CURRENT is WEB even when it never says "search": "when is the new season of Black Clover coming out?" or "what's the latest iPhone price?" needs up-to-date information — never answer it from stale knowledge or promise to look it up later.
 - A factual question about a SPECIFIC real-world thing is WEB even when it isn't time-sensitive and never says "search": "what do you know about Black Clover", "who is Grigori Perelman", "tell me about the Framework laptop" — look them up for an accurate, current answer rather than reciting possibly-stale training data. But a question of OPINION, REASONING, or a general/timeless concept is CHAT: "what do you think of Black Clover", "how does anime production work", "what is recursion".
+- Asking Jarvis to RETRIEVE something it has stored is TASK, not CHAT — it searches an index that reaches far further back than the messages still on screen: "find the pdf about cloud computing", "which report mentioned the outage" (a saved document, by its content) and "what did we discuss about the database migration", "find the conversation where we talked about pricing" (a past conversation, by its topic) are all TASK. But "we discussed this already" or "thanks for explaining that" is CHAT — commenting on a conversation rather than asking Jarvis to go and find one.
 - A question about JARVIS'S OWN actions is TASK, not CHAT — Jarvis answers it from its action record, never from memory: "what was the name of the folder you created?", "did you delete anything today?", "who created the jarvis_test folder?" (Jarvis may have) are all TASK; "I deleted a bunch of files yesterday" is CHAT (the user talking about their own actions).
 Any wording that asks for one of those actions now — or asks about actions Jarvis itself performed — gets its action label; anything else is CHAT.
 
@@ -640,6 +808,23 @@ async def _classify_message(
     context_block = (
         _CLASSIFY_CONTEXT_TEMPLATE.format(context=context) if context else ""
     )
+    model = getattr(provider, "model_name", None)
+    started = time.perf_counter()
+
+    def _stamp(label: str, mode: str, error: Optional[str] = None) -> tuple[str, str]:
+        """Record the verdict on the turn's routing trace (a no-op when there is
+        none) and return it unchanged. The trace is how the audit trail tells
+        "the model judged this conversation" apart from "the call failed and
+        CHAT was the fail-open default" — outcomes that are identical to the
+        user and need completely different fixes."""
+        routing_trace.note_classified(
+            label, mode,
+            ms=int((time.perf_counter() - started) * 1000),
+            error=error,
+            model=model,
+        )
+        return label, mode
+
     try:
         response = await provider.chat(
             messages=[LLMMessage(
@@ -658,15 +843,23 @@ async def _classify_message(
         )
     except Exception as e:
         logger.warning(f"Message classification failed — treating as chat: {e}")
-        return "CHAT", "DELEGATE"
+        return _stamp("CHAT", "DELEGATE", error=f"{type(e).__name__}: {e}"[:256])
     reply = response.content.strip().upper()
     for label in _ACTION_LABELS:
         if reply.startswith(label):
             # Mode is the second word; anything but an explicit INLINE (or a
             # blank/garbled mode) falls to DELEGATE — the safe UX default.
             mode = "INLINE" if "INLINE" in reply else "DELEGATE"
-            return label, mode
-    return "CHAT", "DELEGATE"
+            return _stamp(label, mode)
+    # A reply starting with CHAT is a real judgement; anything else (blank,
+    # garbled, a thinking model that spent its budget) is a FAILURE wearing the
+    # same fail-open clothes. Recorded apart, because a rising rate of the
+    # second is a provider/model problem, not a prompt one.
+    if reply.startswith("CHAT"):
+        return _stamp("CHAT", "DELEGATE")
+    return _stamp(
+        "CHAT", "DELEGATE", error=f"unrecognized reply: {reply[:60]!r}"
+    )
 
 
 # ======================================================== background intent
@@ -744,6 +937,193 @@ def conversation_context(request: ChatRequest) -> str:
 
 # ============================================================= entry point
 
+@dataclass
+class RouteDecision:
+    """What routing decided, plus everything the audit trail says about why.
+
+    The audited fields live on ONE object — the turn's ``RouteTrace`` — instead
+    of being copied onto this one. Two copies of the same fact drift, and this
+    project has paid for exactly that four times (`registry.mutates`, the
+    `_settle` status tuple, `_OPEN_STATUSES`, `KNOWN_TLDS`). So this wraps the
+    trace and adds only what a trace has no business holding: the agent object,
+    the planner's memory string, and the goal actually handed to the planner.
+    """
+
+    trace: routing_trace.RouteTrace
+    agent: AgentSpec = GENERAL
+    memory: str = ""
+    run_goal: str = ""
+
+    @property
+    def routed(self) -> bool:
+        """True when an action route was chosen; False = fall open to chat."""
+        return not self.trace.fail_open_reason
+
+    @property
+    def label(self) -> str:
+        return self.trace.label or "CHAT"
+
+    @property
+    def mode(self) -> str:
+        return self.trace.mode or "DELEGATE"
+
+    @property
+    def delegate(self) -> bool:
+        return self.trace.execution == "delegate"
+
+    @property
+    def fail_open_reason(self) -> str:
+        return self.trace.fail_open_reason
+
+
+async def decide_route(
+    goal: str,
+    conversation: str = "",
+    provider: Optional[LLMProvider] = None,
+    *,
+    memory_loader: Optional[Callable[[str], Awaitable[str]]] = None,
+    defer_check: Optional[Callable[[], bool]] = None,
+) -> RouteDecision:
+    """Decide WHERE a chat message goes — and nothing else.
+
+    Runs the deterministic gate, the code-owned overrides and the LLM
+    confirmation, then returns the verdict. It starts nothing, streams nothing
+    and touches no session state; dispatch is ``maybe_handle_task``'s job.
+
+    Split out on 2026-08-03 for two reasons that are really one. The routing
+    audit trail needs a decision RECORD, and ``scripts/route_bench.py`` needs to
+    score the decision without a request, a StreamingResponse or a database. A
+    bench that scored a *re-implementation* of routing would be this project's
+    fifth "the test drove a shape the product doesn't use" defect (2026-07-17
+    fan-out, 07-30 bulk tools, 08-01 page fakes, 08-02 grid fakes) — so the
+    bench calls THIS, the same function the chat turn calls.
+
+    ``memory_loader`` preserves the production concurrency: the planner's memory
+    context is built while the classifier is in flight (exactly one of them uses
+    each contended resource, so the gather is safe and the memory build hides
+    inside the network wait). A caller that wants only the decision passes None
+    and pays for neither.
+
+    ``defer_check`` is consulted BETWEEN the gate and the classifier — where
+    ``maybe_handle_task``'s parked-question check sits. The position is
+    load-bearing: after the classifier it would spend an LLM call on a turn that
+    is owed to a question somewhere else.
+    """
+    if routing_trace.current() is None:
+        # A caller outside a chat turn (the bench, a test) gets a trace of its
+        # own, so stamping is uniform and the returned decision is fully
+        # populated either way. Nothing here flushes it — writing is chat.py's.
+        routing_trace.begin(None, goal, has_conversation=bool(conversation))
+    trace = routing_trace.current()
+    decision = RouteDecision(trace=trace, run_goal=goal)
+
+    goal = (goal or "").strip()
+    if not goal:
+        routing_trace.note_fail_open(routing_trace.FAIL_NO_GOAL)
+        return decision
+
+    # The gate fires on the message's own words; a short follow-up steering an
+    # action under discussion ("send it") borrows its object from the
+    # conversation instead. Either way the classifier makes the real call.
+    tier = gate_tier(goal)
+    if not tier and is_action_followup(goal, conversation):
+        tier = "action_followup"
+    if not tier and is_browse_followup(goal):
+        tier = "browse_followup"
+    routing_trace.note_gate(bool(tier), tier)
+    if not tier:
+        routing_trace.note_fail_open(routing_trace.FAIL_GATE_CLOSED)
+        return decision
+
+    # Never hijack a reply owed to a parked question.
+    if defer_check is not None and defer_check():
+        routing_trace.note_fail_open(routing_trace.FAIL_PARKED_QUESTION)
+        return decision
+
+    # Phase 4, Part 5: background intent ("…and tell me when you're done")
+    # escapes the chat turn entirely — the plan runs as a persisted Task and
+    # every pause/outcome arrives by push + persisted message, not by stream.
+    # Stripped BEFORE classification: the intent phrase is routing metadata,
+    # not part of the task, and "…and remind me when you are done" makes the
+    # classifier read the whole message as a reminder request (listed as
+    # CHAT) — a real file task fell open to the chat path, whose LLM then
+    # denied having file access (live bug, 2026-07-09).
+    background, cleaned_goal = wants_background(goal)
+    if background:
+        routing_trace.note_background()
+    effective_goal = cleaned_goal if background else goal
+    decision.run_goal = effective_goal
+
+    # A bare navigation instruction ("open junaidjamshed.com") is decided in code
+    # — see _is_bare_navigation. The classifier is not asked, because on this
+    # message shape it does not agree with itself.
+    if _is_bare_navigation(effective_goal):
+        logger.info(f"Bare navigation routed in code [BROWSE]: '{goal[:80]}'")
+        routing_trace.note_bare_navigation()
+        routing_trace.note_label("BROWSE", "DELEGATE")
+        label, mode = "BROWSE", "DELEGATE"
+        if memory_loader is not None:
+            decision.memory = await memory_loader(effective_goal)
+    elif memory_loader is not None:
+        # Multi-class routing (Phase 5, Part 5): TASK / EMAIL / CALENDAR / WEB /
+        # BROWSE / CHAT. The classifier round trip and the planner's memory
+        # context ("one brain", Phase 3.5) run CONCURRENTLY: the classifier never
+        # touches the request's DB session and the context build makes no LLM
+        # call, so exactly one of them uses each contended resource. On a CHAT
+        # label the memory string is discarded; that wasted work is local and
+        # cheap, while the saved wall time is paid on every action turn. Neither
+        # coroutine raises by contract (classify fails to CHAT, memory to "").
+        (label, mode), decision.memory = await asyncio.gather(
+            _classify_message(provider, effective_goal, conversation),
+            memory_loader(effective_goal),
+        )
+    else:
+        label, mode = await _classify_message(provider, effective_goal, conversation)
+
+    if label == "CHAT":
+        # THE DISTINCTION THIS TABLE EXISTS FOR: "the model read this as
+        # conversation" and "the call failed and CHAT is the fail-open default"
+        # are identical from the user's seat and need completely different
+        # fixes. classifier_error is set only on the failure paths.
+        routing_trace.note_fail_open(
+            routing_trace.FAIL_CLASSIFIER_ERROR if trace.classifier_error
+            else routing_trace.FAIL_CLASSIFIER_CHAT
+        )
+        return decision
+
+    # The boss assigns the domain agent from the classifier's label; the
+    # cross-domain fallback (general, all tools) covers an unmapped label.
+    decision.agent = agent_for_label(label)
+
+    # Explicit background intent ("…tell me when you're done") always delegates —
+    # a user override. Otherwise the classifier's mode decides: DELEGATE hands
+    # the goal to its domain agent as a background Task (the user keeps talking
+    # and can start another agent concurrently); INLINE is a quick read streamed
+    # in this turn. Safety is identical either way — the approval gate applies
+    # on both paths, so a mis-tagged write just pauses instead of running.
+    #
+    # BROWSE is ALWAYS delegated, whatever mode the classifier returned. A browse
+    # drives a real browser — it launches Chromium, runs a multi-step
+    # observe→decide→act loop with several LLM calls, navigates pages, and (for
+    # play/watch) keeps a window open. It is NEVER "a quick read answered in one
+    # turn": run INLINE it holds the chat SSE open for the entire browse and locks
+    # the user out of starting anything else (live bug 2026-07-24 — "play latest
+    # episode of one piece on anikoto.cz" was tagged BROWSE INLINE by the LLM, the
+    # browse ran in-turn, and the chat froze "processing and processing" until it
+    # finished; the multi-agent concurrency the user relies on evaporates because
+    # it depends entirely on DELEGATE). The prompt already says "every BROWSE →
+    # DELEGATE"; this is the structural backstop for when the LLM ignores it —
+    # structural-over-prompt, the house rule.
+    delegate = background or mode == "DELEGATE" or label == "BROWSE"
+    routing_trace.note_outcome(
+        routing_trace.OUTCOME_TASK_BACKGROUND if delegate
+        else routing_trace.OUTCOME_TASK_INLINE,
+        agent=decision.agent.key,
+        execution="delegate" if delegate else "inline",
+    )
+    return decision
+
+
 async def maybe_handle_task(
     request: ChatRequest,
     session_id: str,
@@ -751,10 +1131,13 @@ async def maybe_handle_task(
     provider: LLMProvider,
 ) -> Optional[StreamingResponse]:
     """Return a StreamingResponse when the latest user message is a task
-    request; None sends the message down the untouched Phase 2 chat path."""
+    request; None sends the message down the untouched Phase 2 chat path.
+
+    Deciding lives in ``decide_route``; this function dispatches on its verdict."""
     user_msgs = [m.content for m in request.messages if m.role == "user"]
     goal = user_msgs[-1].strip() if user_msgs else ""
     if not goal:
+        routing_trace.note_fail_open(routing_trace.FAIL_NO_GOAL)
         return None
 
     # An open plan owns the next message: a clarifying question ("which
@@ -786,6 +1169,9 @@ async def maybe_handle_task(
             logger.info(
                 f"Typed approval refused for plan {choice_plan.id} — the card stands"
             )
+            routing_trace.note_outcome(
+                routing_trace.OUTCOME_APPROVAL_REFUSED, plan_id=choice_plan.id
+            )
             return _stream_static_text(
                 goal, session_id, db, provider, _typed_approval_nudge,
             )
@@ -795,6 +1181,9 @@ async def maybe_handle_task(
                 f"Chat message routed to plan {plan.id} ({plan.status.value}) "
                 "as the user's answer"
             )
+            routing_trace.note_outcome(
+                routing_trace.OUTCOME_PLAN_ANSWER, plan_id=plan.id
+            )
             return _stream_answer(goal, plan, session_id, db, provider)
 
     # Built before the gate: the follow-up check reads it, and the classifier
@@ -802,103 +1191,40 @@ async def maybe_handle_task(
     # work — no LLM, no DB.
     conversation = conversation_context(request)
 
-    # The gate fires on the message's own words; a short follow-up steering an
-    # action under discussion ("send it") borrows its object from the
-    # conversation instead. Either way the classifier makes the real call.
-    if (
-        not looks_like_task(goal)
-        and not is_action_followup(goal, conversation)
-        and not is_browse_followup(goal)
-    ):
-        return None
-
-    # Never hijack a reply to a parked question ("which jamil?" / "add daud?").
-    # Peek without get_session() — that would create sessions as a side effect.
-    from app.memory.conversation_state import CONVERSATION_SESSIONS
-    sess = CONVERSATION_SESSIONS.get(session_id)
-    if sess is not None and (
-        sess.pending_resolution is not None or sess.pending_creation is not None
-    ):
-        return None
-
-    # Phase 4, Part 5: background intent ("…and tell me when you're done")
-    # escapes the chat turn entirely — the plan runs as a persisted Task and
-    # every pause/outcome arrives by push + persisted message, not by stream.
-    # Stripped BEFORE classification: the intent phrase is routing metadata,
-    # not part of the task, and "…and remind me when you are done" makes the
-    # classifier read the whole message as a reminder request (listed as
-    # CHAT) — a real file task fell open to the chat path, whose LLM then
-    # denied having file access (live bug, 2026-07-09).
-    background, cleaned_goal = wants_background(goal)
-
-    # Multi-class routing (Phase 5, Part 5): TASK / EMAIL / CALENDAR / CHAT.
-    # CHAT fails open to Phase 2. The three action labels all route to the SAME
-    # planner below — the tool registry already contains the file, email, and
-    # calendar tools, so the planner picks the right ones from the goal. The
-    # label buys recall + telemetry and is the documented insertion point for
-    # future per-domain handlers (do not add a dispatcher until one is needed).
-    #
-    # The classifier round trip and the planner's memory context ("one brain",
-    # Phase 3.5) run CONCURRENTLY: the classifier never touches the request's
-    # DB session and the context build makes no LLM call, so exactly one of
-    # them uses each contended resource — gather is safe, and the memory build
-    # (embeds + queries) is hidden inside the classifier's network wait. On a
-    # CHAT label the memory string is discarded; that wasted work is local and
-    # cheap, while the saved wall time is paid on every action turn. Neither
-    # coroutine raises by contract (classify fails to CHAT, memory to "").
-    effective_goal = cleaned_goal if background else goal
-
-    # A bare navigation instruction ("open junaidjamshed.com") is decided in code
-    # — see _is_bare_navigation. The classifier is not asked, because on this
-    # message shape it does not agree with itself.
-    if _is_bare_navigation(effective_goal):
-        logger.info(f"Bare navigation routed in code [BROWSE]: '{goal[:80]}'")
-        classification = ("BROWSE", "DELEGATE")
-        memory = await planner_memory_context(db, effective_goal)
-    else:
-        classification, memory = await asyncio.gather(
-            _classify_message(provider, effective_goal, conversation),
-            planner_memory_context(db, effective_goal),
+    def _owed_elsewhere() -> bool:
+        """Never hijack a reply to a parked question ("which jamil?" / "add
+        daud?"). Peek without get_session() — that would create sessions as a
+        side effect."""
+        from app.memory.conversation_state import CONVERSATION_SESSIONS
+        sess = CONVERSATION_SESSIONS.get(session_id)
+        return sess is not None and (
+            sess.pending_resolution is not None or sess.pending_creation is not None
         )
-    label, mode = classification
-    if label == "CHAT":
+
+    decision = await decide_route(
+        goal,
+        conversation,
+        provider,
+        memory_loader=lambda g: planner_memory_context(db, g),
+        defer_check=_owed_elsewhere,
+    )
+    if not decision.routed:
         return None
 
-    # The boss assigns the domain agent from the classifier's label; the
-    # cross-domain fallback (general, all tools) covers an unmapped label.
-    agent = agent_for_label(label)
-
-    # Explicit background intent ("…tell me when you're done") always delegates —
-    # a user override. Otherwise the classifier's mode decides: DELEGATE hands
-    # the goal to its domain agent as a background Task (the user keeps talking
-    # and can start another agent concurrently); INLINE is a quick read streamed
-    # in this turn. Safety is identical either way — the approval gate applies
-    # on both paths, so a mis-tagged write just pauses instead of running.
-    #
-    # BROWSE is ALWAYS delegated, whatever mode the classifier returned. A browse
-    # drives a real browser — it launches Chromium, runs a multi-step
-    # observe→decide→act loop with several LLM calls, navigates pages, and (for
-    # play/watch) keeps a window open. It is NEVER "a quick read answered in one
-    # turn": run INLINE it holds the chat SSE open for the entire browse and locks
-    # the user out of starting anything else (live bug 2026-07-24 — "play latest
-    # episode of one piece on anikoto.cz" was tagged BROWSE INLINE by the LLM, the
-    # browse ran in-turn, and the chat froze "processing and processing" until it
-    # finished; the multi-agent concurrency the user relies on evaporates because
-    # it depends entirely on DELEGATE). The prompt already says "every BROWSE →
-    # DELEGATE"; this is the structural backstop for when the LLM ignores it —
-    # structural-over-prompt, the house rule.
-    delegate = background or mode == "DELEGATE" or label == "BROWSE"
     logger.info(
-        f"Chat message routed to {agent.display_name} "
-        f"[{label}/{'DELEGATE' if delegate else 'INLINE'}]: '{goal[:80]}'"
+        f"Chat message routed to {decision.agent.display_name} "
+        f"[{decision.label}/{'DELEGATE' if decision.delegate else 'INLINE'}]: "
+        f"'{goal[:80]}'"
     )
 
-    if delegate:
-        run_goal = cleaned_goal if background else goal
+    if decision.delegate:
         return _stream_task_background(
-            goal, run_goal, conversation, memory, session_id, db, provider, agent,
+            goal, decision.run_goal, conversation, decision.memory,
+            session_id, db, provider, decision.agent,
         )
-    return _stream_task(goal, conversation, memory, session_id, db, provider, agent)
+    return _stream_task(
+        goal, conversation, decision.memory, session_id, db, provider, decision.agent,
+    )
 
 
 # ============================================================== task stream

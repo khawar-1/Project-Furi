@@ -1,0 +1,4231 @@
+{
+  "when": "2026-08-03_16-34-44",
+  "repeat": 3,
+  "gate_only": false,
+  "cases": [
+    {
+      "id": "fifa-qualified-2026",
+      "why": "INCIDENT 2026-07-17: fell to plain chat, which answered 'ask me to search the web for it'. The gate blocked 7 of 8 questions this shape while the classifier labelled 8/8 WEB.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2128,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2128,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1790,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1790,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1854,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1854,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "fifa-typo",
+      "why": "INCIDENT 2026-07-17: the typo'd retry missed the gate too.",
+      "known_gap": "The gate misses this and that is ACCEPTED: fuzzy-matching question words was measured and rejected (rapidfuzz scores 'here'->'where' 89, ABOVE 'whihc'->'which' 80 — no threshold separates a typo from an ordinary opening word). rescue_web_turn catches it instead. Kept red-but-known so a fix, or a regression in the backstop, is visible.",
+      "ok_runs": 0,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2,
+          "end_to_end_ok": false
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        }
+      ],
+      "verdict": "KNOWN"
+    },
+    {
+      "id": "black-clover-season",
+      "why": "INCIDENT 2026-07-17: the clause that actually broke — the old shape rule allowed ONE filler word before the question word, and 'tell me when' is two.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2503,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2503,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1439,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1439,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1355,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1356,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "three-questions-one-message",
+      "why": "INCIDENT 2026-07-17, verbatim from the DB. Survived only on 'who is the prime minister'.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 3746,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 3747,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2505,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2506,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2819,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2820,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "match-last-night",
+      "why": "2026-07-17 measured set: gate blocked, classifier said WEB.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1333,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1333,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1340,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1340,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2813,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2813,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "next-iphone",
+      "why": "2026-07-17 measured set. Also a trap for the reminder router — 'let me know when' must not become a reminder.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 3210,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 3210,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2549,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2549,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2082,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2082,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "world-cup-qualified",
+      "why": "2026-07-17 measured set.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2402,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2402,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1495,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1496,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1309,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1309,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "gold-price",
+      "why": "2026-07-17: the subtle one — the 'i' belongs to the request frame, not the subject. Stripping the frame before the self-reference test is what separates it from 'why is my script slow'.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1825,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1825,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1702,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1702,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1813,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1813,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "bitcoin-today",
+      "why": "2026-07-17 measured set.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1935,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1935,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1435,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1435,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1600,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1601,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "karachi-population",
+      "why": "2026-07-17 measured set.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1715,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1715,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1493,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1493,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1509,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1510,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "president-of-pakistan",
+      "why": "The control question used throughout the fan-out rounds: must stay a single-reading WEB lookup.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1567,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1567,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2021,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2021,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1813,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1813,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "langgraph-release",
+      "why": "Explicit web verb + noun.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1679,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1679,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1772,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1772,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1474,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1474,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "look-this-up",
+      "why": "Web noun with no object of its own.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1585,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1585,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2567,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2567,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2801,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2802,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "pizza-recipe",
+      "why": "Web noun.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1669,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1670,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2568,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2568,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2239,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2239,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "open-url-summarize",
+      "why": "Reading a named page is WEB, not BROWSE — it does not ACT on the site.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2239,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2239,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1991,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1992,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "WEB",
+          "wanted": [
+            "WEB"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2476,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2476,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "open-junaidjamshed",
+      "why": "INCIDENT 2026-08-01: answered by plain chat with 'It's with the browser agent in the background' while nothing ran. MEASURED: the classifier returned CHAT/BROWSE/CHAT on three runs of this exact message, which is why _is_bare_navigation now decides it in code with zero LLM calls.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "browse_intent",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": true,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": true,
+          "ms": 1,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "browse_intent",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": true,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": true,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "browse_intent",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": true,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": true,
+          "ms": 0,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "open-youtube",
+      "why": "INCIDENT 2026-08-01: searched YouTube for 'youtube' and played a video. Must route BROWSE and, at the loop layer, terminate on arrival.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": true,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": true,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": true,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": true,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": true,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": true,
+          "ms": 0,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "play-jane-youtube",
+      "why": "The original Phase 14 acceptance goal. BROWSE is ALWAYS delegated — run INLINE it holds the chat SSE open for the whole browse (live bug 2026-07-24).",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": true,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1223,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1223,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": true,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 2535,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2535,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": true,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1797,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1797,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "play-lofi",
+      "why": "Named media site + play verb.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1655,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1655,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1373,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1373,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1687,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1687,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "severance-trailer",
+      "why": "Navigation + an action on the site.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1417,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1418,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1418,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1418,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1606,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1606,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "despacito-spotify",
+      "why": "Named streaming site.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1610,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1611,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 2234,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2234,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 2241,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2241,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "add-to-cart",
+      "why": "INCIDENT 2026-08-01/08-02: the commit flow. Acting on a live site, so BROWSE — and every submit still faces the approval gate.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "browse_intent",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1914,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1915,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "browse_intent",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1849,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1850,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "browse_intent",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1588,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1588,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "apply-to-jobs",
+      "why": "INCIDENT 2026-07-19: the multi-commit flow that produced RULE 22 (one browse_commit, not a browse plus one commit per item).",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1385,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1386,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 2185,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2185,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1717,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1717,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "delete-old-log",
+      "why": "Baseline destructive file task.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "browse_intent",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1612,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1612,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "browse_intent",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1240,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1240,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "browse_intent",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1959,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1959,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "create-notes-txt",
+      "why": "Baseline write task.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1502,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1502,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1684,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1684,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1390,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1390,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "npm-install",
+      "why": "Terminal task.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1472,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1472,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1962,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1962,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1804,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1804,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "move-report-pdf",
+      "why": "Baseline move.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1829,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1829,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1408,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1408,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1610,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1610,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "list-downloads",
+      "why": "Baseline read task.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2076,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2076,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1490,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1490,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1454,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1454,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "del-txt-files",
+      "why": "INCIDENT 2026-07-09: 'del' missed the old verb+domain gate, the message fell to plain chat, and the chat LLM fabricated an entire background-task lifecycle for a deletion that never ran. The reason the gate became recall-first.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1944,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1944,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 2423,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2423,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1479,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1479,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "yeet-txt-files",
+      "why": "Users invent verbs endlessly — the OBJECT noun fires the gate alone and the classifier judges the wording.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1487,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1487,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1696,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1696,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1247,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1247,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "wipe-temp-folder",
+      "why": "Unenumerable verb, strong noun.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1253,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1253,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1322,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1322,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1432,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1433,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "bulk-move-pdfs",
+      "why": "INCIDENT 2026-07-29: the 85-PDF bulk move that reported 'Done — 2 step(s) completed' having moved zero files.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1278,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1278,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 3072,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 3073,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1130,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1130,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "count-files",
+      "why": "INCIDENT 2026-07-09: a real list_directory task phrased as a question.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1519,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1520,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1424,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1425,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1728,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1728,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "own-action-today",
+      "why": "INCIDENT 2026-07-14: answered from the audit log by recall_actions, NOT from memory. The chat LLM asserted a wrong folder name and denied the real one. The own-action tier must stay ahead of the question tier.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "own_action",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1367,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1367,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "own_action",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2276,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2276,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "own_action",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2039,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2040,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "own-action-folder",
+      "why": "INCIDENT 2026-07-14, verbatim. Only reached the classifier because it happened to say 'folder'.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1598,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1598,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1346,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1346,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1851,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1851,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "find-file-about-topic",
+      "why": "Content search — semantic_file_search, not the web.",
+      "known_gap": "FOUND BY THIS BENCH, 2026-08-03, previously unmeasured. The gate is CLOSED. MEASURED: 'find the FILE about X' fires (strong_domain) but 'find the PDF about X', 'find the DOCUMENT about X', 'find my NOTES about X' and 'find the resume pdf' are all closed — so semantic_file_search (Phase 6 Part 3, the whole point of the file index) is unreachable from chat unless the user happens to say the literal word file/folder/desktop. This is the 'users invent verbs endlessly' lesson applied to NOUNS. Not fixed here: this round instruments and measures routing, it does not change it.",
+      "ok_runs": 0,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        }
+      ],
+      "verdict": "KNOWN"
+    },
+    {
+      "id": "find-document-about-topic",
+      "why": "The shape of the semantic-file-search gate hole, second instance.",
+      "known_gap": "Same hole as find-file-about-topic: 'document' is not a gate noun. Kept as a second instance so a fix is proved general, not fitted to one word.",
+      "ok_runs": 0,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        }
+      ],
+      "verdict": "KNOWN"
+    },
+    {
+      "id": "find-notes-about-topic",
+      "why": "The shape of the semantic-file-search gate hole, third instance.",
+      "known_gap": "Same hole. 'notes' is not a gate noun.",
+      "ok_runs": 0,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        }
+      ],
+      "verdict": "KNOWN"
+    },
+    {
+      "id": "search-past-conversation",
+      "why": "Phase 6 Part 4 conversation search — planner rule 17's own example phrasing.",
+      "known_gap": "FOUND BY THIS BENCH, 2026-08-03. Conversation search (Phase 6 Part 4, semantic_file_search over the conversation_messages collection) is unreachable from chat for the same reason — no gate noun. Plan rule 17 explicitly names 'what did we discuss about X' as this tool's job, and the gate never lets it through.",
+      "ok_runs": 0,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": true,
+          "got": "CHAT",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": false,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": false
+        }
+      ],
+      "verdict": "KNOWN"
+    },
+    {
+      "id": "find-file-by-name",
+      "why": "CONTROL for the gate hole above: with the literal word 'files' the same intent fires strong_domain. Keeping the working phrasing beside the broken ones is what makes the hole legible.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1485,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1485,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1646,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1647,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2133,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2133,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "email-jamil-dinner",
+      "why": "Phase 5 Part 3. The recipient lock applies whatever the label.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1509,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1509,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1107,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1107,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1322,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1322,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "any-new-emails",
+      "why": "A criterion-less inbox read.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1238,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1239,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1393,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1393,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1374,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1374,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "check-gmail",
+      "why": "Bare email noun.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1910,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1910,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1540,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1540,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1547,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1547,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "send-new-mail",
+      "why": "INCIDENT 2026-07-12: 'mail' missed the gate, fell to plain chat, and the chat LLM imitated a real approval message.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1262,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1263,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1330,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1330,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1448,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1448,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "forward-email",
+      "why": "Forwarding is deliberately NOT a reply — it must go through send_email and face the grounding guard.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1714,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1714,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1307,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1307,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1840,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1841,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "calendar-meeting",
+      "why": "Phase 5 Part 4. Must not be swallowed by the reminder router — no 'reminder'/'alarm' word.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "CALENDAR",
+          "wanted": [
+            "CALENDAR"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1538,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1538,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "CALENDAR",
+          "wanted": [
+            "CALENDAR"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1096,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1096,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "CALENDAR",
+          "wanted": [
+            "CALENDAR"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1184,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1184,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "calendar-this-week",
+      "why": "Baseline calendar read.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "CALENDAR",
+          "wanted": [
+            "CALENDAR"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1409,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1409,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "CALENDAR",
+          "wanted": [
+            "CALENDAR"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 2142,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2142,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "CALENDAR",
+          "wanted": [
+            "CALENDAR"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "inline",
+          "fail_open_reason": "",
+          "classifier_ms": 1480,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1480,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "delete-standup",
+      "why": "The event-id lock flow: find_events then delete_event via a PENDING placeholder.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "CALENDAR",
+          "wanted": [
+            "CALENDAR"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1387,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1387,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "CALENDAR",
+          "wanted": [
+            "CALENDAR"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1328,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1328,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "CALENDAR",
+          "wanted": [
+            "CALENDAR"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1487,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1487,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "invite-friday",
+      "why": "GENUINELY AMBIGUOUS and recorded as such: calendar tools never set attendees (sendUpdates='none'), so inviting a person is send_email territory — but the user said 'invite'. Both readings are defensible; scoring one as wrong would be scoring a disagreement.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "CALENDAR",
+          "wanted": [
+            "CALENDAR",
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1513,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1513,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "CALENDAR",
+          "wanted": [
+            "CALENDAR",
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1944,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1944,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "CALENDAR",
+          "wanted": [
+            "CALENDAR",
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 2057,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2057,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "how-are-you",
+      "why": "The control that must stay free — no gate fire, no classifier call, no plan.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "played-tekken",
+      "why": "A shared-fact statement for the memory engine, not a task.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "sister-doctor",
+      "why": "Autobiography.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "brothers-name",
+      "why": "A question about the USER — answered from memory; the web cannot help. This exclusion is what makes the wide question tier affordable.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "brother-deleted-save",
+      "why": "GATE FALSE POSITIVE BY DESIGN: strong noun, no request. The classifier exists to catch exactly this — it is a report, not an instruction.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1688,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1688,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1680,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1680,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1579,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1579,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "organized-my-desktop",
+      "why": "GATE FALSE POSITIVE BY DESIGN. Past tense about the user's own action.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1287,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1287,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 2342,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2343,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1314,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1314,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "sent-him-the-files",
+      "why": "GATE FALSE POSITIVE BY DESIGN, cited in CLAUDE.md as the accepted cost of the recall-first rule: one tiny temp-0 call that answers CHAT.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1503,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1504,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1765,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1765,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1177,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1177,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "what-is-a-monad",
+      "why": "The accepted cost of the wider question tier, stated out loud in the 2026-07-17 round: an impersonal concept question reaches the classifier and answers CHAT.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1149,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1149,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1388,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1388,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1240,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1240,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "tell-me-a-joke",
+      "why": "Request frame, no external fact.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1277,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1277,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1077,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1077,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "external_question",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "classifier_chat",
+          "classifier_ms": 1597,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1598,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "who-are-you",
+      "why": "Self-referential — the web cannot answer it.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "remember-about-jamil",
+      "why": "Memory recall through the chat path's MEMORY CONTEXT.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "love-this-song",
+      "why": "A bare media mention with no action verb must not fire the weak path.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "thanks-that-worked",
+      "why": "A comment on a FINISHED action is CHAT — the counterpart to the follow-up rule below, and the pair the classifier prompt has to separate.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "bare-yes",
+      "why": "With no open plan this is conversation. (With one, it never reaches routing — the plan owns the turn.)",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": false,
+          "gate_reason": "",
+          "should_route": false,
+          "got": "CHAT",
+          "wanted": [
+            "CHAT"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": null,
+          "fail_open_reason": "gate_closed",
+          "classifier_ms": null,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 0,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "followup-send-it",
+      "why": "INCIDENT 2026-07-13: names no object of its own, so the gate could never fire on its words — the chat LLM fabricated 'I've started working on that in the background'. is_action_followup borrows the object from the conversation.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "action_followup",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 2515,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2515,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "action_followup",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1240,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1241,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "action_followup",
+          "should_route": true,
+          "got": "EMAIL",
+          "wanted": [
+            "EMAIL"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 2007,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2007,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "followup-its-in-desktop",
+      "why": "INCIDENT 2026-07-10: in isolation the classifier called this 'an answer to an earlier question' and routed CHAT, and the chat LLM answered with promises it cannot keep. It must be judged IN its conversation.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1544,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1544,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1639,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1639,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1951,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1951,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "followup-message-him",
+      "why": "INCIDENT 2026-07-21: names no site and no strong noun, so only the LIVE WINDOW can carry it to the classifier. browse_window simulates an open agent tab, which is what is_browse_followup reads.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "browse_followup",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 2553,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2554,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "browse_followup",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 3308,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 3309,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "browse_followup",
+          "should_route": true,
+          "got": "BROWSE",
+          "wanted": [
+            "BROWSE"
+          ],
+          "label_ok": true,
+          "mode_ok": null,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 2210,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 2210,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "background-intent",
+      "why": "INCIDENT 2026-07-09: the intent phrase must be STRIPPED before classification — with it attached the classifier read the whole message as a reminder request, listed it CHAT, and Jarvis denied having file access.",
+      "known_gap": "",
+      "ok_runs": 3,
+      "runs": [
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": true,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1264,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1265,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": true,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1349,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1349,
+          "end_to_end_ok": true
+        },
+        {
+          "gate_fired": true,
+          "gate_reason": "strong_domain",
+          "should_route": true,
+          "got": "TASK",
+          "wanted": [
+            "TASK"
+          ],
+          "label_ok": true,
+          "mode_ok": true,
+          "execution": "delegate",
+          "fail_open_reason": "",
+          "classifier_ms": 1150,
+          "classifier_error": null,
+          "bare_navigation": false,
+          "ms": 1150,
+          "end_to_end_ok": true
+        }
+      ],
+      "verdict": "PASS"
+    }
+  ]
+}

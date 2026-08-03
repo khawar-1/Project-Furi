@@ -362,6 +362,30 @@ class AgentPlan(BaseModel):
     def pending_steps(self) -> list[PlanStep]:
         return [s for s in self.steps if s.status == StepStatus.PENDING]
 
+    def contract_hash(self) -> str:
+        """Stable identity of everything this plan is asking permission FOR.
+
+        ⚠️ WHY THIS EXISTS (2026-08-03, Tier 2 item 8). Consent to a write is
+        consent to a SIGNATURE SET — the exact commands and paths on the card —
+        and that is precisely why `task_router._is_typed_approval` REFUSES a
+        typed "yes" and nudges the user back to the button: a bare word is not
+        bound to anything.
+
+        An off-card approval (spoken, or from a phone) is only honest if it
+        carries the same binding. So the client echoes back the hash of the
+        contract it was GIVEN, and the server RE-DERIVES this from the plan it
+        just popped. A client can only hold the hash if it received the
+        contract; a plan whose steps changed since produces a different hash and
+        the approval is refused. The card's guarantee, delivered through a
+        different sense — not a weakening of it.
+
+        Built from `signature()` so it inherits exactly what approval already
+        means, and ORDERED so a reshuffle is a different contract."""
+        import hashlib
+
+        payload = json.dumps([s.signature() for s in self.pending_steps()])
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     def completed_steps(self) -> list[PlanStep]:
         return [s for s in self.steps if s.status == StepStatus.COMPLETED]
 

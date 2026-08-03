@@ -119,12 +119,36 @@ class Settings(BaseSettings):
     # a static auth token (app/core/auth.py): loopback is not authorization —
     # any local process or a webpage firing POSTs at localhost could otherwise
     # drive the API.
+    #
+    # ⚠️ THIS WAS DECORATIVE UNTIL 2026-08-03, and the comment above was a claim
+    # the code did not make: BACKEND_HOST appeared in exactly ONE place, the
+    # startup log line, and nothing bound it. Loopback held only because uvicorn
+    # DEFAULTS to 127.0.0.1 and no `--host` was passed in package.json,
+    # electron/main.ts or the README. Setting it in .env changed nothing, in
+    # either direction. It is now passed explicitly at every launch site, so the
+    # value here is the value in force.
     BACKEND_HOST: str = "127.0.0.1"
     BACKEND_PORT: int = 8000
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
     # Empty = the backend generates/persists one at ~/.jarvis/auth_token.
     # Set explicitly only for scripted/dev use; never commit a real value.
     API_AUTH_TOKEN: str = ""
+
+    # ------------------------------------------------- Remote surface (Tier 2.5)
+    # A SECOND listener serving a NARROW allowlist of routes — read, approve,
+    # answer — so a phone can act on a pending approval without the machine's
+    # whole API being reachable. Default OFF.
+    #
+    # ⚠️ THE SAFETY IS STRUCTURAL, NOT THIS FLAG. The remote app is built by
+    # copying only the routes on app/core/remote_manifest.py into a separate
+    # FastAPI app: a route that is not mounted cannot be reached, whatever a
+    # middleware does. "Never a shell" is a property of what exists on that
+    # port, not of a check that runs on it.
+    REMOTE_ENABLED: bool = False
+    # 0.0.0.0 so the phone on the same wifi can reach it. The main app stays on
+    # BACKEND_HOST regardless — these are two different listeners.
+    REMOTE_HOST: str = "0.0.0.0"
+    REMOTE_PORT: int = 8765
 
     # ------------------------------------------------------------------ Web search (Phase 6)
     # Optional. When set, web_search uses the Tavily API (purpose-built for LLM

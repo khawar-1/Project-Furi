@@ -9,7 +9,7 @@
     "frontend:dev": "cd frontend && npm run dev",
     "electron:dev": "tsc -p electron/tsconfig.json && cross-env NODE_ENV=development electron .",
     "electron:build": "electron-builder",
-    "backend": "cd backend && venv\\Scripts\\python -m uvicorn main:app --reload --port 8000",
+    "backend": "cd backend && venv\\Scripts\\python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000",
     "stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-dev.ps1",
     "build": "cd frontend && npm run build && npm run electron:build",
     "lint": "cd frontend && npm run lint",

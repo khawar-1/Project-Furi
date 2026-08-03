@@ -27,6 +27,8 @@ import {
 const isDev = process.env.NODE_ENV === 'development';
 const FRONTEND_DEV_URL = 'http://localhost:5173';
 const BACKEND_PORT = process.env.BACKEND_PORT || '8000';
+// Loopback unless deliberately overridden — the main API runs shell commands.
+const BACKEND_HOST = process.env.BACKEND_HOST || '127.0.0.1';
 const SUMMON_HOTKEY = 'Control+Shift+J';
 
 let mainWindow: BrowserWindow | null = null;
@@ -74,11 +76,20 @@ function startBackend(): void {
   const backendPath = join(app.getAppPath(), 'backend');
   const pythonBin = process.platform === 'win32' ? 'python' : 'python3';
 
-  backendProcess = spawn(pythonBin, ['-m', 'uvicorn', 'main:app', '--port', BACKEND_PORT], {
-    cwd: backendPath,
-    stdio: 'pipe',
-    env: { ...process.env },
-  });
+  // ⚠️ --host IS EXPLICIT. Until 2026-08-03 it was omitted here and in the dev
+  // script, so loopback held only by uvicorn's DEFAULT — `BACKEND_HOST` in .env
+  // was decorative and setting it changed nothing in either direction. The main
+  // API can delete files and run shell commands; which interface it listens on
+  // must be stated, not inherited.
+  backendProcess = spawn(
+    pythonBin,
+    ['-m', 'uvicorn', 'main:app', '--host', BACKEND_HOST, '--port', BACKEND_PORT],
+    {
+      cwd: backendPath,
+      stdio: 'pipe',
+      env: { ...process.env },
+    }
+  );
 
   backendProcess.stdout?.on('data', (data: Buffer) => {
     console.log('[Backend]', data.toString().trim());

@@ -13,6 +13,7 @@ from sqlalchemy import select, func
 from app.core.dependencies import get_db, get_qdrant
 from app.db.models import SemanticMemory, Contact, Episode, Preference
 from app.db.schemas import MemorySearchResult, SemanticMemoryCreate, SemanticMemoryResponse
+from app.memory.archive import list_archived, restore_memory
 from app.memory.engine import MemoryEngine
 
 router = APIRouter()
@@ -33,7 +34,14 @@ async def list_memories(
       - 'shared'  → only shared (user+contact) facts
       - omitted   → returns all user + shared facts (default for About Me)
     """
-    query = select(SemanticMemory).where(SemanticMemory.is_active == True)
+    # Archived facts are excluded here and listed by GET /memory/archived —
+    # that separation IS what "archived" means. They are not deleted: the row
+    # and its vector are untouched and POST /{id}/restore puts one back.
+    query = (
+        select(SemanticMemory)
+        .where(SemanticMemory.is_active == True)
+        .where(SemanticMemory.archived_at.is_(None))
+    )
 
     if category:
         query = query.where(SemanticMemory.category == category)
@@ -71,6 +79,36 @@ async def create_memory(
         subject="user",  # Manual additions are always user facts
     )
     return SemanticMemoryResponse.model_validate(memory)
+
+
+@router.get("/archived", response_model=MemorySearchResult, summary="Archived memories")
+async def list_archived_memories(
+    limit: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+) -> MemorySearchResult:
+    """Facts the housekeeping pass has set aside — long unused, never deleted.
+
+    THE TRUST SURFACE. An automatic tidy-up nobody can inspect is
+    indistinguishable from data loss, so everything it hides is listed here and
+    restorable. Nothing reaches this list without being unused for
+    ARCHIVE_AFTER_DAYS; see app/memory/archive.py for the four conditions."""
+    memories = await list_archived(db, limit=limit)
+    return MemorySearchResult(
+        memories=[SemanticMemoryResponse.model_validate(m) for m in memories],
+        total=len(memories),
+    )
+
+
+@router.post("/{memory_id}/restore", summary="Restore an archived memory")
+async def restore_archived_memory(
+    memory_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Put an archived fact back into retrieval. The undo half — without it the
+    archive would be a delete with extra steps."""
+    if not await restore_memory(db, memory_id):
+        raise HTTPException(status_code=404, detail="No archived memory with that id")
+    return {"restored": True, "id": memory_id}
 
 
 @router.delete("/{memory_id}", summary="Delete a memory")

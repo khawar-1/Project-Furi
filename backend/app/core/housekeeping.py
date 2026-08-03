@@ -43,8 +43,9 @@ _sweeper: Optional[asyncio.Task] = None
 
 
 async def run_housekeeping_pass() -> None:
-    """One sweep: drop expired parked plans and pending questions, then settle
-    any task row left pointing at a plan that no longer exists.
+    """One sweep: drop expired parked plans and pending questions, settle any
+    task row left pointing at a plan that no longer exists, and age out the
+    three audit trails past their retention windows.
 
     Ordered like the lifespan's startup block — purge first, so the reconcile
     sees the surviving rows only. Each step is independently best-effort (the
@@ -52,14 +53,34 @@ async def run_housekeeping_pass() -> None:
     others."""
     from app.agents import purge_expired_plans
     from app.agents.task_runner import reconcile_expired_task_plans
+    from app.core.plan_trace import purge_old_plan_traces
+    from app.core.routing_trace import purge_old_decisions
     from app.db.database import AsyncSessionLocal
+    from app.memory.archive import sweep_memory_archive
     from app.memory.session_persistence import purge_expired_pending_state
+    from app.tools.registry import purge_old_activity
 
     async with AsyncSessionLocal() as db:
         for name, step in (
             ("parked plans", purge_expired_plans),
             ("pending questions", purge_expired_pending_state),
             ("task rows", reconcile_expired_task_plans),
+            # The routing audit trail writes one row per chat turn (2026-08-03).
+            # Small, but unbounded without this — and retention is the price of
+            # storing a copy of what the user typed.
+            ("routing decisions", purge_old_decisions),
+            # Its sibling one layer down: one row per planner invocation, saying
+            # why a plan gave up (2026-08-03).
+            ("plan traces", purge_old_plan_traces),
+            # And the oldest unbounded table of the three. Note its window is a
+            # YEAR, not 30 days — file_intelligence ranks folder habits over all
+            # of it; see ACTIVITY_RETENTION_DAYS in app/tools/registry.py.
+            ("activity log", purge_old_activity),
+            # ⚠️ THE ONLY STEP HERE THAT TOUCHES THE USER'S OWN MEMORIES, and it
+            # is the only one that DELETES NOTHING: it sets `archived_at`, which
+            # hides a long-unused fact from retrieval and is undone by one click
+            # in About Me. See app/memory/archive.py for the four conditions.
+            ("memory archive", sweep_memory_archive),
         ):
             try:
                 await step(db)

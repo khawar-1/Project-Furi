@@ -952,9 +952,20 @@ def steps_for_summary(plan: AgentPlan) -> str:
 def serialize_plan_for_api(plan: AgentPlan) -> dict:
     """The serialized AgentPlan every endpoint and push event carries, plus
     the requires_approval convenience flag so the frontend never
-    string-compares the status enum."""
+    string-compares the status enum.
+
+    An approval pause also carries its contract in SPOKEN form and the hash that
+    binds it (2026-08-03). Added HERE, in the one serializer every surface goes
+    through, so the inline plan chunk, the background `task` push and the phone
+    surface all get it without a second copy — and so a client can only echo a
+    hash it was actually given."""
     data = plan.model_dump(mode="json")
     data["requires_approval"] = plan.status == PlanStatus.AWAITING_APPROVAL
+    if plan.status == PlanStatus.AWAITING_APPROVAL:
+        from app.agents.spoken import spoken_plan_text
+
+        data["spoken_contract"] = spoken_plan_text(plan)
+        data["contract_hash"] = plan.contract_hash()
     return data
 
 

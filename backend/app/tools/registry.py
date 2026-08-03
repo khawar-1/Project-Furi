@@ -18,18 +18,35 @@ returned and the failure goes to loguru.
 """
 import json
 import time
+from datetime import timedelta
 from typing import Any, Callable, Optional
 
 from loguru import logger
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_tool import BaseTool, PermissionLevel, ToolDefinition, ToolResult
-from app.db.models import ActivityLog
+from app.db.models import ActivityLog, utc_now
 
 # Column limits / display caps for the ActivityLog row
 _ACTION_MAX_LEN = 256
 _PARAM_VALUE_MAX_LEN = 300
 _RESULT_SUMMARY_MAX_LEN = 1000
+
+# ⚠️ RETENTION IS COUPLED TO A LEARNING FEATURE — do not shorten this casually.
+# `activity_log` was unbounded until 2026-08-03: nothing ever aged a row out,
+# so a long-lived install grew it forever. But it is not just a UI feed —
+# `app/core/file_intelligence.frequent_folders` ranks the user's save/move
+# habits by counting successful file-tool rows over ALL time, with no date
+# filter. Purging aggressively would silently shrink a signal the planner uses
+# (rule 18), which is exactly the kind of action-at-a-distance this codebase
+# keeps having to unpick.
+#
+# A year bounds the table — the actual defect — while leaving the folder-habit
+# ranking materially intact. Deliberately far longer than the 30 days routing
+# decisions and plan traces get: those record one turn's reasoning, this records
+# what Jarvis DID, which is the audit trail the whole approval story rests on.
+ACTIVITY_RETENTION_DAYS = 365
 
 
 class ToolRegistry:
@@ -230,3 +247,14 @@ async def execute_tool(
         f"Tool executed: {action} → {'ok' if result.success else 'FAILED'} ({duration_ms}ms)"
     )
     return result
+
+
+async def purge_old_activity(db: AsyncSession, days: int = ACTIVITY_RETENTION_DAYS) -> int:
+    """Age out audit rows past the retention window. Called by the housekeeping
+    sweep. Lives here because the module that decides what goes into the audit
+    trail is the one that should decide how long it stays — see the ⚠️ note on
+    ACTIVITY_RETENTION_DAYS for the file_intelligence coupling."""
+    cutoff = utc_now() - timedelta(days=days)
+    result = await db.execute(delete(ActivityLog).where(ActivityLog.created_at < cutoff))
+    await db.commit()
+    return int(result.rowcount or 0)

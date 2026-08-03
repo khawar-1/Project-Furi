@@ -15,6 +15,7 @@ import type {
 } from '@/types';
 import { agentApi, chatApi, tasksApi } from '@/lib/api';
 import * as voiceOutput from '@/lib/voiceOutput';
+import { rememberSpokenContract } from '@/lib/spokenApproval';
 
 interface ChatState {
   // State
@@ -31,6 +32,13 @@ interface ChatState {
   appendChunk: (chunk: StreamChunk) => void;
   respondToPlan: (messageId: string, approved: boolean) => Promise<void>;
   respondToChoice: (messageId: string, answer: string) => Promise<void>;
+  /** A plan that was answered somewhere OTHER than its card — today, approved
+   *  by VOICE (Tier 2 item 8). Keyed by PLAN id, not message id, because the
+   *  caller never had a message id: it heard a contract and said yes.
+   *  Does exactly what the card path does — patch the card, render the
+   *  outcome — so the two cannot drift. Returns the outcome text so a voice
+   *  turn can speak it. */
+  applyApprovedPlan: (plan: AgentPlan) => string | null;
   /** A reminder (Phase 4, Part 4) fired while this window was open: append
    *  its message live if it belongs to the CURRENT session. A reminder for
    *  a different (or no longer open) session was already persisted by the
@@ -164,6 +172,15 @@ export const useChatStore = create<ChatState>((set, get) => {
               return m;
             }),
           }));
+          // Read the approval contract ALOUD in its spoken form, instead of
+          // the visual one this turn is about to stream as a delta (which is
+          // a numbered list of full paths — unholdable by ear). Remembering
+          // the hash is what lets a spoken "approve" be BOUND to these exact
+          // steps; the server re-derives and refuses a stale one.
+          if (plan.requires_approval && plan.spoken_contract && plan.contract_hash) {
+            voiceOutput.speakContractInsteadOfTurn(plan.spoken_contract);
+            rememberSpokenContract(plan.id, plan.contract_hash);
+          }
           return;
         }
         // The ONE voice-output tap (Part 4): every appended delta also feeds
@@ -271,6 +288,28 @@ export const useChatStore = create<ChatState>((set, get) => {
         planError: e instanceof Error ? e.message : 'The plan could not be resumed.',
       });
     }
+  },
+
+  applyApprovedPlan: (plan: AgentPlan) => {
+    if (!plan?.id) return null;
+    // Patch every card tracking this plan — the receiveTaskEvent rule
+    // (patch by id, not by position), because a voice approval arrives with
+    // no message id and the card may be several turns back.
+    set((state) => ({
+      messages: state.messages.map((m) =>
+        m.plan && m.plan.id === plan.id
+          ? { ...m, plan, planResponding: false, planError: null }
+          : m
+      ),
+    }));
+    // The SAME append the card path does — without it a plan approved by
+    // voice completes in silence and the card goes stale (2026-08-04).
+    // ⚠️ Naturally a no-op for a BACKGROUND task: `agent.py` only finalizes
+    // inline plans, so a task-owned plan comes back as an executing snapshot
+    // with no outcome_text and its real outcome arrives by push. That is what
+    // stops this double-speaking, and it is structural, not a check here.
+    appendOutcomeText(plan);
+    return plan.outcome_text ?? null;
   },
 
   respondToChoice: async (messageId: string, answer: string) => {
