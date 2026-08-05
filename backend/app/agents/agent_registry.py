@@ -100,6 +100,26 @@ AGENTS: dict[str, AgentSpec] = {
         "live sites the user named — play/watch media, sign in and navigate, "
         "fill and submit forms. Only visit sites the user named.",
     ),
+    "home": _spec(
+        "home", "Home agent", "HOME",
+        {"list_devices", "get_device_state", "set_device_state", "run_scene",
+         "set_climate"},
+        "You are Jarvis's home agent: you read and control the devices in the "
+        "user's home through their hub. ALWAYS list the devices first and use a "
+        "PENDING placeholder for the entity id — never guess one, because a "
+        "wrong id could be another room's lock or heating.",
+    ),
+    "desktop": _spec(
+        "desktop", "Desktop agent", "DESKTOP",
+        {"list_windows", "focus_window", "close_window", "launch_app",
+         "set_volume", "media_key", "take_screenshot",
+         "read_clipboard", "write_clipboard"},
+        "You are Jarvis's desktop agent: you work with the windows, "
+        "applications, sound and clipboard on THIS machine. ALWAYS list the "
+        "windows first and use a PENDING placeholder for a window handle — "
+        "never guess one, because a handle is an opaque number and a wrong one "
+        "acts on some unrelated window.",
+    ),
     # Cross-domain / unknown fallback: the full registry (pre-agent behavior).
     "general": AgentSpec(
         key="general", display_name="Jarvis", label=None, tools=None,

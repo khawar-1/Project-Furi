@@ -183,6 +183,16 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ Voice
     WHISPER_MODEL: str = "base"
 
+    # ------------------------------------------------------- Home Assistant
+    # The hub ADDRESS is a runtime setting (app_settings key "home.config"),
+    # not an env var — it is changed from Settings without a restart, like
+    # every other opt-in feature. Only the credential lives here, and only as
+    # a fallback: the normal path is Settings → Home & devices, which writes
+    # ~/.jarvis/home_token.json (outside the repo, 0600). Set this instead when
+    # provisioning a machine from a script.
+    HOME_ASSISTANT_TOKEN: str = ""
+    HOME_ASSISTANT_TOKEN_PATH: str = ""  # override the token file (tests)
+
     # ------------------------------------------------------------------ Supabase (optional)
     SUPABASE_URL: str = ""
     SUPABASE_ANON_KEY: str = ""

@@ -697,7 +697,7 @@ def test_classify_prompt_covers_sign_in_and_lists_browse_in_the_answer():
     'One word (TASK, EMAIL, CALENDAR, WEB, or CHAT)' — which biased the model
     against ever choosing it), and the prompt must carry a sign-in example."""
     from app.api.task_router import _CLASSIFY_PROMPT
-    assert "one word (task, email, calendar, web, browse, or chat)" in _CLASSIFY_PROMPT.lower()
+    assert "one word (task, email, calendar, web, home, desktop, browse, or chat)" in _CLASSIFY_PROMPT.lower()
     assert "sign in to github and open my oldest repo" in _CLASSIFY_PROMPT.lower()
 
 

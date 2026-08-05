@@ -59,6 +59,7 @@ async def run_housekeeping_pass() -> None:
     others."""
     from app.agents import purge_expired_plans
     from app.agents.task_runner import reconcile_expired_task_plans
+    from app.core.desktop import sweep_screenshots
     from app.core.plan_trace import purge_old_plan_traces
     from app.core.routing_trace import purge_old_decisions
     from app.db.database import AsyncSessionLocal
@@ -101,6 +102,12 @@ async def run_housekeeping_pass() -> None:
             # they are a queue waiting on the user, and ageing out an unanswered
             # question would silently drop it.
             ("memory conflicts", purge_settled_conflicts),
+            # Screenshots taken by the desktop tools (Feature 2). The ONE step
+            # here that deletes a file, and the reason take_screenshot may
+            # return a path at all: an image of the whole screen must not sit
+            # in ~/.jarvis/screenshots forever. Scoped to the files that tool
+            # wrote — never anything the user saved or renamed themselves.
+            ("screenshots", sweep_screenshots),
         ):
             try:
                 await step(db)

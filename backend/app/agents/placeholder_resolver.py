@@ -181,6 +181,27 @@ _EVENT_ID_PARAMS = {
 }
 _CALENDAR_READ_TOOLS = ("list_events", "find_events")
 
+# Home entity ids: the designed flow is list_devices → set_device_state(
+# entity_id="PENDING: the kitchen lights"). Without this branch every such plan
+# burns an LLM replan on the mechanism working as designed (the round-14
+# incident, and its email/calendar repeats). Ids come EXCLUSIVELY from home read
+# results, so the planner's entity-id grounding rule holds on the code path too.
+_ENTITY_ID_PARAMS = {
+    "set_device_state": "entity_id",
+    "run_scene": "entity_id",
+    "set_climate": "entity_id",
+}
+_HOME_READ_TOOLS = ("list_devices", "get_device_state")
+
+# The desktop twin: a PENDING window handle fills from this plan's own
+# list_windows results. `title` rides along for close_window — see
+# _substitute_window_handle for why it must.
+_WINDOW_HANDLE_PARAMS = {
+    "focus_window": "handle",
+    "close_window": "handle",
+}
+_DESKTOP_READ_TOOLS = ("list_windows",)
+
 # URL parameters: a read step whose url is a per-page template ("PENDING: the
 # three job listing URLs from the search results") expands into one concrete
 # step per result URL from the most recent completed web_search — the web
@@ -820,6 +841,209 @@ def _substitute_event_id(
     return [_concrete_step(template, key, str(pick["id"]), description=desc)]
 
 
+def _devices_from_step(step: PlanStep) -> list[dict]:
+    """Device rows a COMPLETED list_devices/get_device_state step returned — the
+    only source entity-id substitution draws from (never LLM text)."""
+    if (
+        step.tool not in _HOME_READ_TOOLS
+        or step.status != StepStatus.COMPLETED
+        or step.result is None
+    ):
+        return []
+    output = step.result.output
+    if not isinstance(output, dict):
+        return []
+    return [
+        d for d in output.get("devices") or []
+        if isinstance(d, dict) and d.get("entity_id")
+    ]
+
+
+def _device_name_matches(device: dict, placeholder_text: str) -> bool:
+    """True when a word from the device's friendly name or its room appears in
+    the placeholder text (word-boundary, like _substitute_recipient's name
+    match). The room counts because "PENDING: the kitchen lights" names the area
+    as often as the device."""
+    words = f"{device.get('name') or ''} {device.get('area') or ''}".lower().split()
+    return any(
+        tok and re.search(rf"\b{re.escape(tok)}", placeholder_text)
+        for tok in words
+    )
+
+
+def _substitute_entity_id(
+    template: PlanStep, key: str, completed: list[PlanStep]
+) -> Optional[list[PlanStep]]:
+    """The home mirror of _substitute_event_id: fill the PENDING entity_id when
+    the completed home reads pin exactly ONE device — one whose name or room
+    matches the placeholder text, or the only device found. Several candidates
+    ⇒ None, code never picks.
+
+    ⚠️ The scene/climate tools additionally require a matching DOMAIN, so
+    "PENDING: the goodnight scene" can never resolve to a light: a run_scene
+    step only ever considers `scene.*` devices, and set_climate only
+    `climate.*`. Without that filter the single-candidate branch could hand a
+    scene tool a lamp, which the tool would then refuse — a confusing failure
+    for a step that was resolvable."""
+    from app.integrations.home_assistant import domain_of  # runtime — no cycle
+
+    required_domain = {"run_scene": "scene", "set_climate": "climate"}.get(template.tool)
+
+    devices: list[dict] = []
+    seen: set[str] = set()
+    for step in completed:
+        for d in _devices_from_step(step):
+            eid = str(d["entity_id"])
+            if eid in seen:
+                continue
+            if required_domain and domain_of(eid) != required_domain:
+                continue
+            seen.add(eid)
+            devices.append(d)
+    if not devices:
+        return None
+
+    placeholder_text = str(template.parameters.get(key) or "").lower()
+    named = [d for d in devices if _device_name_matches(d, placeholder_text)]
+    named_ids = {str(d["entity_id"]) for d in named}
+    if len(named_ids) == 1:
+        pick = named[0]  # the placeholder names exactly one found device
+    elif len(devices) == 1:
+        pick = devices[0]  # only one candidate exists at all
+    else:
+        return None  # several plausible devices — code never picks
+
+    label = str(pick.get("name") or pick["entity_id"])
+    area = str(pick.get("area") or "").strip()
+    where = f" in the {area}" if area else ""
+    if template.tool == "run_scene":
+        desc = f"Activate scene '{label}'"
+    elif template.tool == "set_climate":
+        desc = f"Set thermostat '{label}'{where}"
+    else:
+        desc = f"Set '{label}'{where} to {template.parameters.get('state') or '?'}"
+    # Substitution, not expansion: the step is still the one the LLM described
+    # — only its entity_id became concrete. Fresh signature + regenerated
+    # action_detail: the user approves the real device.
+    return [_concrete_step(template, key, str(pick["entity_id"]), description=desc)]
+
+
+def _windows_from_step(step: PlanStep) -> list[dict]:
+    """Window rows a COMPLETED list_windows step returned — the only source
+    window-handle substitution draws from (never LLM text)."""
+    if (
+        step.tool not in _DESKTOP_READ_TOOLS
+        or step.status != StepStatus.COMPLETED
+        or step.result is None
+    ):
+        return []
+    output = step.result.output
+    if not isinstance(output, dict):
+        return []
+    return [
+        w for w in output.get("windows") or []
+        if isinstance(w, dict) and w.get("handle") is not None
+    ]
+
+
+def _window_matches(window: dict, placeholder_text: str) -> bool:
+    """True when a word from the window's title or its application appears in
+    the placeholder text — the _device_name_matches rule for windows.
+
+    Short tokens are dropped: window titles are full of one- and two-character
+    noise ("-", "|", "vs") that would match almost any placeholder and turn a
+    genuine several-candidates case into a false single match."""
+    words = f"{window.get('title') or ''} {window.get('process') or ''}".lower()
+    return any(
+        len(tok) >= 3 and re.search(rf"\b{re.escape(tok)}", placeholder_text)
+        for tok in re.split(r"[^\w.]+", words)
+    )
+
+
+def _substitute_window_handle(
+    template: PlanStep, key: str, completed: list[PlanStep]
+) -> Optional[list[PlanStep]]:
+    """The desktop mirror of _substitute_entity_id: fill the PENDING window
+    handle when the completed list_windows steps pin exactly ONE window — one
+    whose title or application matches the placeholder text, or the only window
+    found. Several candidates ⇒ None, code never picks.
+
+    ⚠️ `title` IS FILLED TOO, from the same row. close_window verifies the live
+    window still matches the title it was approved for, so a resolved handle
+    with an unresolved "PENDING: ..." title would fail that check every time —
+    the step would be perfectly resolvable and still dead-end, which is exactly
+    the spurious-failure class this module exists to remove."""
+    windows: list[dict] = []
+    seen: set[str] = set()
+    for step in completed:
+        for w in _windows_from_step(step):
+            handle = str(w["handle"])
+            if handle in seen:
+                continue
+            seen.add(handle)
+            windows.append(w)
+    if not windows:
+        return None
+
+    placeholder_text = str(template.parameters.get(key) or "").lower()
+    named = [w for w in windows if _window_matches(w, placeholder_text)]
+    named_handles = {str(w["handle"]) for w in named}
+    if len(named_handles) == 1:
+        pick = named[0]  # the placeholder names exactly one open window
+    elif len(windows) == 1:
+        pick = windows[0]  # only one candidate exists at all
+    else:
+        return None  # several plausible windows — code never picks
+
+    title = str(pick.get("title") or "")
+    process = str(pick.get("process") or "").strip()
+    where = f" ({process})" if process else ""
+    verb = "Close" if template.tool == "close_window" else "Bring"
+    tail = "" if template.tool == "close_window" else " to the front"
+    desc = f"{verb} the window '{title}'{where}{tail}"
+
+    step = _concrete_step(template, key, str(pick["handle"]), description=desc)
+    # Fill the title from the SAME row when it is still placeholder text — see
+    # the docstring. A title the LLM wrote concretely is left alone: it is what
+    # the user will see and verify, and overwriting it would let a substitution
+    # silently change the contract.
+    existing_title = str(step.parameters.get("title") or "")
+    if title and (not existing_title or _PLACEHOLDER_MARK in existing_title.upper()):
+        from app.agents.planner import _step_action_detail  # runtime — no cycle
+
+        step.parameters["title"] = title
+        step.action_detail = _step_action_detail(step.tool, step.parameters)
+    return [step]
+
+
+def _window_placeholder_key(template: PlanStep) -> Optional[str]:
+    """The window tools' handle parameter when the step's placeholders name ONE
+    window across two fields — `close_window(handle="PENDING: the notepad
+    window", title="PENDING: its title")`.
+
+    ⚠️ WITHOUT THIS THE FEATURE'S OWN INSTRUCTIONS ARE UNRESOLVABLE. close_window
+    requires `title` (it verifies the live window still matches it, because
+    handles get reused), and plan RULE 25 therefore tells the model to put a
+    placeholder in BOTH — but `resolve()` refuses any step with more than one
+    placeholder key, so the exact shape the rule asks for fell through to the
+    LLM every time. Same class as the 2026-07-29 batch-list case: a recognized
+    shape that the general veto could not see.
+
+    The veto is bypassed for THIS shape only — handle must be placeholder text
+    and no key OTHER than handle/title may be one — so a step with an unrelated
+    ambiguous parameter stays ambiguous and still goes to the LLM."""
+    key = _WINDOW_HANDLE_PARAMS.get(template.tool)
+    if key is None:
+        return None
+    value = template.parameters.get(key)
+    if not (isinstance(value, str) and _PLACEHOLDER_MARK in value.upper()):
+        return None
+    extra = set(_string_placeholder_keys(template.parameters)) - {key, "title"}
+    if extra or _nested_placeholder(template.parameters):
+        return None
+    return key
+
+
 def _placeholder_list_key(template: PlanStep) -> Optional[str]:
     """The batch tool's list parameter when it holds ONLY placeholder text —
     `move_files(sources=["PENDING: the pdf paths"])`.
@@ -950,6 +1174,12 @@ def resolve(
         if list_key is not None:
             return _fill_list(plan, template, list_key, completed, grounding)
 
+        # A window named across handle AND title — one window, two fields.
+        # Checked before the single-string rule, which cannot see this shape.
+        window_key = _window_placeholder_key(template)
+        if window_key is not None:
+            return _substitute_window_handle(template, window_key, completed)
+
         keys = _string_placeholder_keys(template.parameters)
         if len(keys) != 1 or _nested_placeholder(template.parameters):
             return None
@@ -962,6 +1192,10 @@ def resolve(
             return _substitute_recipient(template, key, completed)
         if _EVENT_ID_PARAMS.get(template.tool) == key:
             return _substitute_event_id(template, key, completed)
+        if _ENTITY_ID_PARAMS.get(template.tool) == key:
+            return _substitute_entity_id(template, key, completed)
+        if _WINDOW_HANDLE_PARAMS.get(template.tool) == key:
+            return _substitute_window_handle(template, key, completed)
         if _URL_PARAMS.get(template.tool) == key:
             return _expand_urls(template, key, completed, max_new)
         return None

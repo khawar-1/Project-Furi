@@ -12,8 +12,10 @@ from app.tools import activity_tools  # noqa: F401, E402
 from app.tools import browser_agent_tools  # noqa: F401, E402
 from app.tools import browser_tools  # noqa: F401, E402
 from app.tools import calendar_tools  # noqa: F401, E402
+from app.tools import desktop_tools  # noqa: F401, E402
 from app.tools import email_tools  # noqa: F401, E402
 from app.tools import file_tools  # noqa: F401, E402
+from app.tools import home_tools  # noqa: F401, E402
 from app.tools import memory_tools  # noqa: F401, E402
 from app.tools import semantic_file_tools  # noqa: F401, E402
 from app.tools import terminal_tools  # noqa: F401, E402

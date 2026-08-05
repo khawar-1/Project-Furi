@@ -66,6 +66,52 @@ def _names(values: Any) -> str:
     return f"{len(items)} files"
 
 
+def _device(entity_id: Any) -> str:
+    """`light.kitchen_main` → "kitchen main". A spoken approval that reads a
+    slug aloud is one the user cannot check, and this is the one feature where
+    the thing being approved is a door."""
+    text = str(entity_id or "").strip()
+    if not text:
+        return "that device"
+    tail = text.split(".", 1)[-1]
+    return tail.replace("_", " ").strip() or text
+
+
+def _quoted(text: Any) -> str:
+    """A window title, said aloud. Long titles are cut at a word boundary —
+    a browser tab's title can be a whole sentence, and reading all of it is
+    how a spoken contract stops being checkable."""
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    if len(value) > 60:
+        value = value[:60].rsplit(" ", 1)[0] + "…"
+    return f"{value}"
+
+
+def _spoken_volume(params: dict) -> str:
+    level, mute = params.get("level"), params.get("mute")
+    if mute is True:
+        return "mute the sound" + (f" and set the volume to {level}" if level is not None else "")
+    if mute is False:
+        return "unmute the sound" + (f" and set the volume to {level}" if level is not None else "")
+    if level is not None:
+        return f"set the volume to {level}"
+    return "change the volume"
+
+
+def _spoken_length(text: Any) -> str:
+    """Clipboard text is arbitrary and can be enormous. Say its SIZE, and the
+    opening words only when it is short enough to be worth hearing — the
+    visual contract carries the full text."""
+    value = str(text or "")
+    if not value:
+        return "nothing"
+    if len(value) <= 60:
+        return f'"{value}"'
+    return f"{len(value)} characters of text"
+
+
 def _where(path: Any) -> str:
     parent = os.path.dirname(str(path or "").rstrip("\\/"))
     name = os.path.basename(parent)
@@ -115,6 +161,48 @@ SPOKEN_STEPS: dict[str, Callable[[dict], str]] = {
     ),
     "update_event": lambda p: "change an event in your calendar",
     "delete_event": lambda p: "delete an event from your calendar",
+    # --- home & IoT --------------------------------------------------------
+    # These read the ENTITY ID rather than a friendly name, because the spoken
+    # form takes only the step's parameters — the friendly name lives on
+    # action_detail, stamped there by planner._enrich_entity_action_detail from
+    # the plan's own reads. `_device` turns "light.kitchen_main" into "kitchen
+    # main" so a hands-free approval says something a person recognises rather
+    # than spelling out a slug.
+    "set_device_state": lambda p: (
+        f"set {_device(p.get('entity_id'))} to {p.get('state') or 'a new state'}"
+    ),
+    "run_scene": lambda p: (
+        f"run the {_device(p.get('entity_id'))} scene — it may change several devices"
+    ),
+    "set_climate": lambda p: (
+        f"set {_device(p.get('entity_id'))}"
+        + (f" to {p.get('temperature')} degrees" if p.get("temperature") is not None else "")
+        + (f", mode {p.get('mode')}" if p.get("mode") else "")
+    ),
+    # --- desktop -----------------------------------------------------------
+    # These read the step's own parameters, so they speak the TITLE rather than
+    # the handle — reading an opaque integer aloud is the one thing a listener
+    # cannot check, and closing a window is the action here that can interrupt
+    # real work.
+    "focus_window": lambda p: (
+        f"bring {_quoted(p.get('title')) or 'that window'} to the front"
+    ),
+    "close_window": lambda p: (
+        f"close {_quoted(p.get('title')) or 'that window'}"
+        " — if it has unsaved work it will ask you first"
+    ),
+    "launch_app": lambda p: f"open {p.get('name') or 'that application'}",
+    "set_volume": lambda p: _spoken_volume(p),
+    "media_key": lambda p: {
+        "play_pause": "play or pause whatever is playing",
+        "next": "skip to the next track",
+        "previous": "go back to the previous track",
+        "stop": "stop what is playing",
+    }.get(str(p.get("action") or ""), "send a media key"),
+    "write_clipboard": lambda p: (
+        f"put {_spoken_length(p.get('text'))} on your clipboard, replacing "
+        "what is there"
+    ),
     # --- browser -----------------------------------------------------------
     "browse_commit": lambda p: "submit a form on that website",
 }

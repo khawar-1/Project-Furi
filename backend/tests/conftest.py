@@ -375,6 +375,79 @@ def _hermetic_context_store():
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_home_assistant(tmp_path_factory):
+    """home_assistant defaults its token file to the real ~/.jarvis directory
+    and its client to whatever hub the user configured. Tests must never read
+    or write that token, and must never put a request on the LAN: every test
+    gets a scratch token path and a factory that REFUSES outright. Home tests
+    swap in their own fake on top.
+
+    The refusal matters more here than for a read-only integration — the home
+    tools can unlock a door, so a test that accidentally reached a real hub
+    would do something in the physical world."""
+    from app.integrations import home_assistant
+
+    def _refuse():
+        raise RuntimeError("test tried to reach a real Home Assistant hub")
+
+    original_factory = home_assistant.HOME_SERVICE_FACTORY
+    original_path = home_assistant.TOKEN_PATH
+    home_assistant.reset_home_client()
+    home_assistant.HOME_SERVICE_FACTORY = _refuse
+    home_assistant.TOKEN_PATH = (
+        tmp_path_factory.mktemp("home-assistant") / "home_token.json"
+    )
+    yield
+    home_assistant.reset_home_client()
+    home_assistant.HOME_SERVICE_FACTORY = original_factory
+    home_assistant.TOKEN_PATH = original_path
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_desktop(tmp_path_factory):
+    """The desktop controller drives THIS machine — the suite must never reach
+    it. A test that slipped through would close the developer's windows, change
+    their volume, overwrite their clipboard or take a picture of their screen,
+    and would do it silently.
+
+    So the factory REFUSES outright (the home-hub posture, and for a stronger
+    reason: a hub is somewhere else, this is the machine running the tests), the
+    app registry is emptied so no Start Menu is ever walked, and the screenshot
+    directory is redirected into a scratch path so nothing can be written near
+    the real ~/.jarvis. Desktop tests swap in their own fake on top."""
+    from app.core import desktop
+
+    def _refuse():
+        raise RuntimeError("test tried to control the real desktop")
+
+    original_factory = desktop.DESKTOP_CONTROLLER_FACTORY
+    original_cache = desktop._apps_cache
+    original_at = desktop._apps_cached_at
+    original_dirs = desktop._start_menu_dirs
+    original_screens = desktop.screenshot_dir
+    scratch = tmp_path_factory.mktemp("desktop-screens")
+
+    desktop.reset_desktop_controller()
+    desktop.DESKTOP_CONTROLLER_FACTORY = _refuse
+    # Blanking the CACHE is not enough — discover_apps() deliberately re-walks
+    # on an empty result (an empty registry is a state worth retrying), so it
+    # would go straight to the real Start Menu. Blank the SOURCE instead.
+    desktop._start_menu_dirs = lambda: []  # type: ignore[assignment]
+    desktop._apps_cache = []
+    desktop._apps_cached_at = 0.0
+    desktop.screenshot_dir = lambda: scratch  # type: ignore[assignment]
+
+    yield
+
+    desktop.reset_desktop_controller()
+    desktop.DESKTOP_CONTROLLER_FACTORY = original_factory
+    desktop._start_menu_dirs = original_dirs
+    desktop._apps_cache = original_cache
+    desktop._apps_cached_at = original_at
+    desktop.screenshot_dir = original_screens
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_google_auth(tmp_path_factory):
     """Google auth defaults its token file to the real ~/.jarvis directory.
     Tests must never read/write it (or hit Google): every test gets a manager

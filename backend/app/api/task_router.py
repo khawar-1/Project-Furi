@@ -143,6 +143,28 @@ _STRONG_DOMAIN_RE = re.compile(
     # the gate ALONE; the classifier makes the BROWSE/CHAT call. Rare in small
     # talk, so a false fire costs one temp-0 call — the recall-first trade-off.
     r"\bsign(?:ing|ed)?[\s-]?in(?:to)?\b|\blog(?:ging|ged)?[\s-]?in(?:to)?\b|"
+    # Home & IoT domain (Feature 1). Only words that are UNAMBIGUOUSLY about a
+    # controllable home device fire alone: "thermostat" and "smart <thing>" are
+    # never said about anything else. The everyday home nouns people also use in
+    # ordinary conversation ("the lights were beautiful", "he knocked on the
+    # door") are WEAK below and need an action verb — the same split the media
+    # nouns use, for the same measured reason.
+    r"\bthermostats?\b|\bsmart[\s-]?(?:home|bulbs?|plugs?|lights?|locks?|switch(?:es)?)\b|"
+    r"\bhome[\s-]?assistant\b|\bair[\s-]?con(?:ditioning|ditioner)?\b|"
+    # Desktop control (Feature 2). Only words nobody uses about anything
+    # else: "clipboard" and "screenshot" are never said in ordinary
+    # conversation, so they fire alone. The everyday machine nouns
+    # ("window", "app", "volume") are WEAK below — "a window of
+    # opportunity", "there's an app for that" and "the sheer volume of
+    # email" are all real sentences.
+    r"\bclip[\s-]?board\b|\bscreen[\s-]?shots?\b|\bscreen[\s-]?grabs?\b|"
+    r"\btask[\s-]?bar\b|\bstart[\s-]?menu\b|"
+    # "mute"/"unmute" fire ALONE, unlike the other desktop verbs. MEASURED
+    # 2026-08-04: "mute it" was the one miss in a 20-phrase recall set, because
+    # its object is a pronoun and the weak tier needs a noun. English has no
+    # everyday non-audio use of the word — "you're on mute" is still about
+    # sound control — so the cost of firing alone is near zero.
+    r"\bmutes?\b|\bunmutes?\b|"
     # "search" / "look it up" as verbs fire alone (live bug 2026-07-16,
     # round 2: "yes search and tell me when is the new seasopn of blackclover
     # comming out" — a go-ahead to the chat LLM's own "I can search the web,
@@ -159,7 +181,20 @@ _STRONG_DOMAIN_RE = re.compile(
 _WEAK_DOMAIN_RE = re.compile(
     r"(\bpictures\b|\bvideos?\b|\bmusic\b|\bsongs?\b|\btracks?\b|\bepisodes?\b|"
     r"\bmovies?\b|\btrailers?\b|\bpodcasts?\b|\bdrive\b|\bdisk\b|"
-    r"\bprocess(?:es)?\b|[/\\]|~[/\\]?|\.\w{1,4}\b)"
+    r"\bprocess(?:es)?\b|"
+    # Home & IoT (Feature 1) — the everyday nouns. "turn off the lights" fires
+    # (verb + noun); "the lights were beautiful" and "he knocked on the door" do
+    # not. "scene" sits here rather than strong because a scene in a film is far
+    # commoner than a scene on a hub.
+    r"\blights?\b|\blamps?\b|\bbulbs?\b|\bdoors?\b|\bblinds?\b|"
+    r"\bcurtains?\b|\bshades?\b|\bgarage\b|\bheating\b|\bheater\b|"
+    r"\bradiators?\b|\bscenes?\b|\bplugs?\b|\bsockets?\b|\bac\b|"
+    # Desktop control (Feature 2) — the everyday machine nouns. Each needs
+    # an action verb, so "close the chrome window" fires and "a window of
+    # opportunity" does not.
+    r"\bwindows?\b|\bapps?\b|\bapplications?\b|\bprograms?\b|"
+    r"\bvolume\b|\bspeakers?\b|\bsound\b|"
+    r"[/\\]|~[/\\]?|\.\w{1,4}\b)"
 )
 
 # The file vocabulary above names CONTAINERS — file, folder, directory,
@@ -217,6 +252,31 @@ _ACTION_VERB_RE = re.compile(
     # a named site ("play X on youtube") fires the strong gate above on its own.
     r"play|plays|played|playing|watch|watches|watched|watching|"
     r"listen|listens|listened|listening|stream|streams|streamed|streaming|"
+    # Home-control verbs (Feature 1). "turn" was absent from this list
+    # entirely, so "turn off the lights" could never fire the weak gate no
+    # matter which nouns it named. Each only fires WITH a weak noun, so "turn
+    # left" and "I set the table" stay closed.
+    r"turn|turns|turned|turning|switch|switches|switched|switching|"
+    r"dim|dims|dimmed|dimming|brighten|brightens|brightened|brightening|"
+    r"lock|locks|locked|locking|unlock|unlocks|unlocked|unlocking|"
+    r"shut|shuts|shutting|set|sets|setting|"
+    r"close|closes|closed|closing|activate|activates|activated|activating|"
+    # Desktop verbs (Feature 2). "mute"/"pause"/"skip" were absent, so
+    # "mute the sound" and "pause the music" could not fire whatever nouns
+    # they named. Each still needs a weak noun beside it.
+    r"mute|mutes|muted|muting|unmute|unmutes|unmuted|unmuting|"
+    r"pause|pauses|paused|pausing|"
+    # ⚠️ `resume` IS DELIBERATELY ABSENT, and it was here for one run. It is a
+    # DOCUMENT NOUN as well as a media verb, and `_DOCUMENT_NOUN_RE` carries it
+    # — so the word matches itself, the weak tier fires on "my resume is finally
+    # done", and the very case the comment above that list cites as the reason
+    # those nouns are WEAK rather than STRONG comes straight back. A CV is
+    # discussed far more often than playback is resumed, and `play`/`pause`
+    # already cover the media case.
+    r"skip|skips|skipped|skipping|focus|focuses|focused|focusing|"
+    r"minimi[sz]e|minimi[sz]es|minimi[sz]ed|minimi[sz]ing|"
+    r"maximi[sz]e|maximi[sz]es|maximi[sz]ed|maximi[sz]ing|"
+    r"paste|pastes|pasted|pasting|bring|brings|bringing|start|starts|starting|"
     r"search|searches|searched|"
     r"searching|find|finds|found|finding|locate|locates|located|locating|list|lists|"
     r"listing|read|reads|reading|open|opens|opened|opening|show|shows|showing|"
@@ -501,6 +561,61 @@ def _is_browse_intent(text: str) -> bool:
         return False
 
 
+# A launch instruction, anchored to the START of the message. Anchored because
+# "open" mid-sentence is usually about something else entirely ("the file is
+# open", "keep an open mind"), while a launch is what a person opens a sentence
+# with. `run` is deliberately ABSENT: "run the build script" is a terminal task,
+# and letting it reach the registry lookup would spend a Start Menu walk on
+# every shell request.
+_LAUNCH_VERB_RE = re.compile(
+    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|hey\s+jarvis[,\s]+|jarvis[,\s]+)*"
+    r"(?:open|launch|start|fire\s+up|pull\s+up|bring\s+up)\s+(?:the\s+|my\s+)?(.+)$",
+    re.IGNORECASE,
+)
+
+
+def _is_desktop_intent(text: str) -> bool:
+    """Does the user name an INSTALLED APPLICATION to open?
+
+    The desktop twin of `_is_browse_intent`, and it exists for the identical
+    reason: the headline phrasing for this feature — "open spotify" — names no
+    domain noun at all, so no vocabulary the gate could carry would fire on it.
+    A per-app keyword list would be the per-site list the browser refactor
+    forbids, and would miss the next app installed.
+
+    So the registry answers instead: the message must OPEN with a launch verb,
+    and what follows must resolve against the Start Menu (`resolve_app`). That
+    is the same registry `launch_app` itself uses, so the gate and the tool
+    agree by construction — a name the gate accepts is a name the tool can
+    launch.
+
+    ⚠️ THE PREFILTER IS A COST GUARD, NOT A HEURISTIC. `gate_tier` runs on every
+    chat turn, and `discover_apps()` walks the Start Menu (~150ms cold, cached
+    for 5 minutes). The anchored verb test is a cheap regex that keeps that walk
+    off the ordinary conversational path; only a message already shaped like a
+    launch ever pays for it.
+
+    A false fire costs one temp-0 classifier call answering CHAT — the
+    recall-first trade. Best-effort: a registry read that fails is a gate miss,
+    never a crash."""
+    match = _LAUNCH_VERB_RE.match(text or "")
+    if not match:
+        return False
+    target = match.group(1).strip().rstrip("?.!,")
+    # A whole clause is not an app name ("open the file I saved yesterday").
+    if not target or len(target.split()) > 4:
+        return False
+    try:
+        from app.core.desktop import resolve_app
+
+        found = resolve_app(target)
+        # An AMBIGUOUS name counts too: "open code" matching two editors is
+        # still unmistakably a launch request, and the plan will ask which.
+        return found.entry is not None or bool(found.candidates)
+    except Exception:  # noqa: BLE001 — the gate never crashes a chat turn
+        return False
+
+
 # ---------------------------------------------------------- bare navigation
 #
 # "open junaidjamshed.com" — a message whose ENTIRE content is "take me to this
@@ -625,6 +740,29 @@ def gate_tier(text: str) -> str:
         return "own_action_aux"
     if is_external_question(text):
         return "external_question"
+    # An installed application to open — general, no per-app list.
+    #
+    # ⚠️ BEFORE browse_intent, and MEASURED rather than reasoned. "open" is a
+    # nav cue in `ground_origins`, which grounds ANY bare name after one — so
+    # with the obvious ordering (browse first) `open photoshop`, `open slack`,
+    # `open calculator` and `open notepad` ALL audited as "the user named a
+    # website", and only `launch`/`start`/`fire up` ever reached this tier. That
+    # is 5 of 6 installed-app phrasings mislabelled, and "open X" is the single
+    # commonest way anyone asks for this feature.
+    #
+    # Recall is IDENTICAL either way — both tiers return truthy and the
+    # classifier still decides DESKTOP vs BROWSE — so the only thing at stake is
+    # the audited reason, which is exactly what the routing trail exists to get
+    # right (the 2026-08-03 round records the same mislabelling for
+    # `_NAV_STOPWORDS` as an open defect). Discriminating on "is this actually
+    # installed?" is a fact about the machine rather than a guess.
+    #
+    # A name that is BOTH an app and a site ("slack", "discord") audits as
+    # desktop when it is installed — which is what the user most likely meant by
+    # opening it — and a name that is only a site is not in the registry, so it
+    # falls straight through.
+    if _is_desktop_intent(text):
+        return "desktop_intent"
     # A named website to navigate to / operate — general, no per-site list.
     if _is_browse_intent(text):
         return "browse_intent"
@@ -741,6 +879,8 @@ _CLASSIFY_PROMPT = """You route messages for Jarvis OS, a personal AI that can a
 - EMAIL: search and read Gmail; draft, send, or reply to email.
 - CALENDAR: list/find Google Calendar events; create, update, or delete events.
 - WEB: search the web and open/read a web page to look up online information.
+- HOME: read and control the devices in the user's home through their Home Assistant hub — lights, switches, fans, locks, covers/blinds, thermostats, media players, and the scenes they have defined.
+- DESKTOP: see and control THIS computer — list, focus or close open windows, open an installed application, set the system volume or mute it, send play/pause/next to whatever is playing, take a screenshot, read or replace the clipboard.
 - BROWSE: drive a real web browser to ACT on a live site the user names — play or watch a video (YouTube and the like), sign in to a site and navigate it, open something in a web app (a repo on GitHub, a page in an account), or fill in and submit a web form (e.g. apply to jobs).
 
 Reply with EXACTLY one word:
@@ -748,6 +888,9 @@ TASK — asks Jarvis to perform a FILES/SYSTEM action now, OR asks what Jarvis I
 EMAIL — asks Jarvis to search, read, draft, send, or reply to email now.
 CALENDAR — asks Jarvis to look at or change calendar events now.
 WEB — asks Jarvis to search the web or open/read a web page now, OR asks a factual question better answered from the live internet than from stale built-in knowledge. This covers two cases: (a) anything CURRENT or time-sensitive (news, release dates, upcoming seasons or products, prices, scores, weather), and (b) a factual question about a SPECIFIC real-world entity — a person, company, product, place, organization, or a creative work such as a show, anime, movie, game, or book ("what do you know about Black Clover", "who is the CEO of X", "tell me about the Framework laptop"). Jarvis looks these up rather than guessing, promising, or reciting possibly-outdated training data.
+DESKTOP — asks Jarvis to look at or change something on the COMPUTER IN FRONT OF THEM right now: open an app ("open spotify"), switch to or close a window, turn the volume up/down or mute it, pause/skip what is playing, take a screenshot, or read/replace the clipboard. This is the user's machine, not their house and not a website.
+
+HOME — asks Jarvis to look at or change something in the user's HOME right now: turn lights/switches/fans on or off, dim or colour a light, lock or unlock a door, open or close blinds/curtains/a garage, set the thermostat or heating/AC, or run a scene ("goodnight", "movie night"). This is the user's physical home, not their computer.
 BROWSE — asks Jarvis to DO something on a live website by driving a browser: play or watch a video ("play jane by the long faces on youtube", "watch the new trailer on youtube", "open youtube and play some lofi"); sign in to a site and then navigate or open something in it ("sign in to github and open my oldest repo", "log into my account and download the invoice"); operate an interactive web app; or fill in and submit a web form ("apply to the first 3 python jobs on weworkremotely"). This is ACTING on a live site — distinct from WEB, which only LOOKS UP information. Jarvis never asks the user for a password: if a site needs signing in, it opens the sign-in page for the user and continues after — so "sign in to X and ..." is BROWSE, never a request for credentials.
 CHAT — anything else: casual conversation; OPINION, reasoning, or general/timeless concepts Jarvis can reason about ("what do you think of vector databases", "explain recursion", "how does TCP work"); help writing or debugging code; questions about the user's own life or about Jarvis itself; sharing information about their life; talking ABOUT the user's own past or hypothetical actions; an answer to an earlier question; or a request none of these tools can do (reminders — handled elsewhere).
 
@@ -755,6 +898,8 @@ Judge the INTENT, not the vocabulary:
 - "I sent him the files yesterday" or "my desktop is such a mess" is CHAT (mentioning files while talking), while "get rid of the txt files in that folder" is TASK even though it names no tool.
 - "I emailed him yesterday" or "my inbox is out of control" is CHAT, while "email jamil about dinner" is EMAIL even though it names no tool.
 - An instruction to SEND is EMAIL even when the text to send reads like a statement or is written on someone's behalf: "email i221538@nu.edu.pk that the report is done", "send Ali a mail saying I'll be late", and "email him that this is Furi writing on behalf of my master" are all EMAIL, not CHAT.
+- "the heating in here is awful" or "I should get smart bulbs" is CHAT (talking about the home), while "turn off the kitchen lights", "lock the front door", "set the thermostat to 21" and "run movie night" are HOME even though they name no tool.
+- "this laptop is so slow" or "I love that app" is CHAT (talking about the machine), while "open spotify", "close the chrome window", "turn the volume down", "mute it", "take a screenshot" and "what is on my clipboard" are DESKTOP. "turn off the lights" is HOME, not DESKTOP — the house, not the screen.
 - "my calendar is packed this week" is CHAT, while "put a meeting with jamil on my calendar tomorrow at 3" is CALENDAR.
 - "what do you think of vector databases?" is CHAT (answerable from knowledge), while "search the web for the latest LangGraph release" or "look up who won the match today" or "open https://example.com and summarize it" is WEB.
 - "play jane by the long faces on youtube", "watch the new severance trailer on youtube", or "open youtube and play some lofi" is BROWSE (act on a live site), while "what's the most-viewed youtube video" or "who owns youtube" is WEB (just look it up).
@@ -773,12 +918,12 @@ When unsure, choose DELEGATE.
 {context_block}USER MESSAGE:
 {message}
 
-One word (TASK, EMAIL, CALENDAR, WEB, BROWSE, or CHAT) — and for any action label (not CHAT) add its mode, INLINE or DELEGATE, e.g. "TASK INLINE", "EMAIL DELEGATE", "BROWSE DELEGATE":"""
+One word (TASK, EMAIL, CALENDAR, WEB, HOME, DESKTOP, BROWSE, or CHAT) — and for any action label (not CHAT) add its mode, INLINE or DELEGATE, e.g. "TASK INLINE", "EMAIL DELEGATE", "BROWSE DELEGATE":"""
 
 # The recognized action labels. All three feed the SAME planner and the same
 # approval gates — there is one execution path. The label buys recall +
 # telemetry and is the clean seam for future per-domain handlers.
-_ACTION_LABELS = ("TASK", "EMAIL", "CALENDAR", "WEB", "BROWSE")
+_ACTION_LABELS = ("TASK", "EMAIL", "CALENDAR", "WEB", "HOME", "DESKTOP", "BROWSE")
 
 # Shown to the classifier when the conversation has earlier turns. A message
 # is part of a conversation, not an island: "its in my downloads folder" after
@@ -788,7 +933,7 @@ _ACTION_LABELS = ("TASK", "EMAIL", "CALENDAR", "WEB", "BROWSE")
 _CLASSIFY_CONTEXT_TEMPLATE = """RECENT CONVERSATION (context only — the user message below is the NEXT message in it):
 {context}
 
-A short follow-up that continues an action being discussed in that conversation — supplying a detail it was missing ("its in my downloads folder"), correcting it, or telling Jarvis to go ahead with it ("send it", "yes do that", "play it") — gets that action's label (TASK, EMAIL, CALENDAR, WEB, or BROWSE): "send it" after an email was being discussed is EMAIL; "play it" after a song on YouTube was being discussed is BROWSE. A message merely commenting on a finished action ("thanks, that worked") is CHAT.
+A short follow-up that continues an action being discussed in that conversation — supplying a detail it was missing ("its in my downloads folder"), correcting it, or telling Jarvis to go ahead with it ("send it", "yes do that", "play it") — gets that action's label (TASK, EMAIL, CALENDAR, WEB, HOME, DESKTOP, or BROWSE): "send it" after an email was being discussed is EMAIL; "play it" after a song on YouTube was being discussed is BROWSE. A message merely commenting on a finished action ("thanks, that worked") is CHAT.
 
 """
 
@@ -797,7 +942,7 @@ async def _classify_message(
     provider: LLMProvider, message: str, context: str = ""
 ) -> tuple[str, str]:
     """One tiny temperature-0 call returning (label, mode): label is a routing
-    label ("TASK"/"EMAIL"/"CALENDAR"/"WEB"/"BROWSE"/"CHAT"), mode is
+    label ("TASK"/"EMAIL"/"CALENDAR"/"WEB"/"HOME"/"DESKTOP"/"BROWSE"/"CHAT"), mode is
     "INLINE" (a quick read answered in this turn) or "DELEGATE" (real work handed
     to a background agent). Any failure — an exception OR an unrecognized reply —
     means ("CHAT", "DELEGATE") (fail open): the message flows into the untouched

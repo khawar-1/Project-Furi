@@ -27,6 +27,8 @@ from app.api import initiative as initiative_api
 from app.api import threads as threads_api
 from app.api import browser as browser_api
 from app.api import autofill as autofill_api
+from app.api import desktop as desktop_api
+from app.api import home as home_api
 from app.api import remote as remote_api
 import app.core.reminders  # noqa: F401 — registers the "reminder" job handler at import time
 import app.core.birthdays  # noqa: F401 — registers the "birthday" job handler at import time
@@ -457,6 +459,13 @@ def create_app() -> FastAPI:
 
     # Autofill profile — the grounded data source for browser form-filling (15.2)
     app.include_router(autofill_api.router, prefix="/api/autofill", tags=["Autofill"])
+
+    # Home & IoT — connection settings + a read-only device view. The agent
+    # path goes through the home tools and their approval gate, never here.
+    app.include_router(home_api.router, prefix="/api/home", tags=["Home"])
+    # Desktop control (Feature 2). Settings + the launchable-app audit list;
+    # every action goes through the tools and their approval gate, never here.
+    app.include_router(desktop_api.router, prefix="/api/desktop", tags=["Desktop"])
 
     # Tier 2 item 5 — pairing devices for the remote surface. LOCAL ONLY:
     # these routes are absent from the remote manifest, so a paired phone

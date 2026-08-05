@@ -15,6 +15,7 @@ import {
   Eye,
   FolderSearch,
   Gauge,
+  Home,
   Link2,
   Link2Off,
   Loader2,
@@ -39,6 +40,8 @@ import { useShallow } from 'zustand/react/shallow';
 import {
   autofillApi,
   browserApi,
+  desktopApi,
+  homeApi,
   indexApi,
   initiativeApi,
   integrationsApi,
@@ -49,6 +52,10 @@ import {
   type AutofillField,
   type AutofillKind,
   type BrowserVisionState,
+  type HomeDeviceList,
+  type DesktopSettings,
+  type DesktopAppList,
+  type HomeSettings,
   type VoiceUpdateBody,
 } from '@/lib/api';
 import { useVoiceStore } from '@/stores/voiceStore';
@@ -2290,6 +2297,494 @@ function AutofillCard() {
   );
 }
 
+/**
+ * Home & IoT (Feature 1) — the Home Assistant connection plus the audit list
+ * of what Jarvis can see and control.
+ *
+ * The device list is the TRUST SURFACE, and it is why this card shows one at
+ * all: a feature that can unlock a door has to be able to answer "what exactly
+ * can it reach?" without the user running a plan to find out. It is read-only —
+ * the agent path goes through the tools and their approval gate, never here.
+ */
+/** One capability sub-toggle. Extracted because this card has five of them and
+ *  five hand-written copies of the same markup is how they drift apart. */
+function SubToggle({
+  label,
+  hint,
+  checked,
+  disabled,
+  onToggle,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="min-w-0">
+        <div className="text-xs text-slate-300">{label}</div>
+        <div className="text-[11px] text-slate-600">{hint}</div>
+      </div>
+      <button
+        onClick={onToggle}
+        disabled={disabled}
+        className={clsx(
+          'relative w-9 h-5 rounded-full transition-colors flex-shrink-0 disabled:opacity-30',
+          checked ? 'bg-cyan-500/70' : 'bg-surface-2 border border-surface-border',
+        )}
+      >
+        <span
+          className={clsx(
+            'absolute top-0.5 w-4 h-4 rounded-full bg-slate-200 transition-all',
+            checked ? 'left-[18px]' : 'left-0.5',
+          )}
+        />
+      </button>
+    </div>
+  );
+}
+
+function DesktopControlCard() {
+  const [settings, setSettings] = useState<DesktopSettings | null>(null);
+  const [apps, setApps] = useState<DesktopAppList | null>(null);
+  const [showApps, setShowApps] = useState(false);
+  const [isBusy, setIsBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setSettings(await desktopApi.getSettings());
+    } catch {
+      /* optional feature — a missing endpoint is not an error */
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const loadApps = useCallback(async () => {
+    try {
+      setApps(await desktopApi.listApps());
+    } catch {
+      /* the audit list is best-effort */
+    }
+  }, []);
+
+  const save = async (update: Partial<DesktopSettings>) => {
+    if (!settings) return;
+    setIsBusy(true);
+    setError(null);
+    // Optimistic + revert (the FileIndexCard lesson): every toggle writes
+    // THROUGH immediately rather than waiting for a separate Save click.
+    const optimistic = { ...settings, ...update };
+    setSettings(optimistic);
+    try {
+      setSettings(
+        await desktopApi.updateSettings({
+          enabled: optimistic.enabled,
+          allow_launch: optimistic.allow_launch,
+          allow_close: optimistic.allow_close,
+          allow_input: optimistic.allow_input,
+          allow_clipboard: optimistic.allow_clipboard,
+          allow_screenshot: optimistic.allow_screenshot,
+          screenshot_retention_days: optimistic.screenshot_retention_days,
+        }),
+      );
+    } catch (e) {
+      setSettings(settings); // revert
+      setError(e instanceof Error ? e.message : 'Could not save the desktop settings');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  if (!settings) return null;
+  const off = !settings.enabled;
+
+  return (
+    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
+      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
+        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
+          <Monitor size={15} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-sm font-semibold text-slate-200">Desktop control</h2>
+          <p className="text-xs text-muted truncate">
+            Windows, apps, volume and the clipboard on this machine
+          </p>
+        </div>
+        <span
+          className={clsx(
+            'text-[10px] px-2 py-0.5 rounded-full border font-mono',
+            settings.enabled
+              ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20'
+              : 'bg-surface-2 text-slate-500 border-surface-border',
+          )}
+        >
+          {settings.enabled ? 'on' : 'off'}
+        </span>
+      </div>
+
+      <div className="px-4 py-3.5 space-y-3">
+        <p className="text-xs text-slate-400">
+          Jarvis already sees which window you have open. This lets it act: switch to a
+          window, open an app, turn the volume down. Every action is shown to you for
+          approval first, naming the exact window or application.
+        </p>
+
+        {!settings.supported && (
+          <div className="text-[11px] text-amber-400/80 bg-amber-500/5 border border-amber-500/20 rounded-lg px-2.5 py-2">
+            {settings.detail || 'Desktop control is not supported on this platform.'}
+          </div>
+        )}
+
+        <SubToggle
+          label="Enable desktop control"
+          hint="Off by default — Jarvis cannot touch this machine until you turn it on."
+          checked={settings.enabled}
+          disabled={isBusy || !settings.supported}
+          onToggle={() => void save({ enabled: !settings.enabled })}
+        />
+
+        <div className="pt-1 space-y-2.5 border-t border-surface-border/60">
+          <p className="text-[10px] uppercase tracking-wide text-slate-600 pt-2.5">
+            What it may do
+          </p>
+          <SubToggle
+            label="Open applications"
+            hint="Only apps in your Start Menu — never a path or a command."
+            checked={settings.allow_launch}
+            disabled={isBusy || off}
+            onToggle={() => void save({ allow_launch: !settings.allow_launch })}
+          />
+          <SubToggle
+            label="Volume and media keys"
+            hint="Set the volume, mute, play/pause, skip."
+            checked={settings.allow_input}
+            disabled={isBusy || off}
+            onToggle={() => void save({ allow_input: !settings.allow_input })}
+          />
+          <SubToggle
+            label="Close windows"
+            hint="Sends the same request as clicking the X — an app with unsaved work still asks you."
+            checked={settings.allow_close}
+            disabled={isBusy || off}
+            onToggle={() => void save({ allow_close: !settings.allow_close })}
+          />
+          <SubToggle
+            label="Clipboard"
+            hint="Read and replace it. Your clipboard may hold a password you just copied."
+            checked={settings.allow_clipboard}
+            disabled={isBusy || off}
+            onToggle={() => void save({ allow_clipboard: !settings.allow_clipboard })}
+          />
+          <SubToggle
+            label="Screenshots"
+            hint="Saves an image of every display to ~/.jarvis/screenshots. Jarvis does not look at it."
+            checked={settings.allow_screenshot}
+            disabled={isBusy || off}
+            onToggle={() => void save({ allow_screenshot: !settings.allow_screenshot })}
+          />
+        </div>
+
+        {settings.allow_screenshot && (
+          <label className="flex items-center justify-between gap-3">
+            <span className="text-[11px] text-slate-500">Delete screenshots after</span>
+            <span className="flex items-center gap-1.5">
+              <input
+                type="number"
+                min={1}
+                max={365}
+                value={settings.screenshot_retention_days}
+                onChange={(e) =>
+                  void save({ screenshot_retention_days: Number(e.target.value) || 7 })
+                }
+                disabled={isBusy}
+                className="w-16 px-2 py-1 rounded-lg bg-surface-2 border border-surface-border text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500/40"
+              />
+              <span className="text-[11px] text-slate-500">days</span>
+            </span>
+          </label>
+        )}
+
+        {/* The trust surface: launch_app takes a NAME and resolves it against
+            this registry — it has no path or command parameter, so this list is
+            the complete set of things it can start. */}
+        <div className="pt-1 border-t border-surface-border/60">
+          <button
+            onClick={() => {
+              setShowApps((v) => !v);
+              if (!apps) void loadApps();
+            }}
+            className="w-full flex items-center justify-between text-[11px] text-slate-500 hover:text-slate-300 transition-colors pt-2.5"
+          >
+            <span>Applications Jarvis can open{apps ? ` (${apps.count})` : ''}</span>
+            <span className="font-mono">{showApps ? '−' : '+'}</span>
+          </button>
+          {showApps && (
+            <div className="mt-2 max-h-40 overflow-y-auto rounded-lg bg-surface-2 border border-surface-border px-2.5 py-2">
+              {apps === null ? (
+                <p className="text-[11px] text-slate-600">Reading the Start Menu…</p>
+              ) : apps.count === 0 ? (
+                <p className="text-[11px] text-slate-600">
+                  {apps.detail || 'No applications found in the Start Menu.'}
+                </p>
+              ) : (
+                <ul className="space-y-0.5">
+                  {apps.apps.map((name) => (
+                    <li key={name} className="text-[11px] text-slate-400 font-mono truncate">
+                      {name}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+
+        {error && <p className="text-[11px] text-red-400/80">{error}</p>}
+      </div>
+    </div>
+  );
+}
+
+function HomeCard() {
+  const [settings, setSettings] = useState<HomeSettings | null>(null);
+  const [devices, setDevices] = useState<HomeDeviceList | null>(null);
+  const [baseUrl, setBaseUrl] = useState('');
+  const [token, setToken] = useState('');
+  const [isBusy, setIsBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [probe, setProbe] = useState<string | null>(null);
+  const [showDevices, setShowDevices] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const next = await homeApi.getSettings();
+      setSettings(next);
+      setBaseUrl(next.base_url);
+    } catch {
+      /* the home integration is optional — a missing endpoint is not an error */
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = async (update: Partial<HomeSettings> & { token?: string }) => {
+    if (!settings) return;
+    setIsBusy(true);
+    setError(null);
+    setProbe(null);
+    // Optimistic + revert (the FileIndexCard lesson): the toggle writes
+    // THROUGH immediately rather than waiting for a separate Save click, which
+    // is what left an earlier card's "on" silently unpersisted.
+    const optimistic = { ...settings, ...update } as HomeSettings;
+    setSettings(optimistic);
+    try {
+      setSettings(
+        await homeApi.updateSettings({
+          enabled: optimistic.enabled,
+          base_url: update.base_url ?? baseUrl,
+          ...(update.token !== undefined ? { token: update.token } : {}),
+        }),
+      );
+      setToken('');
+    } catch (e) {
+      setSettings(settings); // revert
+      setError(e instanceof Error ? e.message : 'Could not save the home settings');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleTest = async () => {
+    setIsBusy(true);
+    setError(null);
+    try {
+      const result = await homeApi.testConnection();
+      setProbe(result.detail);
+      if (result.connected) void loadDevices();
+    } catch (e) {
+      setProbe(e instanceof Error ? e.message : 'Could not reach the hub');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const loadDevices = useCallback(async () => {
+    try {
+      setDevices(await homeApi.listDevices());
+    } catch {
+      /* the list is a convenience; a failure just leaves it empty */
+    }
+  }, []);
+
+  if (!settings) return null;
+
+  const connected = settings.enabled && settings.configured;
+
+  return (
+    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
+      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
+        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
+          <Home size={15} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-sm font-semibold text-slate-200">Home &amp; devices</h2>
+          <p className="text-xs text-muted truncate">
+            Lights, locks, blinds and heating through Home Assistant
+          </p>
+        </div>
+        <span
+          className={clsx(
+            'text-[10px] px-2 py-0.5 rounded-full border font-mono',
+            connected
+              ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20'
+              : 'bg-surface-2 text-slate-500 border-surface-border',
+          )}
+        >
+          {connected ? 'on' : settings.enabled ? 'needs setup' : 'off'}
+        </span>
+      </div>
+
+      <div className="px-4 py-3.5 space-y-3">
+        <p className="text-xs text-slate-400">
+          Connect your Home Assistant hub and Jarvis can read and control the devices in
+          your home. Every change — a light, a lock, the thermostat — is shown to you for
+          approval first, naming the exact device and room.
+        </p>
+
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-xs text-slate-300">Enable home control</div>
+            <div className="text-[11px] text-slate-600">
+              Off by default — Jarvis sees no devices until you turn this on.
+            </div>
+          </div>
+          <button
+            onClick={() => void save({ enabled: !settings.enabled })}
+            disabled={isBusy || (!settings.enabled && !baseUrl.trim())}
+            className={clsx(
+              'relative w-9 h-5 rounded-full transition-colors flex-shrink-0 disabled:opacity-40',
+              settings.enabled ? 'bg-cyan-500/70' : 'bg-surface-2 border border-surface-border',
+            )}
+          >
+            <span
+              className={clsx(
+                'absolute top-0.5 w-4 h-4 rounded-full bg-slate-200 transition-all',
+                settings.enabled ? 'left-[18px]' : 'left-0.5',
+              )}
+            />
+          </button>
+        </div>
+
+        <div className="space-y-2">
+          <label className="block">
+            <span className="text-[11px] text-slate-500">Hub address</span>
+            <input
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              onBlur={() => baseUrl !== settings.base_url && void save({ base_url: baseUrl })}
+              placeholder="http://homeassistant.local:8123"
+              className="w-full mt-1 px-2.5 py-1.5 rounded-lg bg-surface-2 border border-surface-border text-xs text-slate-200 font-mono placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/40"
+            />
+          </label>
+
+          <label className="block">
+            <span className="text-[11px] text-slate-500">
+              Long-lived access token{' '}
+              {settings.has_token && <span className="text-cyan-500/70">— one is stored</span>}
+            </span>
+            <div className="flex gap-2 mt-1">
+              <input
+                type="password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder={settings.has_token ? '••••••••  (leave blank to keep)' : 'Paste your token'}
+                className="flex-1 px-2.5 py-1.5 rounded-lg bg-surface-2 border border-surface-border text-xs text-slate-200 font-mono placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/40"
+              />
+              <button
+                onClick={() => void save({ token })}
+                disabled={isBusy || !token.trim()}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-200 bg-surface-2 border border-surface-border hover:border-cyan-500/30 transition-colors disabled:opacity-40"
+              >
+                Save
+              </button>
+            </div>
+            <span className="text-[11px] text-slate-600">
+              Home Assistant → your profile → Long-lived access tokens → Create token.
+              It is stored in <code className="text-slate-500">~/.jarvis</code>, never in the
+              database.
+            </span>
+          </label>
+        </div>
+
+        {error && (
+          <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs">
+            {error}
+          </div>
+        )}
+        {probe && (
+          <div className="p-2.5 rounded-lg bg-surface-2 border border-surface-border text-xs text-slate-400">
+            {probe}
+          </div>
+        )}
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => void handleTest()}
+            disabled={isBusy || !settings.configured}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-200 bg-surface-2 border border-surface-border hover:border-cyan-500/30 transition-colors disabled:opacity-40"
+          >
+            {isBusy ? <Loader2 size={12} className="animate-spin" /> : <Link2 size={12} />}
+            Test connection
+          </button>
+          <button
+            onClick={() => {
+              setShowDevices((v) => !v);
+              if (!devices) void loadDevices();
+            }}
+            disabled={!settings.configured}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-400 bg-surface-2 border border-surface-border hover:border-cyan-500/30 transition-colors disabled:opacity-40"
+          >
+            {showDevices ? 'Hide devices' : 'What can Jarvis see?'}
+          </button>
+        </div>
+
+        {showDevices && devices && (
+          <div className="rounded-lg border border-surface-border bg-surface-2/50 max-h-56 overflow-y-auto">
+            {devices.devices.length === 0 ? (
+              <p className="px-3 py-2 text-[11px] text-slate-500">
+                {devices.detail || 'No devices found on the hub.'}
+              </p>
+            ) : (
+              <>
+                <p className="px-3 pt-2 text-[10px] uppercase tracking-wide text-slate-600">
+                  {devices.count} device(s) Jarvis can see
+                </p>
+                <ul className="px-3 py-2 space-y-1">
+                  {devices.devices.map((d) => (
+                    <li key={d.entity_id} className="flex items-center gap-2 text-[11px]">
+                      <span className="text-slate-300 truncate flex-1">{d.name}</span>
+                      {d.area && <span className="text-slate-600">{d.area}</span>}
+                      <span className="text-slate-500 font-mono">{d.state}</span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function SettingsPanel() {
   return (
     <div className="flex flex-col h-full bg-surface overflow-hidden">
@@ -2313,6 +2808,12 @@ export function SettingsPanel() {
         <BrowserAccountCard />
         <BrowserVisionCard />
         <AutofillCard />
+        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">
+          This machine
+        </p>
+        <DesktopControlCard />
+        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Home</p>
+        <HomeCard />
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Files</p>
         <FileIndexCard />
         <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Proactive</p>

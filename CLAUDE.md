@@ -6163,3 +6163,334 @@ the one Playwright imposes on Chromium UNDERNEATH us.
 - **Gates met:** full suite green; `scripts/browse_bench.py` **6/6 scored tasks
   passed** (previous best 5/6) with the navigation-heavy books-toscrape task
   71.3s → 28.1s and the median 32.1s → 28.1s.
+
+### Home & IoT control — the first physical reach (2026-08-04)
+Feature 1 of `FEATURES.md`. Jarvis can now read and control the devices in the
+user's home through a Home Assistant hub. **The most iconic Jarvis capability
+and, until now, entirely absent** — verified before building: a grep for
+`homeassistant|smart.home|hue|mqtt|tuya` across `backend/app` and
+`frontend/src` returned only two unrelated `.wasm` binaries, and
+`app/integrations/` contained Google and nothing else.
+
+**Five tools** (`app/tools/home_tools.py`, self-registering — one import line in
+`app/tools/__init__.py`, no other code change): `list_devices` /
+`get_device_state` (READ) · `set_device_state` / `run_scene` / `set_climate`
+(WRITE). 33 → 38 tools.
+
+- **Why Home Assistant rather than per-vendor SDKs:** one self-hosted HTTP API
+  covers ~2000 device brands. Per-vendor would be N OAuth flows, N token stores
+  and N failure modes for one capability. It also exposes SCENES, which map onto
+  the routines already built, so "run my goodnight routine" composes for free.
+- **WRITE, not DESTRUCTIVE:** every change here is reversible by making the
+  opposite call, unlike sending mail. It still pauses at the structural gate.
+
+**⚠️ THE ENTITY-ID LOCK — the calendar event-id lock applied to a house.**
+A concrete `entity_id` on a home WRITE must trace to a `list_devices` /
+`get_device_state` result in THIS plan (`_entity_id_violation`, in the
+`_generate_steps` reject chain beside `_event_id_violation`). At draft time
+nothing is completed, so ANY concrete id is rejected and the model is pushed to
+read first and use a `PENDING:` placeholder, which
+`placeholder_resolver._substitute_entity_id` fills IN CODE when the reads pin
+exactly one device. Several candidates ⇒ code never picks. **Without this, "turn
+off the light" resolves to a hallucinated `light.bedroom` that on a real hub
+might be the garage door or a different room's lock.** The scene/climate tools
+additionally require a matching DOMAIN in the resolver, or the single-candidate
+branch would hand `run_scene` a lamp.
+
+**⚠️ NO FREE-TEXT SERVICE CALL, and this is the safety boundary.** There is
+deliberately no `call_service` / `run_automation` passthrough.
+`_DOMAIN_SERVICES` is a FIXED map from (domain, desired state) → the HA service
+that achieves it, so a model chooses an entity and a state, never a service
+name. An arbitrary-service escape hatch would reach anything on the hub —
+including HA's own `shell_command` and `notify` integrations — which is the
+reasoning that keeps `run_command` DESTRUCTIVE and blocklisted.
+`_DOMAIN_ATTRIBUTES` is the same discipline one level down: unknown attributes
+are DROPPED in flight rather than forwarded.
+
+**⚠️ NO SSRF EXEMPTION, AND THAT IS THE SAFER DESIGN.** A hub lives on the LAN,
+which `browser_tools._host_is_blocked` refuses. The obvious move is to punch a
+hole in that guard; we do not, because it is not in this path and weakening it
+would cost the web tools for no benefit here. **What actually bounds this client
+is stricter: the base URL can only ever come from the user's own
+configuration.** No home tool accepts a URL, host or path — they take an
+`entity_id`, and the URL is composed in code from the stored config, so no plan,
+page, email or screen text can aim it anywhere. `validate_base_url()` is the one
+gate and it runs against a value a human typed.
+`test_the_tools_expose_no_url_parameter_at_all` is what keeps that true.
+
+**The approval card names a room, not a slug** (`_enrich_entity_action_detail`,
+called beside `_enrich_event_action_detail` at the pause): the grounded id is
+looked up in this plan's completed reads and stamped as
+`device: Kitchen Lights (Kitchen) — currently on`. Code-derived; the LLM cannot
+author it. `spoken.py` gained forms for all three WRITE tools — **the
+`test_every_non_read_tool_has_a_spoken_form` coverage test caught their absence
+on the first full-suite run**, which is exactly the hole it exists for: a
+hands-free approval would otherwise have read "step 1" aloud for something that
+unlocks a door.
+
+**Routing:** a new `HOME` classifier label + a `home` `AgentSpec`. Gate
+vocabulary split by measurement, not caution — STRONG (fires alone):
+`thermostat`, `smart <thing>`, `home assistant`, `air conditioning`; WEAK (needs
+an action verb): `lights`, `door`, `blinds`, `heating`, `scene`, `ac`…
+**`turn` was absent from `_ACTION_VERB_RE` entirely**, so "turn off the lights"
+could never have fired whatever nouns it named. MEASURED: home recall 13/16 →
+**16/16** after adding `close`/`activate`/`ac`; 4 of 12 conversational controls
+pay one temp-0 call answering CHAT (the documented recall-first trade).
+
+**Config + API:** `HomeConfig` in `app_settings` (key `home.config`, `enabled`
+default OFF), **written with `asdict()`** — five of the six sibling setters
+still hand-list their fields, and that is precisely the drift that silently
+dropped `spoken_approval` on 2026-08-03. `GET/PUT /api/home/settings` (the token
+is WRITE-ONLY: a PUT accepts one, a GET only reports whether one is stored) ·
+`POST /test-connection` · `GET /devices`. Settings `HomeCard` with immediate-PUT
+toggles and a **read-only device list — the trust surface**: a feature that can
+unlock a door must answer "what exactly can it reach?" without running a plan.
+NO migration (config in the existing k/v table; the token in `~/.jarvis`, 0600,
+atomic write, never in the database — so a synced or backed-up `jarvis.db`
+carries no way into the user's home).
+
+**All three home routes are DENIED on the remote surface.** `/settings` takes
+the hub address and the token — a paired phone that could rewrite the address
+could point Jarvis at a hub someone else controls, the same hazard that keeps
+`/api/remote` off its own manifest. `/devices` is denied on disclosure grounds:
+every room and lock in the house, and whether each is open. The phone is not cut
+out of anything useful — a home plan started at the desk pauses for approval,
+and `/api/agent/approve` IS on the manifest.
+
+- **⚠️ TWO FALSIFICATIONS CAME BACK GREEN, AND BOTH WERE REAL TEST-REACH GAPS.**
+  Reverting the guard's line in the reject chain, and reverting the
+  `_enrich_entity_action_detail` call in `_execute_node`, both left the tests
+  PASSING — because those tests call the functions DIRECTLY. They proved the
+  functions work and said nothing about whether the planner calls them: the
+  2026-07-17 fan-out shape (a whole feature that had never fired under 1,578
+  green tests) and the 2026-08-03 sweep-wiring case. Two NEW tests drive the
+  real graph. **And the first version of the first one ALSO passed when
+  reverted** — it scripted a GROUNDED second response, which the REFLECT round
+  consumed and used to replace the plan either way, so the guard was invisible.
+  Every scripted response is now the same ungrounded draft, making the guard the
+  only thing that can change the outcome. **When a falsification comes back
+  green, suspect the test's reach before the code — then suspect the fixture.**
+- Tests: `test_home_tools.py` (90). **All 12 behavioural changes proven to FAIL
+  by reverting the specific line IN PLACE** (never `git show :file`), each with
+  the correct signature, via `scripts/_falsify_home.py` — which re-reads the
+  patched file to confirm the revert landed, reads pytest's EXIT CODE (5 =
+  nothing collected is never a pass), and restores under every exit.
+- **RUNTIME-VERIFIED on the REAL `main.py` lifespan**
+  (`scripts/_verify_home_runtime.py` — isolated :18001, scratch DB, and a FAKE
+  Home Assistant hub served on :18123, all in ONE process, because a probe whose
+  token does not survive between invocations reports "everything denied" and
+  reads exactly like success): **18/18** — the router mounts, the feature
+  defaults OFF, a bad address is a 400, settings persist, `test-connection`
+  reaches the hub, devices come back over real HTTP, **an unapproved write never
+  reaches the house** (0 service calls), an approved one arrives as
+  `light/turn_on` with the invented attribute dropped in flight, an absurd
+  temperature fails rather than clamping, and clearing the token leaves no
+  credential on disk.
+  ⚠️ Its one initial FAIL was the PROBE, not the code: it asserted the string
+  "token" was absent from the response, which `has_token` legitimately contains.
+  The claim is about the VALUE. A probe that asserts the wrong thing
+  manufactures defects.
+- **⚠️ A DECORATIVE SETTING CAUGHT IN SELF-REVIEW, and it had already shipped
+  once in this codebase.** `HomeConfig.default_area` was written, persisted,
+  returned to the UI, rendered in the card — and read by NOTHING. Its docstring
+  claimed "tools that filter by area use it"; no tool did. That is the
+  `BACKEND_HOST`-was-decorative defect (2026-08-03: a setting that appeared in
+  exactly one log line while nothing bound it), which reads as a guarantee and
+  makes none. It was REMOVED rather than wired, because the wiring people
+  actually want — "no room named, so use the usual one" — belongs in the planner
+  as its own DATA block and rule, the way rule 18 surfaces frequent folders, not
+  as a field the tools silently consult. The reasoning is recorded at the
+  dataclass so the next person does not re-add it.
+- **HONEST LIMITS, stated rather than discovered later:** an area filter matches
+  Home Assistant's own `area` attribute, which many hubs leave unset — a
+  device with no room set is listed under "No room set" and an area filter will
+  not find it; the entity cache is 60s, so a device someone changes by hand
+  inside that window reads stale from `list_devices` (`get_device_state` always
+  goes to the hub, which is why a state QUESTION uses it); and there is no
+  websocket subscription, so Jarvis learns about the house only when it asks.
+- **LIVE ACCEPTANCE IS USER-DRIVEN AND OUTSTANDING**: against a REAL Home
+  Assistant hub — connect it in Settings → Home & devices, then ask "turn off
+  the kitchen lights" and confirm the card names the room and the current state
+  before anything changes, and that cancelling changes nothing.
+
+### Desktop control — closing the sense/act asymmetry (2026-08-04)
+Feature 2 of `FEATURES.md`. Phase 8 taught Jarvis to SENSE the desktop — active
+app, window title, idle time, screen OCR, all feeding the World Model — and gave
+it no way to ACT on any of it. Verified before building: no `launch_app`,
+`focus_window`, `set_volume`, `screenshot` or clipboard access anywhere in
+`app/tools/`. `run_command` existed but is DESTRUCTIVE-level, so "open Spotify"
+paused for approval every single time: the right default for a shell, the wrong
+ergonomics for the commonest thing anyone asks an assistant to do.
+
+**Nine tools** (`app/tools/desktop_tools.py`, self-registering — one import line
+in `app/tools/__init__.py`, no other code change): `list_windows` /
+`take_screenshot` / `read_clipboard` (READ) · `focus_window` / `close_window` /
+`launch_app` / `set_volume` / `media_key` / `write_clipboard` (WRITE).
+38 → 47 tools.
+
+- **⚠️ ctypes, NOT the PowerShell helper the spec called for.** FEATURES.md
+  specified a long-lived PowerShell process using `Add-Type` P/Invoke, reasoning
+  from `electron/sensing.ts` — which is right THERE, because its host is Node and
+  Node has no FFI without a native module. The host here is Python, and `ctypes`
+  calls the identical Win32 functions with no subprocess at all: no process to
+  spawn, supervise, restart or orphan (the spec's own "~200ms per volume change"
+  risk simply does not arise), and **no shell, therefore no injection surface** —
+  a helper reading commands on stdin is an arbitrary-code channel the moment any
+  field of that command is model-derived, and keeping it safe would mean a fixed
+  verb table and a typed parser, i.e. re-deriving what a direct function call
+  already is. Still zero new dependency, which was the spec's actual reason for
+  choosing PowerShell.
+- **⚠️ TWO Win32 BUGS THE LIVE PROBE FOUND, AND NEITHER WAS REASONABLE TO GUESS.**
+  (1) **COM success is `hr >= 0`, not `hr == 0`.** `SetMute` returns S_FALSE (1)
+  when the requested state is already the current one, so "mute an already-unmuted
+  device" raised *"Could not change mute"* while doing exactly what was asked.
+  `_failed()` now tests the sign bit, as COM's own SUCCEEDED macro does. The
+  restype is `c_long` rather than `ctypes.HRESULT` deliberately — HRESULT makes
+  ctypes raise its own OSError on a failing call, bypassing every message in the
+  module. (2) **An undeclared `restype` SEGFAULTED the process.** ctypes defaults
+  it to `c_int` (32 bits), so a function returning a HANDLE has its result
+  TRUNCATED on Win64 and the truncated value is then passed on as an address.
+  `GetClipboardData` crashed outright; `OpenProcess` did NOT — it "worked" only
+  because Windows happens to hand out small handle values, i.e. a latent crash
+  waiting for a busier machine. `_declare_win32()` declares every signature, which
+  kills the class rather than the instance that fired.
+- **THE WINDOW-HANDLE LOCK** (`planner._window_handle_violation`, in the
+  `_generate_steps` reject chain beside `_entity_id_violation`): a concrete
+  `handle` on focus/close must trace to a `list_windows` result in THIS plan. It
+  binds HARDER than the entity-id lock it mirrors — an entity id is a stable
+  readable name, so a guessed `light.bedroom` is at least wrong in a way a person
+  might notice; a guessed `4654610` is not. At draft time nothing is completed, so
+  any concrete handle is rejected and the model must read first and use
+  `PENDING: <which window>`.
+- **⚠️ HANDLES GET REUSED, SO THE CARD'S TITLE IS CHECKED, NOT DECORATION.**
+  Windows recycles window handles, so a handle read a minute ago can name a
+  different window by the time the user approves. `close_window` REQUIRES the
+  `title` it was approved for and refuses if the live window no longer matches
+  (`_titles_match`, tolerant of the leading dirty marker editors add the moment
+  you type). Live-verified against a real window: approving a close for
+  "Some Other Window" on a live handle is refused.
+- **`close_window` ASKS, it does not kill.** `WM_CLOSE` is what clicking the X
+  sends, so an app with unsaved work shows its save prompt. There is deliberately
+  no `kill_process` tool — that would be a data-loss tool wearing a window tool's
+  name. This is why it is WRITE rather than DESTRUCTIVE.
+- **⚠️ THE APP REGISTRY IS WHAT KEEPS `launch_app` OUT OF DESTRUCTIVE.** It must
+  NOT be a thin ShellExecute over a model-supplied string — that is `run_command`
+  with the approval gate weakened, which is strictly worse than `run_command`. So
+  `discover_apps()` enumerates the Start Menu into a registry and `launch_app`
+  resolves a NAME against it, launching the registry's own path. **No path
+  parameter, no arguments, no command line**, so the reachable surface is exactly
+  "applications this user installed" — a bounded, inspectable set, which is the
+  property `run_command` cannot have. Live-verified: handed
+  `C:\Windows\System32\cmd.exe`, it refuses. Fuzzy resolution reuses the memory
+  engine's `MIN_SCORE = 81` / `MIN_GAP = 8`, so an ambiguous name ASKS (rule 11)
+  rather than guessing between "Code" and "Code - Insiders". MEASURED and left
+  as a known miss: `vscode` scores **80.0** against "Visual Studio Code", one
+  point under the floor — lowering it to admit one contraction would also admit
+  `word`→`WordPad` (100.0), and the failure names the closest match, so it costs
+  one turn.
+- **`take_screenshot` RETURNS A PATH, NEVER BYTES.** A tool result flows into
+  planner and summary prompts, so returning image data would put the user's entire
+  screen into an LLM context on a READ-level call. Reading a screenshot is a
+  separate, explicitly-gated capability (FEATURES.md item 6). Runtime-verified
+  that the result dict carries no bytes anywhere.
+- **⚠️ THE SUB-TOGGLES ARE SPLIT DIFFERENTLY FROM THE SPEC, AND THE ASYMMETRY IS
+  THE POINT.** FEATURES.md folded clipboard and screenshots under one
+  `allow_input`. Grouping "turn the volume down" with "read what I just copied"
+  forces a user who wants the first to grant the second, which is the opposite of
+  what a sub-toggle is for. Turning the feature on grants the safe,
+  high-frequency half (focus, launch, volume, media keys); `allow_close`,
+  `allow_clipboard` and `allow_screenshot` each need a second deliberate click,
+  because a close interrupts real work, the clipboard routinely holds a password
+  just copied out of a manager, and a screenshot captures every display including
+  whatever is behind the thing they meant. All three default OFF.
+- **⚠️ THE FEATURE'S OWN INSTRUCTIONS WERE UNRESOLVABLE, AND ONLY THE
+  PLANNER-DRIVING TEST SAW IT.** `close_window` requires `title`, so plan RULE 25
+  tells the model to put `PENDING:` in BOTH `handle` and `title` — but
+  `placeholder_resolver.resolve()` refuses any step with more than one placeholder
+  key, so the exact shape the rule asks for fell through to the LLM every time and
+  burned a replan round on a step that was fully resolvable. Same class as the
+  2026-07-29 `move_files(sources=["PENDING: …"])` case: a recognized shape the
+  general veto cannot see. `_window_placeholder_key` bypasses the veto for THIS
+  shape only (handle must be placeholder text; no key other than handle/title may
+  be one), and `_substitute_window_handle` fills the title from the SAME row —
+  a resolved handle beside an unresolved title would fail the tool's own
+  verification every time. **The unit tests all passed while this was broken**;
+  the test that drives the real graph exhausted its provider, which is how it
+  surfaced.
+- **⚠️ THE GATE TIER ORDERING WAS WRONG, MEASURED NOT REASONED.** `open` is a nav
+  cue in `ground_origins`, which grounds ANY bare name after one — so with the
+  obvious ordering (browse_intent first), `open photoshop`, `open slack`,
+  `open calculator` and `open notepad` ALL audited as *"the user named a
+  website"*, and only `launch`/`start`/`fire up` ever reached the new tier. That
+  is 5 of 6 installed-app phrasings mislabelled, and "open X" is the commonest way
+  anyone asks for this feature. Recall is IDENTICAL either way (both tiers are
+  truthy, the classifier still decides), so what is at stake is the AUDITED
+  REASON — precisely what the 2026-08-03 routing trail exists to get right, and
+  which already records the same mislabelling for `_NAV_STOPWORDS` as an open
+  defect. `desktop_intent` now goes first, discriminating on "is this actually
+  installed?", a fact about the machine rather than a guess.
+- **`_is_desktop_intent` is the desktop twin of `_is_browse_intent`**, and exists
+  for the identical reason: "open spotify" names no domain noun, so no vocabulary
+  the gate could carry would fire on it, and a per-app keyword list would be the
+  per-site list the browser refactor forbids. The registry answers instead. Its
+  anchored-verb prefilter is a COST GUARD, not a heuristic — `gate_tier` runs on
+  every chat turn and `discover_apps()` walks the Start Menu, so only a message
+  already shaped like a launch ever pays for it (pinned by a test asserting an
+  ordinary chat turn walks it zero times).
+- **Gate vocabulary, measured: 21/21 desktop recall, 1/10 control cost.** STRONG
+  (fires alone): `clipboard`, `screenshot`, `taskbar`, `start menu`, and — the one
+  judgement call — `mute`/`unmute`, because `mute it` was the single miss in the
+  first 20-phrase run (its object is a pronoun, so the weak tier has no noun) and
+  English has no everyday non-audio use of the word. WEAK (needs an action verb):
+  `window`, `app`, `program`, `volume`, `speakers`, `sound` — "a window of
+  opportunity" and "the sheer volume of email" are real sentences. New verbs:
+  `mute`/`pause`/`resume`/`skip`/`focus`/`minimize`/`maximize`/`paste`/`bring`/
+  `start`, none of which the list had.
+- **Both `/api/desktop` routes are DENIED on the remote surface.** `/settings` can
+  widen what Jarvis may do to the machine — a phone that could flip
+  `allow_clipboard` on is a phone that can read whatever was last copied, which on
+  a work machine is routinely a password. `/apps` enumerates every program
+  installed, a fingerprint of the user and of no use away from the desk. A desktop
+  plan STARTED at the desk still pauses for approval, and `/api/agent/approve` IS
+  on the manifest.
+- **The screenshot sweep is the one step in this feature that deletes anything**,
+  and is why returning a path is acceptable at all: `housekeeping` ages out
+  `~/.jarvis/screenshots` past `screenshot_retention_days`. Scoped to
+  `screen-*.png` — a file the user saved or renamed themselves is out of scope,
+  pinned by a test that puts a `holiday-photo.png` in the same folder.
+- **NO migration** (config in the existing k/v table). `DesktopConfig` is written
+  with `asdict()`, per the 2026-08-03 lesson that hand-listed setters silently
+  drop new fields; a test asserts the WHOLE dataclass round-trips.
+- **⚠️ A FALSIFICATION CAME BACK GREEN AND THE TEST WAS THE PROBLEM.** The
+  short-title-token guard "passed" when reverted, because the test's window titles
+  were punctuation (`"a - b - c"`) whose tokens matched under neither threshold —
+  it exercised nothing. Rewritten with a realistic collision (`"How to Cook Rice"`
+  against a placeholder containing "to"), where the guard is the only thing
+  standing between the plan and a confidently wrong window.
+- Tests: `test_desktop_tools.py` (82). **All 16 behavioural changes proven to FAIL
+  by reverting the specific line IN PLACE** (never `git show :file`) via
+  `scripts/_falsify_desktop.py`, which re-reads the patched file to confirm the
+  revert landed, reads pytest's EXIT CODE (5 = nothing collected is never a pass),
+  and restores under every exit.
+- **RUNTIME-VERIFIED on the REAL `main.py` lifespan** (`scripts/_verify_desktop_runtime.py`
+  — isolated :18002, scratch DB, one process): **21/21**, including `list_windows`
+  reading this machine's real windows and **an unapproved close against a REAL
+  window leaving it open**. It is deliberately read-mostly on the developer's own
+  machine: the volume and clipboard checks save the user's value first and the
+  probe asserts both were restored.
+- **HONEST LIMITS, stated rather than discovered later:** Windows only (macOS/Linux
+  get `UnsupportedDesktopController`, which fails cleanly per call rather than at
+  import); `launch_app` cannot reach an app with no Start Menu shortcut; a window
+  with no title is not listed (it is how "a window" is distinguished from a
+  message-only window); `close_window` cannot force — an app that ignores
+  WM_CLOSE stays open, which is the correct behaviour and not a failure; and a
+  **screenshot sits unencrypted in `~/.jarvis/screenshots` until the retention
+  sweep**, so a capture taken while a password manager was open is readable by
+  any local process until then. That follows the `file_tools.TRASH_DIR`
+  precedent (deleted files sit there in the clear too) and a 0600 would be a
+  literal no-op on Windows — but it is why `allow_screenshot` defaults OFF and
+  why the retention window is user-configurable.
+- **LIVE ACCEPTANCE IS USER-DRIVEN AND OUTSTANDING**: `npm run dev`, enable it in
+  Settings → Desktop control, then "what windows do I have open", "open <an app>",
+  "turn the volume down", and "close the <X> window" — confirming the card names
+  the window title before anything closes, and that cancelling changes nothing.

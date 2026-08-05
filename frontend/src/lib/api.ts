@@ -605,6 +605,106 @@ export const browserApi = {
 };
 
 // ============================================================
+// Home & IoT — Home Assistant connection + a read-only device view (Feature 1)
+// ============================================================
+
+/** Connection settings. The access token is WRITE-ONLY over this API: a PUT
+ *  accepts one, a GET only ever reports whether one is stored (the autofill
+ *  SECRET convention). `configured` = an address AND a token are both present,
+ *  which is what separates "not set up" from "hub unreachable". */
+export interface HomeSettings {
+  enabled: boolean;
+  base_url: string;
+  has_token: boolean;
+  configured: boolean;
+}
+
+export interface HomeDevice {
+  entity_id: string;
+  name: string;
+  domain: string;
+  state: string;
+  area: string;
+}
+
+export interface HomeDeviceList {
+  devices: HomeDevice[];
+  count: number;
+  connected: boolean;
+  areas?: string[];
+  detail?: string;
+}
+
+export const homeApi = {
+  getSettings: (): Promise<HomeSettings> => apiFetch<HomeSettings>('/api/home/settings'),
+
+  /** Save the connection settings. Omit `token` to leave the stored one alone
+   *  (the common case — the UI never receives it back, so it has none to
+   *  resend); pass "" to clear it. */
+  updateSettings: (update: {
+    enabled: boolean;
+    base_url: string;
+    token?: string;
+  }): Promise<HomeSettings> =>
+    apiFetch<HomeSettings>('/api/home/settings', {
+      method: 'PUT',
+      body: JSON.stringify(update),
+    }),
+
+  /** Ask the hub who it is — the honest answer to "did my settings work?". */
+  testConnection: (): Promise<{ connected: boolean; version?: string; detail: string }> =>
+    apiFetch<{ connected: boolean; version?: string; detail: string }>(
+      '/api/home/test-connection',
+      { method: 'POST' },
+    ),
+
+  /** Every device the hub exposes — the audit list: "this is what Jarvis can
+   *  see and control". Read-only; the agent path goes through the tools and
+   *  their approval gate, never here. */
+  listDevices: (): Promise<HomeDeviceList> =>
+    apiFetch<HomeDeviceList>('/api/home/devices'),
+};
+
+// ============================================================
+// Desktop control (Feature 2)
+// ============================================================
+export interface DesktopSettings {
+  enabled: boolean;
+  allow_launch: boolean;
+  allow_close: boolean;
+  allow_input: boolean;
+  allow_clipboard: boolean;
+  allow_screenshot: boolean;
+  screenshot_retention_days: number;
+  /** False on a platform with no implementation — `detail` says why. */
+  supported: boolean;
+  detail: string;
+}
+
+export interface DesktopAppList {
+  apps: string[];
+  count: number;
+  detail: string;
+}
+
+export const desktopApi = {
+  getSettings: (): Promise<DesktopSettings> =>
+    apiFetch<DesktopSettings>('/api/desktop/settings'),
+
+  updateSettings: (update: Omit<DesktopSettings, 'supported' | 'detail'>): Promise<DesktopSettings> =>
+    apiFetch<DesktopSettings>('/api/desktop/settings', {
+      method: 'PUT',
+      body: JSON.stringify(update),
+    }),
+
+  /** Every application `launch_app` can start — the audit list. That tool takes
+   *  a NAME and resolves it against this registry; it has no path or command
+   *  parameter, so this list is its complete reachable surface. */
+  listApps: (refresh = false): Promise<DesktopAppList> =>
+    apiFetch<DesktopAppList>(`/api/desktop/apps${refresh ? '?refresh=true' : ''}`),
+};
+
+// ============================================================
 // Autofill profile — the grounded data source for form-filling (Phase 15.2)
 // ============================================================
 export type AutofillKind = 'text' | 'link' | 'document' | 'secret';

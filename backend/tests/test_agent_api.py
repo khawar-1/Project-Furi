@@ -129,6 +129,12 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
         "create_event", "update_event", "delete_event",
         "web_search", "read_webpage", "browse_page",
         "browse", "browse_commit", "stop_media",
+        "list_devices", "get_device_state",
+        "set_device_state", "run_scene", "set_climate",
+        # Desktop control (Feature 2)
+        "list_windows", "take_screenshot", "read_clipboard",
+        "focus_window", "close_window", "launch_app",
+        "set_volume", "media_key", "write_clipboard",
     }
     assert tools["read_file"]["permission_level"] == "read"
     assert tools["recall_memory"]["permission_level"] == "read"

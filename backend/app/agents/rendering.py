@@ -501,6 +501,81 @@ def _fmt_calendar_events(output: dict) -> str:
     return "\n".join(lines)
 
 
+def _fmt_windows(output: dict) -> str:
+    """Open windows, grouped by the application that owns them — the way a
+    person scans a taskbar. The handle is shown because a later step needs it
+    and because it is what the approval card will name."""
+    windows = output.get("windows") or []
+    if not windows:
+        return "No matching windows are open."
+
+    by_app: dict[str, list[dict]] = {}
+    for w in windows[:_MAX_NAMES]:
+        by_app.setdefault(str(w.get("process") or "").strip() or "Unknown app", []).append(w)
+
+    lines = [f"{len(windows)} window(s) open:"]
+    for app in sorted(by_app):
+        lines.append(f"\n{app}:")
+        for w in by_app[app]:
+            lines.append(f"• {w.get('title') or '(untitled)'}  (handle {w.get('handle')})")
+    if len(windows) > _MAX_NAMES:
+        lines.append(f"… and {len(windows) - _MAX_NAMES} more")
+    return "\n".join(lines)
+
+
+def _fmt_screenshot(output: dict) -> str:
+    """A screenshot's PATH and size — never the image, and never a description
+    of it. This tool saves a file; it does not look at one."""
+    path = output.get("path") or "?"
+    width, height = output.get("width"), output.get("height")
+    size = f" ({width}x{height})" if width and height else ""
+    return f"Screenshot saved to `{path}`{size}."
+
+
+def _fmt_clipboard(output: dict) -> str:
+    """The clipboard's text, fenced. Fenced because it is UNTRUSTED prose the
+    user copied from somewhere — it may carry its own markdown, and it must
+    never read as part of Jarvis's own answer."""
+    text = str(output.get("text") or "")
+    if not text.strip():
+        return "The clipboard is empty, or holds something that is not text."
+    head = f"Clipboard ({output.get('length', len(text))} characters):"
+    if output.get("truncated"):
+        head = f"Clipboard (first {len(text)} of {output.get('length')} characters):"
+    return f"{head}\n```\n{text}\n```"
+
+
+def _fmt_home_devices(output: dict) -> str:
+    """Home devices, grouped by room — the way a person thinks about them.
+
+    A hub with 200 entities would otherwise render as 200 flat bullets, and the
+    answer to "what's on downstairs?" would be unreadable. Item-level clipping
+    (never mid-name), and a real source truncation is reported separately from
+    our display budget — the 2026-07-29 lesson that "(truncated)" must mean a
+    fact about the world, not that we ran out of room."""
+    devices = output.get("devices") or []
+    if not devices:
+        return "No matching devices found."
+
+    by_area: dict[str, list[dict]] = {}
+    for d in devices[:_MAX_NAMES]:
+        by_area.setdefault(str(d.get("area") or "").strip() or "No room set", []).append(d)
+
+    lines = [f"Found {len(devices)} device(s):"]
+    for area in sorted(by_area):
+        lines.append(f"\n{area}:")
+        for d in by_area[area]:
+            name = str(d.get("name") or d.get("entity_id") or "?")
+            state = str(d.get("state") or "unknown")
+            lines.append(f"• {name} — {state}  ({d.get('entity_id')})")
+    extra = len(devices) - _MAX_NAMES
+    if extra > 0:
+        lines.append(f"… and {extra} more")
+    if output.get("truncated"):
+        lines.append("(the hub reported more devices than were returned)")
+    return "\n".join(lines)
+
+
 # A result's content is worth rendering as its own fenced block past this;
 # below it, it is a teaser and belongs inline, exactly as before.
 _WEB_CONTENT_INLINE_MAX = 300
@@ -844,6 +919,11 @@ _RESULT_FORMATTERS = {
     "read_thread": _fmt_read_thread,
     "list_events": _fmt_calendar_events,
     "find_events": _fmt_calendar_events,
+    "list_devices": _fmt_home_devices,
+    "get_device_state": _fmt_home_devices,
+    "list_windows": _fmt_windows,
+    "take_screenshot": _fmt_screenshot,
+    "read_clipboard": _fmt_clipboard,
     "web_search": _fmt_web_search,
     "read_webpage": _fmt_read_webpage,
     "browse_page": _fmt_browse_page,

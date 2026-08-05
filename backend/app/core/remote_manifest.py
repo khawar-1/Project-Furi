@@ -150,6 +150,38 @@ DENIED: dict[str, str] = {
     "/api/context/state": "feeds the sensing pipeline",
     "/api/context/screen": "uploads a screen frame for OCR",
 
+    # ---- home & IoT: configured at the machine, like pairing ---------------
+    #
+    # ⚠️ /settings takes the hub ADDRESS and the ACCESS TOKEN. A paired phone
+    # that could rewrite the address could point Jarvis's home tools at a hub
+    # someone else controls — the same class of hazard as a paired device that
+    # can pair another, which is why /api/remote is absent from this manifest
+    # too. Connecting a home is a decision made at the desk.
+    #
+    # The device LIST and the connection probe are reads, and they are denied on
+    # the "discloses more than a phone needs" ground below: a list of every room
+    # and every lock in the house, plus whether each is currently open, is the
+    # single most sensitive read on this surface.
+    #
+    # None of this stops the phone being USEFUL here: a home plan started at the
+    # desk pauses for approval, and approving it is /api/agent/approve, which IS
+    # on the manifest. The phone answers the question; it does not rewire the
+    # house.
+    "/api/home/settings": "sets the hub address and stores its access token",
+    "/api/home/test-connection": "probes the hub",
+    "/api/home/devices": "every room, lock and door in the house, and whether each is open",
+
+    # Desktop control (Feature 2), denied for the same two reasons. /settings
+    # can widen what Jarvis may do to the machine — a phone that could flip
+    # allow_clipboard on is a phone that can read whatever was last copied,
+    # which on a work machine is routinely a password. /apps enumerates every
+    # program the user has installed, which is a fingerprint of them and of
+    # no use away from the desk. A desktop plan STARTED at the desk still
+    # pauses for approval, and approving it is /api/agent/approve, which IS
+    # on the manifest.
+    "/api/desktop/settings": "widens what Jarvis may do to the machine, including clipboard access",
+    "/api/desktop/apps": "every application installed on the user's machine",
+
     # ---- discloses more than a phone needs ---------------------------------
     #
     # These are READS, and denying them is a judgement rather than a rule: the

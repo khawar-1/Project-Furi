@@ -33,6 +33,8 @@ CONTEXT_CONFIG_KEY = "context.config"
 INITIATIVE_CONFIG_KEY = "initiative.config"
 INITIATIVE_JOB_ID_KEY = "initiative.job_id"
 BROWSER_VISION_CONFIG_KEY = "browser_vision.config"
+HOME_CONFIG_KEY = "home.config"
+DESKTOP_CONFIG_KEY = "desktop.config"
 
 
 # --------------------------------------------------------- generic accessor
@@ -737,3 +739,138 @@ async def set_browser_vision_config(
         BROWSER_VISION_CONFIG_KEY,
         {"enabled": config.enabled, "posture": config.posture},
     )
+
+
+# ------------------------------------------------------- home & IoT config
+
+@dataclass
+class HomeConfig:
+    """Home Assistant connection settings.
+
+    `enabled` defaults OFF — controlling the user's lights, locks and heating is
+    strictly opt-in, the sensing/index/voice/initiative convention.
+
+    There is NO token field here on purpose: the credential lives in
+    ~/.jarvis/home_token.json (or .env), never in the database, so a synced or
+    backed-up jarvis.db carries no way into the user's home. Only the address is
+    a runtime setting.
+
+    ⚠️ A `default_area` field ("when the user says 'turn on the lights' with no
+    room, use this one") was written and then REMOVED before shipping: nothing
+    read it. A setting that is stored, returned to the UI and consumed by no
+    code is the `BACKEND_HOST`-was-decorative defect — it reads as a guarantee
+    and makes none. If a default-room signal is wanted, it belongs in the
+    planner as its own DATA block and rule, the way rule 18 surfaces frequent
+    folders — not as a field nobody consults.
+    """
+    enabled: bool
+    base_url: str = ""
+
+
+def default_home_config() -> HomeConfig:
+    return HomeConfig(enabled=False, base_url="")
+
+
+def _coerce_home(raw: Any) -> HomeConfig:
+    """A stored dict → HomeConfig, defaulting any missing/invalid part (never a
+    crash from a hand-edited row) — the ContextConfig discipline."""
+    default = default_home_config()
+    if not isinstance(raw, dict):
+        return default
+    return HomeConfig(
+        enabled=bool(raw.get("enabled", default.enabled)),
+        base_url=str(raw.get("base_url", default.base_url) or "").strip().rstrip("/"),
+    )
+
+
+async def get_home_config(db: AsyncSession) -> HomeConfig:
+    raw = await get_setting(db, HOME_CONFIG_KEY, default=None)
+    if raw is None:
+        return default_home_config()
+    return _coerce_home(raw)
+
+
+async def set_home_config(db: AsyncSession, config: HomeConfig) -> None:
+    # asdict(), never a hand-listed field map. Five of the setters above still
+    # hand-list, and that is exactly the drift that silently dropped
+    # `spoken_approval` on 2026-08-03: the field was added to the dataclass, the
+    # default and the coercer, and the WRITE quietly discarded it. A new field
+    # here is carried automatically.
+    await set_setting(db, HOME_CONFIG_KEY, asdict(config))
+
+
+# ------------------------------------------------------- desktop-control config
+
+@dataclass
+class DesktopConfig:
+    """Desktop control settings (Feature 2).
+
+    `enabled` defaults OFF — acting on the user's own machine is strictly
+    opt-in, the sensing/index/voice/initiative/home convention.
+
+    ⚠️ THE SUB-TOGGLES ARE NOT UNIFORM, AND THE ASYMMETRY IS THE POINT. Turning
+    the feature on grants the safe, high-frequency half (focusing a window,
+    opening an installed app, volume and media keys); the three capabilities
+    that can actually cost the user something each need a second, deliberate
+    click:
+
+      - `allow_close` — a close request can surface an unsaved-work prompt, and
+        a mistaken one interrupts real work. (WM_CLOSE never forces, but the
+        interruption is the cost.)
+      - `allow_clipboard` — the clipboard routinely holds a password that was
+        just copied out of a manager. Reading it is a privacy act, and writing
+        destroys whatever the user had waiting to paste.
+      - `allow_screenshot` — captures everything on every display, including
+        whatever happens to be open behind the thing they meant.
+
+    FEATURES.md specified four fields and folded clipboard and screenshots under
+    a single `allow_input`. Split deliberately: grouping "turn the volume down"
+    with "read what I just copied" means a user who wants the first is forced to
+    grant the second, which is the opposite of what a sub-toggle is for.
+
+    `screenshot_retention_days` bounds ~/.jarvis/screenshots — housekeeping
+    sweeps it, so an image captured once does not sit on disk indefinitely.
+    """
+    enabled: bool
+    allow_launch: bool = True
+    allow_close: bool = False
+    allow_input: bool = True
+    allow_clipboard: bool = False
+    allow_screenshot: bool = False
+    screenshot_retention_days: int = 7
+
+
+def default_desktop_config() -> DesktopConfig:
+    return DesktopConfig(enabled=False)
+
+
+def _coerce_desktop(raw: Any) -> DesktopConfig:
+    """A stored dict → DesktopConfig, defaulting any missing/invalid part (never
+    a crash from a hand-edited row) — the ContextConfig discipline."""
+    default = default_desktop_config()
+    if not isinstance(raw, dict):
+        return default
+    return DesktopConfig(
+        enabled=bool(raw.get("enabled", default.enabled)),
+        allow_launch=bool(raw.get("allow_launch", default.allow_launch)),
+        allow_close=bool(raw.get("allow_close", default.allow_close)),
+        allow_input=bool(raw.get("allow_input", default.allow_input)),
+        allow_clipboard=bool(raw.get("allow_clipboard", default.allow_clipboard)),
+        allow_screenshot=bool(raw.get("allow_screenshot", default.allow_screenshot)),
+        screenshot_retention_days=_clamp_int(
+            raw.get("screenshot_retention_days", default.screenshot_retention_days),
+            1, 365, default.screenshot_retention_days,
+        ),
+    )
+
+
+async def get_desktop_config(db: AsyncSession) -> DesktopConfig:
+    raw = await get_setting(db, DESKTOP_CONFIG_KEY, default=None)
+    if raw is None:
+        return default_desktop_config()
+    return _coerce_desktop(raw)
+
+
+async def set_desktop_config(db: AsyncSession, config: DesktopConfig) -> None:
+    # asdict(), for the reason recorded on set_home_config above.
+    await set_setting(db, DESKTOP_CONFIG_KEY, asdict(config))
