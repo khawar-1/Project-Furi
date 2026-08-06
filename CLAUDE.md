@@ -6494,3 +6494,280 @@ in `app/tools/__init__.py`, no other code change): `list_windows` /
   Settings → Desktop control, then "what windows do I have open", "open <an app>",
   "turn the volume down", and "close the <X> window" — confirming the card names
   the window title before anything closes, and that cancelling changes nothing.
+
+### Jarvis could open an app but not a folder (2026-08-06)
+Found in a capability audit of the desktop round above, not from a live report:
+apps launch properly, and **"open my downloads folder" had no tool at all**.
+Verified before writing anything — a grep for
+`open_folder|reveal|explorer|startfile|show_in_folder` across `app/tools/`
+returned nothing, and `os.startfile` appeared in exactly ONE place in the whole
+backend (`core/desktop.py:443`, inside `launch_app`).
+
+- **⚠️ THE FAILURE MODE WAS WORSE THAN A PLAIN "CANNOT DO THAT", AND PLAN RULE
+  25 CAUSED IT.** That rule ended `use run_command for anything else`, so the
+  planner drafted `run_command(explorer C:\Users\DELL\Downloads)` — **a
+  DESTRUCTIVE shell-command approval card for opening a folder**. `explorer` is
+  not in `_BLOCKED_COMMAND_WORDS`, so it ran; then
+  `RunCommandTool._result:353` marked the non-zero exit as failure, because
+  `explorer.exe` conventionally exits 1 **on success**. The window opened and
+  Jarvis reported the step FAILED. The other branch was no better: the message
+  routes `strong_domain` on `downloads` → TASK → the file agent, which reached
+  for `list_directory` and printed the contents into the chat when the user
+  asked for a WINDOW.
+- **⚠️ THE INVARIANT IS WHAT KEEPS IT OUT OF DESTRUCTIVE, and it is one line.**
+  `os.startfile("setup.exe")` RUNS it; `os.startfile("payload.bat")` RUNS it —
+  so an unbounded "open this path" tool is `run_command` with the approval gate
+  weakened, which is strictly worse than `run_command` (the `launch_app`
+  argument, one tool over). `_folder_to_show` resolves a FILE to its PARENT, so
+  **what reaches the OS is ALWAYS A DIRECTORY** and the tool can only ever put a
+  folder window on screen. Hence the name `open_folder` rather than `open_path`:
+  the name states the bound. **REJECTED: a safe-extension allowlist** — a
+  hand-kept list would be the seventh instance of the "a second copy of a list
+  is a hole" defect here, and handlers for the "safe" types (.pdf, .html) have
+  their own history. One line beats a list nobody maintains.
+- **IT LIVES IN `file_tools.py`, NOT `desktop_tools.py`**, and that is a routing
+  fact rather than a taste one: agent tool catalogs are FILTERED, "downloads"
+  fires `strong_domain` at tier 1 and routes TASK to the **file agent**, so a
+  desktop-only tool would be invisible to the agent that actually gets the goal.
+  Living there also means `_resolve_path` / `_blocked_reason` / `_PROTECTED` are
+  reused rather than re-derived. It is carried by BOTH the file and desktop
+  agents, because either can receive the phrasing.
+- **IT INHERITS THE WHICH-DRIVE GUARD, and that is a visible behaviour change.**
+  `registry.mutates("open_folder")` is True (permission is not READ), so it
+  takes the WRITE side of `folder_resolver` — with `C:\Downloads` and
+  `D:\Downloads` both present, "open downloads" PAUSES and asks, spending a
+  `_MAX_FOLDER_HANDOFFS` slot rather than a `MAX_QUESTIONS` one. Stricter than
+  the harm warrants (opening the wrong window is instantly visible and costs
+  nothing), but it is the safe direction and it comes free from being in
+  `_FOLDER_PARAMS` rather than `_EXEMPT_PATH_PARAMS`.
+- **NO CONSENT TOGGLE, deliberately.** The `DesktopConfig` sub-toggles exist for
+  PRIVACY surfaces — the clipboard holds a password just copied, a screenshot
+  captures every display. Showing the user their own folder is neither, and
+  `create_folder` and `delete_file` are more consequential and ungated. It is a
+  WRITE, so the approval gate applies like any other.
+- **THE COST, STATED RATHER THAN DISCOVERED LATER:** the file is not
+  HIGHLIGHTED. Windows does that with `explorer /select,<path>`, but only as a
+  single argv token whose quoting breaks on paths with spaces unless it goes
+  through a shell — and a shell is exactly what must not be here. Opening the
+  containing folder answers "where does this live" with no fragile mechanism;
+  highlighting is additive later and does not touch the invariant.
+- **⚠️ THREE OF THIRTEEN FALSIFICATIONS CAME BACK INVALID ON THE FIRST RUN, and
+  each was a lesson this file already records.** (1) A "regression" test that
+  drove the very line being reverted — it is a second behavioural test, and one
+  that also fails proves nothing. (2) Reverting the path guard in `execute()`
+  left the test PASSING, because a protected DIRECTORY is caught AGAIN by the
+  folder guard in `_open`: **a falsification must remove the GUARANTEE, not one
+  of several copies of it**, so that case now reverts both and a separate case
+  proves the second copy is independently load-bearing. (3) The launcher test
+  asserted only "did not raise" and passed against `raise` — because
+  `BaseTool.safe_execute` catches everything anyway. **The local handler's real
+  value is the MESSAGE** (which folder, what went wrong, instead of the
+  wrapper's generic "raised an unexpected error"), so that is what it pins now.
+- Tests: `test_open_folder.py` (29) — the never-execute invariant frozen against
+  a matrix of real executable extensions; the guards; the false-FAILED fix
+  pinned; the six coverage maps asserted by name; and two runs through the REAL
+  planner graph, because the unit tests prove the tool works and say nothing
+  about whether the planner reaches it (the distinction that has cost this
+  codebase four rounds). **13/13 behavioural changes proven to FAIL by reverting
+  in place** (`scripts/_falsify_open_folder.py`).
+- **RUNTIME-VERIFIED on the REAL `main.py` lifespan**
+  (`scripts/_verify_open_folder_runtime.py`, isolated :18003, scratch DB):
+  **9/9** — 48 tools in the live catalog, an unapproved open reaching the OS
+  zero times, `C:\Windows` refused even when approved, a real file opening its
+  folder and never itself, four audit rows including the blocked attempt, and —
+  once, announced — the REAL launcher opening a real Explorer window. ⚠️ Its
+  first run died on `AttributeError: 'list' object has no attribute 'get'`:
+  `/api/agent/tools` returns a BARE LIST, and my probe assumed `{"tools": [...]}`.
+  A probe that asserts the wrong thing manufactures defects.
+- **HONEST LIMITS:** no highlight (above); Windows uses `os.startfile` while
+  macOS/Linux shell out to `open`/`xdg-open` by argv, and only the Windows path
+  is verified on real hardware; and a folder the user cannot see in Explorer
+  anyway (permissions) will open an empty window rather than an error, because
+  the OS owns that outcome.
+- **LIVE ACCEPTANCE IS USER-DRIVEN AND OUTSTANDING**: `npm run dev`, then "open
+  my downloads folder" — it must show an approval card naming the folder (NOT a
+  shell command), open the window on approval, and report success.
+
+### The magic words were written into the prompt (2026-08-06)
+Reported with the transcript, and the complaint is the specification: *"why does
+it want magic words to do something, cant it understand what i mean… user wont be
+able to remember magic words to activate something in jarvis"*. Two consecutive
+messages, one working and one not:
+
+    furi please unmute the volume   -> handed to the desktop agent, done
+    furi open fomi folder           -> "I can open it for you, sir - but the
+                                       request didn't route to my tools from
+                                       here. Say it as one direct instruction,
+                                       e.g. 'open the fomi folder'."
+
+- **THE ROUTING AUDIT PAID FOR ITSELF: the diagnosis was ONE SQL QUERY.** The
+  2026-08-03 round exists because "for a system whose main failure mode is *it
+  didn't do the thing*, the not-doing is the one thing unaudited". The row:
+  `gate_fired 1 | gate_reason strong_domain | classifier_ms 7384 |
+  classifier_error "unrecognized reply: ''" | fail_open_reason classifier_error |
+  rescue_fired 0`. **The gate was never the problem** — it fired on `folder` at
+  tier 1, exactly as designed. Three defects were found; **only two were measured
+  to matter, and the third is recorded below as belt rather than cause** —
+  claiming all three would have been exactly the cherry-picking this file keeps
+  warning about.
+- **⚠️ D1 — THE CLASSIFIER RETURNED NOTHING AND WAS NOT RETRIED, and the code
+  already knew the difference.** `_classify_message` distinguishes a reply
+  starting with CHAT (a JUDGEMENT) from a blank or garbled one (a FAILURE) — it
+  says so in a comment, and it records them apart so `fail_open_reason` can tell
+  them apart. **Then it did exactly the same thing with both.** The distinction
+  was recorded and acted on nowhere, which is the `plan_traces` shape one layer
+  up: the symptom audited, the diagnosis inert. Meanwhile
+  `browser/loop.py::_decide` had learned this on 2026-07-24 — *"an empty string
+  is what a reasoning model returns when the cap runs out mid-thought… retrying
+  this one turns a dead browse into a continued one"* — and the single most
+  consequential LLM call in the product never got the lesson. ONE retry, for the
+  failure classes only (an exception, or a reply matching no label): a clean CHAT
+  is deliberately never retried, because that is a judgement made with the whole
+  conversation in view and retrying it would double the cost of every
+  conversational turn. **`classifier_error` is still stamped ONLY on final
+  failure**, so `fail_open_reason` keeps meaning what the table was built to
+  distinguish; a RECOVERED retry is a log line, not a column, and the reason is
+  written at the return.
+- **The cap was self-inflicted, the same way the browse decision cap was.**
+  `max_tokens=512` was set on 2026-07-13 against a much smaller prompt; the
+  catalog gained two whole tool groups (HOME, DESKTOP) on **2026-08-04**, two days
+  before this incident, and the cap did not move. A richer catalog raises the
+  reasoning cost of USING it. 512 → 1024, and the cap bounds THINKING, not output
+  — the parser reads the first word, so a healthy call is unchanged.
+- **⚠️ D2 — `open_folder` WAS INVISIBLE TO THE ROUTER, AND THAT WAS MINE FROM THE
+  DAY BEFORE.** The 2026-08-06 round added it to six maps plus the agent specs and
+  pinned all of them with tests. It did not add it to `_CLASSIFY_PROMPT`, whose
+  FILES/SYSTEM group said *"search/read/list files and folders"* and whose DESKTOP
+  group said *"open an installed application"* — **neither mentions opening a
+  folder window.** So the component that decides whether the request routes at all
+  had never been told the capability exists. This is the 2026-08-03 finding
+  verbatim (*"the gate fix alone did NOT deliver the feature… the model was
+  answering correctly for what it had been told"*, conversation search 0/3 → 3/3 on
+  this exact edit), re-committed two days later — which is the argument for a
+  coverage test rather than for the fix.
+- **⚠️ AND THE A/B SAYS D2 WAS NOT THE CAUSE — MEASURED, AGAINST MY OWN CLAIM.**
+  `scripts/_measure_folder_routing.py` strips the new catalog line back out and
+  runs the SAME phrasings through the real model in both arms (4 folder phrasings
+  × 3 runs, deliberately NOT the catalog's own wording — the 2026-08-02 rule that
+  a check resembling a prompt example measures the prompt's memory): **before
+  12/12, after 12/12.** deepseek-v4-flash routed *"furi open fomi folder"*, *"open
+  my downloads folder"*, *"show me where that report lives"* and *"pull up the
+  phase3test folder on screen"* to TASK with or without the description, and both
+  controls held (`what is the capital of france` → WEB, `i finally cleaned up my
+  downloads folder` → CHAT). So the catalog gap is real, worth closing, and now
+  enforced by the walk — **but it did not produce this incident, and this note
+  counts it as belt rather than cause.** The 2026-08-03 conversation-search case
+  DID move 0/3 → 3/3 on the same kind of edit; the lesson is that whether a
+  catalog entry is load-bearing is a MEASUREMENT, not an inference from a
+  previous round.
+- **So the seventh map is now a REGISTRY WALK.**
+  `test_every_registered_tool_is_described_or_deliberately_absent` requires each of
+  the 48 registered tools to be either mapped to a phrase the catalog really
+  contains, or listed in `_CATALOG_EXEMPT` with a reason (`recall_memory` /
+  `lookup_contact` — shared reads used INSIDE a plan, never what a message asks
+  for, since what the user remembers is already injected as MEMORY CONTEXT). The
+  catalog is prose, so the mapping cannot be derived — but it can be made TOTAL,
+  and a new tool now fails the test until someone decides which it is. This is the
+  `folder_resolver` coverage-test pattern that found `read_file.path` on its first
+  run; **it found `stop_media` on its first run here** — routable by design ("stop
+  the music" is deliberately kept out of the interrupt router so it stays a
+  `stop_media` task) and absent from the catalog.
+- **⚠️ D3 — THE MAGIC-WORD DEMAND WAS AN INSTRUCTION IN THE PROMPT, NOT A
+  MISBEHAVIOUR.** Four CAPABILITIES rules each END by telling the model to ask for
+  a rephrase: the unrouted-action rule (*"ask them to rephrase it as a direct
+  instruction"*), the sign-in rule, the own-action rule, and the promise-nothing
+  rule (*"the ONLY honest reply is to ask them to say it as one direct
+  instruction"*). The model was being obedient. **Only the WEB rule had a
+  backstop** — `_DEAD_END_OFFER_RE` spoke web vocabulary exclusively — so files,
+  folders, mail, calendar, the browser and the audit log all dead-ended, and the
+  ONE capability whose demand was rescued was the one nobody complained about.
+  Note the shape: the SCREEN AWARENESS rule already says *"NEVER tell the user to
+  say 'take a screenshot' or any similar magic words"*, so the codebase had already
+  named the defect for one feature while mandating it for four others.
+- **THE MECHANISM WAS ALREADY GENERAL; ONLY THE TRIGGER WAS SCOPED.**
+  `rescue_web_turn`'s body is `planner.start(goal)` with the GENERAL agent and the
+  full catalog — it always could have opened a folder. Renamed
+  `rescue_unrouted_turn` (alias kept, the `_deterministic_text` convention), and
+  the guard gained ONE branch anchored on the DEMAND rather than on any
+  capability's vocabulary, so it covers all four rules at once and any future rule
+  for free. **MEASURED against a corpus: 9/9 phrasings recognized, 9/9 benign lines
+  untouched** — including the recorded false positive *"I can help with that — just
+  say the word"* (which answers an EMAIL turn and must not be rescued) and *"as a
+  direct result of your note"*.
+- **AUTHORITY IS UNCHANGED, WHICH IS WHY WIDENING IT IS SAFE.** A rescue re-runs the
+  goal through the same planner, the same registry and the same structural approval
+  gate: a read runs, a write PAUSES on a card. That is the Routine principle —
+  re-deriving a plan from a goal STRING is auto-PLAN, never auto-WRITE — and it is
+  the same property that makes scheduled routines and accepted suggestions safe.
+  Widening the trigger past web widens RECALL, never authority.
+- **⚠️ A LOADED GUN, FOUND BY MEASURING RATHER THAN READING.** The corpus run came
+  back with one false positive: **our own `_IMPERSONATION_CORRECTION`**, which ended
+  *"To actually do this, say it as a direct instruction, e.g. …"*. Harmless today
+  (the guard only ever scans model deltas) and a self-triggering rescue the moment
+  anyone widens it to the whole response, the way the impersonation guard already
+  does. It was also the SECOND magic-word surface, in text we author
+  deterministically. Both problems die with the phrase, and
+  `test_no_deterministic_text_trips_the_dead_end_guard` walks the module's
+  user-facing constants so the next one cannot reintroduce it. `_DEAD_END_FALLBACK`
+  likewise stopped saying *"the search itself failed"* — now that a folder-open can
+  land there, that would be a small lie of exactly the kind this module spends most
+  of its length preventing.
+- **The prompt keeps producing the admission on purpose.** It is now a MACHINE
+  SIGNAL, not user-facing advice: the guard cuts it before it reaches the screen and
+  does the work instead. What the prompt lost is the narration — the live reply
+  explained that *"the request didn't route to my tools from here"*, which is
+  internal plumbing, means nothing to the user, and is what made the demand read as
+  a defect they had to work around. A test pins BOTH halves: the new clause is
+  present, and the trigger phrase is still there (removing it would blind the guard).
+- **⚠️ TWO RUNTIME "FAILURES" WERE THE PROBE, for the third time in this project.**
+  (1) It asserted `fail_open_reason is None` when the column default is `""`
+  (models.py). (2) It read `provider.prompts[0]` for the classifier prompt, and
+  **background memory extraction from the PREVIOUS turn** landed at index 0 between
+  the reset and the call — 10014 chars where the real prompt is 9787. Both read
+  exactly like code defects. The fix is to find the classifier by its own opening
+  line rather than trusting ordering. **A probe that asserts the wrong thing
+  manufactures defects.**
+- **THE GUARD IS PINNED AGAINST THE PROMPT ITSELF, not against hand-written
+  phrasings.** `test_every_rephrase_demand_in_the_live_prompt_trips_the_guard`
+  builds the real system prompt, finds every sentence in it that demands a
+  rephrase, and requires the guard to recognize each one — MEASURED at 5 demands,
+  5 covered. Checking the guard against strings I invented would have proved
+  nothing about what the prompt actually emits, and a sixth rule worded
+  differently would have silently dead-ended exactly as the first four did. Same
+  discipline as the registry walk one bullet up: make the mapping TOTAL so the
+  next addition fails a test instead of a user.
+- Tests: `test_task_router.py` +16 (95 → 111 test functions; the file collects
+  321 with its parametrized blocks). **All 14 behavioural changes proven to FAIL by
+  reverting the specific line IN PLACE** (never `git show :file`) via
+  `scripts/_falsify_magic_words.py`, each with the correct signature; two anchors
+  are deliberately multi-line because `if attempt == 2:` appears twice in
+  `_classify_message` and a non-unique anchor would patch the wrong branch.
+- **RUNTIME-VERIFIED on the REAL `main.py` lifespan**
+  (`scripts/_verify_magic_words_runtime.py`, isolated :18004, scratch DB, one
+  process): **12/12** — the incident goal with an EMPTY first reply retries, routes,
+  and reaches a real `awaiting_approval` card for the real folder with the chat
+  model never called and no magic-word demand anywhere in the response; the routing
+  row shows the recovery is NOT recorded as a fail-open; a genuine CHAT verdict
+  still costs exactly one call; and a non-web dead end is rescued into a plan with
+  the demand cut and `rescue_fired` recorded.
+- **HONEST LIMITS, stated rather than discovered later.** (1) The rescue can
+  false-positive if the model uses the phrase in a genuinely explanatory turn ("how
+  do I get you to do things?"), which would run the planner on a conversational
+  message; the cost is one failed plan and an honest message, the web branch has
+  carried the same exposure since 2026-07-17, and narrowing it by guessing intent is
+  the keyword shape measured at zero three times here. (2) A provider that is really
+  down now costs TWO classifier calls before falling open — about 15s at the latency
+  this incident recorded — in exchange for recovering the far commoner transient.
+  (3) The catalog walk proves every tool is DESCRIBED; it cannot prove the
+  description is good enough for the model to route on. `route_bench --gate-only`
+  (deterministic, zero credits) WAS re-run and is **IDENTICAL to the 2026-08-03
+  baseline — GATE RECALL 52/53, GATE COST 5/14** — so nothing here regressed the
+  gate. The paid live-model half was not re-run in full; the slice that matters
+  for this round was measured separately by the folder A/B above (12/12 in both
+  arms).
+- Gates: **3608 passing, 14 skipped, 0 failed** (baseline 3592/14/0 — +16, zero
+  regressions); typecheck clean; no frontend change this round.
+- **LIVE ACCEPTANCE IS USER-DRIVEN AND OUTSTANDING**: `npm run dev`, then "furi open
+  fomi folder" and "open my downloads folder" — each must either route straight to
+  an approval card naming the folder, or be rescued into one. In neither case may
+  Jarvis print a phrase to say.

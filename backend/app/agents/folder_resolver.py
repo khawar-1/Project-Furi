@@ -123,6 +123,12 @@ _FOLDER_PARAMS: dict[str, tuple[str, str]] = {
     "create_file": ("path", "parent"),
     "create_folder": ("path", "parent"),
     "run_command": ("working_directory", "self"),
+    # COVERED, not exempt: "open downloads" is the LLM writing a bare name the
+    # user spoke into a path anchored under HOME, with nothing on disk
+    # consulted — the exact case this guard exists for. Mode "self" is right
+    # for both shapes it accepts: a bare folder IS the container, while a file
+    # path's parent is not HOME, so the guard correctly stands down there.
+    "open_folder": ("path", "self"),
 }
 
 # Path parameters deliberately NOT disambiguated, and why. The split is by WHO

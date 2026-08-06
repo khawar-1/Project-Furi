@@ -347,6 +347,7 @@ def _fmt_recall_memory(output: dict) -> str:
 # rule — a move "destination" may be the folder the file landed INSIDE).
 _ACTION_LINE_KEYS = {
     "create_folder": ("created folder", "path", None),
+    "open_folder": ("opened folder", "path", None),
     "create_file": ("created file", "path", None),
     "delete_file": ("deleted", "path", None),
     "move_file": ("moved", "source", "destination"),

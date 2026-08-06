@@ -1151,10 +1151,17 @@ async def test_classifier_chat_verdict_falls_through(client):
 
 async def test_classifier_failure_falls_through_to_chat(client):
     # chat() raises (no scripted responses) → fail open, conversation streams.
+    #
+    # The call count went 1 → 2 on 2026-08-06, deliberately: a classifier
+    # FAILURE is now retried once before falling open (an empty or raised
+    # reply is a hiccup, not a verdict — see the magic-word section at the end
+    # of this file). The behaviour this test exists for is unchanged and still
+    # asserted below: a classifier that cannot answer must never block the
+    # conversation.
     provider = use_provider(responses=[], streams=["Normal reply."])
     events = await post_chat(client, "delete my temp files", "s-clsfail")
 
-    assert provider.chat_calls == 1
+    assert provider.chat_calls == 2, "one attempt, then one retry — then give up"
     assert plan_events(events) == []
     assert "Normal reply." in streamed_text(events)
 
@@ -1869,3 +1876,394 @@ def test_a_capability_offer_about_the_agent_is_not_a_fabrication():
     assert _SYSTEM_VOICE_RE.search(
         "it's with the browser agent in the background"
     ) is not None
+
+
+# ================================================== the magic-word round
+#
+# Live 2026-08-06, reported with the transcript. "furi please unmute the
+# volume" worked; the very next message, "furi open fomi folder", answered:
+#
+#   I can open it for you, sir — but the request didn't route to my tools
+#   from here. Say it as one direct instruction, e.g. "open the fomi folder".
+#
+# The user's objection is the specification for this section: nobody can be
+# expected to remember a phrase that unlocks a capability Jarvis has just said
+# it has, and being told to guess one is worse than a plain refusal.
+#
+# THREE separate defects produced that one sentence, and the routing audit
+# table answered the first two in a single query:
+#
+#   gate_fired 1 | gate_reason strong_domain   <- the gate was never the problem
+#   classifier_ms 7384 | classifier_error "unrecognized reply: ''"
+#   fail_open_reason classifier_error | rescue_fired 0
+#
+#   D1 the classifier produced NOTHING and was not retried — the audit already
+#      told a failure from a judgement and nothing acted on the distinction.
+#   D2 open_folder (shipped the same day) was missing from the classifier's
+#      tool catalog, so nothing told the router the capability exists.
+#   D3 four CAPABILITIES rules end by demanding a rephrase and only the WEB one
+#      had a backstop, so every other capability dead-ended.
+
+
+async def test_an_empty_classifier_reply_is_retried_not_taken_as_chat(client, tmp_path):
+    """THE INCIDENT, FROZEN AT ITS ROOT. An empty reply is what a reasoning
+    model returns when its budget runs out mid-thought — a failure, not a
+    verdict. Before this round it fell straight open to chat and the user was
+    told to rephrase; now the second attempt lands and the turn routes to a
+    real approval card for the real folder."""
+    steps = [step("open it", "open_folder", path=str(tmp_path))]
+    provider = use_provider(
+        responses=[
+            "",                     # the live failure, verbatim
+            "TASK INLINE",          # the retry lands
+            plan_json(steps), plan_json(steps),   # draft, reflect
+        ],
+        streams=["unused — this turn must never reach the chat model"],
+    )
+    events = await post_chat(client, "furi open fomi folder", "s-mw-retry")
+
+    plans = plan_events(events)
+    assert plans, "the retried verdict should have routed to a plan"
+    assert plans[0]["plan"]["status"] == "awaiting_approval"
+    assert provider.stream_calls == 0, "chat must not answer a turn that routed"
+
+
+async def test_a_clean_chat_verdict_is_never_retried(client):
+    """The other half, and the one that bounds the cost: a reply of CHAT is a
+    judgement the model made with the whole conversation in view, not a
+    hiccup. Retrying it would double the price of every conversational turn.
+
+    Uses a message that actually FIRES the gate — the first cut of this test
+    used small talk, the classifier was never reached at all, and it therefore
+    measured nothing about retrying."""
+    provider = use_provider(
+        responses=["CHAT"],
+        streams=["Nothing was deleted, sir."],
+    )
+    events = await post_chat(client, "i finally cleaned up my temp files", "s-mw-nochat")
+
+    assert plan_events(events) == []
+    assert provider.chat_calls == 1, "a judgement must cost exactly one call"
+
+
+async def test_two_empty_replies_still_fail_open_to_chat(client):
+    """The retry adds a second chance, never a new failure mode. A provider
+    that is genuinely down must still leave the user with a conversation
+    rather than a broken action route."""
+    provider = use_provider(
+        responses=["", ""],
+        streams=["I can help with that, sir."],
+    )
+    events = await post_chat(client, "furi open fomi folder", "s-mw-both-empty")
+
+    assert provider.chat_calls == 2, "exactly one retry, not a loop"
+    assert provider.stream_calls == 1, "the turn still reaches chat"
+    assert events[-1]["done"] is True
+
+
+async def test_a_raising_classifier_is_retried_too(client, tmp_path):
+    """A transient exception is the same class of failure as an empty reply —
+    the planner already treats them alike (`_is_transport_error`)."""
+    steps = [step("open it", "open_folder", path=str(tmp_path))]
+
+    class _FlakyOnce(FakeProvider):
+        async def chat(self, messages, temperature=0.7, max_tokens=None):
+            if self.chat_calls == 0:
+                self.chat_calls += 1
+                raise RuntimeError("connection reset")
+            return await super().chat(messages, temperature, max_tokens)
+
+    provider = _FlakyOnce(
+        responses=["TASK INLINE", plan_json(steps), plan_json(steps)],
+        streams=["unused"],
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: provider
+    events = await post_chat(client, "furi open fomi folder", "s-mw-raise")
+
+    assert plan_events(events), "a transient exception must not cost the turn"
+    assert provider.stream_calls == 0
+
+
+def test_the_retry_nudge_names_every_allowed_verdict():
+    """A bare repeat of the same prompt is a coin flip. The nudge has to make
+    attempt 2 genuinely different, and it can only do that if it lists the
+    words the parser actually accepts — so this walks _ACTION_LABELS rather
+    than hard-coding them, and a new label cannot silently go unlisted."""
+    from app.api.task_router import _ACTION_LABELS, _CLASSIFY_RETRY_NUDGE
+
+    for label in (*_ACTION_LABELS, "CHAT"):
+        assert label in _CLASSIFY_RETRY_NUDGE, f"{label} missing from the retry nudge"
+
+
+def test_the_classifier_budget_stays_above_the_thinking_floor():
+    """Recorded three times in this codebase and re-learned once more here: on
+    a reasoning model the thinking tokens come out of max_tokens, so a small
+    cap returns ZERO output and every message falls open to chat. 512 was set
+    on 2026-07-13 and the prompt has gained two whole tool groups since."""
+    from app.api.task_router import _CLASSIFY_MAX_TOKENS
+
+    assert _CLASSIFY_MAX_TOKENS >= 512
+
+
+# Each registered tool must be DESCRIBED in the classifier's catalog, or be
+# written down here as deliberately absent. The catalog is prose, not tool
+# names, so the mapping cannot be derived — but it CAN be made total, which is
+# the whole point: a new tool now fails this test until someone decides which
+# it is, instead of shipping invisible to the router.
+_CATALOG_PHRASES = {
+    "search_files": "search/read/list files",
+    "read_file": "search/read/list files",
+    "list_directory": "search/read/list files",
+    "open_folder": "open a folder",
+    "create_file": "create/move/rename/delete files",
+    "create_folder": "create/move/rename/delete files",
+    "move_file": "create/move/rename/delete files",
+    "move_files": "create/move/rename/delete files",
+    "rename_file": "create/move/rename/delete files",
+    "delete_file": "create/move/rename/delete files",
+    "delete_files": "create/move/rename/delete files",
+    "run_command": "run terminal commands and scripts",
+    "execute_script": "run terminal commands and scripts",
+    "recall_actions": "past actions from its audit log",
+    "semantic_file_search": "find a saved document by its content",
+    "search_emails": "search and read gmail",
+    "read_email": "search and read gmail",
+    "read_thread": "search and read gmail",
+    "create_email_draft": "draft, send, or reply to email",
+    "send_email": "draft, send, or reply to email",
+    "reply_email": "draft, send, or reply to email",
+    "list_events": "list/find google calendar events",
+    "find_events": "list/find google calendar events",
+    "create_event": "create, update, or delete events",
+    "update_event": "create, update, or delete events",
+    "delete_event": "create, update, or delete events",
+    "web_search": "search the web",
+    "read_webpage": "open/read a web page",
+    "browse_page": "open/read a web page",
+    "list_devices": "read and control the devices",
+    "get_device_state": "read and control the devices",
+    "set_device_state": "lights, switches",
+    "run_scene": "the scenes they have defined",
+    "set_climate": "thermostats",
+    "list_windows": "list, focus or close open windows",
+    "focus_window": "list, focus or close open windows",
+    "close_window": "list, focus or close open windows",
+    "launch_app": "open an installed application",
+    "set_volume": "set the system volume",
+    "media_key": "send play/pause/next",
+    "take_screenshot": "take a screenshot",
+    "read_clipboard": "read or replace the clipboard",
+    "write_clipboard": "read or replace the clipboard",
+    "browse": "play or watch a video",
+    "browse_commit": "submit a web form",
+    "stop_media": "stop something it is already playing",
+}
+
+# Deliberately absent, with the reason. Both are SHARED READS used INSIDE a
+# plan, never the thing a message is asking for: what the user remembers is
+# already injected into every chat turn as MEMORY CONTEXT, so "what is Jamil's
+# email" is answered without routing anywhere.
+_CATALOG_EXEMPT = {"recall_memory", "lookup_contact"}
+
+
+def test_every_registered_tool_is_described_or_deliberately_absent():
+    """⚠️ D2, AND WHY THIS IS A WALK RATHER THAN A SPOT-CHECK. open_folder was
+    added to six maps plus the agent specs on 2026-08-06 and missed the one
+    that decides whether a request routes AT ALL — the same omission recorded
+    on 2026-08-03, when conversation search went 0/3 to 3/3 on this edit
+    alone. A capability the catalog never mentions cannot be routed to, and
+    every other guard in the product is downstream of that.
+
+    This is the `folder_resolver` coverage-test pattern, which found
+    `read_file.path` the first time it ran. It found `stop_media` on its
+    first run here."""
+    import app.tools  # noqa: F401 — registration side effect
+    from app.tools.registry import registry
+    from app.api.task_router import _CLASSIFY_PROMPT
+
+    catalog = _CLASSIFY_PROMPT.lower()
+    tools = set(registry.names())
+
+    uncovered = sorted(tools - set(_CATALOG_PHRASES) - _CATALOG_EXEMPT)
+    assert not uncovered, (
+        f"tools missing from the classifier catalog map: {uncovered}. Add a "
+        f"describing phrase to _CLASSIFY_PROMPT and map it here, or add the "
+        f"tool to _CATALOG_EXEMPT with a reason."
+    )
+
+    for tool, phrase in sorted(_CATALOG_PHRASES.items()):
+        if tool not in tools:
+            continue  # a tool removed from the registry; the map may lag
+        assert phrase in catalog, (
+            f"{tool} is mapped to {phrase!r}, which is no longer in the "
+            f"classifier catalog — the description was edited away"
+        )
+
+
+# ---------------------------------------- the backstop past WEB (D3)
+
+
+async def test_a_folder_dead_end_is_rescued_the_way_a_web_one_always_was(client):
+    """THE REPORTED SENTENCE, FROZEN. Routing failed, chat offered to do it
+    and asked for a rephrase — and before this round nothing caught that,
+    because the guard only spoke web vocabulary while `rescue_unrouted_turn`
+    was already domain-agnostic underneath. The user gets the folder, not a
+    phrase to memorise."""
+    provider = use_provider(
+        responses=[
+            "CHAT",                               # routing genuinely says chat
+            plan_json([step("open it", "open_folder", path="~/fomi")]),
+        ],
+        streams=[
+            "I can open it for you, sir — but the request didn't route to my "
+            "tools from here. Say it as one direct instruction, e.g. \"open "
+            "the fomi folder\", and I'll take care of it right away."
+        ],
+    )
+    events = await post_chat(client, "furi open fomi folder", "s-mw-folder")
+
+    assert plan_events(events), "the folder dead end should have been rescued"
+    assert provider.stream_calls == 1
+
+
+async def test_the_magic_word_demand_never_reaches_the_user(client):
+    """The point of the whole round. Jarvis must not print a phrase to guess
+    and then immediately act — that reads as asking permission and ignoring
+    the answer. Asserts no FRAGMENT escapes, not merely the whole sentence:
+    the 2026-07-17 look-behind bug shipped exactly that way."""
+    use_provider(
+        responses=["CHAT", plan_json([step("open it", "open_folder", path="~/fomi")])],
+        streams=[
+            "I can open it for you, sir. Say it as one direct instruction, "
+            "e.g. \"open the fomi folder\"."
+        ],
+    )
+    events = await post_chat(client, "furi open fomi folder", "s-mw-nocue")
+
+    text = streamed_text(events).lower()
+    for leak in ("say it as", "direct instruction", "say it", "e.g."):
+        assert leak not in text, f"the magic-word demand leaked: {leak!r}"
+    assert "i can open it for you" in text, "the honest prefix still stands"
+
+
+async def test_every_capability_rule_the_prompt_carries_is_rescuable(client):
+    """Four CAPABILITIES rules end in a rephrase demand — unrouted action,
+    sign-in, own-action, and promise-nothing — and each words it slightly
+    differently. One pattern has to cover all four, or the next capability
+    added to the prompt quietly dead-ends again."""
+    from app.api.chat import _DEAD_END_OFFER_RE
+
+    for wording in [
+        "I can do that, sir. Please rephrase it as a direct instruction.",
+        "I can sign you in — say it as one direct instruction.",
+        "I would need to check the action record; say it as a direct question.",
+        "Say it as one direct instruction and I'll run it.",
+        "Try wording it as a direct request, sir.",
+    ]:
+        assert _DEAD_END_OFFER_RE.search(wording), f"not recognized: {wording!r}"
+
+
+def test_an_offer_chat_can_keep_is_still_not_a_dead_end():
+    """The false positive the suite caught on the first draft of this guard,
+    re-asserted now that the trigger is far broader. An offer is a dead end
+    only when it offers something chat cannot do; a plain 'say the word' is
+    not a demand to re-word anything."""
+    from app.api.chat import _DEAD_END_OFFER_RE
+
+    for benign in [
+        "I can help with that — just say the word.",
+        "Of course, sir. The file is in your Downloads folder.",
+        "That was a direct hit, sir.",
+        "I sent him the files yesterday, as a direct result of your note.",
+        "I put the report as a direct attachment.",
+    ]:
+        assert _DEAD_END_OFFER_RE.search(benign) is None, f"false positive: {benign!r}"
+
+
+def test_no_deterministic_text_trips_the_dead_end_guard():
+    """⚠️ A LOADED GUN, FOUND BY MEASURING RATHER THAN READING. The old
+    impersonation correction ended 'To actually do this, say it as a direct
+    instruction' — our OWN text, carrying the exact phrase this guard now
+    treats as a routing miss. Harmless while the guard scans model deltas
+    only, and a self-triggering rescue the moment anyone widens it to the
+    whole response the way the impersonation guard already does. It is also
+    the same magic-word demand, in text we author.
+
+    Walks every deterministic user-facing string in the module, so the next
+    one cannot reintroduce the collision."""
+    from app.api import chat as chat_mod
+
+    for name in (
+        "_IMPERSONATION_CORRECTION",
+        "_DEAD_END_FALLBACK",
+    ):
+        text = getattr(chat_mod, name)
+        assert chat_mod._DEAD_END_OFFER_RE.search(text) is None, (
+            f"{name} contains the dead-end trigger phrase"
+        )
+
+
+def test_every_rephrase_demand_in_the_live_prompt_trips_the_guard():
+    """⚠️ THE COVERAGE TEST FOR D3, and the one that keeps this round fixed.
+
+    The defect was that four CAPABILITIES rules each demand a rephrase and only
+    the WEB one had a backstop. Verifying the guard against hand-written
+    phrasings proves nothing about the sentences the PROMPT actually produces —
+    so this walks the built prompt, finds every rephrase demand in it, and
+    requires the guard to recognize each. A sixth rule worded differently now
+    fails here instead of silently dead-ending in production.
+
+    Measured at the time of writing: 5 demand sentences, 5 covered."""
+    import re
+    from app.api.chat import _DEAD_END_OFFER_RE, _build_system_prompt
+
+    prompt = _build_system_prompt()
+    demands = [
+        s.strip() for s in re.split(r"(?<=[.;])\s+", prompt)
+        if re.search(r"\b(say it as|rephrase it as)\b", s, re.I)
+    ]
+    assert demands, (
+        "no rephrase demand found in the prompt — either the rules were "
+        "reworded (update this finder) or they are gone (then the guard's "
+        "trigger is dead and the backstop can never fire)"
+    )
+    uncovered = [d for d in demands if not _DEAD_END_OFFER_RE.search(d)]
+    assert not uncovered, (
+        f"{len(uncovered)} prompt rule(s) demand a rephrase that the dead-end "
+        f"guard cannot recognize, so they will dead-end in production: "
+        f"{[d[-90:] for d in uncovered]}"
+    )
+
+
+def test_the_prompt_never_tells_the_user_to_work_around_the_plumbing():
+    """The live reply explained that 'the request didn't route to my tools
+    from here' — internal plumbing, meaningless to the user, and the sentence
+    that made the magic-word demand read as a system defect they had to work
+    around. The rule that produces this admission must keep producing it (the
+    backstop keys on it) while keeping it to one short sentence."""
+    from app.api.chat import _build_system_prompt
+
+    prompt = _build_system_prompt()
+    assert "Never explain the routing" in prompt
+    assert "say it as a direct instruction" in prompt, (
+        "the admission is the backstop's trigger — removing it blinds the guard"
+    )
+
+
+def test_the_rescue_is_the_same_function_under_both_names():
+    """`rescue_web_turn` was never web-specific in behaviour — it runs the
+    GENERAL planner on the goal. The rename says so; the alias keeps the
+    module's public shape for anything patching the old name."""
+    from app.api import task_router
+
+    assert task_router.rescue_web_turn is task_router.rescue_unrouted_turn
+
+
+def test_the_rescue_failure_text_does_not_claim_a_search_happened():
+    """It used to say 'I tried to look that up and the search itself failed'.
+    Now that a folder-open can land here, that would be a small lie of exactly
+    the kind the rest of this module exists to prevent."""
+    from app.api.chat import _DEAD_END_FALLBACK
+
+    assert "search" not in _DEAD_END_FALLBACK.lower()
+    assert "look that up" not in _DEAD_END_FALLBACK.lower()

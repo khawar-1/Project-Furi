@@ -124,6 +124,7 @@ SPOKEN_STEPS: dict[str, Callable[[dict], str]] = {
     # --- files -------------------------------------------------------------
     "create_file": lambda p: f"create a file called {_base(p.get('path'))}{_where(p.get('path'))}",
     "create_folder": lambda p: f"create a folder called {_base(p.get('path'))}",
+    "open_folder": lambda p: f"open the {_base(p.get('path'))} folder on screen",
     "move_file": lambda p: (
         f"move {_base(p.get('source'))} into {_base(p.get('destination'))}"
     ),

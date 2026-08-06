@@ -875,16 +875,16 @@ def is_browse_followup(goal: str) -> bool:
 # ======================================================== LLM confirmation
 
 _CLASSIFY_PROMPT = """You route messages for Jarvis OS, a personal AI that can act on the user's computer and accounts with exactly these tool groups:
-- FILES/SYSTEM: search/read/list files and folders, create/move/rename/delete files, run terminal commands and scripts, recall Jarvis's OWN past actions from its audit log (what it created, deleted, moved, sent, or ran), find a saved document by its CONTENT or topic rather than its name, and search the user's OWN past conversations with Jarvis by what was discussed in them.
+- FILES/SYSTEM: search/read/list files and folders, OPEN A FOLDER in a file-explorer window on screen (or show the user where a file lives), create/move/rename/delete files, run terminal commands and scripts, recall Jarvis's OWN past actions from its audit log (what it created, deleted, moved, sent, or ran), find a saved document by its CONTENT or topic rather than its name, and search the user's OWN past conversations with Jarvis by what was discussed in them.
 - EMAIL: search and read Gmail; draft, send, or reply to email.
 - CALENDAR: list/find Google Calendar events; create, update, or delete events.
 - WEB: search the web and open/read a web page to look up online information.
 - HOME: read and control the devices in the user's home through their Home Assistant hub — lights, switches, fans, locks, covers/blinds, thermostats, media players, and the scenes they have defined.
 - DESKTOP: see and control THIS computer — list, focus or close open windows, open an installed application, set the system volume or mute it, send play/pause/next to whatever is playing, take a screenshot, read or replace the clipboard.
-- BROWSE: drive a real web browser to ACT on a live site the user names — play or watch a video (YouTube and the like), sign in to a site and navigate it, open something in a web app (a repo on GitHub, a page in an account), or fill in and submit a web form (e.g. apply to jobs).
+- BROWSE: drive a real web browser to ACT on a live site the user names, or stop something it is already playing — play or watch a video (YouTube and the like), sign in to a site and navigate it, open something in a web app (a repo on GitHub, a page in an account), or fill in and submit a web form (e.g. apply to jobs).
 
 Reply with EXACTLY one word:
-TASK — asks Jarvis to perform a FILES/SYSTEM action now, OR asks what Jarvis ITSELF did on the machine (the folder/file it created, what it deleted, what it has done today), OR asks Jarvis to FIND something it has stored: a document by what it is about, or what was said in an earlier conversation.
+TASK — asks Jarvis to perform a FILES/SYSTEM action now, INCLUDING opening a folder on screen ("open my downloads folder", "show me the phase3test folder", "where does that file live"), OR asks what Jarvis ITSELF did on the machine (the folder/file it created, what it deleted, what it has done today), OR asks Jarvis to FIND something it has stored: a document by what it is about, or what was said in an earlier conversation.
 EMAIL — asks Jarvis to search, read, draft, send, or reply to email now.
 CALENDAR — asks Jarvis to look at or change calendar events now.
 WEB — asks Jarvis to search the web or open/read a web page now, OR asks a factual question better answered from the live internet than from stale built-in knowledge. This covers two cases: (a) anything CURRENT or time-sensitive (news, release dates, upcoming seasons or products, prices, scores, weather), and (b) a factual question about a SPECIFIC real-world entity — a person, company, product, place, organization, or a creative work such as a show, anime, movie, game, or book ("what do you know about Black Clover", "who is the CEO of X", "tell me about the Framework laptop"). Jarvis looks these up rather than guessing, promising, or reciting possibly-outdated training data.
@@ -925,6 +925,22 @@ One word (TASK, EMAIL, CALENDAR, WEB, HOME, DESKTOP, BROWSE, or CHAT) — and fo
 # telemetry and is the clean seam for future per-domain handlers.
 _ACTION_LABELS = ("TASK", "EMAIL", "CALENDAR", "WEB", "HOME", "DESKTOP", "BROWSE")
 
+# See the cap's reasoning at the call site. A FLOOR, never a target: it bounds
+# how much the model may THINK before answering, and the answer itself is one
+# or two words.
+_CLASSIFY_MAX_TOKENS = 1024
+
+# Appended on the retry only. The model is told what went wrong with its last
+# reply, the way browser/loop.py `_decide` does — a bare repeat of the same
+# prompt is a coin flip, while naming the failure makes the second attempt
+# meaningfully different from the first.
+_CLASSIFY_RETRY_NUDGE = (
+    "\n\nYour previous reply was empty or did not begin with one of the "
+    "allowed words. Reply now with EXACTLY one of: TASK, EMAIL, CALENDAR, "
+    "WEB, HOME, DESKTOP, BROWSE, CHAT — optionally followed by INLINE or "
+    "DELEGATE. No explanation, no reasoning, nothing else."
+)
+
 # Shown to the classifier when the conversation has earlier turns. A message
 # is part of a conversation, not an island: "its in my downloads folder" after
 # a failed delete is the user steering that task, not small talk (live bug
@@ -944,8 +960,9 @@ async def _classify_message(
     """One tiny temperature-0 call returning (label, mode): label is a routing
     label ("TASK"/"EMAIL"/"CALENDAR"/"WEB"/"HOME"/"DESKTOP"/"BROWSE"/"CHAT"), mode is
     "INLINE" (a quick read answered in this turn) or "DELEGATE" (real work handed
-    to a background agent). Any failure — an exception OR an unrecognized reply —
-    means ("CHAT", "DELEGATE") (fail open): the message flows into the untouched
+    to a background agent). A failure — an exception OR an unrecognized reply —
+    is RETRIED once (see the call site) and, if it fails again, means
+    ("CHAT", "DELEGATE") (fail open): the message flows into the untouched
     Phase 2 chat path, never a broken action route. A recognized action label
     with no/blank mode defaults to DELEGATE — chat is never left blocked, and a
     quick read mis-tagged DELEGATE only costs one extra notification (both paths
@@ -954,6 +971,9 @@ async def _classify_message(
         _CLASSIFY_CONTEXT_TEMPLATE.format(context=context) if context else ""
     )
     model = getattr(provider, "model_name", None)
+    # Started BEFORE the retry loop on purpose: `classifier_ms` is the latency
+    # the TURN actually paid, not one attempt's. So a p50 that jumps in the
+    # audit means retries are firing, which is the signal worth seeing.
     started = time.perf_counter()
 
     def _stamp(label: str, mode: str, error: Optional[str] = None) -> tuple[str, str]:
@@ -970,41 +990,96 @@ async def _classify_message(
         )
         return label, mode
 
-    try:
-        response = await provider.chat(
-            messages=[LLMMessage(
-                role="user",
-                content=_CLASSIFY_PROMPT.format(
-                    message=message, context_block=context_block
-                ),
-            )],
-            temperature=0.0,
-            # NOT a tiny cap: on thinking models (gemini-2.5-*) reasoning
-            # tokens count against max_tokens, so 8 produced ZERO output
-            # (finish_reason=MAX_TOKENS) and EVERY message fell open to chat —
-            # Jarvis stopped doing tasks entirely on Gemini (found 2026-07-13).
-            # The parser only reads the first word; temp-0 keeps replies short.
-            max_tokens=512,
-        )
-    except Exception as e:
-        logger.warning(f"Message classification failed — treating as chat: {e}")
-        return _stamp("CHAT", "DELEGATE", error=f"{type(e).__name__}: {e}"[:256])
-    reply = response.content.strip().upper()
-    for label in _ACTION_LABELS:
-        if reply.startswith(label):
-            # Mode is the second word; anything but an explicit INLINE (or a
-            # blank/garbled mode) falls to DELEGATE — the safe UX default.
-            mode = "INLINE" if "INLINE" in reply else "DELEGATE"
-            return _stamp(label, mode)
-    # A reply starting with CHAT is a real judgement; anything else (blank,
-    # garbled, a thinking model that spent its budget) is a FAILURE wearing the
-    # same fail-open clothes. Recorded apart, because a rising rate of the
-    # second is a provider/model problem, not a prompt one.
-    if reply.startswith("CHAT"):
-        return _stamp("CHAT", "DELEGATE")
-    return _stamp(
-        "CHAT", "DELEGATE", error=f"unrecognized reply: {reply[:60]!r}"
-    )
+    prompt = _CLASSIFY_PROMPT.format(message=message, context_block=context_block)
+
+    # ⚠️ ONE RETRY, AND ONLY FOR THE FAILURE CLASSES (2026-08-06). Live: "furi
+    # open fomi folder" spent 7384ms and came back EMPTY, so routing fell open
+    # to chat and the user was told to rephrase. The audit row already told
+    # these apart — fail_open_reason was `classifier_error`, not
+    # `classifier_chat` — so the distinction was RECORDED and then acted on
+    # nowhere: the most consequential LLM call in the product treated "the
+    # model judged this conversation" and "the call produced nothing" as the
+    # same outcome.
+    #
+    # An empty string is what a reasoning model returns when the cap runs out
+    # mid-thought, and this provider's temp-0 is not deterministic — so it is
+    # plausibly transient, which is exactly the argument browser/loop.py
+    # `_decide` made for its own one-retry on 2026-07-24. A clean CHAT is
+    # deliberately NOT retried: that is a judgement the model made with the
+    # whole conversation in view, not a hiccup, and retrying it would double
+    # the cost of every ordinary conversational turn.
+    last_error: Optional[str] = None
+    for attempt in (1, 2):
+        try:
+            response = await provider.chat(
+                messages=[LLMMessage(
+                    role="user",
+                    content=prompt if attempt == 1 else prompt + _CLASSIFY_RETRY_NUDGE,
+                )],
+                temperature=0.0,
+                # NOT a tiny cap: on thinking models reasoning tokens count
+                # against max_tokens, so 8 produced ZERO output
+                # (finish_reason=MAX_TOKENS) and EVERY message fell open to chat
+                # — Jarvis stopped doing tasks entirely on Gemini (2026-07-13).
+                #
+                # RAISED 512 → 1024 (2026-08-06), self-inflicted in the same way
+                # the browse decision cap was: this prompt gained two whole tool
+                # groups (HOME, DESKTOP) on 2026-08-04 while the cap had not
+                # moved since 2026-07-13. A richer catalog raises the reasoning
+                # cost of USING it, so the cap has to move with it. The cap
+                # bounds thinking, not output — the parser reads the first word
+                # and temp-0 keeps replies short, so a normal call is unchanged.
+                max_tokens=_CLASSIFY_MAX_TOKENS,
+            )
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"[:256]
+            logger.warning(
+                f"Message classification call failed (attempt {attempt}): {e}"
+            )
+            if attempt == 2:
+                return _stamp("CHAT", "DELEGATE", error=last_error)
+            continue
+
+        def _recovered(verdict: str) -> None:
+            """A verdict reached on attempt 2 means attempt 1 failed. The audit
+            column deliberately does NOT record that (it would mark a
+            successful classification as a fail-open, destroying the very
+            distinction this round restored) — so the log is the only place a
+            rising retry rate is visible, and BOTH outcomes have to say it. A
+            recovered CHAT is otherwise indistinguishable from a first-try
+            CHAT, which is exactly the blindness that let this incident sit."""
+            if attempt == 2:
+                logger.warning(
+                    "Routing classifier RECOVERED on retry (first reply was "
+                    f"unusable: {last_error}) — verdict {verdict}. A rising "
+                    "rate here is a provider/model problem, not a prompt one."
+                )
+
+        reply = response.content.strip().upper()
+        for label in _ACTION_LABELS:
+            if reply.startswith(label):
+                # Mode is the second word; anything but an explicit INLINE (or a
+                # blank/garbled mode) falls to DELEGATE — the safe UX default.
+                mode = "INLINE" if "INLINE" in reply else "DELEGATE"
+                _recovered(label)
+                return _stamp(label, mode)
+        # A reply starting with CHAT is a real judgement; anything else (blank,
+        # garbled, a thinking model that spent its budget) is a FAILURE wearing
+        # the same fail-open clothes. Recorded apart, because a rising rate of
+        # the second is a provider/model problem, not a prompt one.
+        if reply.startswith("CHAT"):
+            _recovered("CHAT")
+            return _stamp("CHAT", "DELEGATE")
+
+        last_error = f"unrecognized reply: {reply[:60]!r}"
+        logger.warning(f"Routing classifier returned no verdict (attempt {attempt}): {last_error}")
+
+    # Both attempts failed. `classifier_error` is stamped ONLY here and on the
+    # exception path, so `fail_open_reason` keeps meaning exactly what the
+    # routing table was built to distinguish; a RECOVERED retry is reported in
+    # the log above rather than this column, which would otherwise mark a
+    # successful classification as a failure.
+    return _stamp("CHAT", "DELEGATE", error=last_error)
 
 
 # ======================================================== background intent
@@ -1691,28 +1766,41 @@ def plan_run_events(
     return event_generator()
 
 
-async def rescue_web_turn(
+async def rescue_unrouted_turn(
     goal: str,
     request: ChatRequest,
     session_id: str,
     db: AsyncSession,
     provider: LLMProvider,
 ):
-    """Re-run a chat turn as a plan after the chat model itself admitted the
-    answer needs a web lookup (chat.py's `_DEAD_END_OFFER_RE`).
+    """Re-run a chat turn as a plan after the chat model itself admitted it
+    needs a capability chat does not have (chat.py's `_DEAD_END_OFFER_RE`) —
+    a web lookup, or any action it just asked the user to re-say.
+
+    RENAMED from `rescue_web_turn` (2026-08-06). Only the name and the trigger
+    were ever web-shaped: the body below runs the GENERAL planner on the goal
+    with the full tool catalog and always could have opened a folder, read
+    mail or driven a browser. The web-only vocabulary in `_DEAD_END_OFFER_RE`
+    was the whole limit, and it left every other capability dead-ending on a
+    magic-word demand.
 
     Deliberately does NOT re-classify. Routing already had its chance at this
     message and got it wrong — that failure is the entire reason this path
     exists, and asking the same classifier the same question a second time
-    would just buy the same answer. The model's own "ask me to search" IS the
-    label, and it is a better one: it was produced with the whole
-    conversation, the memory context, and its own knowledge in view.
+    would just buy the same answer. (Where the classifier FAILED rather than
+    judged, `_classify_message` has already retried it once, which is the
+    cheaper and earlier fix; this is the net under everything that survives
+    it.) The model's own admission IS the label, and it is a better one: it
+    was produced with the whole conversation, the memory context, and its own
+    knowledge in view.
 
     Everything downstream is the ordinary task path — same planner, same
-    registry, same structural approval gate. `web_search` and `read_webpage`
-    are READ tools, so a rescued turn cannot write anything; and if the
-    planner drafts a write step anyway, it pauses for approval exactly as it
-    would have on the front door. A rescue widens recall, never authority."""
+    registry, same structural approval gate. A rescued turn therefore has
+    exactly the authority the front door would have given it: a read runs, and
+    a write PAUSES for approval on a card the user must click. Widening the
+    trigger past web widens RECALL, never authority — the same property that
+    lets a scheduled routine or an accepted suggestion re-derive a plan from a
+    goal string safely."""
     conversation = conversation_context(request)
     memory = await planner_memory_context(db, goal)
 
@@ -1726,6 +1814,12 @@ async def rescue_web_turn(
         persist_user=False,
     ):
         yield sse
+
+
+# The pre-2026-08-06 name, kept because this module's public shape is what
+# tests and callers patch (the `_deterministic_text` / `_summarize_completed`
+# convention above). It was never web-specific in behaviour.
+rescue_web_turn = rescue_unrouted_turn
 
 
 # ================================================================ rendering

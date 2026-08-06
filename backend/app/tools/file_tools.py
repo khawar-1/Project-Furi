@@ -5,6 +5,7 @@ Tools over the local filesystem:
   search_files    READ         find files/folders by name, extension, date, size
   read_file       READ         read a text file's contents
   list_directory  READ         list a directory's entries
+  open_folder     WRITE        show a folder in the file explorer window
   move_file       WRITE        move a file to a new location
   move_files      WRITE        move MANY files into one folder (batch)
   rename_file     WRITE        rename a file or folder in place
@@ -31,6 +32,7 @@ Safety model (enforced here, before any filesystem access):
 import asyncio
 import os
 import shutil
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -714,6 +716,153 @@ class CreateFolderTool(BaseTool):
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path of the folder to create"},
+                },
+                "required": ["path"],
+            },
+            permission_level=self.permission_level,
+        )
+
+
+# ------------------------------------------------------------- open a folder
+#
+# ⚠️ THE INVARIANT THAT KEEPS THIS TOOL OUT OF DESTRUCTIVE: what is handed to
+# the OS is ALWAYS A DIRECTORY. A file path opens the folder CONTAINING it, so
+# this tool can only ever put a file-explorer window on screen — it never opens
+# a document in its handler and never executes anything.
+#
+# That bound is the whole design, and it is the `launch_app` argument applied
+# one tool over: a thin ShellExecute over a model-supplied path is `run_command`
+# with the approval gate weakened, which is strictly worse than `run_command`.
+# `os.startfile("setup.exe")` RUNS it; `os.startfile("payload.bat")` RUNS it.
+# Resolving to the parent directory removes that surface in code rather than
+# policing it with an extension allowlist — a hand-kept list would be the
+# seventh instance of the "a second copy of a list is a hole" defect, and
+# handlers for "safe" types (.pdf, .html) have their own history.
+#
+# The cost, stated rather than discovered later: the file is not HIGHLIGHTED in
+# the window. Windows can do that with `explorer /select,<path>`, but only as a
+# single argv token whose quoting breaks on paths containing spaces unless it
+# goes through a shell — and a shell is exactly what must not be here. Opening
+# the containing folder answers "where does this live" with no fragile
+# mechanism; highlighting can be added later without changing the invariant.
+
+def _default_open_launcher(folder: Path) -> None:
+    """Show a directory in the platform's file manager.
+
+    Every caller path resolves to a DIRECTORY before reaching here (see
+    `_folder_to_show`), which is what makes `os.startfile` safe: ShellExecute on
+    a directory invokes the folder's open verb, never a program.
+
+    Exit codes are deliberately NOT checked. `explorer.exe` conventionally exits
+    non-zero even when it has opened the window perfectly well, and treating
+    that as failure is the live defect this tool exists to remove — Jarvis used
+    to open the folder through `run_command` and then report the step FAILED.
+    A launcher that cannot start at all raises, and that is the real failure.
+    """
+    if os.name == "nt":
+        os.startfile(str(folder))  # noqa: S606 — a directory, never a command
+        return
+    import subprocess
+
+    # argv form, shell=False: the path is an argument, never parsed as syntax.
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen(  # noqa: S603 — fixed program name, path passed as argv
+        [opener, str(folder)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+#: Test seam (the DESKTOP_CONTROLLER_FACTORY / SESSION_FACTORY idiom). A
+#: conftest autouse fixture points this at a refusing stub so no test can put a
+#: real window on the developer's screen.
+OPEN_LAUNCHER = _default_open_launcher
+
+
+def _folder_to_show(path: Path) -> Path:
+    """The directory this tool will open. A file resolves to its parent — the
+    single line that makes "never execute anything" true by construction."""
+    return path if path.is_dir() else path.parent
+
+
+@register_tool
+class OpenFolderTool(BaseTool):
+    """Open a folder in the file explorer.
+
+    The gap this closes (2026-08-06): "open my downloads folder" had no tool at
+    all. It landed on `list_directory`, which prints the contents into the chat
+    when the user asked for a WINDOW — or, following plan rule 25's own advice
+    to "use run_command for anything else", on a DESTRUCTIVE shell-command
+    approval card for opening a folder, which then reported FAILED because
+    `explorer.exe` exits non-zero on success.
+    """
+
+    @property
+    def name(self) -> str:
+        return "open_folder"
+
+    @property
+    def permission_level(self) -> PermissionLevel:
+        # WRITE, not DESTRUCTIVE: it puts a window on screen showing files the
+        # user already has access to, and changes nothing. It is not READ
+        # either — it acts on the world outside the chat, so it passes the
+        # approval gate like any other write.
+        return PermissionLevel.WRITE
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        try:
+            path = _resolve_path(kwargs.get("path"))
+        except ValueError as e:
+            return _fail(self, str(e))
+        if reason := _blocked_reason(path):
+            return _fail(self, reason)
+        return await asyncio.to_thread(self._open, path)
+
+    def _open(self, path: Path) -> ToolResult:
+        if not path.exists():
+            return _fail(
+                self,
+                f"'{path}' does not exist, so there is no folder to open. "
+                f"Search for it by name first (search_files with "
+                f"include_folders=true) and open the path that search returns.",
+            )
+        folder = _folder_to_show(path)
+        # A file directly under a filesystem root would resolve its parent to
+        # that root, which _blocked_reason refuses for the path itself.
+        if reason := _blocked_reason(folder):
+            return _fail(self, reason)
+        try:
+            OPEN_LAUNCHER(folder)
+        except Exception as e:  # noqa: BLE001 — a launcher failure is the tool's
+            return _fail(self, f"Could not open '{folder}': {type(e).__name__}: {e}")
+        return _ok(self, {
+            "opened": str(folder),
+            "requested": str(path),
+            # True when the user named a FILE and we showed its folder instead.
+            # Surfaced so the outcome text can say so rather than implying the
+            # file itself was opened.
+            "showed_containing_folder": folder != path,
+        })
+
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description=(
+                "Open a folder in the user's file explorer window. Given a FILE "
+                "path it opens the folder CONTAINING that file. It only ever "
+                "opens a folder window: it cannot open a document in its "
+                "application and cannot run a program (use launch_app for an "
+                "installed application, read_file to read a file's contents). "
+                "This is the ONLY way to open a folder — never use a shell "
+                "command such as explorer or start."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Folder to open, or a file whose folder should be opened",
+                    },
                 },
                 "required": ["path"],
             },

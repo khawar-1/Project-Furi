@@ -66,7 +66,7 @@ AGENTS: dict[str, AgentSpec] = {
     "file": _spec(
         "file", "File agent", "TASK",
         {"move_file", "move_files", "rename_file", "create_folder", "create_file",
-         "delete_file", "delete_files", "run_command", "execute_script"},
+         "delete_file", "delete_files", "open_folder", "run_command", "execute_script"},
         "You are Jarvis's file & system agent: you work with the user's files, "
         "folders, and terminal. Stay within file/system work; use your read "
         "tools to locate things before you change them.",
@@ -111,9 +111,13 @@ AGENTS: dict[str, AgentSpec] = {
     ),
     "desktop": _spec(
         "desktop", "Desktop agent", "DESKTOP",
+        # open_folder is a FILE tool, carried here too because "open my
+        # downloads folder" can land on either agent depending on which gate
+        # tier fires — and an agent that cannot open a folder would fall back
+        # to run_command, which is the defect it exists to remove.
         {"list_windows", "focus_window", "close_window", "launch_app",
          "set_volume", "media_key", "take_screenshot",
-         "read_clipboard", "write_clipboard"},
+         "read_clipboard", "write_clipboard", "open_folder"},
         "You are Jarvis's desktop agent: you work with the windows, "
         "applications, sound and clipboard on THIS machine. ALWAYS list the "
         "windows first and use a PENDING placeholder for a window handle — "

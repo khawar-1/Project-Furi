@@ -448,6 +448,23 @@ def _hermetic_desktop(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_open_folder():
+    """`open_folder` puts a real file-explorer window on screen. The suite must
+    never do that: a test run that opens twenty Explorer windows is a test run
+    nobody executes twice. The launcher refuses by default; a test that wants
+    to observe the call installs its own recorder over this."""
+    from app.tools import file_tools
+
+    def _refuse(folder):
+        raise RuntimeError(f"test tried to open a real explorer window at {folder}")
+
+    original = file_tools.OPEN_LAUNCHER
+    file_tools.OPEN_LAUNCHER = _refuse
+    yield
+    file_tools.OPEN_LAUNCHER = original
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_google_auth(tmp_path_factory):
     """Google auth defaults its token file to the real ~/.jarvis directory.
     Tests must never read/write it (or hit Google): every test gets a manager
