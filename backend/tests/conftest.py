@@ -105,6 +105,59 @@ def _hermetic_reading_enumerator():
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_season():
+    """The browse loop asks season.resolve_latest_season which season is airing
+    whenever a goal wants the LATEST episode, and that costs a provider call.
+
+    The SAME isolation hazard as _hermetic_reading_enumerator above, and it broke
+    the same shape of test the day it shipped: `test_latest_episode_flow_web_
+    number_then_url_swap` asserts `provider.calls == 0` to prove the URL swap is
+    deterministic, and the season call (plus its retry) silently ate two scripted
+    responses and made it 2. Default to "the web does not know", which is the
+    documented fall-back path — every existing latest-episode test then behaves
+    exactly as it did before this module existed. Season tests patch it."""
+    from app.browser import season as browse_season
+
+    real = browse_season.resolve_latest_season
+
+    async def _no_season(title, provider, *, today="", rows=None):
+        return None
+
+    browse_season.resolve_latest_season = _no_season
+    yield
+    browse_season.resolve_latest_season = real
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_series_api():
+    """`season.resolve_latest_season` now asks a CATALOG API before reading prose,
+    so the suite gains a second way to reach the network — one that needs no
+    provider and therefore no scripted response to give it away.
+
+    `_hermetic_season` above already covers every test that goes through the loop,
+    but that is isolation by ACCIDENT: it stubs the caller, so the moment a test
+    patches the season resolver back (which season tests do, by design) the real
+    HTTP path is live again. This fixture stubs the TRANSPORT, so no arrangement
+    of the two can reach api.anilist.co or themoviedb.org. Both factories default
+    to "this catalog knows nothing", which is the documented fall-back. Tests that
+    exercise a catalog install their own."""
+    from app.browser import series_api
+
+    anilist, tmdb = series_api.ANILIST_FACTORY, series_api.TMDB_FACTORY
+
+    async def _no_anilist(search):
+        return []
+
+    async def _no_tmdb(path, params):
+        return {}
+
+    series_api.ANILIST_FACTORY = _no_anilist
+    series_api.TMDB_FACTORY = _no_tmdb
+    yield
+    series_api.ANILIST_FACTORY, series_api.TMDB_FACTORY = anilist, tmdb
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_folder_resolver(tmp_path_factory):
     """The same-named-folder guard probes the machine's home + drive roots for
     duplicate well-known folders. Tests must never touch real drives: every

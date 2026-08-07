@@ -125,3 +125,35 @@ def reset_cuda_probe() -> None:
     """Test hook: forget the cached probe result (not the DLL registration)."""
     global _cuda_available
     _cuda_available = None
+
+
+#: Logical cores deliberately left to the rest of the machine. Jarvis is a
+#: desktop app sharing a laptop with the user's real work, not a batch job that
+#: owns the box.
+_RESERVED_CORES = 2
+
+
+def cpu_worker_threads() -> int:
+    """How many threads a local inference engine may use on the CPU path.
+
+    WHY THIS EXISTS. voice_stt and voice_tts each asked for `os.cpu_count()` —
+    on this machine 16 — so a single transcription or one spoken sentence could
+    claim every logical core. Worse, they reach the CPU path by SILENT FALLBACK:
+    a CUDA init failure is caught and retried on CPU, so a VRAM squeeze on a
+    6 GB laptop GPU converts itself into a whole-machine CPU saturation event,
+    which is what "the laptop gets stuck" actually is.
+
+    `os.cpu_count()` also returns LOGICAL processors, while voice_stt's comment
+    claimed it was using physical cores — 2x its own stated intent on any SMT
+    part. Hyper-threads share execution resources, so for compute-bound
+    inference the second thread on a core buys little and costs contention.
+
+    So: half the logical count (a reasonable stand-in for physical cores with no
+    new dependency), minus headroom, floored at 1. On 16 logical -> 6.
+
+    This bounds ENGINE threads only. It is not a global cap: the shared
+    asyncio.to_thread executor and fastembed are untouched.
+    """
+    logical = os.cpu_count() or 4
+    physical_ish = max(1, logical // 2)
+    return max(1, physical_ish - _RESERVED_CORES) if physical_ish > _RESERVED_CORES else max(1, physical_ish)

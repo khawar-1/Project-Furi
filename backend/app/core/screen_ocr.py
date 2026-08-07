@@ -31,7 +31,26 @@ def _default_ocr_factory() -> Callable[[bytes], str]:
     capture, on an opted-in machine, loads the model."""
     from rapidocr_onnxruntime import RapidOCR  # heavy: onnxruntime + models
 
-    engine = RapidOCR()
+    from app.core.gpu_bootstrap import cpu_worker_threads
+
+    # RapidOCR was built with NO thread arguments, so onnxruntime applied its
+    # default of one intra-op thread per core — across THREE graphs (detection,
+    # classification, recognition). A screen capture fires every 30s and again
+    # on every foreground-window change, so that is a repeated full-core burst
+    # on a machine the user is trying to work on. RapidOCR exposes per-graph
+    # thread counts as constructor kwargs; they are passed defensively because
+    # the names are version-dependent and a capture must never fail over a
+    # tuning knob (the lazy-import discipline this factory already follows).
+    threads = cpu_worker_threads()
+    try:
+        engine = RapidOCR(
+            det_intra_op_num_threads=threads,
+            cls_intra_op_num_threads=threads,
+            rec_intra_op_num_threads=threads,
+        )
+    except TypeError:
+        logger.debug("RapidOCR does not accept thread kwargs; using its defaults.")
+        engine = RapidOCR()
 
     def _run(image_bytes: bytes) -> str:
         # RapidOCR accepts encoded image bytes directly; result is a list of

@@ -67,6 +67,14 @@ class FakePage:
         # order (default: a page with no media).
         self.evaluate_results = []
         self.evaluate_calls = 0
+        # A real Page can be CLOSED, and code that refuses a tab closes it. A fake
+        # without this cannot tell "refused and closed" from "refused and left
+        # lying around" — the 2026-08-03 lesson that a fake which cannot express
+        # the contract passes whichever way the code goes.
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
 
     async def route(self, pattern, handler):
         self.routes.append((pattern, handler))
@@ -2075,6 +2083,53 @@ async def test_an_adopted_popup_is_still_guarded(fake_browser):
         == "abort"
     )
     assert session.stats.blocked_mutations == 1
+
+
+async def test_an_ad_popup_is_never_adopted(fake_browser):
+    """THE 2026-08-07 INCIDENT. A click on anikoto's episode-range selector opened
+    a pop-under to getsmartyapp.com; this session FOLLOWED it and closed the
+    anikoto page, so the loop stood on an ad, spent an LLM decision on its DOM,
+    and had to navigate all the way back — ~180s of a 391s run.
+
+    `blocked_ads` was 0, because the host is not in the hand-kept `_AD_HOSTS`
+    list, and it never could have been. The right test is not "is this an ad?" but
+    "may we be here at all?" — Rule 3 already refuses a main-frame navigation to a
+    non-allowlisted host, so a tab sitting on one is somewhere this session is
+    forbidden to go, and adopting it was incoherent."""
+    session = await _session()
+    original = session.page
+    ad = FakePage(url="https://www.getsmartyapp.com/landers/lander39.php?sid=1")
+
+    await session._adopt_new_page(ad)
+
+    assert session.page is original, "the ad must not become the active page"
+    assert ad.closed is True, "and the tab it opened is closed, not left behind"
+    assert session.stats.blocked_ads == 1
+
+
+async def test_a_blank_new_tab_is_not_refused_but_does_not_take_the_page(fake_browser):
+    """The permissive direction, and it is deliberate: a target=_blank link opens
+    at about:blank and navigates a moment later, so its destination is not
+    knowable here. It is therefore neither refused nor closed.
+
+    ⚠️ THIS TEST USED TO ASSERT `session.page is blank`, AND THAT WAS THE
+    2026-08-07 ROUND-2 INCIDENT WRITTEN DOWN AS AN EXPECTATION. Taking over on a
+    promise meant closing the page we were driving for a tab that had said
+    nothing yet, and a pop-under arrives in exactly that shape. The guard still
+    goes on immediately; only the take-over waits."""
+    session = await _session()
+    original = session.page
+    blank = FakePage(url="about:blank")
+
+    await session._adopt_new_page(blank)
+
+    assert session.stats.blocked_ads == 0, "a blank tab is not an ad — nothing is refused"
+    assert blank.closed is False, "and it is not closed either"
+    assert session.page is original, "but it has not earned the page we are driving"
+    assert blank.routes or session._cdp_sessions, "it IS guarded from its first request"
+
+    for task in list(session._deferred_adopts):
+        task.cancel()
 
 
 class _PopupPage(FakePage):

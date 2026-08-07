@@ -141,9 +141,15 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
     assert tools["lookup_contact"]["permission_level"] == "read"
     assert tools["create_file"]["permission_level"] == "write"
     assert tools["create_folder"]["permission_level"] == "write"
-    # WRITE, not DESTRUCTIVE: open_folder can only ever put a folder window on
-    # screen (a FILE path opens its parent), so it executes nothing.
-    assert tools["open_folder"]["permission_level"] == "write"
+    # READ (2026-08-06): open_folder puts a window on screen showing files the
+    # user already has. `list_directory` right above is READ and pulls that
+    # folder's whole contents into an LLM prompt — the gate cannot coherently
+    # guard the lesser act and wave through the greater. It executes nothing:
+    # a FILE path opens its PARENT, so the OS only ever receives a directory.
+    assert tools["open_folder"]["permission_level"] == "read"
+    # ...while launch_app stays WRITE, and the contrast is the whole line:
+    # that one RUNS an installed program, which can do anything its user can.
+    assert tools["launch_app"]["permission_level"] == "write"
     assert tools["delete_file"]["permission_level"] == "destructive"
     # The batch twins must carry the SAME level as their singular form — a
     # bulk delete is no less destructive for being one step.

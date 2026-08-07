@@ -103,6 +103,7 @@ from app.agents import browser_grounding
 from app.browser import choice
 from app.browser import extract as browser_extract
 from app.browser import publicsuffix
+from app.browser import season as browse_season
 from app.browser import trace as browse_trace
 from app.core import dom_observe
 from app.providers.base import LLMMessage, LLMProvider
@@ -724,12 +725,27 @@ _TRAIL_QUALIFIER_RE = re.compile(rf"(?:\s+{_QUALIFIER_NUM})+\s*$", re.IGNORECASE
 # bare "\w+ " — an arbitrary word slot would eat a real title word. None of these
 # words begins a real anime/show title, so titles stay safe.
 _RELEASE_ADJ = r"(?:released|aired|airing|available|uploaded|dubbed|subbed|out)\s+"
+# ⚠️ REPEATED, like _LEAD_QUALIFIER_RE above — an ordinal chain can STACK.
+# "play latest episode of latest season of bleach" is one ordinal naming a
+# position INSIDE another, and a single-shot strip left "latest season of
+# bleach" as the title (live 2026-08-07). That is not merely an ugly search
+# term: it is the input to _resolve_latest_episode's web query AND to
+# _latest_series_action's token-subset test, and {latest, season, of, bleach}
+# can never be a subset of a `bleach-…` slug — so the whole latest-episode
+# path switched itself off silently. The numeric sibling has always been
+# repeated ("ep 4 of season 2 of X"); the worded one simply was not.
+# MEASURED 9/9: the stacked case reduces to "bleach" while every title-safety
+# case ("The Last of Us", "The First Slam Dunk", "The Last Airbender") is
+# untouched — the chain still only strips when a media word FOLLOWS the
+# ordinal, so a real title beginning with one is never eaten.
 _LEAD_ORDINAL_RE = re.compile(
-    r"^\s*(?:the\s+)?"
+    r"^\s*(?:"
+    r"(?:the\s+)?"
     r"(?:last|latest|newest|final|first|next|previous|prev|most\s+recent)\s+"
     rf"(?:{_RELEASE_ADJ})?"
     r"(?:episodes?|eps?|epi|seasons?|parts?|chapters?|volumes?|vol|ova)\b"
-    r"\s*(?:of\s+)?",
+    r"\s*(?:of\s+)?"
+    r")+",
     re.IGNORECASE,
 )
 # The "s2e4" shorthand, plus a trailing "of" it may connect to ("s2e1 of X").
@@ -1214,6 +1230,12 @@ def _episode_action(goal: str, obs: dom_observe.Observation) -> Optional[dict]:
 # success, it falls back. Grounded on /ep-N slugs, never page text, so the
 # reverted "grabbed a year" heuristic's failure cannot recur.
 _LATEST_WEB_WAIT = 15.0  # seconds — one bounded await for the concurrent search.
+# The SEASON read is a search plus an 8192-token model call — MEASURED at 30-60s,
+# far longer than the episode-number search. It is therefore polled across steps
+# rather than awaited once (see _season), and each poll gets only a short slice:
+# the page is what the loop should be spending its time on, and every step that
+# passes is time the search got for free.
+_SEASON_STEP_WAIT = 4.0
 
 # Guidance appended to the decision goal for a "latest/newest episode" task
 # (2026-07-25) — how a person reaches the newest thing, no per-site code. Two
@@ -1260,6 +1282,29 @@ def _wants_latest_episode(goal: str) -> bool:
     if _target_episode(goal):
         return False
     return bool(_LATEST_EPISODE_RE.search(goal or ""))
+
+
+# "the latest SEASON" specifically — a strictly narrower ask than "the latest
+# episode", and the two need opposite treatment of an ABSOLUTE episode number.
+_LATEST_SEASON_RE = re.compile(
+    r"\b(?:the\s+)?(?:last|latest|newest|final|current|most\s+recent)\s+"
+    rf"(?:{_RELEASE_ADJ})?"
+    r"seasons?\b",
+    re.IGNORECASE,
+)
+
+
+def _wants_latest_season(goal: str) -> bool:
+    """True when the goal names a SEASON, not just an episode.
+
+    ⚠️ THIS PREDICATE EXISTS TO KEEP THE BLAST RADIUS SMALL, and that is the point
+    of it. A catalog lists each cour as its own entry whose episodes restart at 1,
+    so for a season goal an absolute series number is meaningless BY DEFINITION —
+    while for "the latest episode of black clover" that same number is the whole
+    feature (the hidden 101-170 range, live 2026-07-25). Everything this gate
+    controls is therefore scoped to goals that said "season" out loud; a goal that
+    did not is byte-identical to before."""
+    return bool(_LATEST_SEASON_RE.search(goal or ""))
 
 
 async def _resolve_latest_episode(title: str) -> Optional[int]:
@@ -1425,6 +1470,56 @@ def _series_slug(href: str) -> Optional[str]:
     if not slug or re.fullmatch(r"ep-\d+", slug, re.IGNORECASE):
         return None
     return slug
+
+
+def _season_entry_action(
+    obs: dom_observe.Observation, title: str, season_name: str
+) -> Optional[dict]:
+    """Open the catalog entry for the season the WEB says is currently airing.
+
+    ⚠️ WHY THIS EXISTS AND WHY IT MUST RUN BEFORE _latest_series_action
+    (2026-08-07). A catalog lists each cour as its OWN entry with its OWN episode
+    numbering restarting at 1, and `_latest_series_action` picks the TIGHTEST
+    slug — fewest tokens beyond the title. That rule is right for "play one piece"
+    (the canonical series beats the movie) and exactly backwards here, because the
+    tightest match is BY CONSTRUCTION the oldest entry. MEASURED on the real
+    anikoto result set for "bleach":
+
+        extra=1  bleach-yaa9n                                 <- tightest WINS
+        extra=6  bleach-thousand-year-blood-war-arc-2izxu
+        extra=9  bleach-…-part-4-the-calamity-…               <- what was asked for
+
+    That is the incident: Bleach (2004) was opened for a "latest season" goal.
+    With a season NAME in hand the question stops being "which entry is
+    canonical?" and becomes "which entry IS this season?", which is a
+    most-tokens-MATCHED test rather than a fewest-EXTRAS one.
+
+    Deliberately returns None rather than guessing: no season name, nothing on the
+    page matching it, or a genuine TIE between two equally-good entries all defer —
+    to `_latest_series_action` and then to the model, which has the season name in
+    its goal. Code never picks between real equals (the house rule)."""
+    if not season_name:
+        return None
+    hrefs: dict[str, str] = {}
+    labels: dict[str, str] = {}
+    for el in obs.elements:
+        slug = _series_slug(el.href or "")
+        if not slug or slug in hrefs:
+            continue
+        hrefs[slug] = urljoin(obs.url or "", el.href)
+        # Score the slug AND the link's visible text: a site may carry the season
+        # in one and not the other ("…/watch/bleach-tybw-4" labelled "Bleach:
+        # Thousand-Year Blood War - The Calamity"), and either alone is enough.
+        labels[slug] = f"{slug.replace('-', ' ')} {el.name or ''}"
+    if not hrefs:
+        return None
+    winner = browse_season.best_entry(list(labels), season_name, title, key=labels.get)
+    if winner is None:
+        return None
+    href = hrefs[winner]
+    if not href or href == (obs.url or ""):
+        return None
+    return {"action": "navigate", "url": href}
 
 
 def _latest_series_action(
@@ -3354,6 +3449,50 @@ def _outcome(
     )
 
 
+def cancel_background_lookups(session: Any) -> None:
+    """Stop the concurrent season / episode lookups a browse may have started.
+
+    ⚠️ THEY MUST NOT OUTLIVE THE PROVIDER THAT SERVES THEM (2026-08-07 round 2).
+    Both are `ensure_future`d so they run alongside the page loading, and both are
+    deliberately parked on the SESSION so they are never garbage-collected
+    mid-flight. Nothing then ever ended them: a browse that finishes early — the
+    live run stopped at a login wall eight seconds in — returns while a lookup is
+    still in flight, and the caller's very next act is to close the browse-local
+    httpx client the lookup is using. The log is unambiguous about the result:
+
+        16:59:50  login wall at anikoto.cz (step 1) — stopping for the user
+        16:59:55  latest-season read failed (deepseek could not be reached
+                  at https://api.deepseek.com (ReadError))
+        16:59:55  latest-season read failed (Cannot send a request, as the
+                  client has been closed.)
+
+    Both halves of that are noise from a task nobody was waiting for, and the
+    retry it triggered was spent against an already-dead client. Cancelling at the
+    same place the provider is closed makes the lifetime explicit instead of
+    accidental. Never raises — this runs in a `finally` on the teardown path, and
+    a cleanup that can throw there would mask the real outcome."""
+    for attr in ("_season_task", "_latest_ep_task"):
+        # ⚠️ `getattr(..., None)` suppresses AttributeError and NOTHING ELSE — a
+        # descriptor that raises anything else propagates straight out of a
+        # function documented as never raising. Caught by
+        # test_cancelling_lookups_never_raises.
+        try:
+            task = getattr(session, attr, None)
+        except Exception:
+            continue
+        if task is None:
+            continue
+        try:
+            if not task.done():
+                task.cancel()
+        except Exception:
+            pass
+        try:
+            setattr(session, attr, None)
+        except Exception:
+            pass
+
+
 async def run_browse(
     session: Any,
     goal: str,
@@ -3391,6 +3530,14 @@ async def run_browse(
     # the same cooperative rule — an action already in flight finishes. None
     # (every pre-existing caller) means not stoppable, unchanged behaviour.
     stop_check: Optional[Callable[[], bool]] = None,
+    # THE USER'S OWN REQUEST (2026-08-07), stamped in code by
+    # planner._inject_user_words. `goal` is authored by the PLANNER and is what the
+    # decision prompt reads; this is what the DETERMINISTIC paths read, because
+    # they answer questions only the user's phrasing can settle — did they say
+    # "play"? which series? did they ask for the latest? A rephrasing turned all
+    # three answers wrong at once and switched the features off silently. Defaults
+    # to "" so every pre-existing caller and test falls back to `goal` unchanged.
+    intent_text: str = "",
 ) -> BrowseOutcome:
     """Drive `session` toward `goal`, observing and acting until the model says
     done, the action budget is spent, or a dead-loop is detected. Read-only by
@@ -3525,10 +3672,52 @@ async def run_browse(
     # ep-1 when both were unavailable. Kick a web search for the latest number NOW
     # — concurrently with the browser opening the series — and swap it into the site
     # URL once we're on any episode page of it (the deterministic hook below).
-    wants_latest = not commit and _wants_latest_episode(goal)
-    latest_title = _extract_search_term(goal) if wants_latest else None
+    # READ THE USER, NOT THE PARAPHRASE (2026-08-07). See the `intent_text`
+    # parameter: `goal` is the planner's sentence, and MEASURED on the live
+    # incident it turned _wants_latest_episode's title to None, so `latest_task`
+    # was never created and the entire latest-episode web search never ran —
+    # silently, because a None title logs nothing.
+    intent = (intent_text or "").strip() or goal
+    wants_latest = not commit and _wants_latest_episode(intent)
+    wants_season = wants_latest and _wants_latest_season(intent)
+    latest_title = _extract_search_term(intent) if wants_latest else None
+    # WHAT THE WEB SAYS IS CURRENTLY AIRING (2026-08-07). Resolved concurrently
+    # with the browser opening the site, exactly like the episode number was, and
+    # for the same reason — it is free if it lands before we need it. See
+    # season.py for why the old max("episode N") rule had to go (MEASURED: it
+    # returned 343 for Bleach, where the answer was 2).
+    season_task: Optional[asyncio.Task] = None
+    season_hint: Optional[browse_season.SeasonHint] = None
+    season_done = False
     latest_task: Optional[asyncio.Task] = None
     if latest_title:
+        season_task = asyncio.ensure_future(
+            browse_season.resolve_latest_season(latest_title, provider)
+        )
+        season_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        try:
+            session._season_task = season_task
+        except Exception:
+            pass
+    # ⚠️ A SEASON GOAL NEVER ASKS FOR AN ABSOLUTE EPISODE NUMBER (2026-08-07 rd 2),
+    # AND ASKING FOR ONE IS WHAT PRODUCED THE INCIDENT. `_resolve_latest_episode`
+    # reads the MAX "episode N" out of search prose, which for a long-running
+    # series is whatever a watch-order listicle enumerated — MEASURED at 304/343/
+    # 380 for Bleach, where the answer was 2. The live trace shows what that number
+    # then bought, at step 0, on the HOMEPAGE, before any season was known:
+    #
+    #     16:59:47  web says the latest episode of 'bleach' is 304
+    #     16:59:47  latest-episode series navigation -> /watch/bleach-yaa9n/ep-304
+    #
+    # `_latest_series_action` REQUIRES a number, so without one it cannot fire and
+    # the loop searches instead of jumping — which is why not starting this search
+    # is the fix for the premature jump as well as for the wrong number. The page
+    # supplies the episode for a season goal, which is both correct (site numbering
+    # is a site convention no catalog reports) and what was asked for.
+    #
+    # Unscoped "latest episode" goals keep it in full: that is the 001-100/101-170
+    # hidden-range case it was written for (live 2026-07-25) and it is untouched.
+    if latest_title and not wants_season:
         latest_task = asyncio.ensure_future(_resolve_latest_episode(latest_title))
         # Referenced past this call (stored on the session, which outlives it) so it
         # is never GC'd mid-flight; the callback retrieves any exception so it never
@@ -3544,6 +3733,49 @@ async def run_browse(
     latest_attempted: set[int] = set()
     ranges_opened: set[str] = set()  # episode-range controls already clicked open
     clicked_result = False  # the intent-engine top result has been picked (once)
+    # Set once the SEASON name has actually chosen a catalog entry. From that
+    # moment the web's ABSOLUTE episode number is meaningless here — see
+    # _latest_number.
+    season_scoped = False
+
+    async def _season() -> Optional[browse_season.SeasonHint]:
+        """What the web says is airing, or None.
+
+        ⚠️ A TIMEOUT IS NOT AN ANSWER — it must not be cached as one. The
+        episode-number search settles in a few seconds, but this one is a search
+        PLUS an 8192-token read and was MEASURED at 30-60s, while the first step
+        can arrive within ~20s of launch. Giving up permanently on the first
+        bounded await (which is what `latest_web_done`-style one-shot caching
+        does) would time out on the common case and silently return to the old
+        behaviour — the very failure this module exists to end. So only a
+        COMPLETED task settles the question; a not-yet-ready one is re-checked on
+        the next step, by which time the page has usually cost more seconds than
+        the search needs.
+
+        Each check is cheap: a done task is read with no waiting at all, and an
+        unfinished one is given a SHORT slice rather than the full budget, so the
+        browse is never blocked on it."""
+        nonlocal season_hint, season_done
+        if season_done or season_task is None:
+            return season_hint
+        if season_task.done():
+            season_done = True
+            try:
+                season_hint = season_task.result()
+            except Exception:
+                season_hint = None
+            return season_hint
+        try:
+            season_hint = await asyncio.wait_for(
+                asyncio.shield(season_task), timeout=_SEASON_STEP_WAIT
+            )
+            season_done = True
+        except asyncio.TimeoutError:
+            pass  # still running — ask again next step
+        except Exception:
+            season_done = True
+            season_hint = None
+        return season_hint
 
     async def _latest_number(observation: dom_observe.Observation) -> Optional[int]:
         """The latest episode number to aim for. The concurrently-searched web
@@ -3555,9 +3787,26 @@ async def run_browse(
         the latest (the live 2026-07-25 miss). Stays None until some source yields a
         number, so the model is free to navigate until episode/range links appear;
         it is monotonic non-decreasing, which is what lets the loop recognize it has
-        ARRIVED (current == latest → done)."""
+        ARRIVED (current == latest → done).
+
+        ⚠️ THE WEB'S NUMBER IS DROPPED ONCE A SEASON HAS BEEN CHOSEN (2026-08-07).
+        `_resolve_latest_episode` reads an ABSOLUTE series number out of search
+        prose, and MEASURED it returns 343 for Bleach — a real number, lifted from
+        a watch-order listicle, and meaningless on a cour page whose own episodes
+        run 1..13. Feeding it in there does not merely aim at the wrong episode: it
+        makes verify-before-done reject every legitimate `done` until the run hard-
+        fails at three strikes, which is WORSE than the wrong answer it replaced.
+        Absolute numbering only makes sense while the entry IS the whole series, so
+        the moment a season name picks a cour entry the page becomes the only
+        source. Unscoped goals ("the latest episode of black clover") are
+        untouched — that 001-100/101-170 case is what the web number was for.
+
+        The web's WITHIN-season number (season_hint.episode) is deliberately not
+        folded in either: MEASURED across 5 runs it came back None/1/1/1/1 while
+        the true answer was 2. The season NAME was stable 5/5; the number was not,
+        which is exactly why one is used and the other is not."""
         nonlocal latest_num, latest_web_done
-        if not latest_web_done:
+        if not latest_web_done and not season_scoped:
             latest_web_done = True
             if latest_task is not None:
                 try:
@@ -3790,7 +4039,7 @@ async def run_browse(
         # homepage") and we are there. Nothing is left to do, so finish in CODE —
         # no LLM call, no fast-path search, no chance to invent work. The general
         # case of the media/episode terminators above; see _destination_reached.
-        if action is None and not commit and _destination_reached(goal, obs):
+        if action is None and not commit and _destination_reached(intent, obs):
             action = {
                 "action": "done",
                 "reason": f"{obs.title or obs.url} is open — that was the whole goal.",
@@ -3809,9 +4058,36 @@ async def run_browse(
         # (bypassing a paginated episode list) or, if already there, finish. No
         # LLM/vision call. Non-commit only (the commit form-fill path is untouched).
         if action is None and not commit:
-            action = _episode_action(goal, obs)
+            action = _episode_action(intent, obs)
             if action is not None:
                 logger.info(f"browse: deterministic episode navigation → {action}")
+
+        # LATEST SEASON → THE RIGHT ENTRY (2026-08-07). Before any episode
+        # machinery runs, make sure we are on the entry for the season the WEB says
+        # is currently airing. This has to come FIRST: every leg below reasons
+        # about episode numbers WITHIN whatever entry we happen to be standing on,
+        # so landing on the 2004 series makes all of them confidently wrong — which
+        # is the incident. Fires at most once (season_scoped), only when the goal
+        # asked for the latest and a season name actually resolved, and only when
+        # ONE entry clearly matches it. No LLM call — the name was already fetched
+        # concurrently with the page load.
+        if (
+            action is None
+            and wants_latest
+            and not commit
+            and not season_scoped
+            and _current_episode(obs) is None
+        ):
+            hint = await _season()
+            if hint is not None:
+                entry = _season_entry_action(obs, latest_title or "", hint.name)
+                if entry is not None:
+                    action = entry
+                    season_scoped = True
+                    logger.info(
+                        f"browse: latest season is {hint.name!r} → opening its "
+                        f"entry {action}"
+                    )
 
         # REVEAL HIDDEN EPISODES (2026-07-25): before trusting any latest number,
         # operate an episode-range selector so eps behind it become visible and the
@@ -3848,7 +4124,35 @@ async def run_browse(
         # …/watch/<slug>/ep-<latest> in CODE and navigate; the NEXT observation's
         # title↔URL agreement confirms it. Ambiguous slug (several same-title
         # entries) → defer to the model, which now gets the number injected below.
-        if action is None and wants_latest and _current_episode(obs) is None:
+        # ⚠️ BELT — A SEASON GOAL MUST NOT JUMP INTO AN ARBITRARY ENTRY OF THE
+        # FRANCHISE (2026-08-07 round 2). `_latest_series_action` picks the
+        # TIGHTEST slug, which for a multi-cour series is BY CONSTRUCTION the
+        # oldest entry (`bleach-yaa9n`, extra=1, beats every Thousand-Year Blood
+        # War cour). Not starting the prose search above already denies it the
+        # number it needs on a homepage, but a results page can supply one from its
+        # own /ep-N links, so the rule is stated here as well rather than left to
+        # follow from a missing input.
+        #
+        # Held ONLY while the season question is still open or answered-and-
+        # unreached: a season we DID scope to has already chosen the entry, and a
+        # season the catalogs genuinely do not know (season_done with no hint) must
+        # fall through to exactly the behaviour this leg had before — never a hang.
+        hold_for_season = (
+            wants_season
+            # No lookup was ever started (the title did not extract), so there is
+            # nothing to wait FOR — and a hold whose release condition can never
+            # be reached is a hang. Harmless today, because the leg no-ops on an
+            # empty title anyway; stated so it stays harmless.
+            and season_task is not None
+            and not season_scoped
+            and not (season_done and season_hint is None)
+        )
+        if (
+            action is None
+            and wants_latest
+            and not hold_for_season
+            and _current_episode(obs) is None
+        ):
             latest = await _latest_number(obs)
             series_action = _latest_series_action(
                 obs, latest_title or "", latest, latest_attempted
@@ -3865,7 +4169,7 @@ async def run_browse(
         # results page — the "humrahi" live miss, which searched, then FAILED to
         # select and paused. Fires once; never on a /watch page. No LLM/vision call.
         if action is None and not commit and not clicked_result:
-            top = _top_result_action(obs, goal)
+            top = _top_result_action(obs, intent)
             if top is not None:
                 action = top
                 clicked_result = True
@@ -3900,9 +4204,20 @@ async def run_browse(
         # (2026-07-22b). Everything after step 0 is the model's job. The typed query
         # is site-adapted (_search_query_for): the bare title on a catalog (anikoto),
         # the intent phrase on a search engine (YouTube).
+        # Reads `intent` (the user's own words), not the planner's paraphrase: what
+        # to TYPE INTO A SEARCH BOX is the series the USER named. The paraphrase
+        # reduced to no title at all on the live incident, which turned the fast
+        # path off and handed a hostile ad-heavy homepage to the model.
+        #
+        # DELIBERATELY still the BARE TITLE, not the resolved season name. Searching
+        # "Bleach Thousand-Year Blood War - The Calamity" is one exact-match away
+        # from ZERO results on a site that titles that cour differently, whereas
+        # "bleach" returns every entry and _season_entry_action then picks the right
+        # one from them by name. Recall first, choose second — the same asymmetry
+        # the fan-out uses. The season name is not lost: it reaches the model below.
         if action is None and step == 0 and not commit:
             action = _fast_path_action(
-                goal, obs, query=_search_query_for(goal, obs.url, latest_num)
+                intent, obs, query=_search_query_for(intent, obs.url, latest_num)
             )
             if action is not None:
                 logger.info("browse: took the fast path (single search box) — no LLM call")
@@ -3922,6 +4237,20 @@ async def run_browse(
                     decide_goal = (
                         f"{goal} (the latest episode is number {latest_num} — "
                         f"navigate to that episode's page)"
+                    )
+                # THE SEASON NAME, when code could not use it (2026-08-07). The
+                # deterministic leg defers on a tie or when nothing on THIS page
+                # matches — a site may name the cour only on the entry itself. The
+                # model is the right fallback, but only if it is told what to look
+                # for: without this it re-reads "the latest season" and guesses,
+                # which is the incident. Grounded — the name came from search
+                # results and was checked against them, so this can never inject a
+                # season that does not exist.
+                if season_hint is not None and not season_scoped:
+                    decide_goal = (
+                        f"{decide_goal} (the season currently airing is "
+                        f"'{season_hint.name}' — open THAT season's entry, not the "
+                        f"original series)"
                     )
                 # Operate paginated lists / pick newest-by-date (2026-07-25) — the
                 # generic lever for range dropdowns and no-number sites (YouTube).

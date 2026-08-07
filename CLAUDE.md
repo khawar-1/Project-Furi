@@ -737,8 +737,18 @@ cd backend && python -m venv venv && venv\Scripts\activate && pip install -r req
 # Start Qdrant (required for vector memory — backend runs without it but falls back to non-vector search)
 docker-compose up -d
 
-# Dev: backend + frontend + electron all together
+# Dev: backend + frontend + electron all together.
+# Since 2026-08-06 this runs uvicorn WITHOUT --reload, because it is also how
+# the app is used day to day. --reload costs a second Python process, a
+# watchfiles poller over a tree containing node_modules, and — the expensive
+# part — a full reload of ~1.5 GB of voice models onto a 6 GB laptop GPU on
+# every file touch (the backend.log of 2026-08-06 shows two complete boots
+# 7 minutes apart from ordinary editing).
 npm run dev
+
+# Same stack WITH auto-reload, for editing backend code. Prefer this only while
+# actually changing Python: it is the slower, heavier mode by design.
+npm run dev:watch
 
 # After stopping dev with Ctrl+C, sweep any stranded processes (the uvicorn
 # --reload parent holding port 8000, a stray Vite/Electron, an orphaned
@@ -748,8 +758,9 @@ npm run dev
 npm run stop
 # Manual check: netstat -ano | findstr ":8000"   and   Get-Process python,node,electron -ErrorAction SilentlyContinue
 
-# Backend only (equivalent to what `npm run dev` runs)
-cd backend && venv\Scripts\python -m uvicorn main:app --reload --port 8000
+# Backend only (equivalent to what `npm run dev` runs). Add --reload to match
+# `npm run dev:watch`.
+cd backend && venv\Scripts\python -m uvicorn main:app --port 8000
 
 # Frontend only
 cd frontend && npm run dev
@@ -5724,6 +5735,298 @@ exactly what the log says, line for line.
   `resume_agent_control`, `rearm_ok`) — a fake that cannot tell releasing from
   closing passes whichever way the code goes.
 
+### Ask a catalog, not the prose — the second latest-season round (2026-08-07)
+
+The round above shipped and the SAME prompt failed again, differently:
+*"play latest ep of latest season of bleach on anikoto"* → **the 2004 series,
+episode 304**. Root-caused from the trace
+(`browse/2026-08-07_16-59-42_0cf8e91fd86b.jsonl`) and `backend.log:17832-17857`
+before any code was read, then every claim below was MEASURED against the live
+services.
+
+- **⚠️ THE ROUND-1 FIX WORKED. THAT IS WHAT MAKES THE DIAGNOSIS EXACT.**
+  `_inject_user_words` landed (the tool call carries
+  `user_words='play latest ep of latest season of bleach on anikoto'`), so
+  `_wants_latest_episode` fired, the title extracted, and the episode search
+  finally ran — which round 1 had proven never happened. The log then shows the
+  new failure in three lines:
+
+      16:59:47  web says the latest episode of 'bleach' is 304
+      16:59:47  latest-episode series navigation -> /watch/bleach-yaa9n/ep-304
+      16:59:49  ... the SEASON search only STARTS here, two seconds too late
+
+  Restoring the plumbing is what let the wrong number reach a navigation. The
+  round-1 note predicted this exactly ("fixing only RC1 would have made the
+  outcome WORSE") and shipped the season resolver to cover it; the resolver was
+  simply never in the race.
+
+- **⚠️ AND IT COULD NOT HAVE BEEN. THE INSTRUMENT WAS TOO SLOW AND TOO FRAGILE.**
+  `season.py` asks a temp-0 model to read six search results: a search (~2s) plus
+  an 8192-token reasoning call MEASURED at 30-60s, against a first step that
+  arrives ~20s after launch. Worse, it needs the browse-local provider to still
+  exist when it lands, and on that run it did not:
+
+      16:59:55  latest-season read failed (deepseek could not be reached (ReadError))
+      16:59:55  latest-season read failed (Cannot send a request, as the client
+                has been closed.)
+
+  Both lookups are `ensure_future`d and parked on the SESSION so they are never
+  GC'd mid-flight, and NOTHING ever ended them. The browse stopped at a login
+  wall eight seconds in and returned; the caller's very next act is to close the
+  httpx client the lookup is using. `cancel_background_lookups(session)` now runs
+  in the same `finally`, BEFORE `provider.__aexit__`, so the lifetime is explicit
+  instead of accidental.
+
+- **THE FIX IS TO ASK A DATABASE WHOSE WHOLE JOB IS THIS QUESTION.**
+  NEW `app/browser/series_api.py`: **AniList** (anime, GraphQL, **no API key** —
+  which is why this works on a fresh clone) and **TMDb** (live-action TV,
+  key-gated). Zero LLM calls, so the race, the provider coupling and the
+  token-budget fragility all die together. MEASURED against the live service,
+  8/8, ~1s per lookup:
+
+      bleach                  -> "BLEACH: Thousand-Year Blood War - The Calamity" ep 2
+      one piece               -> "ONE PIECE"                                      ep 1172
+      attack on titan         -> "Attack on Titan Final Season Part 2"            ep 12
+      black clover            -> "Black Clover"                                   ep 170
+      the dangers in my heart -> "The Dangers in My Heart Season 2"               ep 13
+      breaking bad / stranger things / the office -> None (today's behaviour)
+
+  Episode 2 is what Google answers for the incident's own question. For contrast,
+  re-measured the same day: the prose max returns **343** (it returned 304 during
+  the incident — unstable AND wrong), and the LLM read was 5/5 on the NAME but
+  None/1/1/1/1 on the episode.
+
+- **⚠️ THREE SELECTION TRAPS, ALL FOUND BY MEASURING REAL ROWS RATHER THAN
+  IMAGINING THEM.** (1) `NOT_YET_RELEASED` — the newest entry by date for
+  `black clover` is "Black Clover Season 2" (Oct 2026) and for
+  `the dangers in my heart` is a 2027 third season; both have ZERO episodes in
+  existence, so a naive newest-wins rule sends the browse hunting a season no
+  site can carry. (2) Companion releases — a 2023 MOVIE and a 2019 ONA short are
+  both newer than Black Clover's 2017 series, so `SEASON_FORMATS` is TV-only.
+  (3) A live-action query — AniList indexes anime only and its fuzzy search
+  answers ANYTHING (`the office` → the 1999 OVA "OL Kaizou Kouza"). The guard is
+  a match floor, and the gap is enormous: **garbage 16.0, every real anime
+  100.0**, so `MATCH_FLOOR = 60` has margin both ways. It FAILS CLOSED — an
+  abbreviation the catalog cannot match returns None and the browse keeps the
+  behaviour it had, because no season scoping is today's behaviour while a WRONG
+  season is a wrong navigation.
+
+- **RELEASING IS A FILTER, NOT A TIEBREAK**, and the test that proves it needed
+  the real shape: an airing entry can have STARTED years ago (One Piece, 1999)
+  while a finished spin-off started later. Ranking by date picks the spin-off.
+
+- **`episodes` IS THE PLANNED TOTAL, NOT THE AIRED COUNT** — a defect the tests
+  caught. While a cour airs the catalog reports the NEXT episode, so the newest
+  watchable one is `next - 1` (Bleach reports next=3, the answer is 2). A version
+  that fell through to `episodes` whenever that arithmetic came up empty reported
+  **10** for a season that had just premiered.
+
+- **⚠️ THE USER'S OWN CONSTRAINT SHAPED THE DESIGN, and it was right: "for the ep
+  we can inject url but for the searching i dont think we should inject url, as
+  the name ... might be little diff on what name is listed on streaming site."**
+  So the catalog name is NEVER used to build a URL and never typed into a search
+  box — the site is still searched for the BARE TITLE (recall first, choose
+  second; "bleach" returns all 12 entries, the full official name risks zero).
+  The name is only ever used to SCORE the entries the site itself returned.
+  MEASURED against the real anikoto listing, `bleach-yaa9n` — the incident's own
+  answer — scores **0**:
+
+      score=5  bleach-thousand-year-blood-war-the-calamity-752db   <- target
+      score=5  bleach-thousand-year-blood-war-the-calamity-xdf5    <- target (sub/dub)
+      score=4  ...-the-separation / ...-the-conflict / ...-arc
+      score=0  bleach-yaa9n  and every movie
+
+- **THE PROSE READ IS KEPT AS THE FALLBACK, UNCHANGED.** The catalogs cover anime
+  and live-action TV and return None for everything else — a web series, a film,
+  a title their search cannot match — which is exactly where reading prose is
+  still the only instrument.
+
+- **THE NARROW GATE IS THE WHOLE BLAST-RADIUS STORY** (`_wants_latest_season`).
+  For a SEASON goal an absolute series number is meaningless by definition, so
+  the prose episode search is not started at all — and since
+  `_latest_series_action` REQUIRES a number, not fetching one is what denies it
+  the input it used to jump on. For "the latest episode of black clover" that
+  same number is the whole feature (the hidden 101-170 range, live 2026-07-25)
+  and is untouched. A BELT states the rule anyway, because a series landing page
+  supplies a number from its own range selector: while a season is known and
+  unreached, the series-jump leg is held. It releases the moment the catalogs
+  settle to "unknown", so a title neither knows is never held — a hold that could
+  become a hang would break every series the APIs do not list.
+
+- **⚠️ TWO OF MY OWN TESTS WERE PASSING VACUOUSLY, and the falsification harness
+  is what said so.** The belt tests were built from sibling `/ep-N` links — but
+  `_href_latest_episode` requires the CURRENT url to already be an episode page,
+  and on one of those `_current_episode` is set and the leg is skipped entirely.
+  No number could ever exist, so both tests passed with the belt REMOVED. The
+  only source of a number on a non-episode page is a RANGE SELECTOR, which is
+  what they use now. Three more came back green for the recorded reasons: a
+  wiring guard satisfied by a COMMENT that mentioned the function it was checking
+  for; a match-floor case defended three times over (floor, format filter and
+  franchise guard all reject `the office` independently — "a falsification must
+  remove the GUARANTEE, not one of several copies of it"); and a
+  releasing-vs-newest case whose fixture made both rules give the same answer.
+
+- **VERIFIED LIVE** (`scripts/_verify_season_runtime.py`, on the SELECTOR event
+  loop production uses, real AniList + real anikoto + real Chromium, **12/12
+  checks**, nothing played and nothing submitted). **3 consecutive runs, 3/3
+  reached the airing cour**, each in **17.6-24.0s with ONE LLM call**, against
+  the incident's 391s / 6 calls / wrong series:
+
+      17:43:29  anilist: current season of 'bleach' is
+                'BLEACH: Thousand-Year Blood War - The Calamity', episode 2
+      17:43:39  step 1  click -> the Calamity page
+      17:43:44  step 3  navigate -> .../the-calamity-752db/ep-2
+
+- **⚠️ REMAINING BLOCKER, REPRODUCED 3/3 AND DELIBERATELY NOT FIXED HERE.** All
+  three runs then failed at the last hop: *"needs your approval to visit
+  moonlighthathel.org"* (and `dstimaariracon.org` on run 3 — two different
+  domains, which is precisely why the hand-kept `_AD_HOSTS` list can never cover
+  this). An ad pop-under opens as `about:blank`, `_may_adopt` adopts it BY DESIGN
+  (a legitimate `target=_blank` link also opens blank, and Rule 3 judges its
+  navigation), `_adopt_new_page` then CLOSES the superseded page — and when the
+  blank tab navigates to the ad, the real page we were driving is already gone.
+  So the ad steals the navigation and the user is asked to approve a domain they
+  never mentioned.
+
+  **NOT PATCHED, and the reason is that the obvious separator does not exist.**
+  The documented legitimate case (an "Apply" button opening an ATS in a new tab)
+  is ALSO an adopted tab going off-allowlist, and pop-unders are spawned by
+  clicks too — so "was it adopted?" and "did a click cause it?" both fail to
+  separate ad from ATS, which is why the codebase asks. The plausible fix is a
+  MODE split (in READ mode, close an adopted tab that lands off-allowlist and
+  restore the opener without asking; keep today's ask for commit flows), and that
+  is a change to consent and navigation behaviour in the security-critical
+  module — it needs its own falsification round and a `browse_bench` re-run,
+  which is exactly what the user's "make sure our navigating logic isn't
+  affected" rules out doing at the end of this one.
+
+- Also: `TMDB_API_KEY` in Settings/.env.example, optional and documented; a new
+  autouse `_hermetic_series_api` fixture stubs the TRANSPORT rather than the
+  caller, so no arrangement of the two season fixtures can reach the network.
+  **⚠️ TMDb IS NOT LIVE-VERIFIED** — no key was available (an unauthenticated
+  call returns a clean 401, which is all that could be confirmed), so its
+  response handling is written to the documented shape and covered hermetically
+  only. The AniList half is verified against the real service.
+
+- Tests: NEW `test_series_api.py` (24 — every AniList fixture fetched live and
+  pasted verbatim, both measured traps present in the real data; the measured
+  16.0/100.0 floor pinned) and NEW `test_browse_season_catalog.py` (11 — the
+  incident frozen through the real loop, the unscoped regression, the belt, the
+  hold release, the catalog answering at zero provider cost, the prose fallback,
+  and the lifecycle). **12/12 behavioural changes proven to FAIL by reverting the
+  specific line IN PLACE** (`scripts/_falsify_season_catalog.py`).
+
+### A pop-under killed a run that had already won (2026-08-07, round 3)
+The user gave the same prompt twice and reported: *"both time jarvis got the right
+season, but then it triggered adds, both times it failed… before the fix jarvis
+never triggered adds, i think u did something that is causing jarvis to triger
+adds."* Half right, and the half that is wrong matters as much as the half that
+is right — so both are recorded here with the evidence.
+
+- **⚠️ THE ROUND-2 WORK SUCCEEDED, AND BOTH RUNS DIED ONE ACTION AFTER
+  SUCCEEDING.** The traces are unambiguous: each reached
+  `.../bleach-thousand-year-blood-war-the-calamity-752db/ep-1` and dispatched
+  `navigate .../ep-2` — the correct final action, in 4 steps, in ~26s. Then:
+
+      18:56:59.488  browse: latest-episode navigation -> .../ep-2
+      18:56:59.652  browser: following a new tab as the active page
+      18:57:03.231  browse failed: Page.evaluate: Execution context was destroyed
+
+  164ms into the winning navigation, a pop-under opened, the loop TOOK IT OVER
+  and closed the anikoto page, and the run died.
+- **⚠️ ADS ARE NOT NEW — THE FATALITY IS. Do not re-derive this.** The 14:28 run
+  of the SAME goal, on the code BEFORE round 1, adopted an ad **twice**
+  (`browse step 3: 'Access popular coupons and cash back fre'`) and spent ~180s
+  of a 391s run navigating back; round 1's own note records it as RC4 with
+  `blocked_ads=0`. So the trigger is anikoto's, is pre-existing, and no change of
+  ours created it. What round 2 changed is the **TIMING**: the flow now lands on
+  an episode page and clicks the range selector, so the pop-under arrives *inside
+  a navigation* rather than between two clicks — and a slow recovery became a
+  hard failure. The user's instinct that something we did made it worse is
+  correct; the specific belief that ads were new is not, and acting on the belief
+  rather than the logs would have sent this round hunting the wrong thing.
+- **⚠️ D1 — THE TAKE-OVER HONOURED A PROMISE BY DESTROYING THE PAGE FIRST.**
+  Round 1 added `_may_adopt`: a tab that has ALREADY landed off-allowlist is
+  refused and closed. It is right and it could never have caught this, because a
+  pop-under does not arrive that way — it opens on `about:blank` and navigates a
+  moment later, which is **exactly** how a legitimate `target=_blank` link
+  arrives. `_may_adopt` therefore permits blank BY DESIGN, and its own docstring
+  explains why: Rule 3 will judge the navigation. The flaw was never that
+  reasoning; it was that `_adopt_new_page` **acted on it immediately** — swapped
+  `self.page` and closed the superseded page — so the page we were driving was
+  destroyed for a tab that had said nothing yet. When Rule 3 then refused the
+  ad's navigation, it was refusing on behalf of a session whose real page was
+  already gone.
+- **THE FIX SPLITS GUARDING FROM TAKING OVER, and only the second half waits.**
+  The interceptor goes on the instant the tab appears — unchanged, and
+  load-bearing: an un-adopted ad tab would otherwise load for real, no SSRF
+  check, no Rule 3, which would be a worse posture than the bug. Only the
+  take-over defers, polling for a real URL (`ADOPT_RESOLVE_MS = 3000`) and then
+  deciding on fact: **allowed → follow it** (the WeWorkRemotely "Apply" case the
+  popup follow exists for, preserved and tested); **forbidden → close it and stay
+  put**; **never lands → leave it alone**. That third outcome is the common one
+  and it is the elegant part — Rule 3 aborts the ad's own navigation, so the tab
+  stays blank, the deadline passes, and we simply never move.
+- **LEAVING AN UNRESOLVED TAB IS DELIBERATE, not laziness.** Closing a tab we
+  cannot classify is the same act-on-incomplete-information mistake the round
+  exists to remove, and it costs one idle tab that `close_all` reclaims. Stated
+  in the docstring so it is not "tidied up" later.
+- **`_may_adopt` became ONE READING of a tri-state `_adopt_verdict`**
+  (`allow` | `refuse` | `unknown`) rather than a second copy of the rule — the
+  hole this codebase has now recorded seven times. Note the subtlety the split
+  exposes: "not refused" is the right answer to *may we be here?* and the wrong
+  one to ask *before destroying a page*, which is why `_adopt_new_page` reads the
+  verdict itself and `_may_adopt` no longer decides anything.
+- **⚠️ D2 — `observe()` TREATED A NORMAL EVENT AS A FATAL ONE.** Its top-level
+  `page.evaluate` was unguarded, so `Execution context was destroyed, most likely
+  because of a navigation` escaped to the user as *"The browser task failed"*.
+  `session._await_readiness` has documented that exact event as normal since it
+  was written — *"a navigation mid-poll destroys the execution context. That is
+  normal (a redirect), not an error"* — and the two layers simply disagreed. One
+  retry, then propagate. **Retrying on ANY exception is deliberate**: the wording
+  is Playwright's, not a contract, and a guard that stops recognising a message
+  silently stops guarding. The bound is what keeps it honest — a second failure
+  is re-raised, so a genuinely dead page still says so, half a second later.
+  **BOTH fixes were needed**: D1 alone leaves the ep-2 navigation itself able to
+  destroy the context mid-observe; D2 alone leaves the real page closed.
+- **⚠️ AN EXISTING TEST WAS PINNING THE DEFECT, and it is the second time in this
+  feature.** `test_a_blank_new_tab_is_still_adopted` asserted
+  `session.page is blank` — the incident written down as an expectation. Rewritten
+  to the real contract (not refused, not closed, **guarded**, but it has not
+  earned the page we are driving) and falsified against the old behaviour.
+- **MEASURED, and it is why explicit season numbers are still unsupported.** The
+  user also asked whether *"season 4 of my hero academia"* would work.
+  `_wants_latest_season` is False for it, so no catalog lookup runs, no season
+  scoring happens, and the LLM picks from the listing unaided — which often
+  works, because titles are legible, but nothing in code guarantees or checks it.
+  Reusing round 2's scorer looked like a free fix until it was measured against
+  the REAL 30-entry anikoto listing, where **the same site names seasons five
+  different ways**: `my-hero-academia-2/-3/-4` (bare number),
+  `my-hero-academia-season-6/-7` (the word), `my-hero-academia-5th-season`
+  (ordinal), `my-hero-academia-final-season` (no number at all) — beside decoys
+  `my-hero-academia-the-movie-2/-3/-4`, and two entries for entirely different
+  shows (`my-hero-academia-vigilantes-season-2`, `my-heroic-husband-2nd-season`).
+  Scoring "Season 4" against that set **TIES** `my-hero-academia-4` with
+  `my-hero-academia-the-movie-4-you-re-next` at 1 apiece: it would pick a movie
+  as often as a season. `SEASON_FORMATS` excludes movies on the catalog side and
+  nothing does on the slug side. So this needs its own round (an ordinal/word
+  normaliser and a movie-token exclusion, falsified and live-checked), not a
+  line. Recorded as a gap WITH its measurement, deliberately NOT half-fixed.
+- Tests: NEW `test_browse_popunder.py` (11 — both incidents frozen; the
+  target=_blank regression; the ad-lands/never-lands/already-landed matrix; the
+  guard-while-waiting property; the cancel-on-close leak test; the retry bound).
+  Gates: **3725 passing, 14 skipped, 0 failed** (baseline 3714/14/0 — +11, zero
+  regressions); no frontend change this round.
+  **9/9 behavioural changes proven to FAIL by reverting the specific line IN
+  PLACE** (`scripts/_falsify_popunder.py`, which encodes the recorded harness
+  lessons as CHECKS: unique whole-line anchors, the revert verified on disk,
+  pytest's EXIT CODE read (5 = nothing collected is never a pass), and an
+  asserted restore in a `finally`).
+- **HONEST LIMIT:** we cannot stop a site opening pop-unders, and this does not
+  try to. It makes them harmless — the page we are driving is never traded for a
+  tab that has not said what it is. A pop-under can still cost one wasted moment;
+  it can no longer cost the run.
+
 ### Browser stack — CURRENT STATE (authoritative; supersedes the log above)
 
 Everything above this heading is the build log. This section is what the code does
@@ -5742,7 +6045,11 @@ act, fast paths, wall detectors, budgets) · `commit_flow.py` (discover → appr
 submit, multi-commit) · `grounding.py` (origin/fill/upload grounding) ·
 `registry.py` (one generic `HeldSessionRegistry`) · `state.py` (the `Handoff`
 vocabulary) · **`choice.py`** (which of several matching things did you mean —
-pure, no LLM) · **`trace.py`** (per-run JSONL trace) · `publicsuffix.py`.
+pure, no LLM) · **`series_api.py`** (which season is airing, from AniList/TMDb —
+zero LLM, and no key needed for anime) · **`season.py`** (the same question read
+out of web prose, the FALLBACK for what no catalog carries; a catalog names the
+SEASON, the page counts the EPISODES) ·
+**`trace.py`** (per-run JSONL trace) · `publicsuffix.py`.
 The old `app/core/browser_*` and `app/agents/browser_*` paths are `sys.modules`
 self-replacement shims (~100 test monkeypatches target them; Phase 8 of the refactor
 deliberately did not delete them).
@@ -5800,7 +6107,50 @@ does:
   interceptor on any tab it does reuse, and a tab that cannot be re-armed is left
   to the user rather than driven. The playback hand-off itself is now gated on a
   POSITIVE read of the goal (`loop.goal_wants_playback` — a play/watch/listen
-  verb LEADING the goal), never on the absence of a heuristic.
+  verb LEADING the goal), never on the absence of a heuristic. **It reads the
+  USER'S OWN WORDS, not the planner's paraphrase** (2026-08-07): the goal
+  string is LLM-authored, and "Find Bleach on anikoto, …" does not lead with a
+  playback verb, so a genuine play request silently lost its hand-off.
+  `planner._inject_user_words` stamps the user's request onto every pending
+  `browse` step (never `browse_commit` — its signature binds an approval) and
+  the loop reads `intent = user_words or goal` for every deterministic path.
+- **THE LATEST SEASON COMES FROM A CATALOG, THE LATEST EPISODE FROM THE PAGE**
+  (2026-08-07 round 2, `series_api.py` + `season.py`). A catalog lists each cour
+  as its OWN entry with its own numbering restarting at 1, so "the latest season"
+  is a fact about the WORLD and "which episode is newest" is a fact about the
+  SITE. **AniList** (anime, no API key) and **TMDb** (live-action, key-gated)
+  answer the first with ZERO LLM calls — MEASURED 8/8 correct where the prose max
+  returns 343 for Bleach and the LLM read of snippets was None/1/1/1/1 on the
+  episode. Deterministic selection: an entry that is RELEASING is the current
+  season; otherwise the newest TV entry, with `NOT_YET_RELEASED` and companion
+  movies/ONAs excluded by construction (both measured traps). A match floor
+  (garbage 16.0 vs real 100.0) fails CLOSED, so a title neither catalogs keeps
+  today's behaviour. `season.py`'s prose read is the FALLBACK for exactly that
+  case. The name is only ever used to SCORE the entries the site returned — never
+  to build a URL and never typed into a search box, because a catalog's official
+  name and a streaming site's listing differ; the site is searched for the bare
+  title. For a "latest SEASON" goal the absolute episode number is not fetched at
+  all (it is meaningless on a cour page, and `_latest_series_action` needs a
+  number, so withholding it is what stops the jump to the canonical entry); a
+  belt additionally holds that leg while a known season is unreached, releasing
+  the moment the catalogs settle to "unknown".
+- **A NEW TAB IS ADOPTED ONLY WHERE THE LOOP MAY GO, AND NEVER ON A PROMISE**
+  (2026-08-07, rounds 1 and 3). A pop-under to a non-allowlisted origin is somewhere
+  Rule 3 already forbids navigating, so following it was incoherent — and it cost
+  46% of one live run and killed two others outright. `_adopt_verdict` is tri-state
+  (`allow` | `refuse` | `unknown`), with `_may_adopt` as its single derived reading:
+  a tab that has ALREADY landed off-allowlist is refused and closed (counted in
+  `blocked_ads`); a tab on `about:blank` is `unknown`, because a pop-under and a
+  legitimate `target=_blank` are indistinguishable at that instant. An `unknown`
+  tab is **guarded immediately but taken over only when it says where it is
+  going** — allowed → follow it, forbidden → close it, never lands → leave it. So
+  the page the loop is driving is never traded for a tab that has promised nothing,
+  and Rule 3 aborting the ad's own navigation is usually what settles it. This is
+  NOT an ad heuristic and `_AD_HOSTS` was deliberately not grown.
+- **A PAGE THAT NAVIGATES MID-OBSERVE IS NORMAL, NOT A FAILED RUN** (2026-08-07).
+  `observe()` retries its top-level evaluate once — on ANY exception, since the
+  driver's "Execution context was destroyed" wording is not a contract — then
+  propagates, so a genuinely dead page still reports itself.
 - **A PAUSE KEEPS THE PAGE IT IS ASKING ABOUT** (2026-08-02). An
   `action_approval` or `origin_approval` hand-off leaves its tab open — the user
   is deciding about that page, and the resumed run reuses it instead of
@@ -6771,3 +7121,488 @@ messages, one working and one not:
   fomi folder" and "open my downloads folder" — each must either route straight to
   an approval card naming the folder, or be rescued into one. In neither case may
   Jarvis print a phrase to say.
+
+### Nobody had read the timing line (2026-08-06)
+Reported as two complaints — "can we make jarvis fast… response time and speaking,
+and also the tasks" and "running jarvis sometimes crashes the opened things and
+makes laptop stuck or lag". They are FIVE defects with different fixes, and the
+first finding is that the answer was already being measured and never read.
+
+- **⚠️ `app/core/timing.py` HAD BEEN LOGGING THE ANSWER ALL ALONG.** The real user
+  turns in `~/.jarvis/logs/backend.log` (the other 1,639 lines are hermetic tests
+  at ~70ms): `restore=749ms reminder_route=608ms routine_route=608ms
+  task_route=7901ms context=3047ms persist=10ms ttft=20849ms total=22504ms`.
+  **20.8s to first token** — and the instrumented stages summed to 12.9s, leaving
+  **~7.9s attributable to nothing**, because `chat.py:1022-1024` sat between
+  `timer.stop("context")` and `timer.stage("persist")` and was covered by no
+  stage. A latency line with a hole in it is how the largest stage stays
+  invisible; the hole is closed (`affective`/`screen`/`bg_tasks` timed
+  SEPARATELY — "which of the three" is the whole question — plus `trace_flush`,
+  `prompt`, and a `pre_llm` mark so `ttft - pre_llm` is the model's own latency
+  and everything before it is ours).
+- **THE 7.9s WAS A DEAD GOOGLE TOKEN, RETRIED FOREVER.** `get_credentials` is the
+  single choke point every Google call goes through, and on an
+  expired-beyond-refresh token it did a real network round trip EVERY time, with
+  no memory that the previous call had just failed identically. **53 failures in
+  one log**, and `context_store` calls it TWICE per world-model miss behind a 5s
+  TTL an ordinary conversational gap misses. Two of those failures land inside the
+  22.5s turn (02:39:42/43; the turn ran 02:39:35 to 02:39:57). A breaker
+  (`_REFRESH_FAILURE_THRESHOLD=2`, 300s cooldown, monotonic clock, half-open
+  probe) now skips only work we have just watched fail: the caller gets the SAME
+  exception and the SAME message, so nothing downstream can tell the difference
+  except in seconds. Any success or an explicit connect/disconnect resets it —
+  the user's own action is never second-guessed by state from before it.
+- **⚠️ THE STREAMING GUARD WAS O(n^2), AND MY FIRST FIX BROKE IT.**
+  `chat.py` scanned `"".join(full_response)` on EVERY delta — MEASURED 724ms of
+  blocking event-loop CPU for a 3000-char reply in 600 deltas, landing in exactly
+  the window when TTS wants CPU for the first sentence. The obvious fix — keep a
+  fixed TAIL of emitted text — is **wrong**, and the reasoning that justifies it
+  is the trap: "a marker is detected on the delta that completes it, so it starts
+  at most one match-length back" holds only while deltas are SMALL. One large
+  delta emits far more than the window at once and slides a marker past it, so the
+  guard falls silent on precisely the fabrications it exists to cut. It scans
+  `window + ALL newly emitted text` (`_VOICE_SCAN_WINDOW = 512`, derived: the
+  longest possible match is ~151 chars, and a test computes that bound FROM THE
+  PATTERN so a new alternative fails loudly instead of going unmatched).
+  **MEASURED HONESTLY: 724ms to 221ms (3.3x), not the 6x the broken version
+  showed — it was faster because it was scanning less than it had to.**
+- **⚠️ AND THE TEST FOR IT PASSED ON THE BROKEN CODE.** The falsification caught
+  that the fabrication had been placed in the final 64 characters, where the
+  end-of-stream flush — a SECOND COPY of the guarantee — catches it either way.
+  The marker must sit MID-delta with more than `_OFFER_LOOKBEHIND` of text after
+  it, and the assertion must be the CORRECTION rather than the absence of the
+  invented results (the in-loop guard deliberately cuts after yielding). Twice in
+  this round a green falsification meant the test could not reach the defect.
+- **NO ADMISSION CONTROL, ON A MACHINE THAT CANNOT AFFORD THE SETTINGS.** MEASURED
+  on this laptop: **6 GB VRAM** (nvidia-smi; WMI truncates to 4 and must not be
+  used), 15.7 GB RAM, and **commit charge 17.3 of a 27.5 GB limit** — which is
+  the crash: `~/.jarvis/logs/renderer-crashes.log` decodes to `0xC000012D`
+  **STATUS_COMMITMENT_LIMIT** (the OS refusing to commit), alongside `0xC0000005`
+  and four Chromium GPU-process crashes. Every heavy feature is ON in
+  `app_settings` though all default OFF in code (`wake_word`, `screen_ocr`,
+  `stt_model=small`, file indexing). Two amplifiers now fixed: `voice_tts` and
+  `voice_stt` each asked for `os.cpu_count()` = **16** threads (and STT's comment
+  claimed PHYSICAL cores while calling the LOGICAL count — 2x its own intent), on
+  a path reached by SILENT FALLBACK from a failed CUDA init, so a VRAM squeeze
+  converted itself into whole-machine CPU saturation. `gpu_bootstrap.
+  cpu_worker_threads()` bounds engine threads (16 to 6); RapidOCR was constructed
+  with NO `SessionOptions` at all, so onnxruntime took a thread per core across
+  three graphs.
+- **⚠️ SCREEN OCR COSTS 5.3 SECONDS OF CPU PER FRAME.** MEASURED with the real
+  engine on a real 1280x800 capture of this display: 5,375ms default / 5,235ms
+  with threads bounded. It fires every 30s **and on every foreground-window
+  change** (5s floor), on the shared `to_thread` executor — an ~18% continuous
+  duty cycle at best, near-saturation while alt-tabbing. **The thread cap moved it
+  ~3%**: the cost is three ONNX graphs on that image, not thread starvation, so
+  making OCR cheap needs a smaller capture, a longer interval and a
+  skip-if-unchanged check — or turning it off. Recorded, not yet fixed.
+- **⚠️ THE PLAN'S BIGGEST CLAIMED TASK WIN WAS FALSE — MEASURE PROMPTS, DO NOT
+  REASON ABOUT THEM.** The planner prompt re-order (moving `_PLAN_RULES`' 17,866
+  static chars above the per-minute timestamp so it becomes a cacheable prefix)
+  was scoped as "the biggest single latency win for tasks". MEASURED against the
+  real API: trivial prompt (30 chars) **891ms**; classify prompt (9,828 chars)
+  2.6-3.9s; **plan prompt (59,801 chars) median 2,774ms**. A 6x larger prompt
+  costs the SAME wall time — the floor is network RTT, not token processing. The
+  genuine processing component works out to ~600ms per planner call. Also
+  measured: **`_CLASSIFY_PROMPT` is already 98% static prefix** (placeholders at
+  char 9,590 of 9,828), so there was never anything to win there. **Dropped**: a
+  prompt-order change to a security-sensitive prompt, requiring a full
+  `plan_bench` re-validation, for ~600ms a call. The real lever for tasks is the
+  NUMBER of round trips, not their size.
+- **Also measured and deliberately NOT changed**: `get_context_config` being read
+  twice per turn issues no second query (`db.get()` resolves from SQLAlchemy's
+  identity map, and `expire_on_commit=False` keeps it loaded); and
+  `asyncio.gather` on chat's three notes would need session plumbing (an
+  `AsyncSession` is not concurrency-safe) for work the breaker already removed.
+- **`--reload` is no longer the day-to-day path.** `npm run dev` runs uvicorn
+  plainly and `npm run dev:watch` keeps the old behaviour. `--reload` costs a
+  second Python process, a watchfiles poller over a tree containing
+  `node_modules`, and a full reload of ~1.5 GB of voice models onto a 6 GB GPU on
+  every file touch (the log shows two complete boots 7 minutes apart from
+  ordinary editing). `.env` `DEBUG` to false: it has exactly ONE effect in the
+  codebase, `create_async_engine(echo=...)`, formatting and logging every
+  statement for output nobody was reading (zero SQL lines in backend.log).
+- NEW `scripts/perf_probe.py` (`--idle` footprint / `--turns` TTFT / `--compare`),
+  built because three rounds have tuned this app for speed and none left a way to
+  re-measure the MACHINE. ⚠️ Its first cut charged **3.9 GB of the user's own
+  Chrome** to Jarvis — chrome.exe is the same image name as the browser agent's,
+  so browser processes are classified by command line against the
+  `~/.jarvis/browser` profile and the non-Jarvis group is shown for context but
+  excluded from the total. NEW `scripts/_falsify_perf.py` encodes the recorded
+  harness lessons as CHECKS (unique whole-line anchors, verify the revert landed
+  on disk, read pytest's exit code — 5 means nothing collected — and restore in a
+  `finally`).
+- **Separate from performance, found on the way**: `app/db/database.py:52` runs
+  `PRAGMA foreign_keys=ON` on the one-off `init_db` connection only. It is
+  per-connection, so **every pooled connection runs with foreign keys OFF**. Not
+  fixed this round; three lines from the WAL setting that IS correct (`:51` is
+  persistent in the file).
+- Tests: `test_task_router.py` +3 (window bound derived from the pattern; the
+  large-delta incident; a marker far into a long reply), `test_google_auth.py` +5
+  (network calls stop; non-destructive while open; reset-on-success; the
+  half-open single probe; disconnect clears), `test_voice_stt.py` +3 (bounded
+  below core count; never zero on a small box; whisper's CPU path uses it).
+  **6/6 valid falsifications.** Gates: **3619 passing, 14 skipped, 0 failed**
+  (baseline 3608/14/0 — +11, zero regressions); `route_bench --gate-only`
+  **GATE RECALL 52/53, GATE COST 5/14 — identical to baseline**.
+- **OUTSTANDING, needs the app running**: wake-word cost (3 ONNX models at 80ms
+  cadence, un-throttled in the tray via `backgroundThrottling: false`) and the
+  `_SYNTH_LOCK` question — `voice_tts.synthesize_stream` runs `model.create()` to
+  COMPLETION before the first frame, and the lock is held for the whole stream,
+  which would defeat the frontend's `MAX_SYNTH_IN_FLIGHT = 2` prefetch. The queue
+  is unbounded, so whether the lock is actually the bottleneck is a MEASUREMENT
+  not yet taken — do not "fix" it before measuring (this round already found one
+  such assumption false).
+
+### Opening a folder asked permission, took 93 seconds, and picked a drive (2026-08-06)
+Two messages, live, minutes apart, with the screenshot: `open donwloads` →
+opened `C:\Users\DELL\Downloads` with no question though `D:\Downloads` also
+exists; `open folder 'fomi'` → *"I've handed that to the file agent"*, then a
+failed step, a question, an approval card, and 108 seconds. The user's four
+points, verbatim: why the file agent for one and not the other, why no
+which-Downloads question, why so slow, and **"opening file/folder etc isnt
+destructive task so it shouldnt ask permission — it should only ask if there
+are two folders of the same name"**. All four root-caused from the audit
+trail before any code moved.
+
+- **THE ROUTING AUDIT AND `plan_traces` PAID FOR THEMSELVES AGAIN — the whole
+  diagnosis was two SQL queries.** `routing_decisions` says both messages
+  routed `TASK` (so BOTH went to the file agent — the visible difference was
+  `mode`: `INLINE` for downloads, `DELEGATE` for fomi, which is what produces
+  the "handed to the file agent" line). `plan_traces` prices the slowness
+  exactly: the fomi plan's `entry=start` row is **`duration_ms: 93389`** with
+  `replan_count: 1` and `questions_asked: 1`, and `tasks.plan_payload` holds
+  the failed step verbatim — `open_folder(path="PENDING: full path of the
+  folder named 'fomi' found by the search")` → *"Step parameters still contain
+  unresolved 'PENDING:' placeholders"*. Nothing here was inferred from the
+  screenshot.
+- **⚠️ D1 — `open_folder` WAS IN NO PLACEHOLDER MAP, AND THAT IS THE 93
+  SECONDS.** The planner drafted exactly the flow plan rule 9 asks for
+  (search first, then open the found path), `resolve()` ran through every
+  branch and fell off the end at `return None`, the step FAILED, and the LLM
+  replan path took over — burning a replan round, a clarifying question the
+  user had to answer, and an approval card, for one folder. The tool was
+  added to **six** maps the day it shipped; this was the seventh and it was
+  missed. Fourth instance of "a second copy of a list is a hole"
+  (`registry.mutates` 2026-07-30, `_DIR_KEY` 2026-08-01, `_settle`'s status
+  tuple 2026-08-03, `set_voice_config`'s field list 2026-08-03).
+- **THE INVARIANT THAT MAKES IT THE LAST INSTANCE, and it is exact:** *if the
+  pre-flight guard requires a parameter to point at something REAL on disk,
+  the designed flow for it is "read first, then PENDING" — so a PENDING there
+  MUST be resolvable in code.* `test_the_placeholder_resolver_knows_the_tool`
+  walks `_MUST_EXIST_PARAMS` + `_MUST_EXIST_LIST_PARAMS` against every
+  placeholder map. It held for all five other entries (delete/rename/move/
+  execute_script via `_FILE_PARAMS`, run_command via `_DIR_PARAMS`) and for
+  `open_folder` only after this round — the `folder_resolver` coverage-test
+  discipline that found `read_file.path` on its first run.
+- **`open_folder` is NOT simply another `_DIR_PARAMS` entry**, because it also
+  accepts a FILE path (rule 9: "give open_folder a FILE path when the user
+  wants to see where a file lives"), and folder-only substitution would leave
+  that flow dead-ending exactly as the incident did. `_substitute_open_target`
+  tries folders first and consults files ONLY when no completed step produced
+  a folder at all — that ordering is what keeps the rule free of a
+  folder-vs-file judgement call. It SUBSTITUTES, never expands: `_expand_files`
+  would turn a search matching five files into five explorer windows.
+  `_pick_one` takes a POOL so the two rules cannot drift (the 2026-08-03
+  `mutation_scope` shape).
+- **⚠️ D2 — `open_folder` IS NOW READ, AND THE ARGUMENT THAT SETTLES IT IS
+  `list_directory`.** Reading a folder pulls its whole contents into an LLM
+  prompt and prints them into the chat, and it is READ; opening one puts a
+  window on the user's own screen showing files they already have, and it
+  asked for approval. The gate cannot coherently guard the lesser act and wave
+  through the greater — and `take_screenshot` (READ, captures every display to
+  disk) and `read_clipboard` (READ, can return a password) are both further
+  past this line. **NOT extended to `launch_app`**, deliberately and stated in
+  code: that EXECUTES an installed program. The line is "shows you something
+  you already have" vs "runs code", and a test pins the contrast.
+- **WHAT MAKES IT SAFE WAS NEVER THE GATE, AND NOW CARRIES ALONE.**
+  `_folder_to_show` resolves a FILE to its PARENT, so what reaches the OS is
+  ALWAYS A DIRECTORY — `os.startfile("setup.exe")` RUNS it, and this tool can
+  never hand the OS a file at all, which is why it is not "run_command with
+  the gate weakened". `_blocked_reason` still refuses protected/root paths and
+  `_MUST_EXIST_PARAMS` still fails a hallucinated path in the pre-flight
+  check, which is independent of approval. Each of the three is pinned by its
+  own test, and the planner-level test asserts the guessed path never opens
+  while the replan's real one does.
+- **⚠️ D3 — A TYPO STOOD THE WHICH-DRIVE GUARD DOWN, AND EVERY OTHER
+  PRECONDITION HELD.** Repro'd before touching anything: `detect()` with goal
+  `"open downloads"` returns `ask [C:\Users\DELL\Downloads, D:\Downloads]`;
+  with `"open donwloads"` it returns None. `_named_in_words` does an exact
+  word-boundary match, and the guard's job is only to establish that the USER
+  (not memory, not a web page) is the source of the name — a transposed pair
+  of letters does not make them less the source.
+- **MEASURED, because fuzzy matching has been falsified TWICE here.**
+  (Routing question words: `here`→where scores 89 while `whihc`→which scores
+  80, so no threshold exists. Product variants: `pants`/`paints` 90.9
+  outscores `watch`/`watches` 83.3.) Neither carries over, and the reason is
+  the candidate set — those compared against an OPEN VOCABULARY, this compares
+  against ONE folder name already known to exist on disk, twice over. Over 30
+  measured pairs the lowest true typo and the highest coincidence **touch at
+  83.3**, so `_TYPO_FLOOR = 84.0` and it costs one case (`vidoes`→`videos`).
+- **THE FLOOR SELF-SCALES WITH NAME LENGTH, and that falls out of the metric
+  rather than being tuned in:** a one-character difference scores 66.7 at 3
+  letters, 75.0 at 4, 83.3 at 6, 85.7 at 7 — so short names (`src`, `docs`,
+  `fomi`, `test`) get NO tolerance, where one letter usually means a different
+  word, and long names get it, where it almost always means a slip. No
+  separate length gate is needed; a test pins the curve so a floor change
+  fails loudly instead of quietly admitting `dogs` for `docs`.
+- **The asymmetry justifies erring permissive, and it is steep.** A false
+  positive needs all three of: the model home-anchoring the path, TWO real
+  folders of that name existing, and a similar token — and then costs ONE
+  question whose options are real verified paths. A false negative is the
+  2026-08-01 incident: 85 files moved to the wrong drive, silently.
+- **⚠️ D4 — THE MODE PROMPT, AND IT IS THE RARE ONE THAT MEASURES.** A/B
+  against the real model, 6 phrasings × 3 runs
+  (`scripts/_measure_open_mode.py`): naming "open a folder on screen" in the
+  INLINE rule, plus one clause saying it stays INLINE even when Jarvis must
+  search first, takes **INLINE recall 5/12 → 12/12** with both DELEGATE
+  controls unchanged at 3/3. Recorded loudly BECAUSE the analogous catalog
+  edit six hours earlier measured **12/12 in both arms** and was honestly
+  written up as belt rather than cause: whether a prompt line is load-bearing
+  is a measurement every time, never an inference from the previous round.
+- **⚠️ THE FIRST RUN OF THAT A/B WAS INVALID AND REPORTED A CONFIDENT VERDICT.**
+  `_classify_message` is `(provider, message, context)` and the probe passed
+  `(message, context, provider)`, so every call raised `'str' object has no
+  attribute 'chat'` — in BOTH arms — and the script printed *"no case moved —
+  the edit is belt, not cause"*. A probe that cannot reach the code proves
+  nothing, and "nothing moved" is exactly what a broken probe looks like. It
+  now refuses to report unless a POSITIVE CONTROL passes in the same run
+  (unambiguous file work must route TASK), the third time that rule has had to
+  be re-learned here.
+- **A green suite hid one real consequence, and the fix was the test.**
+  `test_an_empty_classifier_reply_is_retried_not_taken_as_chat` asserted
+  `awaiting_approval` — using the approval card as a convenient "the plan got
+  this far" marker. With no card the step RUNS, so it now asserts the folder
+  was really opened; and `stream_calls == 0` became `1` because a COMPLETED
+  inline plan gets an LLM SUMMARY of its real results (there is no call to
+  count while a plan sits paused on deterministic approval text). What that
+  assertion always MEANT — the user is not told to rephrase — is now what it
+  says.
+- Tests: `test_open_folder.py` 29 → **55**. **8/8 behavioural changes proven
+  to FAIL by reverting the specific line IN PLACE**
+  (`scripts/_falsify_open_round.py`), each with the correct signature. The
+  `PermissionLevel.READ` anchor needed the comment line above it — three other
+  file tools return the same bare line, and the harness's uniqueness check
+  caught it; its exit-code check also caught a regression node id I had
+  guessed wrong.
+- **RUNTIME-VERIFIED on the REAL `main.py` lifespan**
+  (`scripts/_verify_open_folder_runtime.py`, isolated :18003, scratch DB, one
+  process): **14/14** — the live catalog reports `read` for open_folder and
+  `write` for launch_app, an open with **no `approved=`** succeeds and reaches
+  the OS, `C:\Windows` is still refused, a file still opens its parent, four
+  audit rows, a PENDING path resolves from the tool's **real** `search_files`
+  output with no LLM, and — against **this machine's real two Downloads
+  folders** — `open donwloads` asks which drive while `open notepad` does not.
+  One real Explorer window opened at the end, announced.
+- **NOT changed, and flagged rather than assumed:** `launch_app` still asks
+  for approval. The user's "don't need permission to open anything on the pc"
+  plausibly covers apps, but running an installed program is a different risk
+  class from showing a folder, so that is their call to make explicitly.
+
+### The planner's paraphrase switched three features off, silently (2026-08-07)
+Live, spoken as one sentence: *"play latest episode of latest season of bleach on
+anikoto"*. Jarvis opened Bleach (2004), then the Thousand-Year Blood War **arc-1**
+entry, played its **ep-13**, reported the task done, took **391 seconds**, and
+never handed the video to the user's normal browser as it normally does. Google,
+given the same words, answers *Season 4 / Part 4 "The Calamity", Episode 2*.
+Root-caused from `~/.jarvis/logs/browse/2026-08-07_14-28-45_34e8a2d0ab74.jsonl`
+and `backend.log:10601-10634` **before any code was read**, then every claim below
+was MEASURED by running the real functions and the real search provider.
+
+- **⚠️ RC1 — THE PLANNER REPHRASED THE GOAL AND THREE DETERMINISTIC PATHS TURNED
+  THEMSELVES OFF.** The drafted step was `browse(goal="Find Bleach on anikoto, go
+  to its latest season, and start playing the newest episode")`. Run against the
+  real functions:
+
+      function                user's words              planner's words
+      goal_wants_playback     True                      FALSE   -> no hand-off
+      _extract_search_term    'bleach'                  NONE    -> no web search
+      _title_tokens           {bleach}                  {}      -> slug match dead
+
+  `loop.py:3529` was `latest_title = _extract_search_term(goal) if wants_latest`,
+  and `:3531` starts the search only `if latest_title`. So **the entire 2026-07-24
+  latest-episode grounding never ran**, and logged nothing — the resolver logs on
+  success or on exception, and a None title is neither. All seven steps were blind
+  LLM clicking. The tool's own parameter doc says *"in plain words"* and plan RULE
+  21 says *"give it the goal in plain words"*: the model did exactly as told.
+  **This is the codebase's recorded defect class INVERTED** — normally a prompt
+  rule has no comparator; here CODE depended on a prompt's exact wording, and its
+  failure mode was to disable itself quietly.
+- **⚠️ RC2 — FIXING ONLY RC1 WOULD HAVE MADE IT WORSE, and that is why this round
+  is one change and not two.** MEASURED against the live provider, the query the
+  code would have issued: `"bleach latest episode number"` -> **343**;
+  `"latest season of bleach latest episode number"` -> **380**. The rule is
+  `max("episode N")` over snippets, and watch-order listicles enumerate HISTORY
+  ("Ep 300-316", "Ep 343"), so the maximum mention is reliably the OLDEST content
+  — while the newest episode of a season that just started has the SMALLEST
+  number. Fed 343 it would have built `/watch/bleach-yaa9n/ep-343` and
+  `verify-before-done` would then have rejected every legitimate `done` until the
+  run hard-failed at three strikes: **a dead run in place of a wrong answer.**
+- **⚠️ RC3 — THE TIGHTEST-SLUG RULE IS BACKWARDS FOR A SEASON GOAL.**
+  `_latest_series_action` picks the entry with the fewest tokens beyond the title.
+  MEASURED on the real anikoto slugs: `bleach-yaa9n` extra=1 (WINS),
+  `bleach-thousand-year-blood-war-arc-2izxu` extra=6, the cour-4 entry extra=9. A
+  catalog lists each cour as its own entry, so **the tightest match is by
+  construction the oldest** — the 2004 original. Right for "play one piece"
+  (canonical beats the movie), exactly wrong here. And nothing anywhere parsed a
+  season: `_WEB_EP_RE` reads `episode N` only, and `loop.py:1234` said so outright
+  (*"'latest/newest season' (which we serve as the newest EPISODE)"*).
+- **⚠️ RC4 — AN AD POP-UNDER WAS ADOPTED AS THE ACTIVE PAGE (46% of the runtime).**
+  A click on the episode-range selector opened `getsmartyapp.com`;
+  `_adopt_new_page` followed it AND CLOSED the anikoto page, so steps 3-6 redid
+  steps 0-2 — **~180s of 391s, pure recovery** — and an untrusted ad page's DOM
+  went into a decision prompt. `blocked_ads=0`: the host is not in the hand-kept
+  `_AD_HOSTS` list, and **it is not in the run's allowlist either**.
+
+**THE DESIGN: each source is used for what it can actually know.** The web cannot
+know that anikoto numbers TYBW cour 4 as `ep-2`; the page cannot know which of
+five Bleach entries is newest. So **the web resolves the SEASON (a name) and the
+page resolves the EPISODE (a number)**.
+
+- **`planner._inject_user_words`** — the fourth injector, beside
+  `_inject_approved_origins` / `_inject_site_corrections` / `_inject_target_choices`
+  and for the same reason: a fact the planner cannot be trusted to preserve is
+  enforced in code. `goal` keeps its job (what to DO on the page, what the decision
+  prompt reads); `user_words` carries the user's own request and is what the
+  deterministic paths read, via one `intent = intent_text or goal` in `run_browse`.
+  **⚠️ SCOPED TO `browse`, NEVER `browse_commit`**: `browse` is READ so a parameter
+  costs nothing, while `browse_commit` is DESTRUCTIVE and `signature()` is built
+  from `parameters`, so stamping one there would invalidate a granted approval.
+  Pinned by a test asserting the commit step's signature is unchanged.
+- **`_LEAD_ORDINAL_RE` is now REPEATED**, like its numeric sibling
+  `_LEAD_QUALIFIER_RE` has always been. An ordinal chain can STACK, and one strip
+  left `"latest season of bleach"` — not merely an ugly query but the web-search
+  string AND the token set matched against a slug. MEASURED 9/9: the stacked case
+  reduces to `bleach` while `The Last of Us` / `The First Slam Dunk` /
+  `The Last Airbender` are untouched (the chain still only strips when a MEDIA
+  word follows the ordinal).
+- **NEW `app/browser/season.py`** — one search plus **one narrow temp-0 call**
+  whose only job is "which season is current, and what episode is it on?" (the
+  `reading_enumerator` shape; reading prose is irreducibly a judgement, and
+  determinism here bought reproducible wrongness, not correctness). **Grounded in
+  CODE**: the season name must appear VERBATIM in the retrieved text (punctuation
+  flattened, so a dash style cannot refuse a name that is really there) and the
+  episode must appear as an "episode N" mention — `extract.py`'s no-fabrication
+  property applied to a season. A one-word "season" is refused, because grounding
+  cannot filter a fragment. Never raises; any doubt returns None and the caller
+  behaves exactly as it did before the module existed.
+- **⚠️ THE TOKEN CAP IS 8192 AND THAT IS NOT THE USUAL "THINKING-MODEL FLOOR".**
+  This codebase records a 512 floor three times, and 512 was tried first here: it
+  returned an EMPTY string. So did 1024, 2048 and 4096 — at cap 2048 the call
+  reported `tokens_used=4075` with `content=''`, i.e. the whole budget went to
+  reasoning and none to an answer. **AND SHORTENING THE PROMPT MADE IT WORSE**: a
+  trimmed prompt with trimmed rows still came back empty at 8192 (`used=9087`).
+  Less evidence did not mean less thinking. Recorded loudly because "the prompt is
+  too long" is the first thing anyone will reach for, and it was tried and
+  falsified. One retry on an empty reply (the `_decide` precedent) sits on top.
+- **MEASURED HIT RATE, because one success is not a measurement: 7/7.**
+  `bleach` -> `'The Calamity'` **5/5 runs**; `one piece` -> `'Season 22 Elbaph'`;
+  `the dangers in my heart` -> `'Season 2'`. **The season NAME was stable 5/5; the
+  episode number was not** (None/1/1/1/1 against a true answer of 2) — which
+  independently validates using one and not the other.
+- **`_season_entry_action` runs FIRST in the step loop**, before every episode leg,
+  because they all reason about numbers WITHIN whatever entry we are standing on:
+  landing on the 2004 series makes all of them confidently wrong. It scores the
+  slug AND the link's visible label, and defers on a genuine TIE and on nothing
+  matching (code never picks between real equals). The season name is then handed
+  to the model in `decide_goal`, so a deferral is not a dead end.
+- **⚠️ THE WEB'S ABSOLUTE NUMBER IS DROPPED once a season is chosen.** Absolute
+  numbering only means anything while the entry IS the whole series; on a cour page
+  whose episodes run 1..13, folding in 343 is the RC2 hard-fail. Unscoped goals
+  ("the latest episode of black clover") are untouched — that 001-100/101-170 case
+  is what the web number was written for. The web's WITHIN-season number is not
+  used either, for the reason the hit-rate measurement gives.
+- **THE SEARCH QUERY IS DELIBERATELY STILL THE BARE TITLE, not the season name** —
+  a considered refinement of the approved plan, which said to search the season
+  name. Searching "Bleach Thousand-Year Blood War - The Calamity" is one
+  exact-match away from ZERO results on a site that titles the cour differently;
+  "bleach" returns every entry and the season name then picks from them. Recall
+  first, choose second — the fan-out asymmetry.
+- **THE HAND-OFF READS THE USER'S WORDS.** `goal_wants_playback(intent_text)`. The
+  positive gate itself is KEPT — it is what stopped a storefront being handed over
+  with the interceptor lifted (2026-08-01); the bug was that it asked the right
+  question of the wrong string.
+- **AN ADOPTED TAB MUST BE SOMEWHERE THE LOOP MAY GO.** NOT a bigger `_AD_HOSTS` —
+  a hand-kept list is this codebase's most-recorded hole (six instances) and no
+  list could have contained `getsmartyapp.com`. The right test already existed and
+  is stronger: Rule 3 refuses a main-frame navigation to a non-allowlisted host, so
+  a tab sitting on one is somewhere this session is already forbidden to be, and
+  adopting it was incoherent. `_may_adopt` refuses and closes it, counted in
+  `blocked_ads`. It never asks what the page IS, only whether we may be there, so
+  it covers every pop-under and redirect farm without knowing any of their names.
+  **Permissive in exactly one direction**: `about:blank` is adopted, because a
+  `target=_blank` link opens blank and navigates a moment later — Rule 3 judges
+  that navigation, so the two paths cover each other.
+- **§7 WAS SCOPED AS "MEASURE FIRST" AND NO CONSTANT MOVED.** Five
+  `never reached readiness in 15000ms` cost ~75s, and raising `READY_POLL_MS` is
+  the obvious move — but this codebase has twice recorded a timing "fix" that
+  measured to nothing (the 2026-08-06 prompt-size round; the 2026-07-27 slowdown
+  that was the machine). Raising a budget is only right if pages ARRIVE just past
+  it; if they never arrive, the fix is to stop waiting. The poll now records how
+  long readiness took when it DID arrive (logged above 2s) and what the page looked
+  like when it did not (`nodes/acts/complete/still`) — the number that answers the
+  question. `ready_wait` and `slow_navs` joined the session summary. **Behaviour
+  unchanged.**
+- **⚠️ A REGRESSION I INTRODUCED, caught by an existing test, and it is the
+  documented hazard:** the season call ate the scripted `FakeProvider` queue and
+  broke `test_latest_episode_flow_web_number_then_url_swap`'s `provider.calls == 0`
+  — exactly what `_hermetic_reading_enumerator` exists for. NEW autouse
+  `_hermetic_season` defaults to "the web does not know", so every pre-existing
+  latest-episode test behaves as it did.
+- **⚠️ AND ONE OF MY OWN TESTS ASSERTED THE WRONG THING — the falsification caught
+  it.** `test_the_absolute_web_number_is_ignored...` asserted `page.url`, but
+  `ScriptedPage.navigate()` sets `page.url` from the NEXT SCRIPTED PAYLOAD, so it
+  read the fixture's opinion and passed against the reverted code. It asserts on
+  `page.acted` — what the loop actually REQUESTED — now. A test that asserts the
+  wrong thing manufactures defects, and here it nearly hid one.
+- Tests: NEW `test_browse_latest_season.py` (33 — the incident frozen at every
+  layer; the 8-case title matrix incl. three title-safety cases; the tightest-slug
+  rule pinned as the REASON a fix was needed; the measured anikoto scores; tie and
+  no-match deferral; the injector's browse-only scoping with the commit signature
+  unchanged; a SOURCE wiring guard for the call site, with its limit stated; the
+  5-case adopt matrix; the grounding guard), plus `test_browser_session.py` (+2 —
+  the ad popup frozen, blank still adopted; `FakePage` gained `close()` so the fake
+  can express "refused and closed") and `test_browse_window_continuity.py` (+2 —
+  the hand-off driven through the TOOL, because asserting `goal_wants_playback` on
+  two strings proves the predicate and says nothing about which string the hand-off
+  passes it).
+- **10/10 behavioural changes proven to FAIL by reverting the specific line IN
+  PLACE** (`scripts/_falsify_latest_season.py`, which encodes the recorded harness
+  lessons as CHECKS: unique whole-line anchors, the revert VERIFIED on disk,
+  pytest's EXIT CODE read (5 = nothing collected is never a pass), restore in a
+  `finally`, and a regression test alongside). Two cases came back invalid on the
+  first run — one a wrong node id, one the fixture bug above — and both were real.
+- **⚠️ THE FIXTURE WAS A FICTION UNTIL IT WAS CHECKED, and checking it changed the
+  picture.** The first draft of the test INVENTED a cour-4 slug. Fetching
+  anikoto's real results for "bleach" returned **twelve** entries — six
+  movies/specials, three earlier cours, the original, and **TWO listings of The
+  Calamity** (sub/dub). MEASURED against that real set, scoring by season name
+  gives exactly those two a non-zero score and **every other entry zero**,
+  including `bleach-yaa9n`, the one the tightest-slug rule picks and the one the
+  incident opened. So the mechanism narrows 12 → 2 correctly; it then DEFERS,
+  because the two duplicates tie and code never picks between real equals. That is
+  not a dead end — `decide_goal` names the season, so the model chooses between two
+  entries that are both right instead of guessing among twelve, which is the whole
+  distance from the incident. Deliberately NOT broken by taking DOM order: which of
+  a sub/dub pair is "latest" is not knowable from a slug, and this round has no
+  measurement to justify a guess. `REAL_SLUGS` in the test is the fetched set, and
+  a duplicate-free variant exercises the deterministic leg. **A fake page is a
+  claim about the live DOM — check it.**
+- Gates: **3678 passing, 14 skipped, 0 failed** (28m26s), **11/11 valid
+  falsifications**, typecheck clean. No frontend change this round. `browse_bench`
+  was NOT re-run and is unaffected by construction, verified rather than assumed:
+  all six bench goals reduce to `_wants_latest_episode` False, so the season legs
+  are unreachable there, and `intent` is byte-identical to `goal` for every caller
+  that passes no `user_words`.
+- **HONEST LIMITS, stated rather than discovered later.** The season name is an LLM
+  reading of web snippets: it is grounded, and the browser still confirms arrival by
+  title↔URL agreement, so a wrong name degrades to the old behaviour rather than a
+  false claim — it is not a proof. If a site has no entry for the newest season, the
+  best match is an older cour, which is the honest answer. Per-cour vs absolute
+  numbering is a site convention no web source reports, which is why the number
+  comes from the page. And **`_TRAIL_SITE_RE` truncates a title whose last two words
+  look like "on <word>"** — `watch attack on titan` extracts `attack`. MEASURED as
+  PRE-EXISTING (it reproduces on the unchanged regex, and on a bare goal with no
+  ordinal at all), so it is recorded here and deliberately NOT fixed in this round;
+  the plausible fix is to strip a trailing site only when the token matches the host
+  being browsed, which is a real comparator rather than a word list.

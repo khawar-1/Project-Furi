@@ -852,6 +852,33 @@ def _merge_challenge(
     return merged
 
 
+# A page that navigates WHILE we are reading it destroys the execution context
+# mid-evaluate. That is a normal event, not a broken page — session's readiness
+# poll has said so in a comment since it was written ("A navigation mid-poll
+# destroys the execution context. That is normal (a redirect), not an error") —
+# but observe() propagated it, and it reached the user as a failed browse:
+# "The browser task failed: Page.evaluate: Execution context was destroyed"
+# on a run that was one navigation from finishing (2026-08-07, twice).
+# Long enough for a commit to land, short enough not to matter otherwise.
+_OBSERVE_RETRY_MS = 500
+
+
+async def _extract_top(page: Any, observation_id: str) -> Any:
+    """Read the top document, with ONE retry.
+
+    Retries on ANY exception rather than matching the driver's message: the
+    wording of "Execution context was destroyed" is Playwright's, not a contract,
+    and a guard that stops recognising it would silently stop guarding. The
+    bound is what keeps this honest — a second failure is re-raised, so a page
+    that is genuinely dead still says so, half a second later."""
+    try:
+        return await page.evaluate(_EXTRACT_JS, {"obsId": observation_id, "base": 0})
+    except Exception as exc:
+        logger.debug(f"observe retrying after {type(exc).__name__}: {exc}")
+    await asyncio.sleep(_OBSERVE_RETRY_MS / 1000.0)
+    return await page.evaluate(_EXTRACT_JS, {"obsId": observation_id, "base": 0})
+
+
 async def observe(page: Any) -> Observation:
     """Snapshot one page. Best-effort about the prose (a page with no body text
     is normal), strict about the elements (they are what the loop acts on).
@@ -861,7 +888,7 @@ async def observe(page: Any) -> Observation:
     players live; before this they were simply invisible, and a page whose whole
     purpose sat inside one read as empty."""
     observation_id = uuid.uuid4().hex[:12]
-    raw = await page.evaluate(_EXTRACT_JS, {"obsId": observation_id, "base": 0})
+    raw = await _extract_top(page, observation_id)
     if not isinstance(raw, dict):
         raise RuntimeError(f"page observation returned {type(raw).__name__}, expected an object")
 

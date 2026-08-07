@@ -33,7 +33,11 @@ from typing import Any, Callable, Optional
 
 from loguru import logger
 
-from app.core.gpu_bootstrap import cuda_available, register_cuda_dll_dirs
+from app.core.gpu_bootstrap import (
+    cpu_worker_threads,
+    cuda_available,
+    register_cuda_dll_dirs,
+)
 
 #: Where faster-whisper stores downloaded model weights.
 WHISPER_DIR = Path.home() / ".jarvis" / "whisper"
@@ -73,8 +77,13 @@ def _build_model(model_name: str, device: str, compute_type: str) -> Any:
         "download_root": str(WHISPER_DIR),
     }
     if device == "cpu":
-        # Use all physical cores for CPU decode (the default under-threads).
-        kwargs["cpu_threads"] = os.cpu_count() or 4
+        # Bounded, not "all cores". This path is reached by SILENT FALLBACK from
+        # a failed CUDA init, so the machine is already under pressure when it
+        # runs — claiming every logical core here is what turns a VRAM squeeze
+        # into a frozen laptop. See gpu_bootstrap.cpu_worker_threads (which also
+        # fixes this line's old claim to be using PHYSICAL cores while calling
+        # os.cpu_count(), i.e. logical).
+        kwargs["cpu_threads"] = cpu_worker_threads()
     return WhisperModel(model_name, **kwargs)
 
 

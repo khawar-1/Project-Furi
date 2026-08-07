@@ -213,6 +213,36 @@ _DEAD_END_OFFER_RE = re.compile(
 # _DEAD_END_OFFER_RE ("(let me know|tell me) if you would like me to " ≈ 40).
 _OFFER_LOOKBEHIND = 64
 
+# How much PRECEDING text the impersonation guard carries forward as overlap
+# context. Each pass scans `previous_window + everything newly emitted`, never a
+# fixed tail of the whole reply.
+#
+# WHY. The guard used to scan `"".join(full_response)` on EVERY delta, rebuilding
+# and re-reading the entire reply each time — O(n^2) in response length.
+# MEASURED 2026-08-06 on a 3000-char reply: 724ms of blocking event-loop CPU in
+# 600 small deltas, against 221ms windowed (3.3x; 3.0x at 60 deltas, 1.9x at 6).
+# That lands in exactly the window when TTS wants CPU to synthesize the first
+# sentence, so it slowed the spoken reply as well as the typed one.
+# (An earlier tail-only draft measured 6x — it was faster because it was wrong,
+# scanning less than it had to. 3.3x is the honest figure for a correct scan.)
+#
+# ⚠️ WHY OVERLAP AND NOT A PLAIN TAIL. The first cut of this scanned only the
+# last N characters of emitted text, on the reasoning that a marker is detected
+# on the delta that completes it and so begins at most `len(match)` back. That
+# is true only while deltas are SMALL. A provider that delivers the reply in a
+# few large deltas emits far more than N characters at once, and a marker in the
+# middle of such a delta is never in the tail — the guard would fall silent on
+# exactly the fabrications it exists to cut. Scanning `window + new text` holds
+# for any delta size and is still linear overall.
+#
+# WHY 512. Every alternative in _SYSTEM_VOICE_RE is length-bounded; the longest
+# possible match is the initiation-claim branch at ~151 chars
+# (`the operation` + `[^\n]{0,120}` + ` has been launched`). 512 leaves >3x
+# margin, and test_impersonation_window_exceeds_longest_possible_match derives
+# that bound from the pattern itself, so a new alternative that outgrows the
+# window fails a test instead of silently going unmatched.
+_VOICE_SCAN_WINDOW = 512
+
 # Used only when the rescue itself fails (planner/provider down). Deterministic
 # and honest: it states what happened and never asks the user for a password.
 #
@@ -682,7 +712,13 @@ async def chat_stream(
     finally:
         # Best-effort by contract: logs, rolls back, never raises. Observability
         # must never be able to cost a turn.
-        await routing_trace.flush(db, trace)
+        #
+        # TIMED (2026-08-06): this is an awaited SQLite write on every turn,
+        # including the fall-through, and it sat outside every timer stage — so
+        # an audit write that costs a turn would have been invisible in exactly
+        # the line written to make latency attributable.
+        with timer.stage("trace_flush"):
+            await routing_trace.flush(db, trace)
 
     from app.memory.session_persistence import save_pending_state
 
@@ -1018,21 +1054,36 @@ async def chat_stream(
         await save_pending_state(db, session_id)
     timer.stop("context")
 
-    # Build message history with memory-enhanced system prompt
-    affective_note = await _affective_note(db)
-    screen_note = await _screen_note(db)
-    background_note = await active_tasks_context(db, session_id)
-    messages: list[LLMMessage] = [
-        LLMMessage(role="system", content=_build_system_prompt(
-            memory_context, pending_resolution, disambiguation_resolved_note,
-            pending_creation=pending_creation,
-            ambiguous_mentions=ambiguous_mentions,
-            affective_note=affective_note,
-            screen_note=screen_note,
-            background_note=background_note,
-        ))
-    ]
-    messages.extend(_provider_history(request.messages))
+    # Build message history with memory-enhanced system prompt.
+    #
+    # TIMED SEPARATELY (2026-08-06). These three awaits fell between
+    # timer.stop("context") and timer.stage("persist"), so they were covered by
+    # NO stage — and on the slowest real turn on record the instrumented stages
+    # summed to 12.9s against a ttft of 20.8s, leaving ~7.9s attributable to
+    # nothing. `_affective_note` is the suspect: it reaches get_world_model,
+    # whose 5s TTL an ordinary conversational gap misses, and which makes two
+    # sequential Google calls that fail on a broken token. Timed one by one
+    # rather than as a block, because "which of the three" is the whole question.
+    with timer.stage("affective"):
+        affective_note = await _affective_note(db)
+    with timer.stage("screen"):
+        screen_note = await _screen_note(db)
+    with timer.stage("bg_tasks"):
+        background_note = await active_tasks_context(db, session_id)
+    # Pure CPU (no awaits), but it assembles every gathered block into one
+    # string, so it grows with the memory context and is worth attributing.
+    with timer.stage("prompt"):
+        messages: list[LLMMessage] = [
+            LLMMessage(role="system", content=_build_system_prompt(
+                memory_context, pending_resolution, disambiguation_resolved_note,
+                pending_creation=pending_creation,
+                ambiguous_mentions=ambiguous_mentions,
+                affective_note=affective_note,
+                screen_note=screen_note,
+                background_note=background_note,
+            ))
+        ]
+        messages.extend(_provider_history(request.messages))
 
     # Persist the user's message. The timestamp anchors the late-reply check:
     # any user message persisted AFTER this moment arrived while the
@@ -1045,9 +1096,19 @@ async def chat_stream(
             await _persist_message(db, session_id, "user", last_user_msg)
         user_msg_persisted_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
+    # The handoff to the provider. `mark` records time-since-turn-start, so
+    # `ttft - pre_llm` is the model's own latency and `pre_llm` is everything we
+    # spend before asking it — the split that says whether a slow turn is ours
+    # to fix or the provider's.
+    timer.mark("pre_llm")
+
     async def event_generator():
         """Yields SSE-formatted chunks from the provider stream."""
         full_response = []
+        # Rolling tail of emitted text for the impersonation guard, so the scan
+        # is bounded per delta instead of re-reading the whole reply. See
+        # _VOICE_SCAN_WINDOW.
+        emitted_tail = ""
         impersonation = False
         dead_end = False
         # Text received but deliberately not emitted yet — see the dead-end
@@ -1097,6 +1158,14 @@ async def chat_stream(
                     continue
                 ready, pending = pending[:-_OFFER_LOOKBEHIND], pending[-_OFFER_LOOKBEHIND:]
                 full_response.append(ready)
+                # Scan ALL the newly-emitted text plus a window of what came
+                # before it, so a marker straddling the join is still seen. It
+                # must be `tail + ready`, never the tail alone: one provider
+                # delivering the reply in a few large deltas would otherwise
+                # slide a marker past a fixed-size tail and the guard would go
+                # quiet exactly where it matters most.
+                scan = emitted_tail + ready
+                emitted_tail = scan[-_VOICE_SCAN_WINDOW:]
                 yield _chunk(ready)
                 # Impersonation guard: cut the stream at the first system-voice
                 # marker — the rest of a fabricated task/reminder lifecycle is
@@ -1104,7 +1173,7 @@ async def chat_stream(
                 # straight. Checked AFTER yielding so the marker itself is
                 # visible; markers can span deltas, so the accumulated text is
                 # searched, not the delta.
-                if _SYSTEM_VOICE_RE.search("".join(full_response)):
+                if _SYSTEM_VOICE_RE.search(scan):
                     impersonation = True
                     logger.warning(
                         "Chat LLM impersonated a system message — stream cut "
@@ -1126,13 +1195,19 @@ async def chat_stream(
             # needs a referent, which is why this guard cuts AFTER the marker
             # rather than before it.
             if not dead_end and not impersonation and pending:
-                emitted = "".join(full_response)
+                # Offsets are relative to `emitted_tail` rather than the whole
+                # reply. Identical arithmetic — pending is still appended
+                # directly after it — and the window provably covers any match
+                # (see _VOICE_SCAN_WINDOW), so the cut lands in the same place
+                # without joining the entire response twice more.
+                emitted = emitted_tail
                 late = _SYSTEM_VOICE_RE.search(emitted + pending)
                 if late and late.end() > len(emitted):
                     pending = pending[: late.end() - len(emitted)]
                 full_response.append(pending)
+                emitted_tail = (emitted_tail + pending)[-_VOICE_SCAN_WINDOW:]
                 yield _chunk(pending)
-                if _SYSTEM_VOICE_RE.search("".join(full_response)):
+                if _SYSTEM_VOICE_RE.search(emitted_tail):
                     impersonation = True
                     logger.warning(
                         "Chat LLM impersonated a system message — corrected "

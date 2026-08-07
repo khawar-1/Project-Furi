@@ -5,7 +5,7 @@ Tools over the local filesystem:
   search_files    READ         find files/folders by name, extension, date, size
   read_file       READ         read a text file's contents
   list_directory  READ         list a directory's entries
-  open_folder     WRITE        show a folder in the file explorer window
+  open_folder     READ         show a folder in the file explorer window
   move_file       WRITE        move a file to a new location
   move_files      WRITE        move MANY files into one folder (batch)
   rename_file     WRITE        rename a file or folder in place
@@ -803,11 +803,33 @@ class OpenFolderTool(BaseTool):
 
     @property
     def permission_level(self) -> PermissionLevel:
-        # WRITE, not DESTRUCTIVE: it puts a window on screen showing files the
-        # user already has access to, and changes nothing. It is not READ
-        # either — it acts on the world outside the chat, so it passes the
-        # approval gate like any other write.
-        return PermissionLevel.WRITE
+        # READ (2026-08-06, same day, on the user's report: "opening a folder
+        # isn't destructive so it shouldn't ask permission — it should only ask
+        # if there are two folders of the same name").
+        #
+        # ⚠️ THE ARGUMENT THAT SETTLES IT IS `list_directory`, WHICH IS ALREADY
+        # READ. Reading a folder pulls its entire contents into an LLM prompt
+        # and prints them into the chat; opening one puts a window on the
+        # user's own screen showing files they already have. The approval gate
+        # cannot coherently guard the lesser act and wave through the greater.
+        # `take_screenshot` (READ) captures every display to disk and
+        # `read_clipboard` (READ) can return a password just copied out of a
+        # manager — both further past this line than a folder window.
+        #
+        # WHAT MAKES IT SAFE IS NOT THE GATE, AND NOW HAS TO CARRY ALONE:
+        # `_folder_to_show` resolves a FILE to its PARENT, so what reaches the
+        # OS is ALWAYS A DIRECTORY. `os.startfile("setup.exe")` RUNS it — this
+        # tool can never hand the OS a file at all, which is why it is not
+        # "run_command with the gate weakened". `_blocked_reason` still refuses
+        # protected and root paths, and `_MUST_EXIST_PARAMS` still fails a
+        # hallucinated path in the planner's pre-flight guard, which is
+        # independent of approval. Those three are now the whole of it, so
+        # every one of them is pinned by its own test.
+        #
+        # NOT extended to `launch_app`, deliberately: that EXECUTES an
+        # installed program, which can do anything its user can. The line is
+        # "shows you something you already have" vs "runs code".
+        return PermissionLevel.READ
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:

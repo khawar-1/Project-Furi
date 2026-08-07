@@ -992,6 +992,111 @@ def test_impersonation_guard_allows_capability_statements(text):
     assert _SYSTEM_VOICE_RE.search(text) is None
 
 
+# ------------------------------------------- impersonation guard: scan window
+#
+# The guard used to scan `"".join(full_response)` on every delta — O(n^2) in the
+# reply length, MEASURED at 724ms of blocking event-loop CPU for a 3000-char
+# reply. It now scans `window + newly emitted text`. These pin the two
+# properties that make that safe.
+
+def test_impersonation_window_exceeds_longest_possible_match():
+    """The window must be wider than the longest match _SYSTEM_VOICE_RE can
+    produce, or a marker could span the join and never be seen.
+
+    Derived from the pattern rather than hard-coded, so ADDING an alternative
+    with a bigger bound fails here instead of silently going unmatched at
+    runtime — the failure mode of a guessed constant is a guard that quietly
+    stops guarding.
+    """
+    import re as _re
+    from app.api.chat import _VOICE_SCAN_WINDOW
+
+    pattern = _SYSTEM_VOICE_RE.pattern
+    # Worst case for any one alternative: its literal text plus whatever its
+    # bounded wildcards may absorb. Both are over-estimates (the raw source
+    # includes regex syntax that matches nothing), which is the safe direction.
+    widest_wildcard = max(
+        (int(n) for n in _re.findall(r"\{0,(\d+)\}", pattern)), default=0
+    )
+    longest_literal = max(len(alt) for alt in pattern.split("|"))
+    upper_bound = widest_wildcard + longest_literal
+
+    assert _VOICE_SCAN_WINDOW > upper_bound, (
+        f"_VOICE_SCAN_WINDOW={_VOICE_SCAN_WINDOW} no longer exceeds the longest "
+        f"possible match (~{upper_bound} chars). A marker can now span the scan "
+        f"join and go undetected — widen the window."
+    )
+
+
+class _BulkStreamProvider(FakeProvider):
+    """Yields the whole reply as ONE delta.
+
+    Real providers vary: some emit token-sized deltas, some flush large buffers.
+    FakeProvider splits on spaces, so every existing test exercises only the
+    small-delta case — which is exactly why the bug below was invisible.
+    """
+
+    async def stream_chat(self, messages, temperature: float = 0.7, max_tokens=None):
+        self.stream_calls += 1
+        self.stream_prompts.append(messages[0].content)
+        yield self._streams.pop(0)
+
+
+async def test_impersonation_is_caught_inside_one_large_delta(client):
+    """A fabrication buried mid-way through a single large delta must still be
+    cut.
+
+    ⚠️ This is the bug the windowed scan nearly shipped with. The first draft
+    kept only a tail of already-emitted text, reasoning that a marker is
+    detected on the delta that completes it and so starts at most one
+    match-length back. That holds only while deltas are SMALL. One large delta
+    emits far more than the window at once, leaving a marker in its middle
+    outside the tail — the guard falls silent on precisely the fabricated
+    lifecycle it exists to cut.
+
+    ⚠️ The marker must sit in the MIDDLE, with more than _OFFER_LOOKBEHIND
+    characters of text after it. The end-of-stream flush is a SECOND copy of
+    this guarantee and searches the held-back buffer, so a fabrication in the
+    final 64 characters is caught either way — the first version of this test
+    put it there and passed against the broken code, proving nothing.
+
+    The assertion is the CORRECTION, not the absence of the invented results:
+    the in-loop guard deliberately cuts after yielding (the marker needs to stay
+    visible so the correction has a referent), so within one large delta the
+    fabricated text has already shipped. What the guard changes is whether the
+    user is told it was fiction.
+    """
+    filler = "Right, sir. " * 120                     # ~1440 chars, >> the window
+    fabricated = (
+        filler
+        + 'Finished the background task "tidy my desktop". '
+        + "Done — 3 step(s) completed. 4 file(s) deleted: notes.txt. "
+        + "Anything else? " * 12                      # >64 chars, so the flush
+    )                                                 # cannot be what catches it
+    provider = _BulkStreamProvider(None, [fabricated])
+    app.dependency_overrides[get_llm_provider] = lambda: provider
+
+    events = await post_chat(client, "hows your day going", "s-imp-bulk")
+    text = streamed_text(events)
+
+    assert "Correction from the Jarvis system" in text
+    assert "no task ran" in text
+
+
+async def test_impersonation_is_caught_far_into_a_long_reply(client):
+    """A marker arriving long after the scan window would have scrolled past
+    is still caught, because each pass scans the new text, not just a tail."""
+    filler = "All quiet here. " * 100                 # ~1600 chars of preamble
+    provider = use_provider(streams=[filler + "Reminder set — I'll remind you at 6:00 PM."])
+    assert provider is not None
+
+    events = await post_chat(client, "thanks for earlier", "s-imp-late")
+    text = streamed_text(events)
+
+    assert "Correction from the Jarvis system" in text
+    assert "no reminder or calendar event was created" in text
+
+
 # ========================================================== background intent
 
 @pytest.mark.parametrize("goal,cleaned", [
@@ -1905,12 +2010,24 @@ def test_a_capability_offer_about_the_agent_is_not_a_fabrication():
 #      had a backstop, so every other capability dead-ended.
 
 
-async def test_an_empty_classifier_reply_is_retried_not_taken_as_chat(client, tmp_path):
+async def test_an_empty_classifier_reply_is_retried_not_taken_as_chat(
+    client, tmp_path, monkeypatch
+):
     """THE INCIDENT, FROZEN AT ITS ROOT. An empty reply is what a reasoning
     model returns when its budget runs out mid-thought — a failure, not a
     verdict. Before this round it fell straight open to chat and the user was
-    told to rephrase; now the second attempt lands and the turn routes to a
-    real approval card for the real folder."""
+    told to rephrase; now the second attempt lands and the turn routes.
+
+    The end state is the folder OPEN, not an approval card. It asserted the
+    card until open_folder dropped to READ later the same day — the card was
+    only ever a convenient marker for "the plan got this far", and the thing
+    this test is actually about is the retried verdict reaching a plan at all
+    instead of the chat model answering."""
+    from app.tools import file_tools
+
+    opened: list = []
+    monkeypatch.setattr(file_tools, "OPEN_LAUNCHER", lambda f: opened.append(f))
+
     steps = [step("open it", "open_folder", path=str(tmp_path))]
     provider = use_provider(
         responses=[
@@ -1924,8 +2041,17 @@ async def test_an_empty_classifier_reply_is_retried_not_taken_as_chat(client, tm
 
     plans = plan_events(events)
     assert plans, "the retried verdict should have routed to a plan"
-    assert plans[0]["plan"]["status"] == "awaiting_approval"
-    assert provider.stream_calls == 0, "chat must not answer a turn that routed"
+    assert plans[0]["plan"]["status"] == "completed"
+    assert opened == [tmp_path], "the folder the user asked for, actually opened"
+    # ⚠️ NOT `stream_calls == 0` any more, and the reason is worth stating: a
+    # COMPLETED inline plan gets an LLM SUMMARY of its real step results, which
+    # is streamed through the same provider. That one stream call is the
+    # summary, not the chat model — while the plan was paused at an approval
+    # card the text was deterministic and there was no call to count. What the
+    # assertion always MEANT is that the user is not told to rephrase, so it
+    # now says that directly, in the incident's own words.
+    text = streamed_text(events).lower()
+    assert "direct instruction" not in text and "rephrase" not in text, text
 
 
 async def test_a_clean_chat_verdict_is_never_retried(client):

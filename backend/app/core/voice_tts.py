@@ -47,7 +47,11 @@ from typing import Any, Callable, Optional
 import httpx
 from loguru import logger
 
-from app.core.gpu_bootstrap import cuda_available, register_cuda_dll_dirs
+from app.core.gpu_bootstrap import (
+    cpu_worker_threads,
+    cuda_available,
+    register_cuda_dll_dirs,
+)
 
 #: Where Kokoro's ONNX model + voice-embeddings pack live.
 KOKORO_DIR = Path.home() / ".jarvis" / "kokoro"
@@ -203,7 +207,10 @@ def _build_kokoro(model_path: Path, voices_path: Path, device: str) -> tuple[Any
 
     so = rt.SessionOptions()
     if not want_cuda:
-        so.intra_op_num_threads = os.cpu_count() or 4
+        # Bounded, not "all cores" — see gpu_bootstrap.cpu_worker_threads. This
+        # path also runs after a silent CUDA fallback, so it is exactly when the
+        # machine can least afford to have every logical core taken.
+        so.intra_op_num_threads = cpu_worker_threads()
 
     session = rt.InferenceSession(str(model_path), sess_options=so, providers=providers)
     model = Kokoro.from_session(session, str(voices_path))

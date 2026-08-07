@@ -194,3 +194,52 @@ def test_listen_on_summon_defaults_off_and_round_trips():
     # A pre-Part-5 row has no key — the default fills in.
     assert _coerce_voice({"enabled": True}).listen_on_summon is False
     assert _coerce_voice({"enabled": True, "listen_on_summon": True}).listen_on_summon is True
+
+
+# ------------------------------------------------- CPU engine thread bounding
+#
+# voice_stt and voice_tts each asked onnxruntime/ctranslate2 for
+# os.cpu_count() threads — 16 on the dev laptop. Both reach the CPU path by
+# SILENT FALLBACK from a failed CUDA init, so a VRAM squeeze on a 6 GB laptop
+# GPU turned itself into a whole-machine CPU saturation event.
+
+def test_cpu_worker_threads_leaves_the_machine_usable():
+    """The engine must never claim every logical core."""
+    import os
+    from app.core.gpu_bootstrap import cpu_worker_threads
+
+    logical = os.cpu_count() or 4
+    threads = cpu_worker_threads()
+    assert 1 <= threads < logical, (
+        f"cpu_worker_threads()={threads} on a {logical}-core box - an inference "
+        "engine taking every core is what freezes the laptop"
+    )
+
+
+def test_cpu_worker_threads_never_returns_zero_on_a_small_box(monkeypatch):
+    """Headroom subtraction must not starve a 1- or 2-core machine: zero or a
+    negative thread count is a crash or a hang, not a slow engine."""
+    from app.core import gpu_bootstrap
+
+    for logical in (1, 2, 3, 4, 8, 16, 32):
+        monkeypatch.setattr(gpu_bootstrap.os, "cpu_count", lambda n=logical: n)
+        assert gpu_bootstrap.cpu_worker_threads() >= 1, f"failed at {logical} cores"
+
+
+def test_whisper_cpu_path_uses_the_bounded_count(monkeypatch):
+    """The CPU branch must pass the bounded count through to WhisperModel."""
+    from app.core import voice_stt
+
+    seen = {}
+
+    class _FakeModel:
+        def __init__(self, name, **kwargs):
+            seen.update(kwargs)
+
+    import faster_whisper
+    monkeypatch.setattr(faster_whisper, "WhisperModel", _FakeModel)
+    voice_stt._build_model("small", "cpu", "int8")
+
+    import os
+    assert seen["cpu_threads"] == voice_stt.cpu_worker_threads()
+    assert seen["cpu_threads"] < (os.cpu_count() or 4)

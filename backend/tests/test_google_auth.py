@@ -166,6 +166,145 @@ async def test_refresh_failure_degrades_not_crashes(manager, monkeypatch):
     assert manager.token_path.exists()
 
 
+# ------------------------------------------------- refresh circuit breaker
+#
+# A dead Google token used to cost a real network round trip on EVERY call.
+# MEASURED 2026-08-06: 53 consecutive failures in one log, two of them inside
+# the slowest chat turn on record (20.8s to first token). The breaker skips
+# only work we have just watched fail; the caller's outcome is unchanged.
+
+async def _fail_n_times(manager, monkeypatch) -> dict:
+    """Drive refreshes until the breaker opens. Returns a call counter."""
+    expired = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    _write_token(manager, expiry=expired)
+    from google.oauth2.credentials import Credentials
+
+    calls = {"n": 0}
+
+    def _failing_refresh(self, request):
+        calls["n"] += 1
+        raise RuntimeError("invalid_grant")
+
+    monkeypatch.setattr(Credentials, "refresh", _failing_refresh)
+    return calls
+
+
+async def test_repeated_refresh_failures_stop_hitting_the_network(manager, monkeypatch):
+    """The incident: every call re-attempted a refresh that had just failed.
+
+    After the threshold the network is not touched again during the cooldown —
+    and the caller still gets the SAME exception, so nothing downstream can
+    tell the difference except in latency.
+    """
+    calls = await _fail_n_times(manager, monkeypatch)
+
+    for _ in range(10):
+        with pytest.raises(GoogleNotConnectedError):
+            await manager.get_credentials()
+
+    assert calls["n"] == 2, (
+        f"expected the breaker to stop after 2 real attempts, got {calls['n']} "
+        "network round trips - a dead token is taxing every call again"
+    )
+
+
+async def test_an_open_breaker_never_deletes_the_token(manager, monkeypatch):
+    """Failing fast must stay as non-destructive as failing slowly was."""
+    await _fail_n_times(manager, monkeypatch)
+    for _ in range(5):
+        with pytest.raises(GoogleNotConnectedError):
+            await manager.get_credentials()
+    assert manager.token_path.exists()
+
+
+async def test_a_successful_refresh_resets_the_breaker(manager, monkeypatch):
+    """After a recovery, the failure COUNT must start again from zero.
+
+    ⚠️ An earlier version of this test failed only once before succeeding — one
+    failure is below the threshold, so the breaker never opened and the reset
+    was never load-bearing. It passed against code with the reset deleted,
+    which is no test at all. The sequence below drives the count to the
+    threshold first, so a missing reset is observable: a single later blip
+    would re-open the breaker on a connection that has since proven healthy.
+    """
+    expired = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    _write_token(manager, expiry=expired)
+    from google.oauth2.credentials import Credentials
+
+    state = {"fail": True, "n": 0}
+
+    def _refresh(self, request):
+        state["n"] += 1
+        if state["fail"]:
+            raise RuntimeError("temporary network glitch")
+        self.token = "refreshed-token"
+
+    monkeypatch.setattr(Credentials, "refresh", _refresh)
+
+    # 1. Outage: fail to the threshold, so the breaker opens.
+    for _ in range(2):
+        with pytest.raises(GoogleNotConnectedError):
+            await manager.get_credentials()
+    assert state["n"] == 2
+
+    # 2. Cooldown elapses; the half-open probe succeeds -> recovered.
+    manager._refresh_blocked_until = 0.0
+    state["fail"] = False
+    assert (await manager.get_credentials()).token == "refreshed-token"
+    assert state["n"] == 3
+
+    # 3. A single later blip on a healthy connection must NOT re-open the
+    #    breaker — which is only true if the count went back to zero.
+    state["fail"] = True
+    _write_token(manager, expiry=expired)
+    with pytest.raises(GoogleNotConnectedError):
+        await manager.get_credentials()
+    assert state["n"] == 4
+
+    state["fail"] = False
+    _write_token(manager, expiry=expired)
+    assert (await manager.get_credentials()).token == "refreshed-token"
+    assert state["n"] == 5, (
+        "the call after a single blip was refused, so the failure count "
+        "survived a successful refresh - the breaker was not reset"
+    )
+
+
+async def test_the_cooldown_lets_exactly_one_probe_through(manager, monkeypatch):
+    """Half-open: when the cooldown expires, ONE attempt is allowed. If it
+    fails the breaker re-opens immediately rather than allowing another full
+    run of N failures."""
+    calls = await _fail_n_times(manager, monkeypatch)
+    for _ in range(5):
+        with pytest.raises(GoogleNotConnectedError):
+            await manager.get_credentials()
+    assert calls["n"] == 2
+
+    manager._refresh_blocked_until = 0.0             # simulate cooldown elapsed
+    for _ in range(5):
+        with pytest.raises(GoogleNotConnectedError):
+            await manager.get_credentials()
+    assert calls["n"] == 3, "the probe must be a single attempt, not a new run"
+
+
+async def test_disconnect_clears_the_breaker(manager, monkeypatch):
+    """The user's own action must never be second-guessed by state from before
+    it — a reconnect after a disconnect starts clean."""
+    await _fail_n_times(manager, monkeypatch)
+    for _ in range(3):
+        with pytest.raises(GoogleNotConnectedError):
+            await manager.get_credentials()
+    assert manager._refresh_failures >= 2
+
+    monkeypatch.setattr(google_auth, "_revoke_token", _async_false)
+    await manager.disconnect()
+    assert manager._refresh_failures == 0
+
+
+async def _async_false(_token: str) -> bool:
+    return False
+
+
 async def test_get_credentials_missing_scope_raises(manager):
     _write_token(manager, scopes=list(SCOPES)[:-1])
     with pytest.raises(GoogleNotConnectedError):

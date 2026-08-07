@@ -1622,6 +1622,51 @@ def _inject_target_choices(plan: AgentPlan) -> bool:
     return stamped
 
 
+def _inject_user_words(plan: AgentPlan) -> None:
+    """Stamp the user's OWN request onto every pending `browse` step.
+
+    ⚠️ WHY CODE READS THE USER AND NOT THE MODEL'S PARAPHRASE (2026-08-07).
+    Three deterministic subsystems in the browse loop key on the `goal` STRING —
+    `goal_wants_playback` (does this hand the video to a normal browser?),
+    `_wants_latest_episode` / `_extract_search_term` (start the latest-episode web
+    search) and `_title_tokens` (which catalog entry is this?). But `goal` is
+    AUTHORED BY THE PLANNER, whose instructions are literally "give it the goal in
+    plain words" (rule 21) and whose parameter doc says "in plain words". So the
+    model was doing exactly as told, and MEASURED on the live incident:
+
+        user:    "play latest episode of latest season of bleach on anikoto"
+        planner: "Find Bleach on anikoto, go to its latest season, and start
+                  playing the newest episode"
+
+        goal_wants_playback   True -> False   the hand-off never fired
+        _extract_search_term  'bleach' -> None   the web search never STARTED
+        _title_tokens         {...} -> {}        slug matching died at line 1
+
+    Every one of them failed CLOSED AND SILENTLY: `run_browse` only starts the
+    latest-episode task `if latest_title`, and a None title logs nothing. A whole
+    feature switched itself off because a sentence was rephrased, and the run took
+    391 seconds to open the wrong season.
+
+    This is the codebase's recorded defect class INVERTED. Normally a prompt rule
+    has no comparator; here CODE depends on a prompt's exact wording. The fix is
+    the same one the three injectors above use: the fact the planner cannot be
+    trusted to preserve is enforced in code. `goal` keeps its job — what to DO on
+    the page — and `user_words` becomes the INTENT source.
+
+    ⚠️ SCOPED TO `browse`, NEVER `browse_commit`. `browse` is READ, so adding a
+    parameter cannot disturb anything; `browse_commit` is DESTRUCTIVE and
+    `PlanStep.signature()` is built from `parameters`, so stamping one there would
+    invalidate an approval the user had already granted. The commit flow has no
+    use for this anyway — nothing in it reads intent out of prose."""
+    words = (getattr(plan, "goal", "") or "").strip()
+    if not words:
+        return
+    for step in plan.pending_steps():
+        if step.tool != "browse":
+            continue
+        step.parameters["user_words"] = words
+
+
 def _declined_choice(answer: str) -> bool:
     """True when the reply to a "which one did you mean?" is a refusal rather
     than a pick. Checked BEFORE any matching, with a negative lookahead so
@@ -4377,6 +4422,12 @@ class AgentPlanner:
         # or option the user PICKED — the goal is still the ambiguous sentence,
         # so a re-drafted step would otherwise lose the answer entirely.
         _inject_target_choices(plan)
+        # The user's OWN words (2026-08-07): the browse loop's playback and
+        # latest-episode paths are deterministic code keyed on a string the
+        # PLANNER authors, and a rephrasing silently switched all three off. Same
+        # enforcement as the three above, one layer further out — see
+        # _inject_user_words.
+        _inject_user_words(plan)
 
         while (idx := plan.next_pending_index()) is not None:
             # Cooperative cancel (Part 6): checked BETWEEN steps, before
@@ -4542,6 +4593,14 @@ class AgentPlanner:
                 # A READ with the question budget exhausted falls through and
                 # searches the home copy — it reports nothing, it destroys
                 # nothing. Deliberately unchanged.
+                #
+                # open_folder joined this branch on 2026-08-06 when it dropped
+                # to READ, and the reasoning survives the move intact: the
+                # worst a spent budget buys is a file-explorer window onto the
+                # wrong Downloads, which the user closes. That is the whole
+                # argument for charging it to MAX_QUESTIONS rather than to the
+                # write-side _MAX_FOLDER_HANDOFFS budget, which exists because
+                # a mutating step must never run on a guessed drive.
 
             # COMMIT discovery (14.5): a browse_commit step whose form has not
             # been read yet runs a READ-mode discovery pass FIRST — drive to the

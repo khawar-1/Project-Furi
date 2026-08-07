@@ -911,7 +911,7 @@ Judge the INTENT, not the vocabulary:
 Any wording that asks for one of those actions now — or asks about actions Jarvis itself performed — gets its action label; anything else is CHAT.
 
 Then, for an ACTION label only (never for CHAT), add a SECOND word for how to run it:
-INLINE — a quick lookup Jarvis can answer in essentially one read, right now, that only READS and changes nothing: "what's on my desktop", "list my downloads", "any new emails?", "what's my next meeting", "look up today's weather", "who is the CEO of X". The user waits a moment and gets the answer in the chat.
+INLINE — a quick lookup Jarvis can answer in essentially one read, right now, that only READS and changes nothing: "what's on my desktop", "list my downloads", "open a folder on screen", "any new emails?", "what's my next meeting", "look up today's weather", "who is the CEO of X". The user waits a moment and gets the answer in the chat. Opening a folder is INLINE even when Jarvis has to search for it first — finding it is part of the same one quick answer.
 DELEGATE — real work: anything that CREATES, MOVES, DELETES, SENDS, or CHANGES something; drives a browser (every BROWSE); or clearly takes several steps. "organize my downloads", "email jamil about dinner", "delete the temp files", "apply to 3 jobs", "play a song on youtube". It runs in the background as its own agent while the user keeps talking, and Jarvis notifies them when it is done.
 When unsure, choose DELEGATE.
 

@@ -180,6 +180,23 @@ class Settings(BaseSettings):
     GOOGLE_SEARCH_API_KEY: str = ""
     GOOGLE_SEARCH_CX: str = ""
 
+    # ------------------------------------------------- Series/season catalogs
+    # Optional. Used ONLY by app/browser/series_api.py to answer "which season of
+    # X is current?" for a "play the latest season of ..." browse goal.
+    #
+    # ANIME NEEDS NO KEY: AniList's GraphQL API is public, and it is what makes
+    # this feature work on a fresh clone. This key is for TMDb, which covers
+    # LIVE-ACTION TV (AniList indexes anime only — MEASURED 2026-08-07: it returns
+    # no rows at all for "breaking bad" or "stranger things"). Unset means the
+    # TMDb leg returns None with no request, so a default install is unaffected
+    # and only live-action season resolution is unavailable.
+    #
+    # ⚠️ NOT LIVE-VERIFIED: no TMDb key was available when this shipped, so the
+    # response handling is written to the documented shape and covered
+    # hermetically only. The AniList half is verified against the real service.
+    # Free key: https://www.themoviedb.org/settings/api
+    TMDB_API_KEY: str = ""
+
     # ------------------------------------------------------------------ Voice
     WHISPER_MODEL: str = "base"
 

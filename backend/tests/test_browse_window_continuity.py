@@ -278,6 +278,63 @@ async def test_media_keep_open_hands_off_to_a_clean_window_in_production(
     assert browser_session.active_browse_window() is None
 
 
+async def test_the_handoff_reads_the_users_words_not_the_planners_paraphrase(
+    wired, monkeypatch
+):
+    """THE 2026-08-07 INCIDENT, at the tool. The user said "play latest episode of
+    latest season of bleach on anikoto"; the planner drafted "Find Bleach on
+    anikoto, go to its latest season, and start playing the newest episode".
+    goal_wants_playback is anchored to the LEADING verb, so the paraphrase reads
+    as False and a genuine play request silently lost its hand-off — the user's
+    "it didn't even switch to my normal browser which it normally does".
+
+    ⚠️ This has to be driven through the TOOL. Asserting goal_wants_playback on
+    the two strings proves the predicate and says nothing about which string the
+    hand-off passes it — the test-reach gap that has cost this codebase four
+    rounds."""
+    calls = {}
+
+    async def fake_open_media(url, *, title=""):
+        calls["url"] = url
+        return True
+
+    monkeypatch.setattr(browser_session, "clean_media_enabled", lambda: True)
+    monkeypatch.setattr(browser_session, "open_media_window", fake_open_media)
+
+    result = await _browse(
+        keep_open=True,
+        goal="Find Bleach on anikoto, go to its latest season, and start playing "
+             "the newest episode",
+        user_words="play latest episode of latest season of bleach on anikoto",
+    )
+
+    assert result.output["handoff"] == "clean_window"
+    assert result.output["playing"] is True
+    assert calls["url"] == "https://books.toscrape.com/x"
+
+
+async def test_a_non_playback_goal_is_still_refused_through_user_words(
+    wired, monkeypatch
+):
+    """The positive gate is KEPT (2026-08-01). Reading the user's words must not
+    become "hand everything over": their own words for a shopping goal still do
+    not ask for playback, so Rule 1 stays armed and nothing is played."""
+    monkeypatch.setattr(browser_session, "clean_media_enabled", lambda: True)
+    monkeypatch.setattr(
+        browser_session, "open_media_window",
+        lambda *a, **k: pytest.fail("a shopping goal must never hand off to media"),
+    )
+
+    result = await _browse(
+        keep_open=True,
+        goal="Open the junaidjamshed.com homepage so it is visible in the browser",
+        user_words="add janan perfume to cart on junaidjamshed",
+    )
+
+    assert result.output.get("handoff") != "clean_window"
+    assert result.output.get("playing") is not True
+
+
 async def test_opening_a_site_with_keep_open_never_plays_anything(wired, monkeypatch):
     """⚠️ keep_open means "leave the window open", NOT "this is a media goal"
     (2026-08-01). The planner sets it for "open youtube" too — and the in-place

@@ -170,6 +170,10 @@ NAV_TIMEOUT_MS = 20_000
 # Worst case 10 + 10 + 15 = 35s, DOWN from the old 40s double-DCL timeout.
 NAV_COMMIT_MS = 10_000
 READY_POLL_MS = 15_000
+# Above this, a readiness wait is worth a log line — it is dead time in the
+# run and the only way to tell a budget that is too small from a page that
+# was never going to arrive. Below it, ordinary pages stay quiet.
+READY_LOG_THRESHOLD_SECONDS = 2.0
 READY_STEP_MS = 250
 # STABILITY, not just substance — and this is a MEASURED constant, not a guess.
 #
@@ -550,6 +554,18 @@ _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # Non-network schemes the browser drives itself (about:blank between pages,
 # data:/blob: for generated content). Not requests to anywhere — never gated.
 _LOCAL_SCHEMES = frozenset({"about", "data", "blob", "chrome", "chrome-error"})
+
+# HOW LONG A NEW TAB GETS TO SAY WHERE IT IS GOING (2026-08-07). A pop-under and
+# a legitimate `target=_blank` link BOTH open on about:blank and navigate a
+# moment later, so at the instant the tab appears they are indistinguishable —
+# which is why `_may_adopt` permits blank. What was wrong was ACTING on that
+# indistinguishability: the take-over closed the page we were driving before the
+# new tab had kept its promise. Now the guard goes on at once and the take-over
+# waits for a real URL. Sized to cover a normal popup navigation with room to
+# spare; a tab still blank at the deadline is simply left alone, so the cost of
+# it being too short is an un-adopted tab, never a destroyed page.
+ADOPT_RESOLVE_MS = 3_000
+ADOPT_POLL_MS = 100
 
 # Playwright route-handler races that are BENIGN — the request has already been
 # resolved (continued, aborted, redirected, or the page/context went away), so a
@@ -1496,6 +1512,10 @@ class InterceptStats:
     blocked_navigations: int = 0
     blocked_hosts: int = 0
     blocked_ads: int = 0
+    # Total time spent waiting for pages to become actionable (see
+    # _await_readiness). Reported in the close summary so a run's dead time is
+    # a number rather than an impression.
+    ready_wait_seconds: float = 0.0
     allowed_commits: int = 0
     blocked_downloads: int = 0
     mutation_urls: list[str] = field(default_factory=list)
@@ -1690,6 +1710,11 @@ class BrowserSession:
         self._cdp_sessions: list[Any] = []
         self._cdp_routed = False
         self._inflight: set[Any] = set()
+        # Deferred take-overs (see _adopt_new_page). Strong references, for the
+        # same reason `_inflight` holds one: a dropped task is a decision nobody
+        # ever makes. Cancelled in close(), so a session cannot outlive its own
+        # pending adoptions and act on a page after teardown.
+        self._deferred_adopts: set[Any] = set()
         # MULTI-TAB bookkeeping (2026-08-01). `tab_site` is the registrable
         # domain this tab belongs to — the key a later browse for the same site
         # reuses it by; `tab_meta` is what it is showing (title/url/goal) for the
@@ -1745,13 +1770,23 @@ class BrowserSession:
             logger.info(
                 "browser session summary: "
                 f"requests={s.total_requests} ssrf_checks={s.ssrf_checks} "
-                f"settle={s.settle_seconds:.1f}s blocked_mut={s.blocked_mutations} "
+                f"settle={s.settle_seconds:.1f}s ready_wait={s.ready_wait_seconds:.1f}s "
+                f"slow_navs={s.slow_navigations} blocked_mut={s.blocked_mutations} "
                 f"blocked_host={s.blocked_hosts} blocked_nav={s.blocked_navigations} "
                 f"blocked_ads={s.blocked_ads} commits={s.allowed_commits} "
                 f"cache={'on' if s.http_cache_on else 'DISABLED'}"
             )
         except Exception:
             pass
+        # A deferred take-over outlives nothing: a pending decision that landed
+        # after teardown would swap `self.page` to a tab on a context that is
+        # going away, and close a page the window has already reclaimed.
+        for task in list(self._deferred_adopts):
+            try:
+                task.cancel()
+            except Exception as exc:
+                logger.debug(f"cancel deferred adopt: {type(exc).__name__}: {exc}")
+        self._deferred_adopts.clear()
         # OWNERSHIP (see app/browser/window.py). A session opened through
         # BrowserSession.open is a TAB of the shared window: closing it closes
         # its page, and the context only when it was the last tab — otherwise one
@@ -2187,15 +2222,111 @@ class BrowserSession:
         tabs accumulated for the life of the session. Adoption grants NO new
         capability — the tab gets this session's own interceptor, SSRF guard and
         allowlist before the loop ever drives it. Best-effort throughout; a
-        popup must never break a running browse."""
+        popup must never break a running browse.
+
+        ⚠️ A TAB WE MAY NOT BROWSE IS NEVER ADOPTED (2026-08-07). Live, a click on
+        anikoto's episode-range selector opened a pop-under to getsmartyapp.com;
+        this method followed it AND CLOSED the anikoto page, so the loop stood on
+        an ad, spent an LLM decision on its DOM, and then had to navigate all the
+        way back — ~180s of a 391s run, 46% of it, pure recovery.
+        `blocked_ads` was 0: the host is not in the hand-kept `_AD_HOSTS` list.
+        Growing that list is the wrong fix and this codebase has recorded the
+        hand-kept-list hole six times; the RIGHT test already exists and is
+        stronger. Rule 3 refuses a main-frame navigation to a non-allowlisted
+        host, so a tab on such a host is somewhere this session is already
+        forbidden to GO — adopting it was incoherent. Refuse it, close it, and
+        stay put. This is not an ad heuristic: it never asks what the page is,
+        only whether we are allowed to be there, so it covers every pop-under,
+        redirect-farm and misclick without knowing any of their names.
+
+        ⚠️ AND A TAB THAT HAS NOT SAID WHERE IT IS GOING NEVER COSTS US THE PAGE
+        WE ARE ON (2026-08-07, round 3). The guard above closes a tab that has
+        ALREADY landed somewhere forbidden — but a pop-under does not arrive that
+        way. It opens on `about:blank` and navigates a moment later, which is
+        exactly the shape of a legitimate `target=_blank`, so the blank case was
+        adopted on a PROMISE. Live, twice: the take-over swapped to the blank tab
+        and CLOSED the anikoto page 164ms into the navigation that was about to
+        finish the task; the ad then loaded into the tab we had just made active,
+        and the run died on `Execution context was destroyed`. The
+        promise-keeping and the destruction were in the wrong order.
+        Now the guard goes on IMMEDIATELY
+        (unchanged — an un-intercepted tab would load the ad for real), and only
+        the TAKE-OVER waits for a real URL. Rule 3 then usually decides it for
+        us: it aborts the ad's own navigation, the tab stays blank, the deadline
+        passes and we simply never move."""
+        verdict = self._adopt_verdict(page)
+        if verdict == "refuse":
+            try:
+                await _maybe_await(page.close())
+            except Exception as exc:
+                logger.debug(f"close refused tab: {type(exc).__name__}: {exc}")
+            return
         # A new tab is a new TARGET and needs its own guard: a CDP session of its
         # own, or a page route of its own. There is no longer a context-level
-        # route that could cover it for free.
+        # route that could cover it for free. This happens for the DEFERRED case
+        # too — the tab is guarded from its first request whether or not we ever
+        # drive it, which is what makes waiting safe.
         try:
             await self._install_interception(page)
         except Exception as exc:
             logger.debug(f"adopt popup route: {type(exc).__name__}: {exc}")
         self._refuse_downloads(page)
+        if verdict == "unknown":
+            self._defer_take_over(page)
+            return
+        await self._take_over(page)
+
+    def _defer_take_over(self, page: Any) -> None:
+        """Schedule the take-over decision for when the tab has a real URL."""
+        try:
+            task = asyncio.ensure_future(self._take_over_when_resolved(page))
+        except Exception as exc:  # no running loop (a sync test) — nothing to defer
+            logger.debug(f"defer adopt: {type(exc).__name__}: {exc}")
+            return
+        self._deferred_adopts.add(task)
+        task.add_done_callback(self._deferred_adopts.discard)
+
+    async def _take_over_when_resolved(self, page: Any) -> None:
+        """Poll a blank new tab until it says where it is going, then decide.
+
+        Three outcomes, and only one of them touches the page we are driving:
+        it lands somewhere allowed → take it over (the `target=_blank` case a
+        popup follow exists for); it lands somewhere forbidden → close it and
+        stay put; it never lands → leave it alone.
+
+        LEAVING IT is deliberate rather than lazy. A tab still blank after the
+        deadline is one whose navigation Rule 3 has usually just aborted, and
+        closing a tab we cannot classify is the same act-on-incomplete-
+        information mistake this whole change removes. It costs an idle tab for
+        the life of the session, which `close_all` reclaims.
+
+        Never raises — this runs detached, and a popup must never break a run."""
+        try:
+            deadline = time.monotonic() + (ADOPT_RESOLVE_MS / 1000.0)
+            while time.monotonic() < deadline:
+                await asyncio.sleep(ADOPT_POLL_MS / 1000.0)
+                verdict = self._adopt_verdict(page)
+                if verdict == "allow":
+                    await self._take_over(page)
+                    return
+                if verdict == "refuse":
+                    try:
+                        await _maybe_await(page.close())
+                    except Exception as exc:
+                        logger.debug(f"close refused tab: {type(exc).__name__}: {exc}")
+                    return
+            logger.info(
+                "browser: a new tab never said where it was going — leaving it "
+                "alone and staying on the current page"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug(f"deferred adopt: {type(exc).__name__}: {exc}")
+
+    async def _take_over(self, page: Any) -> None:
+        """Make `page` this session's active page and close the one it replaces.
+        The guard is already installed by the caller."""
         superseded = self.page
         self.page = page
         logger.info("browser: following a new tab as the active page")
@@ -2214,6 +2345,54 @@ class BrowserSession:
                 await _maybe_await(superseded.close())
             except Exception as exc:
                 logger.debug(f"close superseded tab: {type(exc).__name__}: {exc}")
+
+    def _may_adopt(self, page: Any) -> bool:
+        """Whether a newly-opened tab is somewhere this session is allowed to be.
+
+        ONE reading of `_adopt_verdict`, never a second copy of the rule — a
+        predicate kept in two places is this codebase's most-recorded hole. Note
+        what it means and does not: "not refused" covers both a tab we take over
+        now and one we are still waiting on, which is the right answer to the
+        question this function asks (is this tab somewhere we may be?) and the
+        wrong one to ask before destroying a page. `_adopt_new_page` reads the
+        verdict itself for that reason."""
+        return self._adopt_verdict(page) != "refuse"
+
+    def _adopt_verdict(self, page: Any) -> str:
+        """'allow' | 'refuse' | 'unknown' for a newly-opened tab.
+
+        Refuses — the caller then closes it — when it already sits on a host
+        outside the allowlist. 'unknown' is a tab whose URL is not yet knowable
+        (`about:blank`, empty, an unreadable fake), and that is a REAL third
+        answer rather than a soft no: a `target=_blank` link legitimately opens
+        blank and navigates a moment later, and so does a pop-under, so at this
+        instant they cannot be told apart. Collapsing 'unknown' into 'allow' is
+        what let an ad cost us the page we were driving (2026-08-07).
+
+        Pure and synchronous apart from the refusal counter, so the RULE can be
+        tested without a browser. Never raises — a popup must never break a
+        running browse, and on any doubt it falls back to adopting."""
+        try:
+            url = getattr(page, "url", "") or ""
+            parsed = urlparse(url)
+            # about:blank & friends, and a tab with no URL at all — not yet knowable
+            if not url or parsed.scheme in _LOCAL_SCHEMES:
+                return "unknown"
+            host = parsed.hostname
+            if not host or self.origin_allowed(host):
+                return "allow"
+        except Exception as exc:  # an odd fake / a page torn down mid-check
+            logger.debug(f"adopt check: {type(exc).__name__}: {exc}")
+            return "allow"
+
+        # Counted as an ad block because that is what this overwhelmingly is, and
+        # the close summary is where a run's ad pressure becomes visible at all.
+        self.stats.blocked_ads += 1
+        logger.info(
+            f"browser: a new tab opened on {host} — not allowlisted, closing it "
+            "and staying on the current page"
+        )
+        return "refuse"
 
     def _refuse_downloads(self, page: Any) -> None:
         """Downloads are refused wholesale (action-level policy): nothing in the
@@ -2367,9 +2546,39 @@ class BrowserSession:
         answer — if we cannot tell what state the page is in, proceed and let
         assess_page judge the observation, rather than burning the budget on a
         question nothing can answer."""
-        deadline = time.monotonic() + (READY_POLL_MS / 1000.0)
+        # MEASURE, DO NOT GUESS (2026-08-07). A live run spent 5 x 15s here on
+        # anikoto and the obvious move is to raise READY_POLL_MS — but this
+        # codebase has twice recorded a timing "fix" that measured to nothing (the
+        # 2026-08-06 prompt-size round; the 2026-07-27 slowdown that turned out to
+        # be the machine). Raising a budget is only right if pages are ARRIVING
+        # just past it; if they never arrive, the fix is to stop waiting. Nothing
+        # here changes behaviour — it records how long readiness actually took so
+        # the next run can answer that question with a number.
+        started = time.monotonic()
+        deadline = started + (READY_POLL_MS / 1000.0)
         last_nodes = -1
         settled = 0
+
+        def _ready(why: str) -> bool:
+            # ⚠️ WHOLLY BEST-EFFORT. This function's contract is "never raises,
+            # never fatal", and reading self.page.url can throw on a page torn
+            # down mid-poll — which is exactly the case worth measuring. A
+            # measurement that can break the thing it measures is worse than no
+            # measurement, so the whole block is swallowed.
+            try:
+                waited = time.monotonic() - started
+                self.stats.ready_wait_seconds += waited
+                # Only the SLOW ones, so an ordinary page stays silent and a run's
+                # real dead time is what shows up in the log.
+                if waited >= READY_LOG_THRESHOLD_SECONDS:
+                    logger.info(
+                        f"browser: readiness took {waited:.1f}s ({why}) for "
+                        f"{(getattr(self.page, 'url', '') or '')[:100]}"
+                    )
+            except Exception as exc:
+                logger.debug(f"readiness timing: {type(exc).__name__}: {exc}")
+            return True
+
         while True:
             try:
                 state = await self.page.evaluate(_READY_JS)
@@ -2397,21 +2606,35 @@ class BrowserSession:
             # making a trivial page wait a full second for stillness it showed on
             # the first poll is pure latency.
             if state.get("complete") and settled >= READY_COMPLETE_POLLS:
-                return True
+                return _ready("complete")
 
             # SUBSTANTIVE **AND** STILL. Either half alone is wrong: substance
             # alone fires on a bare header while the real content is still
             # arriving (the daraz.pk measurement above), and stillness alone
             # fires on a blank page that has not started.
             if state.get("ready") and settled >= READY_STABLE_POLLS:
-                return True
+                return _ready("substantive+still")
 
             # Still but THIN: the page has finished and simply does not have much
             # on it — a login screen, a redirect stub, an SPA that painted once.
             if settled >= READY_STALL_POLLS and int(state.get("acts") or 0) >= 1:
-                return True
+                return _ready("still-but-thin")
 
             if time.monotonic() >= deadline:
+                try:
+                    self.stats.ready_wait_seconds += time.monotonic() - started
+                    # What the page looked like when the budget ran out — the
+                    # number that says whether waiting LONGER would have helped.
+                    # A page still growing was nearly there; one stuck at 0 acts
+                    # never would be, and for THAT the fix is to stop waiting, not
+                    # to wait more. Best-effort for the reason in _ready.
+                    logger.info(
+                        f"browser: readiness gave up after {READY_POLL_MS}ms "
+                        f"(nodes={last_nodes} acts={int(state.get('acts') or 0)} "
+                        f"complete={bool(state.get('complete'))} still={settled})"
+                    )
+                except Exception as exc:
+                    logger.debug(f"readiness timing: {type(exc).__name__}: {exc}")
                 return False
             await asyncio.sleep(READY_STEP_MS / 1000.0)
 

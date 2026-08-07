@@ -35,6 +35,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -68,6 +69,27 @@ RECONNECT_MESSAGE = (
 # Key we add next to the credential fields in the token file so the status
 # endpoint can show "Connected as x@gmail.com" without a network call.
 _ACCOUNT_EMAIL_KEY = "_account_email"
+
+# --- Refresh circuit breaker -------------------------------------------------
+#
+# WHY. get_credentials() is the single choke point every Google call goes
+# through, and on an expired-beyond-refresh token it did a real network round
+# trip to Google's OAuth endpoint EVERY time, failed, and raised — with no
+# memory that the previous call had just failed the same way.
+#
+# MEASURED on this machine (2026-08-06): 53 consecutive failures in one log,
+# and the world model calls this twice per miss (calendar, then unread) behind
+# a 5s TTL that an ordinary conversational gap misses. Two of those failures
+# land inside the slowest chat turn on record — 20.8s to first token, of which
+# ~7.9s was attributable to nothing the timing line measured. A dead
+# integration was taxing every conversation.
+#
+# The breaker is deliberately SMALL and one-directional: it only ever skips
+# work we have just watched fail. It cannot cause a call to fail that would
+# have succeeded — a closed breaker changes nothing, and any successful refresh
+# or an explicit connect/disconnect resets it immediately.
+_REFRESH_FAILURE_THRESHOLD = 2
+_REFRESH_COOLDOWN_SECONDS = 300.0
 
 
 class GoogleNotConnectedError(Exception):
@@ -115,6 +137,12 @@ class GoogleAuthManager:
         # Keeps the fire-and-forget flow task referenced (the _RUNNING rule
         # from task_runner: a bare create_task can be garbage-collected).
         self._flow_task: Optional[asyncio.Task] = None
+        # Refresh circuit breaker. Guarded by _state_lock because refresh runs
+        # in a worker thread (asyncio.to_thread) while callers are on the loop.
+        # monotonic(), not wall clock: a system clock change must not hold the
+        # breaker open for hours or expire it early.
+        self._refresh_failures = 0
+        self._refresh_blocked_until = 0.0
 
     # ------------------------------------------------------------ properties
 
@@ -200,6 +228,33 @@ class GoogleAuthManager:
 
     # --------------------------------------------------------- credentials
 
+    def _refresh_is_blocked(self) -> bool:
+        """True while the breaker is open (recent refreshes failed repeatedly)."""
+        with self._state_lock:
+            if self._refresh_failures < _REFRESH_FAILURE_THRESHOLD:
+                return False
+            if time.monotonic() >= self._refresh_blocked_until:
+                # Cooldown elapsed: let exactly one attempt through. Failures
+                # stay at the threshold, so a still-dead token re-opens the
+                # breaker on that single attempt rather than after another run
+                # of N — the half-open probe.
+                return False
+            return True
+
+    def _note_refresh_failure(self) -> None:
+        with self._state_lock:
+            self._refresh_failures += 1
+            if self._refresh_failures >= _REFRESH_FAILURE_THRESHOLD:
+                self._refresh_blocked_until = time.monotonic() + _REFRESH_COOLDOWN_SECONDS
+
+    def reset_refresh_breaker(self) -> None:
+        """Clear the breaker. Called on any refresh success and on every
+        connect/disconnect — the user's own action must never be second-guessed
+        by state from before it."""
+        with self._state_lock:
+            self._refresh_failures = 0
+            self._refresh_blocked_until = 0.0
+
     async def get_credentials(self) -> Any:
         """Usable (silently refreshed) credentials, or GoogleNotConnectedError.
         The single choke point every Google API call goes through."""
@@ -212,6 +267,12 @@ class GoogleAuthManager:
 
         creds = Credentials.from_authorized_user_info(data, scopes=list(SCOPES))
         if not creds.valid:
+            # Fail fast while the breaker is open. The outcome for the caller is
+            # IDENTICAL to a failed refresh — same exception, same user-facing
+            # message — so no behaviour changes; only the network round trip and
+            # the seconds it costs are skipped. See _REFRESH_FAILURE_THRESHOLD.
+            if self._refresh_is_blocked():
+                raise GoogleNotConnectedError(RECONNECT_MESSAGE)
             try:
                 # Network I/O — off the event loop.
                 await asyncio.to_thread(creds.refresh, Request())
@@ -219,8 +280,10 @@ class GoogleAuthManager:
                 # Revoked, expired-beyond-refresh, or transient network — the
                 # caller can't act on the difference, and deleting the file on
                 # a maybe-transient failure would be destructive. Degrade.
+                self._note_refresh_failure()
                 logger.warning(f"Google token refresh failed: {type(e).__name__}")
                 raise GoogleNotConnectedError(RECONNECT_MESSAGE) from e
+            self.reset_refresh_breaker()
             self._save_credentials(creds, account_email=data.get(_ACCOUNT_EMAIL_KEY))
         return creds
 
@@ -272,6 +335,9 @@ class GoogleAuthManager:
             account_email = self._fetch_account_email(creds)
             self._save_credentials(creds, account_email=account_email)
             self._last_error = None
+            # A fresh consent supersedes anything the breaker learned from the
+            # token it replaces.
+            self.reset_refresh_breaker()
             logger.info(
                 "✅ Google account connected"
                 + (f" ({account_email})" if account_email else "")
@@ -317,6 +383,8 @@ class GoogleAuthManager:
             logger.warning(f"Could not delete Google token file: {type(e).__name__}")
             disconnected = False
         self._last_error = None
+        # Leave no stale breaker behind for the next account to inherit.
+        self.reset_refresh_breaker()
         return {"disconnected": disconnected, "revoked": revoked}
 
 

@@ -163,6 +163,24 @@ _DIR_PARAMS = {
     "run_command": "working_directory",
 }
 
+# ⚠️ open_folder is SEPARATE from _DIR_PARAMS, and the difference is the point.
+# Live incident 2026-08-06: "open folder 'fomi'" drafted exactly the flow the
+# plan rules ask for — search_files, then open_folder("PENDING: full path of
+# the folder named 'fomi' found by the search") — and `resolve()` had NO branch
+# for the tool, so it fell through to `return None`, the step FAILED on
+# "unresolved 'PENDING:' placeholders", and the LLM replan path took over. The
+# audit puts the cost at **93 seconds of planning** for one folder: a burned
+# replan round, a clarifying question the user had to answer, and an approval
+# pause on the replacement step. The tool was added to six maps that day; this
+# was the seventh and it was missed, which is the defect class this file has
+# now recorded four times ("a second copy of a list is a hole").
+#
+# It cannot simply join _DIR_PARAMS, because open_folder ALSO accepts a FILE
+# path ("show me where my resume lives" → open its containing folder, plan
+# rule 9). Folder-only substitution would leave that flow dead-ending exactly
+# as the incident did. See _substitute_open_target.
+_OPEN_TARGET_PARAMS = {"open_folder": "path"}
+
 # Recipient parameters: substituted only from a lookup_contact result that
 # pins exactly one address (Phase 5 Part 3). cc placeholders stay on the LLM
 # path — conservative, like everything here.
@@ -630,23 +648,65 @@ def _fill_list(
     return [_batch_step(template, template.tool, key, key, pool, deferred)]
 
 
+def _pick_one(candidates: list[str], placeholder_text: str) -> Optional[str]:
+    """The ONE path a placeholder identifies among `candidates`, or None when
+    the results do not pin exactly one — code never picks between several.
+
+    Takes a POOL rather than a step so the folder rule and the open-target rule
+    below cannot drift apart (the 2026-08-03 `mutation_scope` refactor shape:
+    one predicate, thin callers)."""
+    named = [c for c in candidates if PurePath(c).name.lower() in placeholder_text]
+    if len(named) == 1:
+        return named[0]  # the placeholder names exactly one found path
+    if len(candidates) == 1:
+        return candidates[0]  # only one candidate exists at all
+    return None
+
+
 def _substitute_folder(
     template: PlanStep, key: str, completed: list[PlanStep]
 ) -> Optional[list[PlanStep]]:
     source = next((s for s in reversed(completed) if paths_from_step(s)[1]), None)
     if source is None:
         return None
-    folders = paths_from_step(source)[1]
     placeholder_text = str(template.parameters.get(key) or "").lower()
-    named = [f for f in folders if PurePath(f).name.lower() in placeholder_text]
-    if len(named) == 1:
-        pick = named[0]  # the placeholder names exactly one found folder
-    elif len(folders) == 1:
-        pick = folders[0]  # only one candidate exists at all
-    else:
-        return None  # several plausible folders — code never picks
+    pick = _pick_one(paths_from_step(source)[1], placeholder_text)
+    if pick is None:
+        return None
     # Substitution, not expansion: the step is still the one the LLM
     # described — only its path became concrete.
+    return [_concrete_step(template, key, pick, description=template.description)]
+
+
+def _substitute_open_target(
+    template: PlanStep, key: str, completed: list[PlanStep]
+) -> Optional[list[PlanStep]]:
+    """The folder (or the file whose folder) a completed read pinned, for
+    open_folder's single `path`.
+
+    SUBSTITUTION, never expansion — deliberately not _expand_files. A search
+    matching five files would become five steps there, i.e. five explorer
+    windows for one "open it"; nobody means that. Several candidates yield
+    None and the LLM replan path takes over, as everywhere else here.
+
+    Folders are tried FIRST and the file pool is consulted only when NO
+    completed step produced a folder at all. That ordering is what keeps the
+    rule free of a folder-vs-file judgement call: "open the folder containing
+    my resume" reaches the file branch precisely because the search found only
+    the file, so there is nothing to choose between."""
+    if (folder_step := _substitute_folder(template, key, completed)) is not None:
+        return folder_step
+    if any(paths_from_step(s)[1] for s in completed):
+        return None  # a folder existed and did not pin one — do not guess a file
+    source = next((s for s in reversed(completed) if paths_from_step(s)[0]), None)
+    if source is None:
+        return None
+    placeholder_text = str(template.parameters.get(key) or "").lower()
+    pick = _pick_one(paths_from_step(source)[0], placeholder_text)
+    if pick is None:
+        return None
+    # The tool resolves a file to its parent itself (_folder_to_show), so the
+    # concrete step stays honest about what the read actually found.
     return [_concrete_step(template, key, pick, description=template.description)]
 
 
@@ -1188,6 +1248,8 @@ def resolve(
             return _expand_files(plan, template, key, completed, max_new, grounding)
         if _DIR_PARAMS.get(template.tool) == key:
             return _substitute_folder(template, key, completed)
+        if _OPEN_TARGET_PARAMS.get(template.tool) == key:
+            return _substitute_open_target(template, key, completed)
         if _EMAIL_TO_PARAMS.get(template.tool) == key:
             return _substitute_recipient(template, key, completed)
         if _EVENT_ID_PARAMS.get(template.tool) == key:

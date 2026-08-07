@@ -334,9 +334,60 @@ def _explicit_folder_choice(name: str, goal: str, user_answers) -> Optional[str]
     return None
 
 
+# ⚠️ A TYPO IS STILL THE USER NAMING THE FOLDER. Live 2026-08-06: "open
+# donwloads" opened C:\Users\DELL\Downloads without asking, while D:\Downloads
+# also existed. Every other precondition held — the model had already written
+# the home path, both copies were on disk, `find_duplicate_folders` returned
+# them both — and this predicate alone stood the guard down, because "donwloads"
+# does not match \bdownloads\b. The guard's job is to establish that the USER
+# (not memory, not a web page) is the source of the name; a transposed pair of
+# letters does not make them any less the source.
+#
+# MEASURED, because fuzzy matching has been falsified TWICE in this codebase
+# (typo'd routing question words: `here`→where scores 89 while `whihc`→which
+# scores 80, so no threshold exists; product-variant tokens: `pants`/`paints`
+# 90.9 outscores `watch`/`watches` 83.3). Neither result carries over, and the
+# reason is the candidate set: those compared against an OPEN VOCABULARY, this
+# compares against ONE folder name already known to exist on disk, twice over.
+#
+# Over 30 measured pairs the lowest true typo scores 83.3 and the highest
+# coincidence scores 83.3 — they touch, so 84.0 is the floor and it costs one
+# case (`vidoes`→`videos`, 83.3, a transposition in a 6-letter word).
+#
+# THE FLOOR SELF-SCALES WITH NAME LENGTH, which is the property that makes it
+# safe and it falls out of the metric rather than being tuned in: a
+# single-character difference scores 66.7 at 3 letters, 75.0 at 4, 83.3 at 6
+# and 85.7 at 7 — so short names ("src", "docs", "fomi", "test") get NO
+# tolerance, where a one-letter difference usually means a different word, and
+# long names get it, where it almost always means a slip. Pinned by a test so a
+# floor change that breaks it fails loudly.
+#
+# The asymmetry justifies erring permissive, and it is steep. A false positive
+# needs all three of: the model home-anchoring the path, TWO real folders of
+# that name existing, and a similar token — and then costs ONE question whose
+# options are real verified paths. A false negative is the 2026-08-01 incident:
+# 85 files moved to the wrong drive, silently.
+_TYPO_FLOOR = 84.0
+_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+
+
 def _named_in_words(name: str, goal: str, user_answers) -> bool:
     corpus = " ".join([goal or ""] + [str(a) for a in (user_answers or [])])
-    return re.search(rf"(?i)\b{re.escape(name)}\b", corpus) is not None
+    if re.search(rf"(?i)\b{re.escape(name)}\b", corpus) is not None:
+        return True
+    # Only a single-word name can be answered by a single token; a multi-word
+    # folder ("My Documents") is left to the exact check above.
+    if _WORD_RE.fullmatch(name) is None:
+        return False
+    try:
+        from rapidfuzz import fuzz
+    except Exception:  # pragma: no cover — degrade to the exact check
+        return False
+    lname = name.lower()
+    return any(
+        fuzz.ratio(token.lower(), lname) >= _TYPO_FLOOR
+        for token in _WORD_RE.findall(corpus)
+    )
 
 
 @dataclass

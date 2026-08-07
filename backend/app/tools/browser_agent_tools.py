@@ -359,6 +359,17 @@ class BrowseTool(BaseTool):
         allowlist = {o for o in raw_origins if str(o).strip()}
         allowlist.add(_normalize_origin(start_url))
         keep_open = bool(kwargs.get("keep_open"))
+        # THE USER'S OWN REQUEST, stamped in code by planner._inject_user_words —
+        # never authored by the model. `goal` says what to DO on the page and the
+        # loop's decision prompt keeps using it; `intent_text` is what the
+        # deterministic paths READ, because they ask questions only the user's own
+        # phrasing can answer ("did they say PLAY?", "which series?", "did they ask
+        # for the latest?"). Live 2026-08-07 the planner's paraphrase turned
+        # goal_wants_playback False and _extract_search_term None, which silently
+        # killed both the media hand-off and the whole latest-episode web search.
+        # Falls back to `goal` so a direct API call or a pre-change parked plan
+        # behaves exactly as before.
+        intent_text = str(kwargs.get("user_words") or "").strip() or goal
         # Set by the planner on the resumed step after the user approved a
         # world-acting gesture (2026-07-22): the PERMIT for the ONE gesture the
         # user said yes to, bound to that control on that site and consumed when
@@ -441,6 +452,7 @@ class BrowseTool(BaseTool):
                     skip_login_wall=skip_login_wall,
                     keep_open=keep_open,
                     stop_check=stop_check,
+                    intent_text=intent_text,
                 )
 
                 output = {
@@ -722,7 +734,15 @@ class BrowseTool(BaseTool):
                 # reason. destination_only stays as a second, narrower refusal:
                 # a run that finished purely by ARRIVING somewhere sought nothing,
                 # so there is nothing to play even if the wording says "play".
-                wants_playback = browser_loop.goal_wants_playback(goal)
+                # READ FROM THE USER'S WORDS, not the planner's paraphrase
+                # (2026-08-07). The positive gate below is right and stays — it is
+                # what stopped a storefront being handed over with the interceptor
+                # lifted. The bug was that it was asking the right question of the
+                # wrong string: "play latest episode of bleach" became "Find Bleach
+                # on anikoto, …", which does not LEAD with a playback verb, so a
+                # genuine play request silently lost its hand-off to the user's
+                # normal browser.
+                wants_playback = browser_loop.goal_wants_playback(intent_text)
                 if (
                     outcome.success
                     and keep_open
@@ -787,6 +807,11 @@ class BrowseTool(BaseTool):
                     # they can close it, and a broken-looking page they can see
                     # beats one that vanished (2026-08-01).
                     await session.release_after_run()
+                if session is not None:
+                    # BEFORE the provider closes — a season/episode lookup still
+                    # in flight would otherwise be cut off mid-request by the very
+                    # next line (2026-08-07 round 2; see cancel_background_lookups).
+                    browser_loop.cancel_background_lookups(session)
                 try:
                     await provider.__aexit__(None, None, None)  # close its httpx client
                 except Exception:
@@ -1064,6 +1089,18 @@ class BrowseTool(BaseTool):
                     "keep_open": {
                         "type": "boolean",
                         "description": "Leave the window open and playing (for play/watch/listen goals). Default false.",
+                    },
+                    # DELIBERATELY NOT ADVERTISED to the planner. It is stamped in
+                    # code by _inject_user_words and would be worthless as a field
+                    # the model fills — the whole point is that it carries the
+                    # user's phrasing rather than the model's. Declared here only
+                    # so the schema is honest about a parameter the tool reads.
+                    "user_words": {
+                        "type": "string",
+                        "description": (
+                            "Set by Jarvis in code, never by you — the user's own "
+                            "request, verbatim. Do not supply this."
+                        ),
                     },
                 },
                 "required": ["goal", "start_url"],

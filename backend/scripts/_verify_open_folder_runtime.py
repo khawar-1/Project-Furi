@@ -94,19 +94,26 @@ async def main() -> int:
             check("open_folder" in names,
                   "open_folder is in the live tool catalog", f"{len(names)} tools")
             spec = next((t for t in tools if t["name"] == "open_folder"), {})
-            check(spec.get("permission_level") == "write",
-                  "it is WRITE, so the approval gate applies",
+            check(spec.get("permission_level") == "read",
+                  "it is READ — showing a folder asks for no approval",
                   str(spec.get("permission_level")))
+            launch = next((t for t in tools if t["name"] == "launch_app"), {})
+            check(launch.get("permission_level") == "write",
+                  "…while launch_app stays WRITE: that one RUNS a program",
+                  str(launch.get("permission_level")))
             check(set((spec.get("parameters") or {}).get("properties", {})) == {"path"},
                   "it exposes only 'path' — no command, no arguments")
 
         async with AsyncSessionLocal() as db:
-            # -- ⚠️ THE CORE SAFETY CHECK: no approval, no window -------------
+            # -- ⚠️ THE UX FIX, over the real gate ----------------------------
+            # Note the absent `approved=`. This is the reported defect: "opening
+            # a file/folder isn't a destructive task so it shouldn't ask
+            # permission". It used to come back requires_approval=True.
             launched.clear()
             res = await execute_tool("open_folder", {"path": str(demo)}, db)
             check(
-                (not res.success) and res.requires_approval and launched == [],
-                "AN UNAPPROVED OPEN NEVER REACHES THE OS",
+                res.success and (not res.requires_approval) and launched == [demo],
+                "AN UNAPPROVED OPEN JUST WORKS — no permission asked",
                 f"launched={len(launched)}",
             )
 
@@ -146,12 +153,76 @@ async def main() -> int:
             )
 
             # -- the audit trail recorded it ----------------------------------
+            # ⚠️ NOW LOAD-BEARING. With no approval card, the audit row is the
+            # only durable record that a folder was opened at all.
             rows = (await db.execute(
                 select(ActivityLog).where(ActivityLog.tool_name == "open_folder")
             )).scalars().all()
             check(len(rows) >= 4,
-                  "every attempt is audited, blocked ones included",
+                  "every attempt is audited, refused ones included",
                   f"{len(rows)} rows")
+
+            # -- ⚠️ THE 93-SECOND DEFECT, against the tool's REAL output ------
+            # A hand-written fixture can be wrong about the shape search_files
+            # returns; this runs the REAL search and feeds its REAL output to
+            # the resolver, which is the coupling that actually broke.
+            from app.agents.placeholder_resolver import resolve
+            from app.agents.schemas import AgentPlan, PlanStep, StepStatus
+
+            (demo / "FOMI").mkdir(exist_ok=True)
+            search = await execute_tool(
+                "search_files",
+                {"query": "FOMI", "directory": str(demo), "include_folders": True},
+                db,
+            )
+            found = PlanStep(
+                id="s1", description="find it", tool="search_files",
+                parameters={}, permission_level="read", requires_approval=False,
+            )
+            found.status = StepStatus.COMPLETED
+            found.result = search
+            template = PlanStep(
+                id="s2", description="Open the folder the search found.",
+                tool="open_folder", permission_level="read", requires_approval=False,
+                parameters={"path": "PENDING: full path of the folder named 'FOMI'"},
+            )
+            steps = resolve(
+                AgentPlan(goal="open folder 'fomi'", steps=[found, template]),
+                1, max_new=8,
+            )
+            check(
+                steps is not None
+                and steps[0].parameters["path"] == str(demo / "FOMI"),
+                "A PENDING PATH RESOLVES FROM THE REAL SEARCH OUTPUT, no LLM",
+                (steps[0].parameters["path"] if steps else "unresolved -> LLM replan"),
+            )
+
+        # -- ⚠️ THE WHICH-DRIVE QUESTION, on THIS machine's real drives -------
+        # No monkeypatched HOME/DRIVES: the real probe, the real duplicates.
+        from app.agents.folder_resolver import detect, find_duplicate_folders
+
+        dupes = find_duplicate_folders("Downloads")
+        if len(dupes) >= 2:
+            step = PlanStep(
+                id="s", description="open it", tool="open_folder",
+                parameters={"path": dupes[0]}, permission_level="read",
+                requires_approval=False,
+            )
+            typo = detect(step, "open donwloads", [])
+            exact = detect(step, "open downloads", [])
+            check(
+                typo is not None and typo.action == "ask"
+                and len(typo.paths) == len(dupes),
+                "A TYPO'D FOLDER NAME STILL ASKS WHICH DRIVE",
+                f"{len(dupes)} real Downloads: {', '.join(dupes)}",
+            )
+            check(exact is not None and exact.action == "ask",
+                  "…and the exact spelling still does too")
+            check(detect(step, "open notepad", []) is None,
+                  "…while an unrelated word never triggers it")
+        else:
+            print(f"  [skip] only {len(dupes)} 'Downloads' on this machine — "
+                  "the which-drive checks need two")
 
         # -- ONE real window, with the real launcher ---------------------------
         print("\n  … opening ONE real Explorer window on a temp folder now.\n")
