@@ -257,6 +257,26 @@ def _is_search_target(element: Any) -> bool:
     return False
 
 
+# The roles you can put TEXT into. A search form's submit control and its
+# image-upload button are search targets too (they carry form_search), but no
+# amount of typing reaches them — MEASURED on junaidjamshed.com/search, where
+# [22] 'Upload an image for search' tied with the real box and made the fast
+# path defer. Deliberately a role WHITELIST, never "not a button": an unknown
+# role should not become fillable by default.
+_TYPEABLE_SEARCH_ROLES = {"searchbox", "combobox", "input", "textbox"}
+
+
+def _is_typeable_search(element: Any) -> bool:
+    """True when this element is a genuine search target AND is something a
+    person could type into. The fill target must satisfy BOTH: `_is_search_target`
+    answers "would submitting this be reading?" (the safety question, unchanged),
+    and this adds "is there a box here at all?" — the question the fast path was
+    missing on both of its branches."""
+    if not _is_search_target(element):
+        return False
+    return (getattr(element, "role", "") or "").lower() in _TYPEABLE_SEARCH_ROLES
+
+
 def gesture_fingerprint(action: dict, element: Any, url: str) -> str:
     """The identity of ONE world-acting gesture: what kind of gesture, on which
     control, on which site.
@@ -621,6 +641,21 @@ class BrowseOutcome:
     choice_target: str = ""
     choice_field: str = ""
     choice_options: list = field(default_factory=list)
+    # How many things tied in TOTAL, which is not len(choice_options) once the
+    # tie is larger than a question may show (2026-08-08 — measured: twenty
+    # products carry "janan" on one real listing). The pause text says so, so a
+    # shortened list is never read as the complete answer.
+    choice_total: int = 0
+    # Every tied item is sold out (2026-08-09). Normally the unbuyable ones are
+    # simply not offered, so this is the case where there is nothing left to
+    # offer and the question has to say so rather than present dead ends.
+    choice_unbuyable: bool = False
+    # NO SAFE NEXT ACTION (2026-08-09). The loop read the page, produced nothing
+    # usable, and no other gate fired — so instead of killing the run and closing
+    # the window, ask the user what to do. `stuck_page` is the page's own title,
+    # for a question that can name where it is standing.
+    stuck_required: bool = False
+    stuck_page: str = ""
 
     @property
     def url(self) -> str:
@@ -668,15 +703,86 @@ _TRAIL_SITE_RE = re.compile(
 # the search term — "go to youtube.com" typed verbatim into a search box. They
 # belong in the chain like every other verb; what makes a navigation goal safe is
 # _names_only_the_destination downstream, not withholding the strip here.
+# The SHOPPING verbs were missing entirely (2026-08-09), and every shopping
+# phrasing therefore produced a junk search term. MEASURED before the fix:
+#   "go to junaidjamshed.com and add janan perfume in cart"
+#                                    -> 'junaidjamshed.com and add janan perfume'
+#   "add janan sports 100ml to my cart" -> 'add janan sports 100ml to my cart'
+#   "go to amazon and add airpods to cart" -> 'amazon and add airpods to cart'
+# 7 of 7 shopping goals broken — none yielded the product name. Note the second
+# failure mode in the first case: without a shopping verb in the chain, the
+# "go to <site> and " prefix cannot fire (it only consumes when ANOTHER verb from
+# this list follows), so the DOMAIN stayed in the term too.
+#
+# ⚠️ "order" is DELIBERATELY EXCLUDED. It is the one shopping verb with a real
+# noun collision at the position this list matches — the START of the goal — so
+# "order of the phoenix" would be stripped to "of the phoenix". Its benefit is
+# marginal anyway (today "order the blue trousers" already extracts a usable
+# term); "get" is excluded for being too polysemous to strip safely.
 _VERB_ALT = (
     r"(?:search(?:\s+for)?|find|look\s+up|look\s+for|play|open|watch|"
     r"listen\s+to|put\s+on|pull\s+up|go\s+to|navigate\s+to|visit|head\s+to|"
-    r"take\s+me\s+to|bring\s+up)"
+    r"take\s+me\s+to|bring\s+up|add|buy|purchase)"
+)
+# A trailing "to/in/into [the|my] cart" — the shopping twin of _TRAIL_ACTION_RE,
+# and needed for the same reason: it names WHERE the item goes, never what to
+# search for. _TRAIL_SITE_RE happens to eat a bare "in cart" (reading "cart" as a
+# site), but not "to cart" (no "to" in its alternation) and not "to my cart" (two
+# tokens) — so relying on that accident would fix one phrasing of three.
+_TRAIL_CART_RE = re.compile(
+    r"\s+(?:in|to|into)\s+(?:the\s+|my\s+|your\s+)?"
+    r"(?:cart|basket|bag|trolley|wishlist)\s*$",
+    re.IGNORECASE,
 )
 _LEAD_VERB_RE = re.compile(
     rf"^\s*(please\s+)?(can\s+you\s+|could\s+you\s+)?"
     rf"(go\s+to\s+[\w.\-]+\s+and\s+)?"
     rf"{_VERB_ALT}\s+(?:and\s+(?:then\s+)?{_VERB_ALT}\s+)*",
+    re.IGNORECASE,
+)
+# THE SIXTH SWITCH (2026-08-09). The 2026-08-09 store-search round fixed this
+# chain for goals where the shopping verb LEADS, and never reached the ones
+# where the user says WHERE before saying WHAT. MEASURED on the live incident
+# and its neighbours, before this:
+#
+#   "go to junaidjamshed.com in the men kameez shalwar section add black plain
+#    sharwar kameez to cart"                                       -> None
+#   "go to junaidjamshed.com in the men section add a black kurta to cart"
+#                          -> 'junaidjamshed.com in the men section add a black kurta'
+#
+# None is the worse of the two: `_fast_path_action` AND `_open_search_ui_action`
+# are both gated on a term existing, so BOTH deterministic search legs went
+# silently unreachable and a storefront homepage was handed to the model to
+# guess on. That is how the run ended up on the general Men page — the reported
+# defect — rather than on a search for what the user actually named.
+#
+# The existing chain already knew this shape; it just knew ONE spelling of the
+# connector. `(go\s+to\s+[\w.\-]+\s+and\s+)?` consumes "go to <site> and " and
+# only when the connector is literally "and". Live it was a whole clause: "in
+# the men kameez shalwar section".
+#
+# So: a leading NAVIGATION clause runs from a nav verb up to wherever the real
+# request verb starts, whatever sits between. The lookahead is what bounds it —
+# the clause is only consumed when a request verb genuinely follows, so a pure
+# navigation goal ("open youtube") matches nothing here and keeps its existing
+# behaviour, which `_destination_reached` depends on.
+_NAV_VERB_ALT = (
+    r"(?:go\s+to|navigate\s+to|visit|head\s+to|take\s+me\s+to|bring\s+up|open|"
+    r"pull\s+up)"
+)
+_REQUEST_VERB_ALT = (
+    r"(?:add|buy|purchase|order|find|search(?:\s+for)?|look\s+for|look\s+up|"
+    r"play|watch|get|show\s+me)"
+)
+_LEAD_NAV_CLAUSE_RE = re.compile(
+    rf"^\s*(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?"
+    rf"{_NAV_VERB_ALT}\s+"
+    # The site, and any "in the X section" between it and the request. Lazy and
+    # capped: lazy so it stops at the FIRST request verb, capped so a runaway
+    # can never eat a whole sentence looking for one.
+    rf"(?:\S+\s+){{0,8}}?"
+    rf"(?:and\s+(?:then\s+)?)?"
+    rf"(?={_REQUEST_VERB_ALT}\s)",
     re.IGNORECASE,
 )
 # A goal that TYPES/WRITES content somewhere is NOT a search — a quoted span in
@@ -769,8 +875,22 @@ def _extract_search_term(goal: str) -> Optional[str]:
         if not _LEAD_VERB_RE.match(text):
             return None
         return quoted.group(1).strip()
-    text = _TRAIL_ACTION_RE.sub("", text)
-    text = _TRAIL_SITE_RE.sub("", text)
+    # ⚠️ REPEATED UNTIL STABLE, not once each in a fixed order (2026-08-09). The
+    # three trailing clauses can appear in EITHER order, and each regex is
+    # anchored to the end, so whichever runs second never sees its own clause.
+    # MEASURED: "add black plain shalwar kameez to cart on junaidjamshed.com"
+    # extracted 'black plain shalwar kameez TO CART', because the cart strip ran
+    # first and "to cart" was not at the end until the site strip had removed
+    # what followed it.
+    for _ in range(3):
+        stripped = _TRAIL_ACTION_RE.sub("", text)
+        stripped = _TRAIL_CART_RE.sub("", stripped)
+        stripped = _TRAIL_SITE_RE.sub("", stripped)
+        if stripped == text:
+            break
+        text = stripped
+    # A leading "go to <site> …" clause, however it connects to the real request.
+    text = _LEAD_NAV_CLAUSE_RE.sub("", text)
     text = _LEAD_VERB_RE.sub("", text)
     # Reduce a media descriptor to its title: the s2e4 shorthand first (so it is
     # not half-eaten by the qualifier regexes), then the leading and trailing
@@ -1090,29 +1210,122 @@ def _fast_path_action(
             "— no fast-path search"
         )
         return None
+    # ⚠️ ONE RULE, NOT TWO BRANCHES (2026-08-09). This used to take candidates[0]
+    # unchecked when there was exactly ONE, and apply the genuineness test only
+    # when there were SEVERAL — exactly backwards, since one candidate is the
+    # case with nothing to compare against. Both defects were MEASURED live on
+    # junaidjamshed.com, and they are the same defect: the code conflated "is a
+    # search thing" with "is a box you can type in".
+    #
+    #   homepage    the only "search" element is a LINK named 'drawer-search'
+    #               (the icon that OPENS the drawer; the page has ZERO text
+    #               inputs) -> the old lone-candidate branch returned
+    #               {"type", index=<that link>, submit=true}: typing a product
+    #               name into a link.
+    #   /search     TWO genuine search targets — [20] input 'Search' and [22]
+    #               button 'Upload an image for search', both form_search=True
+    #               because they belong to the same search form -> the old >1
+    #               branch found len(real)==2 and deferred, so the fast path
+    #               could not use a search box that was right there.
+    #
+    # TYPEABLE is the structural discriminator and it needs no heuristic: you
+    # cannot fill text into a button or a link. It also SUBSUMES the old rule —
+    # a "Search" link/button whose NAME merely contains the word, and a second
+    # combobox filter, are still exactly the noise that used to force a defer
+    # (the "searched 'find', then something, then the anime" report,
+    # 2026-07-22), and two real boxes are still ambiguous.
+    #
+    # `form_search` joins the candidate gather so a search box whose label does
+    # not literally say "search" ("What are you looking for?") is findable at
+    # all; the typeable filter is what keeps that safe, since every member of a
+    # search form carries the flag — including its submit and image-upload
+    # buttons, which is precisely the live case above.
     candidates = [
         e
         for e in obs.elements
-        if e.role in _SEARCH_ROLES or "search" in (e.name or "").lower()
+        if e.role in _SEARCH_ROLES
+        or getattr(e, "form_search", False)
+        or "search" in (e.name or "").lower()
     ]
-    target = None
-    if len(candidates) == 1:
-        target = candidates[0]
-    elif len(candidates) > 1:
-        # Several search-ish inputs — but if EXACTLY ONE is a GENUINE search
-        # target (a real search role / form_search — never a message/compose
-        # field, per _is_search_target's positive rule), take it. A "Search"
-        # LINK or button whose NAME merely contains the word, and any second
-        # combobox filter, are exactly the noise that used to force a defer to
-        # the model, which then fumbled across the ad-heavy homepage with extra
-        # searches (the user's "searched 'find', then something, then the anime"
-        # report, 2026-07-22). Still defers when the real targets are ambiguous.
-        real = [e for e in candidates if _is_search_target(e)]
-        if len(real) == 1:
-            target = real[0]
+    typeable = [e for e in candidates if _is_typeable_search(e)]
+    target = typeable[0] if len(typeable) == 1 else None
     if target is None:
         return None
     return {"action": "type", "index": target.index, "text": term, "submit": True}
+
+
+# A control that REVEALS the search box rather than being one: the magnifier
+# icon / "Search" toggle that opens a drawer or overlay. Word-boundary so
+# "research" and "searchable" never match; a hyphen is a non-word char, so the
+# live 'drawer-search' does.
+# THE BUY BOX IS NOT AN ELEMENT INDEX (2026-08-10). The page's own add-to-cart
+# form is found in the PAGE (session.find_buy_box) and never in the element list,
+# because MEASURED it is not in the element list: a storefront disables its buy
+# button until a variant is chosen, and observe.eligible() drops disabled
+# elements. A code-authored submit therefore names this sentinel instead of an
+# index, and the submit branch reads the contract it already holds.
+BUY_BOX_INDEX = -1
+
+# "add it to the cart" — the goal shape the buy-box leg serves. Deliberately
+# explicit cart vocabulary plus an add verb, not a bare "buy X": this leg walks a
+# form up to an approval card, and it should only do that when the user plainly
+# asked for a cart. Read against the USER's words, never the planner's paraphrase.
+_CART_INTENT_RE = re.compile(
+    r"\b(?:add|put|place|buy|purchase|order)\b[^.?!]{0,80}?"
+    r"\b(?:cart|bag|basket|trolley)\b",
+    re.IGNORECASE,
+)
+
+
+def wants_cart(goal: str) -> bool:
+    """True when the user asked for something to end up in a cart."""
+    return bool(_CART_INTENT_RE.search(goal or ""))
+
+
+_SEARCH_TOGGLE_RE = re.compile(r"\bsearch\b", re.IGNORECASE)
+_SEARCH_TOGGLE_ROLES = {"link", "button"}
+
+
+def _open_search_ui_action(obs: dom_observe.Observation) -> Optional[dict]:
+    """Click the control that REVEALS a hidden search box, or None.
+
+    ⚠️ THE CAPABILITY THAT SILENTLY DISAPPEARED (2026-08-09). The loop's only
+    search mechanism, `_fast_path_action`, requires a search INPUT to already be
+    in the observation. MEASURED on the live junaidjamshed.com homepage:
+
+        elements = 103, text inputs = 0
+        the only "search" element: [9] role=link name='drawer-search'
+
+    The input does not exist until the icon is clicked, so on every storefront
+    theme that hides search behind a magnifier — which is most of them — the
+    loop could not search AT ALL, and the model, seeing no search box, did the
+    next best thing: it clicked a category. On a catalog that is exactly the
+    wrong move (the user's report: "it just selected the fragrances button
+    instead of searching 'janan'… the one i meant wasnt in them").
+
+    This is the same shape as the 2026-08-08 Escape/overlay-dismiss leg: a
+    MECHANICAL UI affordance the model should not have to reason about, so it is
+    a deterministic leg rather than a prompt line (a prompt with no comparator
+    has measured ZERO here three times).
+
+    Deliberately strict, and it only ever ADDS a step the loop would otherwise
+    have spent guessing:
+      * exactly ONE toggle — several is ambiguous and defers to the model;
+      * the caller only offers it when there is a term to search for AND
+        _fast_path_action already declined for want of a typeable box;
+      * once per page fingerprint, so a toggle that reveals nothing cannot
+        become a loop."""
+    if any(_is_typeable_search(e) for e in obs.elements):
+        return None  # a real box is present — the fast path's job, not ours
+    toggles = [
+        e
+        for e in obs.elements
+        if (getattr(e, "role", "") or "").lower() in _SEARCH_TOGGLE_ROLES
+        and _SEARCH_TOGGLE_RE.search(getattr(e, "name", "") or "")
+    ]
+    if len(toggles) != 1:
+        return None
+    return {"action": "click", "index": toggles[0].index}
 
 
 # ------------------------------------------------------ episode-number navigation
@@ -1158,6 +1371,60 @@ def _target_episode(goal: str) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return n if 1 <= n <= 9999 else None
+
+
+# The SEASON the goal names by number — the twin of _target_episode (2026-08-08).
+# "season 4", "s4e4". A worded "latest season" carries no number and stays
+# _wants_latest_season's job, which resolves a season NAME from the web instead.
+#
+# `part` is deliberately NOT here. In these catalogs a "part" is a subdivision OF
+# a season as often as it is a season (Bleach's Thousand-Year Blood War Part 4 is
+# listed as "The Calamity", not as a 4), so a bare number after it does not
+# reliably name an entry — and a wrong pick is worse than the defer-to-the-model
+# behaviour that not matching leaves in place.
+_GOAL_SEASON_RE = re.compile(
+    r"\bseasons?\.?\s*(\d{1,2})\b|\bs(\d{1,2})\s*e\s*\d{1,4}\b", re.IGNORECASE
+)
+
+
+def _target_season(goal: str) -> Optional[int]:
+    """The specific season number the goal names, or None when it names none."""
+    match = _GOAL_SEASON_RE.search(goal or "")
+    if not match:
+        return None
+    raw = match.group(1) or match.group(2)
+    try:
+        number = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return number if 1 <= number <= 99 else None
+
+
+def season_label(number: int) -> str:
+    """The season name to score entries against. `score_entry` treats "season" as
+    NOISE, so this is really "the number, said out loud" — but keeping the word
+    means one scoring contract for the numbered goal and the web-resolved name."""
+    return f"Season {number}"
+
+
+def _on_target_season(
+    obs: dom_observe.Observation, title: str, season_name: str
+) -> bool:
+    """True when the page we are ON belongs to the season the goal named.
+
+    ⚠️ THIS IS WHAT STOPS AN EPISODE BEING SWAPPED INTO THE WRONG SEASON.
+    _episode_action swaps the target number into WHATEVER url it is standing on,
+    so landing on season 1 episode 1 with a "season 4 episode 4" goal would
+    navigate to season 1 EPISODE 4 and report success — a different show,
+    reported as done. Scored with the same rule that chose the entry, so the two
+    can never disagree about which season a slug is."""
+    if not season_name:
+        return False
+    slug = _series_slug(obs.url or "")
+    if not slug:
+        return False
+    text = f"{slug.replace('-', ' ')} {obs.title or ''}"
+    return browse_season.score_entry(text, season_name, title) > 0
 
 
 def _current_episode(obs: dom_observe.Observation) -> Optional[int]:
@@ -1498,10 +1765,31 @@ def _season_entry_action(
     page matching it, or a genuine TIE between two equally-good entries all defer —
     to `_latest_series_action` and then to the model, which has the season name in
     its goal. Code never picks between real equals (the house rule)."""
-    if not season_name:
+    hrefs, labels, _names = _season_entry_index(obs)
+    if not season_name or not hrefs:
         return None
+    winner = browse_season.best_entry(list(labels), season_name, title, key=labels.get)
+    if winner is None:
+        return None
+    href = hrefs[winner]
+    if not href or href == (obs.url or ""):
+        return None
+    return {"action": "navigate", "url": href}
+
+
+def _season_entry_index(
+    obs: dom_observe.Observation,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """The page's series entries: slug → href, slug → scoring text, slug → the
+    label a HUMAN would recognise.
+
+    Split out of _season_entry_action (2026-08-08) so the navigation and the
+    "which season did you mean?" question are built from ONE pass. Two passes
+    would be two definitions of what is on the page, and the half that drifts is
+    the one whose options no longer match what the code would click."""
     hrefs: dict[str, str] = {}
     labels: dict[str, str] = {}
+    names: dict[str, str] = {}
     for el in obs.elements:
         slug = _series_slug(el.href or "")
         if not slug or slug in hrefs:
@@ -1511,15 +1799,41 @@ def _season_entry_action(
         # in one and not the other ("…/watch/bleach-tybw-4" labelled "Bleach:
         # Thousand-Year Blood War - The Calamity"), and either alone is enough.
         labels[slug] = f"{slug.replace('-', ' ')} {el.name or ''}"
-    if not hrefs:
+        # What the user is shown. The link's own text when it has any — never a
+        # slug, which is machine spelling ("my-hero-academia-4-mt2j9" is not a
+        # question anyone can answer).
+        names[slug] = (el.name or "").strip() or slug.replace("-", " ")
+    return hrefs, labels, names
+
+
+def _season_choice(
+    obs: dom_observe.Observation, title: str, season_name: str
+) -> Optional[tuple[list[str], dict[str, str]]]:
+    """(human labels, label → href) when SEVERAL entries match the season equally
+    well, else None. Code never picks between real equals — it asks, with the
+    page's own words as the options (2026-08-08).
+
+    None also when exactly one matches (that is _season_entry_action's job) and
+    when none do (nothing to ask about; the model decides with the season in its
+    goal)."""
+    hrefs, labels, names = _season_entry_index(obs)
+    if not hrefs or not season_name:
         return None
-    winner = browse_season.best_entry(list(labels), season_name, title, key=labels.get)
-    if winner is None:
+    tied = browse_season.top_entries(list(labels), season_name, title, key=labels.get)
+    if len(tied) < 2:
         return None
-    href = hrefs[winner]
-    if not href or href == (obs.url or ""):
-        return None
-    return {"action": "navigate", "url": href}
+    options: list[str] = []
+    by_label: dict[str, str] = {}
+    for slug in tied:
+        label = names.get(slug) or slug
+        # Two entries can share a visible name (anikoto lists a sub and a dub
+        # copy of the same cour). Keep both reachable rather than silently
+        # dropping one — the user picks the first, which is the DOM's order.
+        if label in by_label:
+            continue
+        options.append(label)
+        by_label[label] = hrefs[slug]
+    return (options, by_label) if len(options) >= 2 else None
 
 
 def _latest_series_action(
@@ -1644,6 +1958,102 @@ def _looks_like_signup(obs: dom_observe.Observation) -> bool:
     return any(_SIGNUP_LABEL_RE.search(label) for label in labels)
 
 
+# ------------------------------------------ credential OVERLAY vs credential WALL
+# 2026-08-08, from a live incident. "play ep 4 of season 4 of my hero academia on
+# anikoto" aborted mid-task, opened a normal browser window on the WRONG episode,
+# asked a question whose only sensible answer was "carry on", and then re-ran the
+# whole browse from the homepage. PROVEN cause, by fetching the page: anikoto
+# ships THREE `type="password"` inputs on every watch page, inside
+# `<div class="modal fade" id="sign">` — a sign-in modal and a register modal.
+# detect_login_wall walls on ANY visible password field, so the moment one of
+# those modals was open the task was over.
+#
+# ⚠️ THE DETECTOR HAD NO WAY TO TELL "this page IS a sign-in page" FROM "this page
+# HAS a sign-in modal", and it was already half-known: run_browse's skip_login_wall
+# comment has said since 2026-07-23 that "many sites (anikoto &c.) are fully usable
+# as a guest, and a modal/overlay can read as a wall". That mitigation only applies
+# AFTER the user has already paid for the false wall.
+#
+# THE DISCRIMINATOR IS THAT A WALL IS NOT DISMISSIBLE. A dialog-borne credential
+# form on a page with content of its own is an OFFER: the loop presses Escape
+# (which it has always been able to do — see _ALLOWED_KEYS and the press_key line
+# in the action menu — but never got the chance to, because the wall returned
+# BEFORE any decision was made) and carries on. If the dialog survives that, it is
+# not dismissible, and run_browse walls exactly as before. So the detector gets
+# strictly better in both directions rather than merely quieter.
+#
+# THE ASYMMETRY, which is why this is the right direction: a false wall aborts a
+# working task, destroys every tab, shows the wrong page and asks a pointless
+# question — the whole incident. A missed wall costs a step or two before the loop
+# stops anyway. Nothing about credential handling changes: pressing Escape handles
+# no credentials, and the extractor still never reads a password value, so the
+# model is never handed one to type.
+_OVERLAY_MIN_PAGE_ELEMENTS = 5
+
+
+def _in_dialog(element: Any) -> bool:
+    """Best-effort read of the structural dialog flag (2026-08-08). A fake
+    element or an older observation shape has no such field, and False is the
+    safe default — it can only make the detector MORE willing to call something
+    a wall, which is the behaviour that predates the flag."""
+    return bool(getattr(element, "in_dialog", False))
+
+
+def _credential_evidence(obs: dom_observe.Observation, signup: bool) -> list:
+    """The elements that make this page look like a credential form: its password
+    fields, or — for the passwordless account-creation case — its email fields."""
+    passwords = [e for e in obs.elements if (e.role or "").lower() == "password"]
+    if passwords:
+        return passwords
+    if signup:
+        return [e for e in obs.elements if _EMAIL_HINT_RE.search(e.name or "")]
+    return []
+
+
+def is_credential_overlay(obs: dom_observe.Observation, signup: bool = False) -> bool:
+    """True when EVERY piece of credential evidence sits inside a dialog AND the
+    page carries substantial content of its own outside it — i.e. a sign-in modal
+    over a usable page, not a sign-in page.
+
+    Both halves are load-bearing. Without the first, a real login page whose form
+    happens to sit in a `.modal`-classed wrapper would be demoted. Without the
+    second, a login page that renders as a dialog over an empty backdrop would be
+    demoted too — there the dialog IS the page.
+
+    Note the element list is already occlusion-filtered (observe.unoccluded), so
+    the page elements counted here are the ones still reachable AROUND the modal,
+    which is exactly the question being asked."""
+    evidence = _credential_evidence(obs, signup)
+    if not evidence or not all(_in_dialog(e) for e in evidence):
+        return False
+    own = sum(1 for e in obs.elements if not _in_dialog(e))
+    return own >= _OVERLAY_MIN_PAGE_ELEMENTS
+
+
+def credential_overlay_site(obs: dom_observe.Observation) -> Optional[str]:
+    """The host whose credential DIALOG is open over an otherwise-usable page, or
+    None.
+
+    ⚠️ THE ONE DEFINITION of "this is an overlay, not a wall". detect_login_wall
+    demotes on it and run_browse dismisses on it, so the two can never disagree
+    about what an overlay is — a second copy of this predicate is the hole this
+    codebase has now recorded seven times (registry.mutates, _DIR_KEY, _settle's
+    status tuple, set_voice_config's field list, ...).
+
+    Returns None for a dedicated auth HOST and for a sign-up/login ROUTE: the URL
+    is the page's own identity, so an address that says "this page is for signing
+    in" is a wall however the form is styled. Only a form with nothing but its own
+    markup to vouch for it is demotable."""
+    host = (urlparse(obs.url).hostname or "").lower().rstrip(".")
+    if _is_auth_host(host):
+        return None
+    if _SIGNUP_ROUTE_RE.search(urlparse(obs.url).path or ""):
+        return None
+    if not is_credential_overlay(obs, _looks_like_signup(obs)):
+        return None
+    return host or "this site"
+
+
 def detect_login_wall(
     obs: dom_observe.Observation,
 ) -> Optional[tuple[str, str]]:
@@ -1670,6 +2080,13 @@ def detect_login_wall(
     signup = _looks_like_signup(obs)
     if _is_auth_host(host):
         return ("login", host or "the sign-in page")
+    # DIALOG DEMOTION (2026-08-08 — see credential_overlay_site): a credential
+    # form inside a modal, on a page with content of its own, is an OFFER.
+    # run_browse dismisses it and carries on; a dialog that survives dismissal is
+    # walled by run_browse through the ordinary hand-off, because a wall is
+    # exactly a credential form you cannot get rid of.
+    if credential_overlay_site(obs) is not None:
+        return None
     if any((e.role or "").lower() == "password" for e in obs.elements):
         # A credential form. Message it as signup when the page is clearly account
         # creation (more accurate than "sign in"), else a plain login.
@@ -1873,6 +2290,12 @@ _EMPTY_PAGE_PAUSE_SECONDS = 0.6
 # and Akamai's interstitials commonly release within a few seconds.
 _WALL_RETRY_SECONDS = 3.0
 _WALL_RETRIES = 2
+# How many credential dialogs one run will try to dismiss (2026-08-08). Small on
+# purpose: the fingerprint set already stops the same page being retried, so this
+# only bounds a page whose fingerprint churns for unrelated reasons (a live
+# counter, a rotating banner). Two is enough for the real case — a site that pops
+# its sign-in modal on entry and again after a navigation.
+_MAX_OVERLAY_DISMISSALS = 2
 
 
 def _looks_like_wall(obs: dom_observe.Observation) -> bool:
@@ -2374,6 +2797,21 @@ _EXTRACT_MAX_TOKENS = 3000
 # for the reasoning that precedes it, which scales with how much page the model
 # was shown. See the note at the call site — 512 was survivable at 11 elements
 # and returned empty output at 155.
+# ⚠️ DO NOT RAISE THIS TO FIX AN EMPTY REPLY. Measured 2026-08-10
+# (scripts/_measure_decision_budget.py), on the real pages of the add-to-cart
+# incident, where the decision call came back EMPTY three times:
+#
+#   product page (12,689-char prompt)   cap 2048/4096/8192/12288 -> ALL empty
+#   search  page (12,653-char prompt)   cap 2048/4096/8192/12288 -> ALL parsed
+#
+# A near-identical prompt, answered at every budget on one page and at none on
+# the other. So an empty reply here is not a token cap, it is the PAGE: that
+# product page offers no element that can add anything to a cart (its buy button
+# is `disabled` until a size is chosen and `observe.eligible()` drops disabled
+# elements), and a model asked to add to the cart from a list of 102 things that
+# cannot reasons until it gives up. The fix was to reach the buy box in code
+# (`session.find_buy_box`), not to buy the model more thinking room — raising
+# this would have been the third "timing fix" in this project to measure at zero.
 _DECISION_MAX_TOKENS = 2048
 _MEMORY_KEEP = 40          # records surfaced back into the decision prompt
 _MEMORY_BLOCK_CHARS = 3500
@@ -3449,6 +3887,32 @@ def _outcome(
     )
 
 
+def _stamp_item_choice(
+    out: BrowseOutcome, decision: "choice.ItemChoice", target_words: list[str]
+) -> BrowseOutcome:
+    """Turn a tie into the "which one did you mean?" hand-off, in ONE place.
+
+    Three sites raise this now — before the model is asked (the tie makes the
+    question unanswerable, so asking it to choose is asking it to guess), when it
+    could not answer at all, and when its own click commits to one of the tied
+    things. They must agree on the kind, the wording of what was matched, and how
+    a tie longer than a question is reported, so they share the code rather than
+    three copies of it (the second-copy-of-a-fact hole this codebase has recorded
+    seven times).
+
+    `choice_total` is the WHOLE tie, `choice_options` only what fits: a shortened
+    list that does not say it is shortened cannot be told from a complete one."""
+    tied = list(decision.tied)
+    said = choice.plain_words(target_words)
+    out.target_choice_required = True
+    out.choice_kind = "item"
+    out.choice_target = " ".join(said[:6])
+    out.choice_options = [c.option() for c in tied[: choice.MAX_CHOICE_OPTIONS]]
+    out.choice_total = len(tied)
+    out.choice_unbuyable = decision.none_buyable
+    return out
+
+
 def cancel_background_lookups(session: Any) -> None:
     """Stop the concurrent season / episode lookups a browse may have started.
 
@@ -3538,6 +4002,13 @@ async def run_browse(
     # three answers wrong at once and switched the features off silently. Defaults
     # to "" so every pre-existing caller and test falls back to `goal` unchanged.
     intent_text: str = "",
+    # WHAT THE USER SAID TO DO WHEN IT GOT STUCK (2026-08-09). Free text from the
+    # STUCK pause, replayed onto the step by planner._inject_stuck_advice. It is
+    # authoritative — they were looking at the page — so it joins BOTH the model's
+    # prompt and the scoring corpus, which is also what makes the ask terminate:
+    # the next round genuinely has different input. Its presence additionally
+    # bars a second stuck ask in this run.
+    stuck_advice: str = "",
 ) -> BrowseOutcome:
     """Drive `session` toward `goal`, observing and acting until the model says
     done, the action budget is spent, or a dead-loop is detected. Read-only by
@@ -3639,9 +4110,25 @@ async def run_browse(
     # supplied — so the model can never request an "upload" with nothing behind it.
     can_upload = bool(commit and (upload_path or "").strip())
 
+    # THE USER'S OWN REQUEST, not the planner's sentence (2026-08-07). See the
+    # `intent_text` parameter. Assigned HERE rather than beside its first
+    # latest-episode use because _target_words below needs it too.
+    intent = (intent_text or "").strip() or goal
+
     # TARGET CHOICE (2026-08-02). The user's own vocabulary the page's items are
     # scored against; the answer to a previous choice question joins it, which is
     # what BREAKS the tie on the resumed run and makes the pause terminal.
+    #
+    # ⚠️ SCORED AGAINST THE USER'S WORDS, NOT THE PLANNER'S (2026-08-08). This
+    # read `goal` until the variant gate was built on top of it, and the goal is
+    # LLM-authored: "add janan sports 100ml to cart" becomes "Find the Janan
+    # Sports perfume and add it to the cart", which DROPS the size the user
+    # actually named — so the size gate would have asked a question they had
+    # already answered. Exactly the defect the latest-episode paths fixed on
+    # 2026-08-07 ("it asked the right question of the wrong string"), in a
+    # function written five days earlier and missed because the rounds were
+    # about different features. Identical to `goal` when no user_words were
+    # stamped, so a caller that passes none is unaffected.
     #
     # Derived from the CURRENT page's url each time it is needed, not once from
     # the session: the site's own name has to be dropped (every candidate on a
@@ -3650,8 +4137,52 @@ async def run_browse(
     # filtering in production while passing every test that set the field by hand.
     def _target_words(url: str) -> list[str]:
         return choice.target_tokens(
-            goal, url, extra=[t for t in (chosen_target, chosen_option) if t]
+            intent,
+            url,
+            extra=[t for t in (chosen_target, chosen_option, stuck_advice) if t],
         )
+
+    def _item_tie(obs) -> tuple[list[str], Optional["choice.ItemChoice"]]:
+        """"Which one did you mean?" for THIS page — the whole verdict, once.
+
+        THE THREE SITES BELOW SHARE THIS, and that is the point. Before, each
+        one recomputed the tie and applied its own suppression, and they had
+        already drifted: two passed the WHOLE tie to `page_is_the_target` while
+        the third passed the truncated eight, so on a twenty-way tie they could
+        reach opposite verdicts about the same page. Every suppression rule now
+        lives here, so a rule added to one is added to all (the
+        second-copy-of-a-fact hole this codebase has recorded seven times).
+
+        Returns `(target_words, decision)`; a None decision means carry on."""
+        target_words = _target_words(obs.url)
+        # BELT 1 — THEY ALREADY ANSWERED THIS (2026-08-09). Once the user has
+        # picked an item and the run has navigated into it, the things listed on
+        # that page are a related-products rail, not a fresh question. Direct:
+        # `page_is_the_target` below infers "have we selected yet?" from scores,
+        # and MEASURED on the incident it cannot — page 9, rail 9, because the
+        # rail carries two other garments sharing the page's own name.
+        if chosen_target and choice.answered_here(chosen_target, obs.title, obs.url):
+            return target_words, None
+        decision = choice.item_choice(
+            target_words, obs.elements, find_price=browser_extract.find_price
+        )
+        if decision is None:
+            return target_words, None
+        # BELT 2 — this page IS the thing (2026-08-02b). Kept for the case belt 1
+        # cannot cover: the user never answered a question, because their own
+        # words were specific enough to land here directly.
+        #
+        # ⚠️ AGAINST THE TIE BEFORE STOCK (`all_tied`). `page_is_the_target`
+        # needs two candidates to compare against and answers False for anything
+        # shorter, so passing the post-stock set would switch this belt OFF the
+        # moment stock narrowed a tie to one survivor — and the run would then
+        # click a rail item on the very page the user asked for. See
+        # choice.ItemChoice.all_tied.
+        if choice.page_is_the_target(
+            target_words, obs.title, obs.url, decision.all_tied
+        ):
+            return target_words, None
+        return target_words, decision
 
     # The one-shot enforcement: the picked item is clicked in CODE on the first
     # page that still shows it, then never again (a second click of the same
@@ -3676,11 +4207,17 @@ async def run_browse(
     # parameter: `goal` is the planner's sentence, and MEASURED on the live
     # incident it turned _wants_latest_episode's title to None, so `latest_task`
     # was never created and the entire latest-episode web search never ran —
-    # silently, because a None title logs nothing.
-    intent = (intent_text or "").strip() or goal
+    # silently, because a None title logs nothing. (`intent` itself is assigned
+    # above, where _target_words can also see it.)
     wants_latest = not commit and _wants_latest_episode(intent)
     wants_season = wants_latest and _wants_latest_season(intent)
     latest_title = _extract_search_term(intent) if wants_latest else None
+    # AN EXPLICITLY NUMBERED SEASON (2026-08-08). "season 4" needs no web lookup
+    # at all — the number IS the answer, and the only question is which entry on
+    # the page carries it. Costs nothing when the goal names no season.
+    target_season = None if commit else _target_season(intent)
+    season_goal = season_label(target_season) if target_season else ""
+    season_title = _extract_search_term(intent) if target_season else None
     # WHAT THE WEB SAYS IS CURRENTLY AIRING (2026-08-07). Resolved concurrently
     # with the browser opening the site, exactly like the episode number was, and
     # for the same reason — it is free if it lands before we need it. See
@@ -3732,7 +4269,26 @@ async def run_browse(
     latest_web_done = latest_task is None
     latest_attempted: set[int] = set()
     ranges_opened: set[str] = set()  # episode-range controls already clicked open
+    # Pages whose credential DIALOG we have already tried to dismiss (2026-08-08).
+    # Keyed on the page fingerprint, which moves when a modal opens or closes —
+    # so seeing the SAME fingerprint again means Escape did not close it, and a
+    # credential form you cannot get rid of is exactly what a wall is.
+    overlays_dismissed: set[str] = set()
     clicked_result = False  # the intent-engine top result has been picked (once)
+    # THE PAGE'S OWN BUY BOX (2026-08-10). Tried at most once per page — a page
+    # that has no identifiable buy form will not grow one on the next step, and
+    # the model takes over exactly as it did before this leg existed. The
+    # contract is kept because the submit branch is handed it directly: it was
+    # found in the page, so there is no element index to re-read it from.
+    buy_box_tried: set[str] = set()
+    buy_box_contract: Optional[dict] = None
+    # The step at which we clicked a control to REVEAL a hidden search box
+    # (2026-08-09), or -2 for "not yet". It does two jobs: it re-opens the
+    # code-search window for exactly the FOLLOWING step (a drawer we just opened
+    # is useless if the fast path is already shut), and being set at all is what
+    # bounds the opening to ONCE PER RUN. -2 rather than -1 so `step == opened +
+    # 1` is false at step 0.
+    search_ui_opened_at = -2
     # Set once the SEASON name has actually chosen a catalog entry. From that
     # moment the web's ABSOLUTE episode number is meaningless here — see
     # _latest_number.
@@ -3929,14 +4485,66 @@ async def run_browse(
                 pass
             continue
 
+        # CREDENTIAL OVERLAY (2026-08-08): a sign-in/sign-up DIALOG is open over a
+        # page that is otherwise usable — anikoto ships one in the markup of every
+        # watch page. Press Escape and carry on. No LLM call, and the loop has
+        # always been able to do this (press_key/Escape is in the action menu and
+        # the whitelist); it simply never got the chance, because the wall check
+        # below returned before any decision was made.
+        #
+        # ⚠️ AND THE DISMISSAL IS WHAT SEPARATES AN OFFER FROM A WALL. The
+        # fingerprint moves when a dialog opens or closes, so meeting the SAME
+        # fingerprint again means Escape did nothing — the form is not dismissible,
+        # which is what a wall is — and we fall through to the hand-off below with
+        # the demotion suppressed. The cap is the belt for a page whose fingerprint
+        # churns for unrelated reasons (a live counter), so this can never spin.
+        #
+        # Computed even on a skip_login_wall run: that flag means "do not STOP for
+        # a wall", not "leave a modal sitting over the page". An open dialog
+        # occludes real controls (observe.unoccluded drops everything under it),
+        # so dismissing it helps every run. Only the hand-off below is suppressed.
+        overlay_site = credential_overlay_site(obs)
+        overlay_survived = False
+        if overlay_site is not None:
+            overlay_fp = _page_fingerprint(obs)
+            if (
+                overlay_fp not in overlays_dismissed
+                and len(overlays_dismissed) < _MAX_OVERLAY_DISMISSALS
+            ):
+                overlays_dismissed.add(overlay_fp)
+                logger.info(
+                    f"browse: a sign-in dialog is open over {overlay_site} "
+                    f"(step {step}) — dismissing it and carrying on"
+                )
+                ok, note = await _act(
+                    session, obs, {"action": "press_key", "key": "Escape"}
+                )
+                if ok:
+                    try:
+                        await session.settle()
+                    except Exception:
+                        pass
+                    continue
+                logger.info(f"browse: could not dismiss the dialog ({note})")
+            overlay_survived = True
+
         # Sign-in wall (14.4): stop the loop cleanly — it has no credentials and
-        # must never type any. The tool turns this into a user-driven login
-        # window + an AWAITING_CHOICE pause; the resumed browse runs signed in.
+        # must never type any. The tool hands the tab over to the user and pauses
+        # the plan (AWAITING_CHOICE); the resumed browse runs signed in.
         # skip_login_wall (2026-07-23): the user chose "continue without signing
         # in" on a prior pause — many sites (anikoto &c.) are fully usable as a
         # guest, and a modal/overlay can read as a wall. Honour that for this run
         # so the loop proceeds past the offer instead of re-pausing on it forever.
         wall = None if skip_login_wall else detect_login_wall(obs)
+        if wall is None and overlay_survived and not skip_login_wall:
+            # A credential form that survived Escape. detect_login_wall demoted it
+            # on the strength of being dismissible, and it was not. The KIND is
+            # re-read rather than assumed "login": an account-creation dialog that
+            # will not close is a signup wall, and the pause text says so.
+            wall = (
+                "signup" if _looks_like_signup(obs) else "login",
+                overlay_site or "this site",
+            )
         if wall is not None:
             kind, site = wall
             logger.info(
@@ -4052,12 +4660,101 @@ async def run_browse(
                 pass
             logger.info(f"browse: destination reached ({obs.url}) → done, no further action")
 
+        # THE USER'S PICKED ITEM, ENFORCED IN CODE (2026-08-02). A previous run
+        # stopped because several things matched their words equally well; they
+        # chose one. Clicking it is not a decision — it is the answer — so it
+        # costs no LLM call, exactly like _episode_action. Re-asking the model
+        # would hand it the same goal that was already PROVEN ambiguous, and the
+        # 2026-07-12 folder_resolver lesson is that the model then keeps its
+        # original pick. Fires on the first page that still shows the item and is
+        # then spent; if the page no longer shows it (we already navigated into
+        # it), locate() returns None and the run carries on normally.
+        #
+        # ⚠️ FIRST AMONG THE DETERMINISTIC LEGS (moved 2026-08-08). It used to sit
+        # below them, which was harmless while only the model could raise a choice
+        # — but the season leg below can, and on the resume it would have re-asked
+        # the very question the user had just answered (the entries are still tied;
+        # that is why they were asked) until _MAX_TARGET_CHOICES gave up. An answer
+        # in the user's own words outranks every guess made without it.
+        if action is None and choice_pending:
+            picked = choice.locate(
+                choice_pending, obs.elements, find_price=browser_extract.find_price
+            )
+            if picked is not None:
+                action = {"action": "click", "index": picked.index}
+                logger.info(
+                    f"browse: clicking the item the user chose ({picked.label!r}) "
+                    "— no LLM call"
+                )
+            choice_pending = ""
+
+        # AN EXPLICITLY NUMBERED SEASON → THE RIGHT ENTRY (2026-08-08). The same
+        # shape as the latest-season leg below and for the same reason, but with
+        # no web lookup: the user said "season 4", so the only question is which
+        # entry on this page carries it. FIRST, and before the episode leg, for
+        # the reason that leg's guard states — an episode number means nothing
+        # until we know which entry we are counting inside.
+        on_target_season = bool(season_goal) and _on_target_season(
+            obs, season_title or "", season_goal
+        )
+        if on_target_season:
+            season_scoped = True
+        if (
+            action is None
+            and season_goal
+            and not commit
+            and not on_target_season
+            and _current_episode(obs) is None
+        ):
+            entry = _season_entry_action(obs, season_title or "", season_goal)
+            if entry is not None:
+                action = entry
+                logger.info(
+                    f"browse: {season_goal} is {entry['url']} → opening it"
+                )
+            else:
+                # SEVERAL entries match equally well — a sub/dub pair, or a site
+                # that lists a cour twice. Code never picks between real equals;
+                # it asks, with the page's own labels as the options (the
+                # browser/choice.py rule, reusing its whole pause/answer path).
+                # No counter here: the branch RETURNS, so one run can ask at most
+                # once, and _MAX_TARGET_CHOICES bounds it across the plan.
+                # NOT named `choice`: that is the imported browser.choice module,
+                # and binding it anywhere in run_browse makes it a local for the
+                # WHOLE function — the closures below then fail with an unbound
+                # free variable. Python scoping, caught by the existing suite.
+                tied_seasons = _season_choice(obs, season_title or "", season_goal)
+                if tied_seasons is not None:
+                    options, _by_label = tied_seasons
+                    logger.info(
+                        f"browse: {len(options)} entries match {season_goal} "
+                        f"equally well — asking which one"
+                    )
+                    out = _outcome(
+                        False, step, obs, session,
+                        error=f"several entries match {season_goal}",
+                        llm_calls=llm_calls, vision_calls=vision_calls,
+                    )
+                    out.target_choice_required = True
+                    out.choice_kind = "season"
+                    out.choice_target = season_goal
+                    out.choice_options = options
+                    return out
+
         # DETERMINISTIC EPISODE NAVIGATION (2026-07-23): the goal names a specific
         # episode and we can PROVE which URL number is the episode (the title↔URL
         # agreement in _current_episode) — reach the exact episode by URL
         # (bypassing a paginated episode list) or, if already there, finish. No
         # LLM/vision call. Non-commit only (the commit form-fill path is untouched).
-        if action is None and not commit:
+        #
+        # ⚠️ HELD WHILE A NAMED SEASON IS UNREACHED (2026-08-08), and this matters
+        # more than the feature above. _episode_action swaps the target number
+        # into WHATEVER url it is standing on, so a "season 4 episode 4" goal that
+        # landed on season 1 episode 1 would navigate to season 1 EPISODE 4 and
+        # report success — a different show, reported as done. Stated here rather
+        # than left to follow from the ordering, which is the belt the
+        # latest-season round already wrote for its own leg.
+        if action is None and not commit and (on_target_season or not season_goal):
             action = _episode_action(intent, obs)
             if action is not None:
                 logger.info(f"browse: deterministic episode navigation → {action}")
@@ -4175,33 +4872,42 @@ async def run_browse(
                 clicked_result = True
                 logger.info(f"browse: intent-search top result → {action}")
 
-        # THE USER'S PICKED ITEM, ENFORCED IN CODE (2026-08-02). A previous run
-        # stopped because several things matched their words equally well; they
-        # chose one. Clicking it is not a decision — it is the answer — so it
-        # costs no LLM call, exactly like _episode_action. Re-asking the model
-        # would hand it the same goal that was already PROVEN ambiguous, and the
-        # 2026-07-12 folder_resolver lesson is that the model then keeps its
-        # original pick. Fires on the first page that still shows the item and is
-        # then spent; if the page no longer shows it (we already navigated into
-        # it), locate() returns None and the run carries on normally.
-        if action is None and choice_pending:
-            picked = choice.locate(
-                choice_pending, obs.elements, find_price=browser_extract.find_price
-            )
-            if picked is not None:
-                action = {"action": "click", "index": picked.index}
-                logger.info(
-                    f"browse: clicking the item the user chose ({picked.label!r}) "
-                    "— no LLM call"
-                )
-            choice_pending = ""
-
         # The fast path fills a single search box with the goal's TITLE — a
-        # search, not a form submission — so it is disabled in commit mode (the
-        # model must fill the real form's fields and choose "submit"). Taking the
-        # first search in CODE is what keeps the model off a hostile homepage's ad
-        # links: free-form, it clicked an ad on anikoto.cz instead of searching
-        # (2026-07-22b). Everything after step 0 is the model's job. The typed query
+        # search, not a form submission.
+        #
+        # ⚠️ IT USED TO BE DISABLED IN COMMIT MODE, AND THAT WAS THE BIGGEST OF
+        # THE FIVE SWITCHES THAT SILENCED SEARCH (2026-08-09). The guard read
+        # `step == 0 and not commit`, justified by "the model must fill the real
+        # form's fields and choose submit". But a commit goal is a JOURNEY that
+        # merely ENDS in a submit: "add janan perfume to cart" is navigate →
+        # find the product → open it → fill → submit, and only the last step
+        # mutates anything. Disabling every deterministic search for the whole
+        # journey because of its final step is a guard keyed on the wrong thing —
+        # the shape this codebase has now recorded four times (registry.mutates
+        # 2026-07-30, _DIR_KEY 2026-08-01, _settle's status tuple and
+        # set_voice_config 2026-08-03).
+        #
+        # Nothing below it needed to change, which is the tell that the guard was
+        # over-broad rather than load-bearing: `_is_action_gesture` has always
+        # returned False for a genuine search target ("a submit gesture on this
+        # element is a SEARCH — which is reading"), so `_act`'s backstop and the
+        # STOP-and-ask hand-off already treat this exact action as reading. The
+        # form's own submit is still reached ONLY through arm_commit →
+        # submit_commit under a signature approval; that path is untouched.
+        #
+        # The one real regression risk is searching AWAY from a start URL that is
+        # already the product page, so `choice.page_covers_target` guards it with
+        # the same scorer the tie gate uses. MEASURED live: on the homepage the
+        # subject is {junaid, jamshed, official, website} and scores 0 against
+        # {janan, perfume} → search; on /products/janan-sport-30ml it covers the
+        # words → act on the page we were given.
+        #
+        # Taking the first search in CODE is what keeps the model off a hostile
+        # homepage's ad links: free-form, it clicked an ad on anikoto.cz instead
+        # of searching (2026-07-22b). Everything after it is the model's job — the
+        # window stays SHUT except on the step immediately after we opened a
+        # hidden search UI, so the drawer we just opened can actually be used.
+        # The typed query
         # is site-adapted (_search_query_for): the bare title on a catalog (anikoto),
         # the intent phrase on a search engine (YouTube).
         # Reads `intent` (the user's own words), not the planner's paraphrase: what
@@ -4215,12 +4921,204 @@ async def run_browse(
         # "bleach" returns every entry and _season_entry_action then picks the right
         # one from them by name. Recall first, choose second — the same asymmetry
         # the fan-out uses. The season name is not lost: it reaches the model below.
-        if action is None and step == 0 and not commit:
-            action = _fast_path_action(
-                intent, obs, query=_search_query_for(intent, obs.url, latest_num)
+        # ⚠️ A RESUMED RUN DOES NOT SEARCH AWAY FROM THE PAGE IT ASKED ABOUT
+        # (2026-08-10). THE INCIDENT: the run stopped on a product page and
+        # asked; the user answered "select size large and add to cart"; the
+        # resume began at step 0 standing on THAT page, fired this leg, clicked
+        # the search toggle, re-typed the original query and opened a DIFFERENT
+        # product. From the user's chair the task had restarted and ignored them.
+        #
+        # `page_covers_target` cannot help here, and that is the whole point: the
+        # page legitimately does not carry every word of the original request —
+        # which is WHY they were asked in the first place. The direct fact does:
+        # this run resumed carrying their answer, so the page in front of it is
+        # the one the answer is about. The `answered_here` shape — once the user
+        # has answered, the answer is a fact and nothing needs inferring.
+        #
+        # Only the run's FIRST step is protected. A later step may search freely
+        # (the answer may well have been "look for something else"), and the
+        # model can always search on its own — the advice reaches its prompt.
+        answered_already = bool(chosen_target or chosen_option or stuck_advice)
+        may_code_search = (
+            (step == 0 and not answered_already) or step == search_ui_opened_at + 1
+        )
+        if action is None and may_code_search:
+            if choice.page_covers_target(_target_words(obs.url), obs.title, obs.url):
+                logger.info(
+                    "browse: this page already IS what was asked for — not "
+                    "searching away from it"
+                )
+            else:
+                action = _fast_path_action(
+                    intent, obs, query=_search_query_for(intent, obs.url, latest_num)
+                )
+                if action is not None:
+                    logger.info(
+                        "browse: took the fast path (single search box) — no LLM call"
+                    )
+                elif (
+                    _search_query_for(intent, obs.url, latest_num)
+                    or _extract_search_term(intent)
+                ) and search_ui_opened_at < 0:
+                    # No box to type in — is one hidden behind an icon? Clicking
+                    # it is READ (it reveals a field; it acts on nothing).
+                    #
+                    # ⚠️ ONCE PER RUN, not once per page. A per-page bound looked
+                    # equivalent and is not: clicking the toggle CHANGES the page
+                    # (junaidjamshed's navigates to /search), so the next step
+                    # has a different fingerprint and could open another one —
+                    # a chain of "search"-named controls would click through them
+                    # all. The honest semantic is that the loop makes at most ONE
+                    # code-authored attempt to reveal a search box; if it does not
+                    # work the model takes over, which is where it started.
+                    action = _open_search_ui_action(obs)
+                    if action is not None:
+                        search_ui_opened_at = step
+                        logger.info(
+                            "browse: the search box is hidden behind a control — "
+                            f"opening it {action} — no LLM call"
+                        )
+        # WHICH ONE DID YOU MEAN? — ASKED BEFORE THE MODEL IS (2026-08-08).
+        #
+        # THE INCIDENT. "go to junaidjamshed.com and add janan to cart" reached
+        # /search?q=janan, and the run DIED there: `_decide` returned an empty
+        # string twice and the browse ended "couldn't work out a safe next action
+        # on this page", closing the window. The user's expectation — ask which
+        # janan, list them — was already built (browser/choice.py, 2026-08-02),
+        # and could not fire: THE TIE GATE IS DOWNSTREAM OF A DECISION THAT THE
+        # TIE ITSELF PREVENTS. It reads `action["action"] == "click"`, so with no
+        # action there is nothing to inspect.
+        #
+        # ⚠️ AND CATCHING IT AFTER THE FACT WAS THE WEAKER DESIGN ANYWAY. A real
+        # tie means the user's words cannot separate these items — so whatever
+        # the model returns is a GUESS, and the old gate's job was to notice the
+        # guess and throw it away. Not asking for it is strictly better: it is
+        # the same "code never picks between real equals" rule this module is
+        # built on, applied to the model as well as to us. It also costs nothing
+        # — two provider calls and ~34s in the incident, spent to produce
+        # something that had to be discarded.
+        #
+        # MEASURED on the real site, which is what bounds it (scripts/
+        # _measure_janan_choice.py, run 2026-08-08):
+        #     homepage           0 candidates carry "janan"  -> silent, correct
+        #     /search?q=janan   20 tie at score 1            -> ask, correct
+        #     "janan sports"     4 tie at score 3            -> ask, correct
+        # So the tie test IS the bound on this site: the page the model should
+        # search from raises nothing at all.
+        #
+        # `step > 0` is the cheap insurance for sites where it is not. The run's
+        # FIRST move is its chance to narrow the page itself — searching, opening
+        # a category — and asking before it has had that chance could offer two
+        # nav links while twenty real products sat one search away, which is a
+        # worse answer than the one being replaced. From the second page on, a
+        # tie is a question for the user. A tie on the very first page is not
+        # lost: it is caught by the stall fallback below, or by the post-decision
+        # gate, exactly as it was before.
+        if (
+            action is None
+            and commit
+            and step > 0
+        ):
+            target_words, decision = _item_tie(obs)
+            # ONE ITEM LEFT TO BUY IS NOT A QUESTION (2026-08-09). The user's
+            # words could not separate these; the store did, by having only one
+            # of them in stock. `unresolved_axis` rule 3 one layer up — offering
+            # a list whose other entries cannot be added is offering dead ends.
+            if decision is not None and decision.settled is not None:
+                action = {"action": "click", "index": decision.settled.index}
+                logger.info(
+                    f"browse: {decision.dropped} of the {decision.dropped + 1} "
+                    f"matching items are sold out — taking the only one in stock "
+                    f"({decision.settled.label!r}) — no LLM call"
+                )
+            elif decision is not None:
+                said = choice.plain_words(target_words)
+                logger.info(
+                    f"browse: {len(decision.tied)} things on this page match "
+                    f"{' '.join(said[:4])!r} equally well (step {step}"
+                    f"{f', {decision.dropped} sold out' if decision.dropped else ''}"
+                    ") — asking which one BEFORE spending a decision on a guess"
+                )
+                return _stamp_item_choice(
+                    _outcome(
+                        False, step, obs, session,
+                        error="several items match — needs the user to choose",
+                        llm_calls=llm_calls, vision_calls=vision_calls,
+                    ),
+                    decision,
+                    target_words,
+                )
+
+        # THE PAGE'S OWN BUY BOX, REACHED IN CODE (2026-08-10).
+        #
+        # THE INCIDENT. "add black kameez kurta in cart" reached the right
+        # product page and then died: the model returned "more", then
+        # "scroll up", then nothing, twice, and the run ended "couldn't work out
+        # a safe next action". It was not confused — MEASURED, THE ACTION DID NOT
+        # EXIST IN ITS WORLD. The buy button is `disabled` until a size is
+        # chosen, `observe.eligible()` drops disabled elements, and the size
+        # swatches are visually-hidden radios, so NEITHER the buy button NOR the
+        # size picker was in the element list at all.
+        #
+        # No prompt can fix that, and no element the model can name will do it.
+        # So the form is found in the PAGE (session.find_buy_box, rule R1) and
+        # handed straight to the machinery that already exists — the variant gate
+        # settles or asks for the size, and the approval card carries the real
+        # contract. Zero LLM calls, and zero new authority: this produces a
+        # `submit`, which has only ever meant "hand this form to the user", and
+        # the one-shot permit, the signature and the approval gate are untouched.
+        #
+        # Bounded to goals that plainly asked for a cart, to pages whose own
+        # subject carries at least one of the user's words (so a stray landing
+        # page is never added), and to one attempt per page.
+        if (
+            action is None
+            and commit
+            and wants_cart(intent)
+            and fingerprint not in buy_box_tried
+        ):
+            buy_box_tried.add(fingerprint)
+            words = _target_words(obs.url)
+            on_topic = choice.page_subject(obs.title, obs.url) and choice._score(
+                words, choice.page_subject(obs.title, obs.url)
             )
-            if action is not None:
-                logger.info("browse: took the fast path (single search box) — no LLM call")
+            # TOLERANT READ, the `sold_out` shape: a session without the method —
+            # every hand-wired fake in the suite — behaves exactly as it did
+            # before this leg existed. `test_the_real_session_can_find_a_buy_box`
+            # is what stops that tolerance becoming a silent no-op in production.
+            finder = getattr(session, "find_buy_box", None)
+            if (not words or on_topic) and callable(finder):
+                contract = await finder()
+                if isinstance(contract, dict) and contract.get("found"):
+                    axes = choice.axes_of(contract)
+                    if not axes and contract.get("submit_disabled"):
+                        # The site itself says this cannot be added, and there is
+                        # no choice to make that would change that. Report its own
+                        # words rather than submitting a form it has switched off.
+                        label = str(contract.get("submit_label") or "").strip()
+                        logger.info(
+                            f"browse: the buy box is disabled with no choice to make "
+                            f"({label!r}) — reporting rather than submitting"
+                        )
+                        return _outcome(
+                            False, step, obs, session,
+                            error=(
+                                "the site will not let this be added to the cart"
+                                + (f" — its button says {label!r}" if label else "")
+                            ),
+                            llm_calls=llm_calls, vision_calls=vision_calls,
+                        )
+                    buy_box_contract = contract
+                    action = {"action": "submit", "index": BUY_BOX_INDEX}
+                    logger.info(
+                        "browse: found this page's own add-to-cart form "
+                        f"({len(axes)} choice(s) to make) — no LLM call"
+                    )
+                elif isinstance(contract, dict) and contract.get("reason"):
+                    logger.info(
+                        f"browse: no buy box for this page ({contract['reason']})"
+                    )
+
         if action is None:
             # B2 (2026-07-25): when we know the latest episode number but the
             # deterministic legs above couldn't fire (an ambiguous slug — several
@@ -4255,6 +5153,16 @@ async def run_browse(
                 # Operate paginated lists / pick newest-by-date (2026-07-25) — the
                 # generic lever for range dropdowns and no-number sites (YouTube).
                 decide_goal = f"{decide_goal}{_LATEST_GUIDANCE}"
+            # WHAT THE USER SAID WHEN IT GOT STUCK (2026-08-09). Last, so it
+            # outranks every guidance clause above: they were looking at the page
+            # when the run stopped on it, which is more than any of them knows.
+            # This is also half of the termination argument for the STUCK ask —
+            # the next round is genuinely working from different input.
+            if stuck_advice:
+                decide_goal = (
+                    f"{decide_goal} (the user was asked what to do here and said: "
+                    f"{stuck_advice!r} — follow that)"
+                )
             # FILTER/SORT STEERING (the daraz.pk lesson): when the goal carries a
             # filter/sort constraint, surface the page's OWN filter controls from
             # the full stamped list (so a control below the ~80-element render
@@ -4326,11 +5234,71 @@ async def run_browse(
                 # page and everything it gathered out through the salvage path,
                 # so "it couldn't work out a next action" now arrives WITH the
                 # page attached.
-                return _outcome(
+                #
+                # …BUT A PAGE FULL OF EQUAL MATCHES IS NOT A DEAD END (2026-08-08).
+                # THE RECALL NET under every reason the model can fail here — an
+                # empty reply, a budget spent on reasoning, a hallucinated index,
+                # a provider hiccup — because none of them changes the fact that
+                # the page shows several things the user's words cannot separate,
+                # and asking is a better answer than closing the window. This is
+                # what the live incident needed: the pre-decision leg above does
+                # not fire on step 0, the model stalled on the results page, and
+                # the run ended with nothing to show for it.
+                #
+                # Deliberately NOT gated on step: the pre-decision leg's job is
+                # to be early, this one's is to catch everything it cannot.
+                if commit:
+                    target_words, decision = _item_tie(obs)
+                    if decision is not None and decision.tied:
+                        logger.info(
+                            f"browse: no usable decision, but {len(decision.tied)} "
+                            "things here match equally well — asking which one rather "
+                            "than stopping"
+                        )
+                        return _stamp_item_choice(
+                            _outcome(
+                                False, step, obs, session,
+                                error="several items match — needs the user to choose",
+                                llm_calls=llm_calls, vision_calls=vision_calls,
+                            ),
+                            decision,
+                            target_words,
+                        )
+                # …AND A DEAD END IS A QUESTION, NOT A DEATH (2026-08-09).
+                # Reported by the user: "when it gets confused or something
+                # unexpected happens then it should pause and ask a question and
+                # be able to update the plan". Live, this line closed the window
+                # and ended the task with nothing to show.
+                #
+                # This is ask-not-fail, the pattern `planner._fallback_question`
+                # and `task_router.rescue_unrouted_turn` are both built on, and
+                # the comparator is a FACT rather than a judgement: the loop
+                # genuinely produced no action. It is emphatically NOT an "is the
+                # model confused?" classifier — that is the shape this codebase
+                # has measured at zero three times.
+                #
+                # The `error` string is kept BYTE-IDENTICAL: it is the honest
+                # description of what happened, it is what a spent budget still
+                # falls back to, and a test pins it.
+                out = _outcome(
                     False, step, obs, session,
                     error="couldn't work out a safe next action on this page",
                     llm_calls=llm_calls, vision_calls=vision_calls,
                 )
+                if commit and not stuck_advice:
+                    # One ask per RUN. A second stall after the user has already
+                    # steered means their instruction did not unblock it, and
+                    # asking again would be chaining questions off a question
+                    # (the _MAX_SITE_CORRECTIONS reasoning). The planner's own
+                    # budget is the outer bound.
+                    out.stuck_required = True
+                    out.stuck_page = obs.title or ""
+                    logger.info(
+                        "browse: no safe next action on "
+                        f"{(obs.title or obs.url)[:60]!r} — asking the user rather "
+                        "than closing the window"
+                    )
+                return out
 
         challenge_note = ""
         if isinstance(getattr(obs, "challenge", None), dict):
@@ -4548,7 +5516,17 @@ async def run_browse(
                     error="this browser task is read-only and cannot submit forms",
                     llm_calls=llm_calls, vision_calls=vision_calls,
                 )
-            target = await session.read_commit_target(obs, action["index"])
+            # A CODE-AUTHORED SUBMIT CARRIES ITS CONTRACT, NOT AN INDEX
+            # (2026-08-10). The buy-box leg found the form in the page — the
+            # control is not in the element list at all, because a storefront
+            # disables it until a variant is chosen — so there is no index to
+            # resolve. Everything below is unchanged: the form is stamped either
+            # way, so the axis gate, the challenge gate, `reread_commit_form`
+            # and the one approved submit all work on it identically.
+            if action.get("index") == BUY_BOX_INDEX:
+                target = buy_box_contract
+            else:
+                target = await session.read_commit_target(obs, action["index"])
             if not target or not target.get("action"):
                 history.append(
                     f"- submit [{action['index']}] — that element is not part of a form"
@@ -4567,6 +5545,105 @@ async def run_browse(
                 # plain "sign in"); both hand off to the user identically.
                 out.wall_kind = "signup" if _looks_like_signup(obs) else "login"
                 return out
+            # WHICH SIZE? — ON THE ARMED FORM (2026-08-08). The select_option
+            # gate below covers a value the MODEL typed into a <select>. It
+            # cannot cover this: a storefront's size axis is a RADIO group, so
+            # the model clicks a swatch (or never touches it at all) and reaches
+            # `submit` with the axis unset. MEASURED on a real product page —
+            # nothing checked, `id` EMPTY, and no Size/Color/Style field in the
+            # contract, i.e. an add-to-cart carrying no variant.
+            #
+            # This is the one point that sees the WHOLE form however the axis
+            # was (or was not) set, which is why the gate is anchored here and
+            # not to the page. Code settles what is not a real question — the
+            # user's own words, or the only value in stock — and asks only when
+            # the choice is genuinely open.
+            settle = choice.unresolved_axis(
+                choice.axes_of(target), _target_words(obs.url),
+                answer=chosen_option,
+            )
+            if settle is not None and settle.settled:
+                status = await session.choose_form_option(settle.axis, settle.settled)
+                if status == "ok":
+                    logger.info(
+                        f"browse: chose {settle.settled!r} for "
+                        f"{(settle.field or settle.axis)[:40]!r} — {settle.why}"
+                    )
+                    # ⚠️ LET THE PAGE RESOLVE IT FIRST. MEASURED on the live
+                    # site: the theme updates the hidden variant `id` in its OWN
+                    # change handler, so a re-read on the next line still sees
+                    # `id=""` — the approval card would show, and the submit
+                    # would carry, no variant at all.
+                    #
+                    # A `settle()` was NOT enough (2026-08-10). Measured on the
+                    # incident's own product, the id landed between 0.5s and 2.0s
+                    # after the swatch was clicked, while settle() returns in
+                    # ~250ms on an already-painted page — so the card named a
+                    # size in words over a contract carrying none. Wait for the
+                    # CHANGE, not for quiet (the wait_for_commit lesson).
+                    await session.settle()
+                    waiter = getattr(session, "await_form_change", None)
+                    fresh = (
+                        await waiter(target)
+                        if callable(waiter)
+                        else await session.reread_commit_form()
+                    )
+                    if isinstance(fresh, dict) and fresh.get("action"):
+                        target = fresh
+                    # The SAME inputs as the first pass — including the answer.
+                    # Dropping it here masked itself on a single-axis form (the
+                    # axis is `chosen` now, so rule 4 skips it) and would have
+                    # asked again about a SECOND axis the user had already named
+                    # in the same reply.
+                    settle = choice.unresolved_axis(
+                        choice.axes_of(target), _target_words(obs.url),
+                        answer=chosen_option,
+                    )
+                else:
+                    # The control would not take it. Do NOT submit a form whose
+                    # variant we could not set — fall through to asking, which
+                    # is the honest outcome (the user can pick in the window).
+                    logger.info(
+                        f"browse: could not set {(settle.field or settle.axis)[:40]!r} "
+                        f"to {settle.settled!r} ({status}) — asking instead"
+                    )
+                    axis = next(
+                        (a for a in choice.axes_of(target) if a.name == settle.axis),
+                        None,
+                    )
+                    offers = tuple(
+                        o.option() for o in (axis.buyable if axis else ())
+                    )[: choice.MAX_CHOICE_OPTIONS]
+                    settle = (
+                        choice.AxisChoice(
+                            axis=settle.axis, field=settle.field, options=offers,
+                            why="the page would not take the value",
+                        )
+                        if len(offers) > 1
+                        else None
+                    )
+            if settle is not None and settle.options:
+                logger.info(
+                    f"browse: {(settle.field or settle.axis)[:40]!r} offers "
+                    f"{len(settle.options)} value(s) and {settle.why} — pausing to ask"
+                )
+                out = _outcome(
+                    False, step, obs, session,
+                    error=(
+                        "needs you to choose "
+                        f"{settle.field or 'an option'} before this can be submitted"
+                    ),
+                    llm_calls=llm_calls, vision_calls=vision_calls,
+                )
+                out.target_choice_required = True
+                out.choice_kind = "option"
+                out.choice_field = settle.field
+                out.choice_target = " ".join(
+                    choice.plain_words(_target_words(obs.url))[:6]
+                )
+                out.choice_options = list(settle.options)
+                return out
+
             # EMBEDDED CHALLENGE GATE (2026-07-19): the form is filled, the
             # model wants to submit, and a visible verification widget on this
             # page carries no token yet. Submitting now would be rejected — and
@@ -4704,48 +5781,34 @@ async def run_browse(
         # whole feature is built on — and narrowing it by label would be the
         # keyword-list shape this codebase has measured at zero three times.
         if commit and action["action"] == "click":
-            target_words = _target_words(obs.url)
-            tied = choice.tied_candidates(
-                target_words, obs.elements, find_price=browser_extract.find_price
-            )
+            # ⚠️ SHARED WITH THE TWO GATES ABOVE (2026-08-09). This site used to
+            # compute its own tie AND pass the TRUNCATED eight to
+            # `page_is_the_target` while the other two passed the whole tie — so
+            # on a twenty-way tie the slice's top score could differ from the
+            # full tie's and the three could disagree about suppressing the same
+            # page. One closure, one verdict.
+            target_words, decision = _item_tie(obs)
+            tied = list(decision.tied) if decision is not None else []
             picked_index = action.get("index")
             commits_to_one = any(c.index == picked_index for c in tied) or (
                 _is_action_gesture(action, obs.index_map().get(picked_index))
             )
-            # …UNLESS THIS PAGE IS ITSELF THE THING (2026-08-02b). (b) reads a
-            # gesture as "committing to one of the tied cards", which is true on
-            # a listing grid and FALSE on a detail page, where the gesture
-            # belongs to the page's own product and the tie is a related-items
-            # rail. Live: the user answered "JANAN SPORT - 30ML", the pick was
-            # enforced, the run reached that product's page — and it asked AGAIN
-            # from the rail, offering three things they had not chosen. See
-            # choice.page_is_the_target for the measured numbers and for why the
-            # comparison must be strict.
-            on_the_target = choice.page_is_the_target(
-                target_words, obs.title, obs.url, tied
-            )
-            if len(tied) > 1 and commits_to_one and on_the_target:
-                logger.info(
-                    f"browse: {len(tied)} things tie, but this page IS "
-                    f"{obs.title!r} — acting on it rather than re-asking"
-                )
-            elif len(tied) > 1 and commits_to_one:
+            if len(tied) > 1 and commits_to_one:
                 said = choice.plain_words(target_words)
                 logger.info(
                     f"browse: {len(tied)} things match "
                     f"{' '.join(said[:4])!r} equally well (step {step}) "
                     "— pausing to ask which one"
                 )
-                out = _outcome(
-                    False, step, obs, session,
-                    error="several items match — needs the user to choose",
-                    llm_calls=llm_calls, vision_calls=vision_calls,
+                return _stamp_item_choice(
+                    _outcome(
+                        False, step, obs, session,
+                        error="several items match — needs the user to choose",
+                        llm_calls=llm_calls, vision_calls=vision_calls,
+                    ),
+                    decision,
+                    target_words,
                 )
-                out.target_choice_required = True
-                out.choice_kind = "item"
-                out.choice_target = " ".join(said[:6])
-                out.choice_options = [c.option() for c in tied]
-                return out
 
         # ACTION-APPROVAL HAND-OFF (2026-07-22): a READ browse never SENDS,
         # POSTS, SUBMITS, UPLOADS, LIKES, DELETES, or BUYS on a live site without

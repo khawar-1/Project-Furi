@@ -12,8 +12,12 @@ The fix: a "browse" held-session slot. A finished browse run HOLDS its live
 session (success or clean loop failure); the next browse run TAKES and reuses
 it — same page, real history, no relaunch — re-scoping the allowlist and only
 navigating to start_url when the current page is off the new task's sites.
-Walls/challenges still close the session (the profile must be freed for the
-hand-off window); exceptions still close via the finally.
+Exceptions still close via the finally.
+
+⚠️ THE "walls/challenges still close the session" LINE THAT USED TO BE HERE IS
+GONE, and it was stale in two stages: a CHALLENGE stopped closing on 2026-08-03
+and a sign-in WALL on 2026-08-08. Both now hand the tab to the user IN PLACE and
+only escalate to the profile-hungry clean window when the same site asks again.
 """
 import pytest
 
@@ -57,6 +61,7 @@ class FakeSession:
         # exactly as it is on the real BrowserSession.
         self.tab_reused = False
         self.playback = False
+        self.released = False
 
     def origin_allowed(self, host):
         if not host:
@@ -86,6 +91,14 @@ class FakeSession:
 
     async def resume_agent_control(self):
         self.playback = False
+        return True
+
+    async def release_to_user(self):
+        """Hand this tab to the user: interception lifted, tab left open
+        (2026-08-03 for a challenge, 2026-08-08 for a sign-in wall). Without
+        this on the fake, the login branch's in-place path raises AttributeError
+        and every assertion below reads the destructive fallback instead."""
+        self.released = True
         return True
 
 
@@ -733,17 +746,8 @@ async def test_an_approval_pause_keeps_a_borrowed_tab_too(wired):
     assert wired["opened"] == []  # it reused the tab rather than opening one
 
 
-async def test_a_login_wall_still_closes_the_tab(wired, monkeypatch):
-    """NOT changed, and deliberately: a sign-in window is a separate Chrome
-    process on the same single profile, so the shared context genuinely has to
-    go. Signing in closes the tabs."""
-    from app.core import browser_session as bs
-
-    async def fake_open_login(url):
-        return True
-
-    monkeypatch.setattr(bs, "open_login_window", fake_open_login)
-    wired["outcome"] = BrowseOutcome(
+def _wall_outcome():
+    return BrowseOutcome(
         success=False,
         actions_taken=1,
         final={"url": "https://x.example/login", "title": "Sign in"},
@@ -751,7 +755,60 @@ async def test_a_login_wall_still_closes_the_tab(wired, monkeypatch):
         login_site="x.example",
         login_url="https://x.example/login",
     )
+
+
+async def test_a_login_wall_hands_the_tab_over_instead_of_closing_it(wired, monkeypatch):
+    """⚠️ THIS TEST USED TO ASSERT THE OPPOSITE, and its docstring said why:
+    "a sign-in window is a separate Chrome process on the same single profile,
+    so the shared context genuinely has to go".
+
+    That was true only because the branch ALWAYS opened such a window. Since
+    2026-08-08 it hands the tab over in place first — so the premise is gone and
+    the old assertion was pinning the defect: live, a false wall on anikoto closed
+    every tab and reopened a normal window on the wrong episode."""
+    from app.core import browser_session as bs
+
+    opened_windows = []
+
+    async def fake_open_login(url):
+        opened_windows.append(url)
+        return True
+
+    monkeypatch.setattr(bs, "open_login_window", fake_open_login)
+    wired["outcome"] = _wall_outcome()
+
     result = await _browse()
 
     assert result.output["login_required"] is True
-    assert wired["opened"][0].closed is True
+    assert result.output["login_in_place"] is True
+    assert wired["opened"][0].closed is False, "the tab was destroyed"
+    assert wired["opened"][0].released is True, "and never handed to the user"
+    assert opened_windows == [], "a separate window was opened for nothing"
+
+
+async def test_a_second_wall_from_the_same_site_earns_the_clean_window(
+    wired, monkeypatch
+):
+    """The profile-hungry path is not deleted, it is EARNED — a site that
+    fingerprints the automated browser can re-issue the wall however often a
+    human signs in. THEN the tabs are worth paying."""
+    from app.core import browser_session as bs
+
+    opened_windows = []
+
+    async def fake_open_login(url):
+        opened_windows.append(url)
+        return True
+
+    monkeypatch.setattr(bs, "open_login_window", fake_open_login)
+    wired["outcome"] = _wall_outcome()
+
+    first = await _browse()
+    assert first.output["login_in_place"] is True
+    assert opened_windows == []
+
+    second = await _browse()
+
+    assert second.output["login_in_place"] is False
+    assert opened_windows == ["https://x.example/login"]
+    assert wired["opened"][-1].closed is True

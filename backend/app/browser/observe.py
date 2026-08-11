@@ -153,6 +153,32 @@ class Element:
     # in the suite, and any older observation shape, stays valid — callers use
     # `name_full or name`.
     name_full: str = ""
+    # DIALOG MEMBERSHIP (2026-08-08): this element lives inside a modal/dialog
+    # rather than the page's own flow. CODE data like `rect`/`form_member` — never
+    # rendered, so the element budget, the action signature and the page
+    # fingerprint are all unaffected. Read by loop.detect_login_wall to tell a
+    # sign-in OFFER (a modal on a usable page) from a sign-in WALL (the page
+    # itself). Defaults False so every fake element in the suite, and any older
+    # observation shape, stays valid — and False is the safe default: it can only
+    # ever make the detector MORE willing to call something a wall, which is the
+    # behaviour that predates this field.
+    in_dialog: bool = False
+    # STOCK (2026-08-09): the store says this one cannot be bought. CODE data
+    # like `in_dialog` above — never rendered, so the element budget, the action
+    # signature and the page fingerprint are all unaffected (a test pins that,
+    # and its mirror pins that a NAME change does move the fingerprint, so it
+    # cannot pass vacuously).
+    #
+    # MEASURED on junaidjamshed.com/search?q=janan, which is the incident: the
+    # signal is on the CARD ANCESTOR's class (`hdt-pr-sold_out`), never on the
+    # title link the user is offered, so a per-element read of the link alone
+    # can never see it. See `soldOutOf` in _EXTRACT_JS for the ancestry walk.
+    #
+    # Defaults False, and that direction is load-bearing: a theme whose markup
+    # this does not understand reads as "available", so the tie question keeps
+    # offering everything exactly as it did before this field existed. The
+    # opposite default would silently HIDE every product on an unfamiliar store.
+    sold_out: bool = False
 
     def render(self) -> str:
         line = f'[{self.index}] {self.role} "{self.name}"' if self.name else f"[{self.index}] {self.role}"
@@ -443,6 +469,99 @@ _EXTRACT_JS = """
     (el.tagName.toLowerCase() === 'input' ? (el.getAttribute('value') || '') : '')
   );
 
+  // DIALOG MEMBERSHIP (2026-08-08). Does this element live inside a modal /
+  // dialog rather than in the page's own flow? Read from the element's OWN
+  // ANCESTRY — the same class of structural signal `form` carries below, and
+  // never page prose.
+  //
+  // What it buys: a credential form inside a dialog is an OFFER on a page that
+  // is otherwise usable; the same form in the page's flow is a WALL. Before
+  // this, detect_login_wall could not tell them apart, and anikoto — which
+  // ships a sign-in AND a register modal in the markup of every watch page —
+  // aborted a working task the moment one was open (live 2026-08-08).
+  //
+  // The selector is the standard ARIA and Bootstrap vocabulary only. Deliberately
+  // NOT '.popup'/'.overlay'/'.drawer': those name a dozen unrelated things, and a
+  // real sign-in page that happened to use one would have its wall demoted.
+  const dialogOf = (el) => {
+    try {
+      return !!(el.closest && el.closest(
+        '[role=dialog],[role=alertdialog],[aria-modal="true"],dialog,.modal,.modal-dialog,.modal-content'
+      ));
+    } catch (e) { return false; }
+  };
+
+  // STOCK (2026-08-09). Does the store say this thing cannot be bought? Read
+  // from the element's OWN ANCESTRY, like dialogOf above — never page prose.
+  //
+  // ⚠️ THE SIGNAL IS NOT ON THE ELEMENT. Measured on the incident's own page
+  // (junaidjamshed.com/search?q=janan, scripts/_measure_ecommerce_round.py):
+  //     sold out   card class 'hdt-card-product hdt-pr-style8 hdt-pr-sold_out'
+  //     buyable    card class 'hdt-card-product hdt-pr-style8'
+  // and the offered element is the TITLE LINK inside that card, whose own class
+  // and text carry nothing either way. 6 of the 20 items offered to the user
+  // were sold out. eligible() already drops `el.disabled`, so of the three
+  // signals session.py's buyable() uses only aria-disabled can fire here — the
+  // rest of the work is the walk.
+  //
+  // ⚠️ THE WALK MUST STOP AT THE CARD, and finding that boundary took THREE
+  // measured attempts — the last of them only visible against the live page.
+  //   "nearest ancestor with a buy control"  reached the whole GRID, so one
+  //       product's badge condemned all twenty.
+  //   "largest ancestor with one product LINK"  stopped one level too EARLY,
+  //       at the info sub-block, because a card links the same product several
+  //       times (image, title, "View product").
+  //   "a card is SMALL, bound it by textContent.length"  looked right and was
+  //       measured DEAD on the live page: textContent counts hidden markup, so
+  //       a card whose visible text is 97 chars reports 8,921 and the walk
+  //       broke one level BELOW the class it was looking for. The hermetic
+  //       tests could not see it — their fixtures have no hidden markup — and
+  //       the live probe reported `dropped=0` where the page had six sold out.
+  // MEASURED on junaidjamshed.com/search?q=janan, per ancestor:
+  //       card   innerText  69-101   textContent  8,420-9,035
+  //       grid   innerText   1,721   textContent    178,167
+  // innerText is the one that separates them, with ~6x margin below the bound
+  // and ~3x above. It costs a layout read, but `nameOf` already takes one for
+  // every eligible element, so the layout is up to date by the time we get here.
+  //
+  // DEAD_RE deliberately OMITS the bare word `disabled`, which session.py's
+  // twin includes: there it tests one size control's own class, here it tests a
+  // whole card's, and cards carry state classes for a dozen unrelated things. A
+  // false positive HIDES a product the user asked for — invisibly — which is
+  // worse than the bug being fixed, so this errs toward offering.
+  const STOCK_DEAD_RE = /sold[\\s_-]*out|unavailable|out[\\s_-]*of[\\s_-]*stock/i;
+  const STOCK_MAX_DEPTH = 6;
+  const STOCK_CARD_TEXT_MAX = 600;
+  // ⚠️ MEMOIZED, AND IT IS NOT A MICRO-OPTIMISATION — MEASURED. Every candidate
+  // that is NOT sold out walks one level PAST its card and reads the GRID's
+  // innerText, which forces a layout read over the whole grid subtree; on a
+  // 20-product listing that is ~19 full-grid reads per observation. A/B on the
+  // live page, same machine, minutes apart: observe 146ms without the walk,
+  // 259ms with it. The grid is one node shared by every card, so caching the
+  // length by node computes it once. Cleared with the closure on every
+  // extraction, so it can never serve a stale layout.
+  const stockTextLen = new Map();
+  const stockLen = (node) => {
+    let n = stockTextLen.get(node);
+    if (n === undefined) {
+      n = String(node.innerText || '').length;
+      stockTextLen.set(node, n);
+    }
+    return n;
+  };
+  const soldOutOf = (el) => {
+    try {
+      if (String(el.getAttribute('aria-disabled') || '') === 'true') return true;
+      let node = el;
+      for (let i = 0; i < STOCK_MAX_DEPTH && node && node !== document.body; i++) {
+        if (STOCK_DEAD_RE.test(String(node.className || ''))) return true;
+        if (stockLen(node) > STOCK_CARD_TEXT_MAX) break;
+        node = node.parentElement;
+      }
+      return false;
+    } catch (e) { return false; }
+  };
+
   const challengeInfo = """ + _CHALLENGE_PROBE_JS + """;
 
   // The no-touch exclusion: anything overlapping a challenge widget's box is
@@ -715,7 +834,9 @@ _EXTRACT_JS = """
       value: value,
       href: clip(href, 100),
       rect: { x: r.left, y: r.top, w: r.width, h: r.height },
-      form: form
+      form: form,
+      in_dialog: dialogOf(el),
+      sold_out: soldOutOf(el)
     });
   }
 
@@ -766,6 +887,8 @@ def _elements_of(
                 rect=(x + dx, y + dy, w, h),
                 frame_id=frame_id,
                 frame_url=frame_url,
+                in_dialog=bool(item.get("in_dialog")),
+                sold_out=bool(item.get("sold_out")),
                 **_form_of(item.get("form")),
             )
         )

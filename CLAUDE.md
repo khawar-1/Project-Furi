@@ -6027,6 +6027,961 @@ is right — so both are recorded here with the evidence.
   tab that has not said what it is. A pop-under can still cost one wasted moment;
   it can no longer cost the run.
 
+### A login MODAL is not a login WALL (2026-08-08)
+Live, one prompt: *"play ep 4 of season 4 of my hero academia on anikoto"*. A
+normal Chrome window opened on **season 4 EPISODE 1**, the chat asked *"Continue
+without signing in"*, and answering that **closed the browser, restarted the task
+from scratch**, and only then opened ep 4. The user also flagged terminal errors
+from the previous run (Bleach, 325s). Root-caused from the three browse traces and
+`backend.log:29382-29495` **before reading any code**; every claim below was then
+measured against the real site and the real functions. **Four defects, and the
+reported one is not the root.**
+
+- **⚠️ D1 — A LOGIN MODAL READ AS A HARD WALL, and the site ships one on every
+  page.** `curl` on that exact ep-1 URL returns **THREE `type="password"` inputs**
+  inside `<div class="modal fade" id="sign" aria-hidden="true">` — a sign-in modal
+  and a register modal. `detect_login_wall` walled on ANY visible password field,
+  so the moment one was open the task was over. **The loop already owned the cure
+  and could not reach it**: `press_key`/Escape is in its action menu and whitelist
+  (*"Escape closes dialogs/overlays"*), but the wall check returns BEFORE any
+  decision is made. Half-known since 2026-07-23, whose own comment says *"many
+  sites (anikoto &c.) are fully usable as a guest, and a modal/overlay can read as
+  a wall"* — but its `skip_login_wall` mitigation only applies AFTER the user has
+  already paid for the false wall.
+  **THE DISCRIMINATOR IS THAT A WALL IS NOT DISMISSIBLE.** A structural
+  `in_dialog` flag per element (`observe._EXTRACT_JS`, `el.closest` over the ARIA +
+  Bootstrap vocabulary — the element's own ancestry, never prose, the same class of
+  signal `form` already carries); `credential_overlay_site` is the ONE definition
+  of "overlay, not wall" (both the demotion and the recovery read it, so they
+  cannot drift); a deterministic Escape leg, once per page fingerprint; and **a
+  dialog that survives that IS a wall**, handed off exactly as before. So the
+  detector gets strictly better in BOTH directions rather than merely quieter.
+  Two halves are load-bearing: every credential field must be dialog-borne (or a
+  login page in a `.modal` wrapper gets demoted) AND the page must have content of
+  its own (or a login page rendered as a dialog over an empty backdrop does).
+  An auth HOST and a `/login`/`/register` ROUTE are never demotable — the URL is
+  the page's own identity. Dismissing is good hygiene regardless: `unoccluded`
+  drops everything under a centred modal, so an open dialog silently degrades
+  EVERY element list. **The asymmetry:** a false wall aborts a working task,
+  destroys every tab, shows the wrong page and asks a pointless question; a missed
+  wall costs a step or two. Nothing about credential handling changes — pressing
+  Escape handles no credentials, and the extractor still never reads a password.
+- **⚠️ D2 — THE LOGIN HAND-OFF DEMOLISHED THE BROWSER, and this is the 2026-08-03
+  CAPTCHA fix in the branch that round did not reach.** `browser_agent_tools:520`
+  closed the session then called `open_login_window`, whose FIRST act is
+  `_window.close_all()`. That round's own comment calls the challenge branch *"the
+  one pause branch that still closed"* — overlooking the login branch forty lines
+  above it. And it opened at `outcome.login_url` — the page the loop stopped on,
+  **ep-1** — which the user reasonably read as "it played the wrong episode".
+  Since the answer to a false wall is always "carry on", every tab was destroyed
+  for nothing. Now mirrors the challenge branch verbatim: `release_to_user()` in
+  place, `note_browse_tab`, `handed_off`; the clean window stays EARNED, escalated
+  only when the same site walls again while the hand-over is fresh. The escalation
+  memory now takes a KIND (`note_handoff`/`handed_over_recently`, keyed on
+  `(kind, site)`) rather than being copied — the second-copy hole, recorded seven
+  times here. `HandoffPayload.in_place` carries "where should the user look" for
+  every kind, and **that closed a latent gap of its own: `_challenge_wall_question`
+  had read `challenge_in_place` since 2026-08-03 and NOTHING ever passed it**, so
+  the challenge pause text also claimed a window it had not opened.
+- **⚠️ D3 — EXPLICIT "season 4" WAS UNSUPPORTED**, recorded on 2026-08-07 as a
+  measured, deliberately-unfixed gap; the user hit it. Reproduced: `Season 4`
+  scored **1 for `my-hero-academia-4` and 1 for `my-hero-academia-the-movie-4`** →
+  tie → `best_entry` None → the model clicked blind (index 57 of 131). `Season 5`
+  scored **0 everywhere** (`5th-season` tokenizes to `5th`). Three structural
+  additions, none per-site: ordinal normalisation (`5th`→`5`, `second`→`2`), a
+  companion-release exclusion (the slug-side twin of `series_api.SEASON_FORMATS`,
+  which had always excluded MOVIE/OVA/SPECIAL on the catalog side — that asymmetry
+  is what let a film tie with a season), and `_target_season` as the twin of
+  `_target_episode`. **MEASURED on the real 40-row listing: seasons 3/4/5/6/7 all
+  resolve uniquely, where before it was 1 of 3.** Ambiguity ASKS, reusing
+  `Handoff.TARGET_CHOICE` with `choice_kind="season"` — no new Handoff member, no
+  new planner branch. **The guard that matters more than the feature:**
+  `_episode_action` swaps the target number into WHATEVER url it is on, so a
+  "season 4 episode 4" goal landing on season 1 episode 1 would navigate to season
+  1 EPISODE 4 and report success — a different show, reported as done. Held while
+  a named season is unreached.
+- **⚠️ AND THE RUNTIME CHECK FOUND A DEFECT IN MY OWN D3 WORK THAT NO TEST HAD.**
+  anikoto's search is **FUZZY**: "my hero academia" returns **40 rows spanning a
+  dozen franchises**. A numbered season has only its digit to match on, and nothing
+  required a candidate to BELONG to the series — so "Season 4" tied the real entry
+  with `that-time-i-got-reincarnated-as-a-slime-season-4`, and the question that
+  produced was not merely wrong, it was nonsense. `belongs_to_series` is
+  `series_api.MATCH_FLOOR`'s rule applied to the slug side, where it was missing.
+  A season NAME was never this exposed — "The Calamity" is distinctive where "4"
+  is not — which is why the 2026-08-07 round did not need it. **My test fixture
+  was a tidy hand-picked ten; the real listing is what showed it**, and the fixture
+  is now all 40 rows. (Season 2 then genuinely ties three ways — the season, the
+  Vigilantes spin-off, and a season-2 extra — and correctly ASKS.)
+- **D4 — THE READINESS MEASUREMENT CAME IN, AND IT SAID STOP WAITING.** The
+  2026-08-07 round deliberately instrumented instead of tuning and wrote the
+  decision rule into the code: *"A page still growing was nearly there; one stuck
+  at 0 acts never would be, and for THAT the fix is to stop waiting, not to wait
+  more."* Four × `readiness gave up after 15000ms (acts=170-234, complete=False,
+  still=0)`, `ready_wait=117.9s` of a 325s run: richly actionable on the FIRST
+  poll, and anikoto's DOM never stops growing. All three exits required
+  `settled >= 4`, so there was no leg for this shape at all. **⚠️ THE TIME BOUND IS
+  THE REAL GUARD, NOT THE ACT FLOOR** — daraz had `acts=322` at 3.82s while its
+  products did not arrive until 5.79s, so a floor-only exit would re-introduce the
+  exact defect `READY_STABLE_POLLS` was measured into existence to prevent.
+  `READY_BUSY_MS = 8_000` (> daraz's 6.36s settle), `READY_BUSY_ACTS = 120`
+  (>> its 54, << anikoto's 170), both pinned by a test carrying the measurements.
+- **NOT changed, deliberately:** the ad-tab closure (2026-08-07 rd 3) and the two
+  empty-reply `_decide` retries (2026-07-26) — both are existing guards working.
+- **⚠️ FOUR FAKES COULD NOT EXPRESS THE CONTRACT, which is the fifth instance of
+  this shape here.** `ScriptedPage` had no `page.keyboard`, so every Escape would
+  have silently failed; `_el` had no `in_dialog`, so no fake page could express the
+  incident at all; `FakeBrowseSession` (login) and `FakeSession` (continuity) had
+  no `release_to_user`. And **two tests were pinning the defect in their own
+  docstrings** — `test_browse_tool_opens_the_sign_in_window_and_signals_login`
+  ("closes its agent session, opens a USER-DRIVEN sign-in window") and
+  `test_a_login_wall_still_closes_the_tab` ("NOT changed, and deliberately: … the
+  shared context genuinely has to go"). That second premise was true only because
+  the branch ALWAYS opened a separate window.
+- **A Python scoping bug the existing suite caught:** a local named `choice` inside
+  `run_browse` shadows the imported `browser.choice` module for the WHOLE function,
+  so the closures reading `choice.target_tokens` failed with an unbound free
+  variable. Also moved: the user's-picked-item leg now runs FIRST among the
+  deterministic legs, because the season leg can raise a choice and would otherwise
+  have re-asked on the resume the very question just answered.
+- Tests: NEW `test_modal_wall.py` (11), NEW `test_browse_explicit_season.py` (23),
+  +4 real-browser tests in `test_browser_extract_js.py` (opt-in, **3/3 green
+  against a real Chromium** on the real anikoto markup), plus additions to
+  `test_browser_session.py`, `test_browser_login.py` and
+  `test_browse_window_continuity.py`. **20/20 behavioural changes proven to FAIL by
+  reverting the specific line IN PLACE** (`scripts/_falsify_modal_wall.py`, which
+  encodes the recorded harness lessons as CHECKS — and **caught two bugs in itself
+  on its first two runs**: an inverted old/new for an additive edit, and a
+  `_landed` check that was trivially true for one, plus a restore assertion that
+  reported "the tree is left broken" about a tree nothing had touched).
+- **RUNTIME-VERIFIED against the real site** (`scripts/_verify_modal_wall_runtime.py`,
+  real Chrome on the SELECTOR loop, **no LLM anywhere** — every mechanism this round
+  touches is deterministic, so a provider outage cannot make it lie): **25/25**. The
+  incident page loads with 138 elements; the modal ships CLOSED (0 password fields,
+  not a wall); opened, it shows 1 password field, marked `in_dialog`, with **125
+  non-dialog elements behind it** → verdict OVERLAY, not wall. Season 4 resolves to
+  exactly one entry — never the film, never the other show's season 4. One honest
+  SKIP: Escape-dismissal is not testable when the modal has to be forced open by
+  hand (no key handler is attached), and a tautological "assertion" there would be
+  a pass that cannot fail.
+- **HONEST LIMITS.** The dismissibility test costs one step on a genuine wall
+  before it is called one. `_target_season` deliberately does NOT read "part 4": in
+  these catalogs a part is a subdivision of a season as often as it is one (Bleach's
+  TYBW Part 4 is listed as "The Calamity"), so a bare number after it does not
+  reliably name an entry. And `belongs_to_series` requires every title word, so a
+  site that renders the title differently from the user's words (anikoto's own
+  `boku-no-hero-academia-*` entries) scores zero and defers to the model — today's
+  behaviour, and the safe direction.
+- Gates: **3767 passing, 17 skipped, 0 failed** (baseline 3725/14/0 — +42, zero
+  regressions; the +3 skipped are the opt-in real-browser tests). Browser suites
+  693 → **794**. Typecheck clean; no frontend or electron file changed.
+  `browse_bench` **4/5 scored + 1 blocked** by a CAPTCHA hand-off — and
+  `quotes-pagination`, the known pre-existing variable failure, is exonerated by
+  something stronger than an A/B: **neither the busy exit nor the overlay leg
+  fired ONCE in the whole bench run** (grep: 0 occurrences each), D3's season legs
+  are structurally unreachable there (no bench goal names a season), and the ebay
+  block went through the untouched challenge branch. **⚠️ AND A PYTEST RUN
+  REPORTED "exit code 0" WHILE NEVER STARTING** — `--timeout=600` is not installed
+  here, and the `| tail` in the invocation meant the reported code was *tail's*.
+  The recorded rule is "check the exit code, not the last line of output"; a pipe
+  makes that the wrong exit code. Every gate above was re-run with the code
+  captured directly.
+
+### The tie gate sat downstream of a decision the tie prevented (2026-08-08)
+Live: *"go to junaidjamshed.com and add janan to cart"*. The run reached
+`/search?q=janan` and **died** — `_decide` returned an empty string twice, the
+browse ended *"couldn't work out a safe next action on this page"*, and the
+window closed. The user's expectation is the feature that already existed
+(`browser/choice.py`, 2026-08-02): ask which janan, and list them. Root-caused
+from `backend.log:35755-35786` and trace `b74aad4670a1` before reading any code.
+
+- **⚠️ ROOT CAUSE: THE GATE READS `action["action"] == "click"`, AND THERE WAS NO
+  ACTION.** The tie machinery is downstream of a model decision; a real tie is
+  precisely what makes that decision unanswerable. The trace is unambiguous —
+  `steps: 1`, the only recorded step being the homepage's navigate to the search
+  URL, then `llm_calls: 2` spent on two empty replies and nothing else.
+- **⚠️ AND CATCHING IT AFTER THE FACT WAS THE WEAKER DESIGN ANYWAY.** A tie means
+  the user's own words cannot separate these items, so whatever the model returns
+  is a GUESS — and the old gate's whole job was to notice the guess and throw it
+  away. Not asking for it is the same "code never picks between real equals" rule
+  the module is built on, applied to the model as well as to us. In the incident
+  it cost two provider calls and ~34s to produce something that had to be
+  discarded. So the check moved BEFORE the decision, and a stall fallback catches
+  every reason the model can fail (empty reply, budget spent reasoning,
+  hallucinated index, provider hiccup) — none of which changes the fact that the
+  page shows several things the user cannot be assumed to have chosen between.
+- **MEASURED, and it overturned three design assumptions**
+  (`scripts/_measure_janan_choice.py`, against the live site):
+
+      homepage           0 candidates carry "janan"   -> silent, correct
+      /search?q=janan   20 tie at score 1             -> ask, correct
+      "janan sports"     4 tie at score 3             -> ask, correct
+      cards carry NO price in their element text
+
+  (1) The first design gated the new leg on "a real item has a PRICE" — dead, the
+  cards carry none. (2) The homepage raises nothing at all, so the tie test IS the
+  bound on this site; `step > 0` survives only as cheap insurance for sites where
+  it is not, because the run's first move is its chance to narrow the page itself
+  and asking before that could offer two nav links while twenty products sat one
+  search away. (3) The 2026-08-02 fixture assumed THREE matches; twenty is what a
+  one-word product name really returns.
+- **`MAX_CHOICE_OPTIONS` 4 → 8, and the question says what it is hiding.** At four
+  the user's own requirement — *"if there are janan sports 100ml and janan sports
+  200ml it should tell me BOTH"* — cannot be expressed for more than one family.
+  Eight cannot show twenty either, so `tied_matches` returns the WHOLE tie
+  untruncated and `choice_total` rides the payload: *"20 things on this page match
+  'janan' equally well … here are the first 8; pick one, or just tell me the name
+  you want."* A silently shortened list is indistinguishable from the complete
+  answer — the "record lied" failure this file keeps unpicking.
+- **THE SIZE QUESTION IS ANSWERED BY THIS, ON THIS SITE — measured, not assumed.**
+  The user's description is exactly right: sizes are separate PRODUCTS
+  (`JANAN SPORT - 30ML` / `- 200ML` / `- GIFT SET` are three listings), so the
+  listing question is where a size gets chosen. Their two other rules already fall
+  out of the existing tie rule and are pinned: *"janan sports"* ties 4 and asks;
+  *"janan gold 100ml"* is a unique leader and is never interrupted.
+- **⚠️ THE PRODUCT-PAGE VARIANT GATE IS MEASURED AND DELIBERATELY NOT BUILT.**
+  `scripts/_measure_commit_form.py` read every `/cart/add` form on a real product
+  page, and the findings are recorded here so the next round does not re-derive
+  them: the main product's form (form 0) carries **no multi-valued axis and no
+  visible quantity control**; `quantity` exists only as a HIDDEN field defaulting
+  to 1 on the rail forms, so asking about it would be asking about something
+  invisible; the only visible `<select>` on the page is the **review-sort**
+  dropdown, so a PAGE-anchored gate would ask the user to choose "Most recent";
+  a real axis (`XS/S/M/L/XL/XXL`) does exist, on a rail form (form 10), which
+  proves the shape but is not the main product; the variant controls are form-
+  **ASSOCIATED, not form-descendants** (`form.querySelectorAll` returns 0 for a
+  radio `form.elements` has just yielded — the first cut of the probe measured
+  exactly that); and `form.elements` yields each radio in a group, so a gate must
+  dedupe by control name. The gate therefore belongs on the ARMED FORM, and it
+  would touch `_FORM_CONTRACT_JS_BODY`, which feeds `_commit_fingerprint`.
+  **Not shipped because it could not be verified against a real page in this
+  session** — every recorded failure of this kind in this file is a feature built
+  against an imagined DOM ("a fake page is a claim about the live DOM — check
+  it", now five instances).
+- Tests: NEW `test_browse_item_choice.py` (15 — the incident frozen end to end
+  with the real twenty-product listing as the fixture; the pre-decision ask
+  asserted at `provider.calls == 1`, i.e. ZERO calls spent on the tie; step 0 left
+  to the model; the homepage raising nothing; a specific request never
+  interrupted; a read-only browse untouched; a stall with no tie still failing
+  honestly; the product page still acting rather than re-asking from its rail; the
+  measured phrasings pinned; the total surviving serialization and an
+  older payload without it). **9/9 falsifications valid**
+  (`scripts/_falsify_item_choice.py`, which IMPORTS the existing harness rather
+  than copying it).
+- **⚠️ ONE FALSIFICATION CAME BACK GREEN AND THE FIXTURE WAS THE PROBLEM.** The
+  `page_is_the_target` case passed with the suppression reverted — because the
+  fixture included the product page's OWN title link, which scores 5 against the
+  rail's 3, so there was a unique leader and NO TIE AT ALL and the suppression was
+  never consulted. Measured (`_score` printed directly), then the self-link was
+  removed so the rail ties 3-3 and only the page's own score stands between it and
+  a second question. **When a falsification passes, suspect the test's reach, then
+  the fixture** — third time in this project.
+- Also: two of my own tests asserted the wrong thing and were caught by running
+  them — one passed raw JS-record dicts where `choice` reads Element attributes
+  (fixed by going through the real `_elements_of`), and one asserted a
+  `"navigate"` action when `_act` opens a url by navigating, which the page fake
+  records as `"goto"`. A test that asserts the wrong thing manufactures defects.
+- Gates: **3783 passing, 17 skipped, 0 failed** (exit code captured DIRECTLY, not
+  through a pipe — the 2026-08-08 `| tail` lesson), browser suites **733 green**,
+  9/9 falsifications valid. ⚠️ **THE DELTA IS +16 AND MY NEW FILE COLLECTS 15** —
+  no baseline full run was taken at the start of this round, so 3767 is a number
+  read out of this file rather than one measured on this tree, and the extra +1 is
+  unattributed. Recorded rather than rounded away: the whole point of these counts
+  is that they are measurements, and "+15, zero regressions" would be a claim
+  nothing here supports. No frontend or electron file changed this round.
+- **⚠️ RUNTIME VERIFICATION AND `browse_bench` ARE OUTSTANDING**, and the live
+  acceptance run is user-driven: `npm run dev`, then *"go to junaidjamshed.com and
+  add janan to cart"* — it must ASK with the real product names and say how many
+  matched, and adding "janan gold 100ml" must NOT ask.
+
+### Which SIZE? — the axis gate on the armed commit form (2026-08-08)
+The deferred half of the round above, and the previous round was right to defer
+it: it had measured only a FRAGRANCE page, which has no multi-valued axis at all,
+and shipping a security-adjacent gate against an imagined DOM is the failure this
+codebase has recorded five times. A real GARMENT page was measured first, and it
+contradicted four things a hand-written fixture would have encoded.
+
+- **⚠️ WHAT WAS MISSING, precisely.** The 2026-08-02 round grounded a commit-mode
+  `select_option`, so a value the MODEL typed into a `<select>` faces the user's
+  own words. It cannot cover a storefront's size axis, because that is a **RADIO
+  group**: the model clicks a swatch, or never touches it at all, and reaches
+  `submit` with the axis unset. MEASURED on the live product page — **nothing
+  checked, the hidden `id` EMPTY, and no Size/Color/Style field in the contract**,
+  i.e. an add-to-cart carrying no variant, shown on an approval card as such.
+- **THE STORE ITSELF AGREES, which is the strongest validation this round has.**
+  The main product's submit button is not called "Add to bag" at all — it reads
+  **"CHOOSE OPTIONS" and is `disabled`**, because the site refuses to let anyone
+  add the item until a size is picked. (The buttons that DO say "Add to bag"
+  belong to the single-variant fragrances in the related-items rail.) So the loop
+  was heading for a control the page had switched off, and the gate is doing what
+  the storefront's own UI demands.
+- **⚠️ AVAILABILITY IS THE LOAD-BEARING FILTER, AND IT IS SIGNALLED TWO DIFFERENT
+  WAYS ON ONE PAGE.** The main product leaves every input ENABLED and marks only
+  the LABEL (`is-disabled`); the related-product cards mark the INPUT
+  (`disabled`). Reading either alone offers sizes that cannot be bought. MEASURED
+  across ten real products: `Size` carries 6 values with **1** in stock on the
+  incident's own product (4/6, 3/6, 5/5, 4/4 elsewhere), and `Color`/`Style` carry
+  exactly ONE value on every product — so the `>1` rule is what keeps the gate
+  from firing on every add. The Shopify JSON agrees on the ground truth, which
+  makes it a fact about the world rather than about our parsing.
+- **SO THE RULES ARE ABOUT WHO IS ENTITLED TO CHOOSE** (`choice.unresolved_axis`,
+  pure, no LLM): the user's own words win always (enforce, never trust — the
+  2026-08-02 `select_option` rule); an axis with nothing buyable is the SITE's
+  answer, not a question; **one buyable value is FORCED, so code takes it** (six
+  sizes and one in stock is not a question, and offering all six offers five dead
+  ends); an axis the page already settled is disclosed on the approval card and
+  not re-litigated; otherwise ASK, offering only what can actually be bought.
+- **NOTHING IS HARDCODED PER SITE OR PER CATEGORY** — the user's requirement in
+  their own words ("factors vary… jarvis shouldnt hardcode it should ask from the
+  available factors"). An axis is any named group of form controls offering more
+  than one value, so Size on a kurta, 30ml/100ml/200ml on a perfume and Waist on a
+  trouser are the same rule; the factors come from the FORM.
+- **AND QUANTITY NEEDS NO SPECIAL CASE, which is the honest answer rather than a
+  gap.** A quantity `<select>` IS an axis by that same rule and is covered for
+  free. On this site the main form has **no quantity control at all** and the rail
+  cards carry an INVISIBLE one defaulting to 1 — a default, not a question.
+- **ANCHORED TO THE ARMED FORM, NEVER THE PAGE**, and that is measured rather than
+  cautious: the only visible `<select>` on a real product page is the **review-sort
+  dropdown**, so a page-anchored gate would ask the user to choose "Most recent".
+  The gate sits where the contract is READ (`action == "submit"`), the one point
+  that sees the whole form however the axis was or was not set.
+- **⚠️ `axes` IS A SEPARATE KEY FROM `fields`, AND THAT IS THE SAFETY CLAIM.**
+  `fields` is what a submit WOULD SEND; `axes` is what the form lets you choose
+  between. `_commit_fingerprint` reads `(name, value)` over fields plus
+  `(name, path)` over uploads and nothing else, so the addition is
+  **fingerprint-invariant by construction** — a cosmetic read can never refuse, or
+  accept, an approved submit. Pinned by a test, with its mirror (the chosen value
+  DOES move the fingerprint) so it cannot pass vacuously.
+- **⚠️ THE TOKEN SCORER CANNOT SEE A CLOTHING SIZE**, found by a failing test.
+  `choice._tokens("M")` is **EMPTY** — the module's rule drops anything under
+  `_MIN_STEM_CHARS` because it was built to match product NAMES, where a stray
+  letter is noise. So a reply of "M" scored 0 against every option and could never
+  settle the question it was answering. An ANSWER is a different kind of text from
+  a GOAL and earns a different rule: a direct reply is matched EXACTLY (normalised,
+  so "100 ml" = "100ml"), while prose keeps the token scorer — scanning a sentence
+  for the bare letter "s" would match almost anything.
+- **⚠️ THE SCORING CORPUS WAS THE PLANNER'S PARAPHRASE, NOT THE USER'S WORDS.**
+  `_target_words` read `goal`, which is LLM-authored: "add janan sports 100ml to
+  cart" becomes "Find the Janan Sports perfume and add it to the cart", DROPPING
+  the size — so the new gate would have asked a question the user had already
+  answered, which is precisely what they asked not to happen. This is the
+  2026-08-07 lesson ("it asked the right question of the wrong string") in a
+  function written five days earlier and missed because the rounds were about
+  different features. Identical to `goal` when no `user_words` were stamped, so
+  every existing caller is unaffected.
+- **⚠️ TWO REAL DEFECTS IN MY OWN CODE, EACH FOUND BY A GATE RATHER THAN BY
+  READING.** (1) FALSIFICATION: the re-check after code applies a value ran
+  WITHOUT the user's answer — masked on a one-axis form (the axis is `chosen` by
+  then, so it is skipped anyway) and would have asked again about a SECOND axis
+  the same reply had already named. (2) RUNTIME: the theme resolves the hidden
+  variant `id` in its OWN change handler, so re-reading on the next line still saw
+  `id=""` and the approval card would have carried no variant — a `settle()`
+  before the re-read reads the real id. Neither is visible in a hermetic test
+  whose fake fills the id immediately, so the fake now models the measured
+  contract.
+- **⚠️ AND THREE "FAILURES" WERE THE PROBE, for the fourth time in this project.**
+  It looked for "Add to cart" on a site that says "Add to bag"; then it read a
+  RAIL CARD's form (reporting a pre-filled id and no axes — which reads exactly
+  like the gate failing) until it selected the form by the SKU in the page's own
+  URL; then it asserted a reply of "L" would settle a **kids'** kurta whose sizes
+  are `2 Y … 10 Y`. A probe that asserts the wrong thing manufactures defects; the
+  reply is now taken from the page's own options.
+- Tests: NEW `test_browse_variant_axis.py` (40 — the measured decisions, the
+  tolerance matrix, the fingerprint claim and its mirror, end-to-end through the
+  real loop for ask / forced-settle / user's-size / resume / refusal / read-only,
+  the second-axis bug frozen, and the corpus change with its regression half) and
+  NEW `test_browser_axes_js.py` (7, opt-in real-browser — the JS is verified
+  against real markup rather than assumed: the form-ASSOCIATED radios ARE found,
+  the label-only stock signal IS read, only L is buyable, the review-sort select
+  is NOT offered, and a label click really selects). **15/15 falsifications valid**
+  (`scripts/_falsify_variant_axis.py`, importing the existing harness so its
+  recorded lessons apply — it refused a non-unique `await session.settle()` anchor
+  on the first run, exactly as designed).
+- **RUNTIME-VERIFIED against the LIVE SITE** (`scripts/_verify_variant_runtime.py`,
+  real Chromium + real `BrowserSession` + the real JS + the real decision module,
+  **18/18**, nothing ever submitted): on the six-sizes-one-in-stock kurta the
+  contract's id starts EMPTY, code settles `L` because it is the only one in stock,
+  the real control accepts it, and the re-read carries
+  **`id='56798395400352'` — the Shopify variant id for size L**, with nothing left
+  to ask; on a five-sizes-all-available kurta it ASKS with the page's own labels
+  and a direct reply settles it in code.
+- **HONEST LIMITS.** A size named in PROSE in a form the page does not spell the
+  same way ("in medium" against an `M` swatch) is not matched and will be asked
+  about — the token scorer cannot bridge that, and asking with the real options is
+  the safe fallback. An axis the page has already pre-selected is not re-asked (the
+  approval card names it in words, which is the designed backstop) — deliberate, so
+  the gate stays quiet on well-behaved storefronts. And a variant chosen by pure JS
+  swatches that write a hidden input without exposing a form-associated control is
+  still invisible to this gate; the approval card's labels remain the mitigation.
+  It is also NOT storefront-specific in the other direction: an unanswered
+  multi-value radio group in ANY form being submitted — a job application's
+  "notice period", say — will be asked about. That is the intended reading of
+  "the factors come from the form", and it is the safe direction: the alternative
+  is submitting the user's application with a required field blank.
+- **NOT re-run, and verified rather than assumed:** `browse_bench`. All six bench
+  goals drive `BrowseTool`, which never passes `commit=True`, and EVERY use of the
+  changed `_target_words` corpus sits behind `commit` — so this round's gate and
+  its corpus change are both structurally unreachable there.
+- Gates: **3823 passing, 24 skipped, 0 failed** (baseline 3783/17/0), exit code
+  captured directly rather than through a pipe. **The delta reconciles exactly
+  this time — +40 hermetic tests and +7 opt-in real-browser tests skipped** —
+  unlike the round above, whose +16-against-15 was recorded as unattributed. No
+  frontend or electron file changed.
+
+### It browsed a category instead of searching — five switches, all off (2026-08-09)
+Live: *"go to junaidjamshed.com and add janan perfume in cart"*. Jarvis opened the
+homepage, clicked the **Fragrances** nav item, and the tie question then offered
+six items off that category listing — none of them the one meant. The user's
+report is also the specification: *"if it had searched janan then all the perfumes
+containing janan would have listed and not the others that dont have janan in
+them, and the one i meant would have been on the first page"*. Root-caused from
+the run's own trace (`2026-08-09_10-04-02_de4206b704de.jsonl`) and `backend.log`
+BEFORE reading any code, then every claim was measured.
+
+- **⚠️ FIVE INDEPENDENT SWITCHES WERE OFF, AND FIXING ANY ONE ALONE CHANGES
+  NOTHING.** That is the whole shape of this round, and it is why the first
+  hypothesis had to be abandoned twice.
+
+      S1  the deterministic search is gated `step == 0 and not commit`, and the
+          run was mode=commit -> it could never have searched, whatever else
+      S2  the live homepage has ZERO text inputs; search sits behind a LINK
+          named 'drawer-search' -> there is no box to type into
+      S3  _fast_path_action's len==1 branch took candidates[0] UNCHECKED
+          -> it would have typed the product name into that link
+      S4  _inject_user_words was scoped to `browse`, never `browse_commit`
+          -> intent fell back to the planner's paraphrase
+      S5  no shopping verb was in the extraction chain
+          -> even the user's own words gave 'junaidjamshed.com and add janan perfume'
+
+- **THE TRACE NAMED S4 IN ONE LINE.** `browse: 6 things on this page match
+  **'janan perfume by submitting'** equally well` — "by submitting" comes from the
+  planner's sentence (*"…add it to the cart **by submitting** the add-to-cart
+  form"*), scored as if the user had said it. MEASURED:
+  `_extract_search_term(planner)` → **None**; `(user)` → junk before S5, `'janan
+  perfume'` after.
+- **⚠️ S4 IS MINE FROM THE DAY BEFORE, AND IT IS THE "FIXED THE READER, NOT THE
+  WRITER" CLASS.** 2026-08-08 added two consumers of the user's own words (the
+  item tie gate, the variant-axis gate) and **both are commit-mode only**. That
+  round then fixed the READER (`intent = intent_text or goal`) and never the
+  WRITER, so in the only mode its consumers run in `intent_text` was always `""`
+  and it fell straight back to the paraphrase. A no-op that reported success —
+  and the CLAUDE.md note for that round records the corpus fix as done. Asserting
+  two functions each behave correctly cannot catch that; `test_discover_hands_the_
+  users_own_words_to_the_loop` drives the real `discover()` and reads what it
+  HANDED ON.
+- **THE SCOPING ARGUMENT WAS DISPROVEN BY ITS OWN THREE SIBLINGS.**
+  `_inject_user_words` said `if step.tool != "browse"`, justified by
+  "browse_commit is DESTRUCTIVE and signature() is built from parameters".
+  `_inject_approved_origins` / `_inject_site_corrections` / `_inject_target_choices`
+  all iterate `_BROWSE_TOOLS` (which INCLUDES browse_commit) and guard on
+  `commit_contract(step.parameters) is not None` — **"has the user approved this
+  step's contract yet?", never "is this tool destructive?"**. That predicate is
+  strictly safer here too: a step with a contract is skipped, so a plan parked
+  before this change keeps its approval, and a step still in DISCOVERY has had
+  nothing approved. Same shape as `registry.mutates` replacing a hand-kept
+  tool-name list.
+- **S1 WAS A GUARD KEYED ON THE WRONG THING** — the fourth instance
+  (`registry.mutates` 2026-07-30, `_DIR_KEY` 2026-08-01, `_settle`'s status tuple
+  and `set_voice_config` 2026-08-03). A commit goal is a JOURNEY that merely ENDS
+  in a submit; disabling every deterministic search for the whole journey because
+  of its final step is over-broad. **Nothing below it needed to change, which is
+  the tell**: `_is_action_gesture` has always returned False for a genuine search
+  target ("a submit gesture on this element is a SEARCH — which is reading"), so
+  `_act`'s backstop and the STOP-and-ask hand-off already treated this exact
+  action as reading. No test pinned the old behaviour (verified before changing
+  it). The one real regression risk — searching away from a start URL that IS the
+  product page — is guarded by the new `choice.page_covers_target`, which uses the
+  SAME scorer as the tie gate so the two cannot disagree. MEASURED: the homepage
+  subject scores 0 against {janan, perfume}; `/products/janan-sport-30ml` covers
+  its own name; a PARTIAL match still searches, which is right because that is the
+  ambiguous case.
+- **⚠️ THE LIVE RUN FOUND A DEFECT THE HERMETIC TESTS COULD NOT, and it inverted
+  my reading of the failure.** With S1-S5 fixed, the probe still failed at "the
+  fast path now types the product name". The obvious diagnosis — the revealed box
+  has `role='input'`, and `_SEARCH_ROLES` is `{searchbox, combobox}` — was WRONG.
+  Measuring the real element record settled it:
+
+      [20] role='input'  name='Search'                      form_search=True  is_search_target=True
+      [22] role='button' name='Upload an image for search'  form_search=True  is_search_target=True
+
+  Both are genuine search targets (they share the search form), so the rule found
+  TWO, called it ambiguous, and deferred **with a search box in front of it**. The
+  missing distinction is not role membership but **typeable**: you cannot fill
+  text into a button. That also subsumes S3 — the homepage's lone LINK — so the
+  two-branch selection collapsed into one rule. `_is_search_target` (the SAFETY
+  predicate, whose docstring records the LinkedIn message-send incident) is
+  UNCHANGED; `_is_typeable_search` only ever narrows what may be typed into.
+  **Had I "fixed" role membership by reasoning, I would have widened a
+  safety predicate to solve a problem it did not have.**
+- **A TEST WAS PINNING THE DEFECT, and its own docstring was the argument against
+  it.** `test_user_words_are_stamped_on_browse_and_never_on_browse_commit` asserted
+  the wrong rule while CONSTRUCTING a commit step with no contract — i.e. one where
+  nothing had been discovered, shown or approved. There was no approval to
+  invalidate. Rewritten as two tests: the words reach a step in discovery, and an
+  approval-bound step is never re-stamped (where the signature assertion belongs).
+- **One fixture was incidentally realistic and had to move.**
+  `test_the_tie_is_raised_without_spending_a_decision_on_it` built its home page
+  from one hand-invented element named "Search" — now a search TOGGLE the loop
+  opens in code, so step 0 stopped costing a provider call and its `== 1` measured
+  the new leg instead of the tie gate. It uses the file's own measured `HOMEPAGE`
+  nav (which contains no such entry), so the assertion again distinguishes "one
+  call for step 0" from "two, one wasted on the tie".
+- **Extraction, MEASURED 14/14** (7 shopping goals + 7 controls). `order` is
+  DELIBERATELY excluded from the verb chain — it is the one shopping verb with a
+  real noun collision at the position the chain matches (the START of the goal),
+  so "order of the phoenix" would become "of the phoenix"; its benefit is marginal
+  since "order the blue trousers" already extracts usably. `get` is excluded for
+  being too polysemous. The trailing cart phrase is stripped BEFORE the site strip:
+  `_TRAIL_SITE_RE` eats a bare "in cart" by accident (reading "cart" as a site) but
+  not "to cart" or "to my cart", so relying on that accident fixes one phrasing of
+  three.
+- Tests: NEW `test_browse_store_search.py` (31 — the incident end to end on the
+  measured page shape, with the model SCRIPTED TO REPEAT THE INCIDENT so a broken
+  leg cannot pass quietly; the live-found image-button case; the toggle matrix and
+  its once-per-page bound; the typeable rule and its ambiguity twin; the
+  extraction matrices), plus `test_browser_commit.py` +2 (the wiring) and
+  `test_browse_latest_season.py` (the defect-pinning test rewritten).
+  **15/15 falsifications valid** (`scripts/_falsify_store_search.py`), every
+  behavioural change proven to FAIL by reverting the specific line IN PLACE with a
+  passing regression twin.
+- **RUNTIME-VERIFIED against the LIVE SITE** (`scripts/_verify_store_search_runtime.py`
+  — real Chromium, real BrowserSession, real observe, real `_act`; **13/13**,
+  nothing submitted): the homepage has 0 typeable boxes, the fast path declines
+  the link, the toggle is found and clicked, a real box appears, the fast path
+  types `janan perfume`, the run lands on `/search?q=janan+perfume` listing
+  JANAN GOLD / SPORT / GIFT SET / OUD / POUR FEMME, and **every item the user
+  could be asked about carries their own word** — the incident's exact complaint,
+  checked directly.
+- **⚠️ THREE PROBE "FAILURES" WERE THE PROBE**, the fourth round running:
+  `candidates_of()` called with the wrong signature; `tied_matches` asserted
+  non-empty when an EMPTY tie is the better outcome (one product leading
+  outright); and the first cut asserted a role-membership diagnosis that
+  measurement then refuted. A probe that asserts the wrong thing manufactures
+  defects.
+- Gates: **3857 passing, 24 skipped, 0 failed** (baseline 3823/24/0 — +34, which
+  reconciles exactly: 31 new + 2 wiring + 1 net from the rewritten season test;
+  zero regressions), exit code captured directly rather than through a pipe.
+  `browse_bench` **4/5 scored + 1 blocked by a CAPTCHA hand-off** — identical to
+  the recorded baseline, with `wikipedia-read` taking the fast path on exactly
+  the same element as before. The one FAIL is `quotes-pagination`, the documented
+  pre-existing variable failure, and this round is structurally incapable of
+  causing it: MEASURED, that goal yields `term=None` AND `query=None`, so the
+  fast path, the toggle leg and `page_covers_target` are all unreachable for it.
+  No frontend or electron file changed.
+- **⚠️ A CHAINING RISK CAUGHT BY REVIEWING MY OWN WORK, after the tests were
+  green.** The toggle was first bounded once per PAGE FINGERPRINT — which looked
+  equivalent to once per run and is not, because clicking the toggle CHANGES the
+  page (junaidjamshed's navigates to `/search`), so the next step has a new
+  fingerprint and could open another one; a chain of "search"-named controls
+  would be clicked through one by one. Bounded once per RUN instead.
+- **HONEST LIMITS.** (1) The toggle is found by its accessible name containing
+  "search"; an icon with no name and no aria-label is invisible, and the run
+  falls back to today's behaviour (the model decides). (2) `page_covers_target`
+  requires EVERY token, so a start URL that is the product page under a
+  differently-worded title still searches — one extra navigation, never a wrong
+  action. (3) The word "perfume" happens to appear in one product's name, so on
+  THIS phrasing one item now leads outright and the run acts instead of asking;
+  the bare "add janan to cart" still ties 20 ways and asks. That is the
+  2026-08-02 unique-leader rule working as designed, and changing it is its own
+  measured decision.
+
+### Sold out, a rail re-asked, and a dead end that killed the run (2026-08-09)
+Two live runs on junaidjamshed.com, four user-visible defects, all root-caused
+from `~/.jarvis/logs/backend.log` (14:22–14:41) and the traces
+`a77b8d82122b` / `299e14b19e4c` / `9faca45138cd` / `87fa08e0f4de` **before any
+code was read**, then measured against the live pages
+(`scripts/_measure_ecommerce_round.py`).
+
+- **⚠️ PLANNING THIS ROUND OFF INVENTED PAGES WENT WRONG TWICE, AND BOTH TIMES
+  THE INVENTED VERSION SAID THE CODE WAS ALREADY CORRECT.** Recorded first
+  because it shaped everything below, and because it is the recorded rule ("a
+  fake page is a claim about the live DOM — check it") caught in the act during
+  PLANNING rather than after shipping. (1) Scoring an imagined "you may also
+  like" rail against the kameez product page gave page **9** vs rails 4-7, i.e.
+  suppression *would* have fired — so the live re-ask had no explanation.
+  MEASURED, the rail carries two OTHER garments both named `BLACK COTTON CASUAL
+  KAMEEZ SHALWAR`, the page ties with itself 9-9, and the user was offered **two
+  byte-identical buttons**. (2) Scoring the string `"Men Kameez Shalwar"` on the
+  men page gave **5**, a unique leader nothing was clicking — the premise of a
+  whole planned feature. MEASURED, the real label is `KAMEEZ SHALWAR`, it scores
+  **3**, and it LOSES to two products at 4.
+- **⚠️ THE SECTION DEFECT WAS NOT A NAVIGATION PROBLEM — IT WAS THE SIXTH
+  SWITCH.** `_extract_search_term` returned **None** for the incident's exact
+  words, and both deterministic search legs are gated on a term existing
+  (`_fast_path_action` and `_open_search_ui_action`), so search went silently
+  unreachable and a storefront homepage was handed to the model to guess on.
+  That is why it opened the general Men page. Two neighbouring phrasings were
+  broken differently — `add X to cart on <site>` kept "to cart" in the term
+  (the trailing strips run in a fixed order and each is anchored to the end, so
+  whichever ran first never saw its own clause), and `go to <site> in the men
+  section add a black kurta to cart` kept the whole sentence including the host.
+  Fixes: `_LEAD_NAV_CLAUSE_RE` consumes a leading navigation clause up to
+  wherever the real request verb starts — bounded by a LOOKAHEAD, so a pure
+  navigation goal ("open youtube") matches nothing and `_destination_reached`
+  is untouched — and the trailing strips repeat until stable. MEASURED 3/3
+  incidents fixed, 11/11 controls unmoved.
+- **STOCK: the signal was one layer down and never read at the item layer.**
+  `AxisOption.available` + `unresolved_axis` have done this correctly for form
+  variants since 2026-08-08; `Candidate` had no such field, and
+  `_LABEL_NOISE_RE` actively STRIPPED "sold out" from the label, deleting the
+  one signal that was present. MEASURED on the incident's own page: **6 of the
+  20 offered were sold out.** `observe.Element.sold_out` now carries it (the
+  `in_dialog` shape — CODE data, never rendered, so the element budget, the
+  action signature and the page fingerprint are all unaffected, pinned by a test
+  AND its mirror), and `choice.item_choice` applies `unresolved_axis`'s own
+  rules one layer up: an unbuyable item is not an option; **one survivor is
+  forced, so code takes it** (rule 3 — six sizes with one in stock is not a
+  question); nothing buyable still ASKS, with `SOLD_OUT_MARK` on every option
+  and a question that says none can be added.
+- **⚠️ AVAILABILITY NEVER FILTERS `candidates_of`, and that is a correctness
+  property rather than an optimisation.** `choice.locate` is the ENFORCEMENT of
+  what the user answered; dropping sold-out items there would silently ignore
+  someone who deliberately picked one. It is a FIELD, read only in the tie path.
+- **⚠️ THE STOCK WALK'S BOUNDARY TOOK THREE MEASURED ATTEMPTS, AND THE THIRD WAS
+  VISIBLE ONLY AGAINST THE LIVE PAGE.** The signal sits on the CARD ANCESTOR's
+  class (`hdt-pr-sold_out`), never on the title link the user is offered, so the
+  walk must reach the card and stop there. "Nearest ancestor with a buy control"
+  reached the whole GRID (one product's badge condemned all twenty); "largest
+  ancestor with one product LINK" stopped one level too EARLY (a card links the
+  same product three times); and "a card is small, bound it by
+  `textContent.length`" looked right, passed every hermetic test AND the
+  real-browser test on hand-written markup, and was **measured dead on the live
+  page** — `textContent` counts hidden markup, so a card whose visible text is
+  97 chars reports **8,921** and the walk broke one level below the class it was
+  looking for. The live probe reported `dropped=0` where the page had six sold
+  out. MEASURED per ancestor: card `innerText` 69-101 / `textContent`
+  8,420-9,035; grid `innerText` 1,721 / `textContent` 178,167. `innerText` is
+  the only one that separates them.
+- **THE RAIL RE-ASK: a proxy replaced by the direct fact.** `page_is_the_target`
+  infers "have we selected yet?" from scores and MEASURED cannot fire here (9 vs
+  9, and it needs STRICTLY greater — rightly, since `>=` would silence the
+  search page). `choice.answered_here` asks the question directly: the user
+  ALREADY picked, and this page covers their pick. That contingency is exactly
+  the asymmetry the user reported — it did not re-ask on `janan leather` (page
+  2, rail 1) and did on the kameez. Independently, `_dedupe_key` now keys on the
+  RENDERED OPTION, because an option the user cannot tell from another is not a
+  second option and `pick_by_answer` was resolving the duplicate by taking the
+  first — code silently picking between real equals.
+- **THREE COPIES OF THE TIE BLOCK BECAME ONE** (`_item_tie`), and they had
+  already drifted: two sites passed the WHOLE tie to `page_is_the_target` while
+  the third passed the truncated eight, so on a twenty-way tie they could reach
+  opposite verdicts about the same page.
+- **⚠️ A BUG THIS ROUND INTRODUCED AND SELF-REVIEW CAUGHT, and it would have
+  been silent.** `page_is_the_target` needs two candidates to compare against
+  and answers False for any shorter list — so once the new stock rule narrowed a
+  rail tie to ONE survivor, feeding it the post-stock set turned the "this page
+  IS the thing" belt off unconditionally, and the run would have started
+  CLICKING a related product on the very page the user asked for. MEASURED
+  shape: page 5, rail 3-3-3 (suppresses correctly) with two of the three sold
+  out. Whether a page is what the user asked for is a fact about the page and
+  their words; the store's stock has nothing to do with it, so `ItemChoice`
+  carries `all_tied` (the tie BEFORE stock) and the belt reads that.
+  ⚠️ Its first test PASSED against the reverted code — the settled-click leg is
+  gated `step > 0` and the run was stopping at step 0, so the assertion held in
+  both worlds. The falsification is what said so; the test now drives a landing
+  page first so step 1 is genuinely reached.
+- **A DEAD END IS NOW A QUESTION** (`Handoff.STUCK`). `loop.py`'s "couldn't work
+  out a safe next action on this page" closed the window and ended the task with
+  nothing to show. This is ask-not-fail — `planner._fallback_question` and
+  `task_router.rescue_unrouted_turn`'s pattern — and the comparator is a FACT,
+  not a judgement: the loop produced no action. It is explicitly **not** an "is
+  the model confused?" classifier, the shape measured at zero three times here.
+  Free text (`options=[]`, the FILL_FIELD shape); the answer is stamped by
+  `_inject_stuck_advice` and reaches BOTH the decision prompt and the scoring
+  corpus, which is what makes the ask terminate. **STUCK is LAST in
+  `handoff_from_outcome`** — it means "nothing else fired", and anywhere earlier
+  it would shadow a discovered contract, i.e. a run that SUCCEEDED. It is in
+  `_DISCOVERY_HOLD_REASONS`, because the window closing is literally the
+  reported defect. `_inject_stuck_advice` SKIPS approval-bound steps:
+  `stuck_advice` lives in `parameters`, so it moves `step.signature()` and would
+  invalidate an approval the user already gave. The `error` string is kept
+  BYTE-IDENTICAL — it is still the honest fallback when the budget is spent, and
+  a test pins it.
+- **⚠️ A PLANNED, USER-APPROVED FEATURE WAS DROPPED ON MEASUREMENT.** "When one
+  link matches your words clearly better than anything else, click it in code"
+  was approved and then killed by Phase 0: on the real men page the tie is two
+  PRODUCTS at 4 and the section link scores 3, so no unique leader existed — the
+  leg would not have fired on the incident, and had it fired it would have
+  clicked a product rather than the section. It also inverts `choice.py`'s
+  documented failure direction ("a spurious leader fails toward NOT asking").
+  The extraction fix subsumes the reported symptom: with search restored the run
+  searches `black plain sharwar kameez` and reaches the product directly.
+- **⚠️ FOUR PROBE FAILURES WERE THE PROBE, in one session** — the fourth, fifth,
+  sixth and seventh instances of this in the project. A `_measure` card selector
+  that matched `hdt-top-bar__item` (the nav bar) because it contained "item"; a
+  truncated URL copied out of a log line that 404'd and whose 404 title then
+  scored 9 against the goal, which looks entirely plausible; a truth query that
+  took a card's FIRST product anchor (the image wrapper, innerText "") and
+  reported "the page says 0 sold out" while the code had correctly found two;
+  and the same query's next cut taking the first anchor WITH text, which on a
+  sold-out card is the "View product" CTA.
+- Tests: NEW `test_browse_stock_and_stuck.py` (47 — every fixture measured, the
+  three incidents frozen, the extraction matrix and its controls), +3
+  real-browser tests in `test_browser_extract_js.py` (the card walk against a
+  real Chromium on the measured markup). **16/16 falsifications valid**
+  (`scripts/_falsify_ecommerce_round.py`), plus the JS walk hand-falsified
+  against a real browser — it CANNOT be falsified hermetically, because
+  `ScriptedPage.evaluate` never runs a line of it, and the harness correctly
+  refused to certify that case rather than reporting a verdict it could not
+  check. Two cases were rejected on the first run for the recorded reasons: one
+  whose "regression" also failed (proves nothing), and one where the belt was
+  not the only suppressor — the measured rail's identical labels ALSO merge, so
+  the fixture gained a distinct-label variant where the belt is the only thing
+  left ("a falsification must remove the GUARANTEE, not one of several copies").
+- **RUNTIME-VERIFIED against the live site** (`scripts/_verify_ecommerce_runtime.py`,
+  real Chromium + real BrowserSession + real observe + real choice, **15/15**,
+  nothing ever submitted and nothing clicked but a search toggle): every product
+  the page's own markup marks sold out is found — **no more and no less** —
+  and none is offered; a deliberately-picked sold-out item is still honoured;
+  the kameez page reads as the one the user chose while the old proxy would not
+  have suppressed it; and the incident goal now yields `black plain sharwar
+  kameez`, opens the hidden search drawer and types it.
+- Gates: **3905 passing, 27 skipped, 0 failed** (baseline 3857/24/0), and the
+  delta reconciles EXACTLY — +48 hermetic tests and +3 opt-in real-browser tests
+  skipped. Exit code captured directly, never through a pipe. `browse_bench`
+  **5/6**, the one failure being `quotes-pagination` — the documented
+  pre-existing variable one, and A/B-PROVEN here rather than assumed: with the
+  stock walk disabled it fails identically (10 records, needed 12) on the same
+  machine minutes apart. Typecheck clean; no frontend change was needed (an
+  options-free question already renders an inline text form).
+  ⚠️ Two suite runs were killed mid-flight during this round and the harness
+  reported one of them as "exit code 0" — that is the SHELL's code; the file's
+  own `PYTEST_EXIT=` said 1 at 25%. The recorded rule ("check the exit code, not
+  the last line of output") extends to the notification: check the code IN THE
+  FILE.
+- **HONEST LIMITS.** Quantity is still not askable on this storefront — the
+  measured product form carries no quantity control at all (the rail cards carry
+  an invisible one defaulting to 1), so the size half of the user's request is
+  covered by the existing variant gate once the rail question stops pre-empting
+  it, and the quantity half is not. The stock signal is per-theme and fail-open:
+  a storefront whose markup this does not understand keeps offering everything,
+  never hides everything. And `_LEAD_NAV_CLAUSE_RE` will mis-cut a goal that
+  names a request verb inside a title after a navigation verb ("open the buy
+  nothing project page" → "nothing project page") — a slightly-off search term,
+  never a wrong action.
+
+### The buy box was not in the element list (2026-08-10)
+Live: *"go to junaidjamshed.com and add black kameez kurta in cart"*. Jarvis
+searched, **picked a product by itself** out of 1000 results, opened it, **never
+asked for a size, never added anything**, stalled and asked what to do — and when
+the user answered *"select size large and add to cart"* it **restarted the
+journey**, searched again and opened a **different** product. Root-caused from
+the two traces (`2026-08-10_00-29-56_a4a729b8ff31`, `…_00-37-50_482c12f736e3`)
+and `backend.log:8264-8311` **before reading any code**. Every design decision
+below was overturned at least once by measurement; three of them twice.
+
+- **⚠️ THE ROOT CAUSE IS AN OBSERVATION GAP, NOT A DECISION GAP.** The model was
+  not confused — **the action did not exist in its world.** MEASURED on the
+  incident's own product page (`scripts/_measure_buybox_chain.py`): the page's own
+  buy button is **`disabled=True`** until a size is chosen, `observe.eligible()`
+  drops `el.disabled`, and the size swatches are visually-hidden radios — so
+  **neither the buy button nor the size picker was in the element list at all.**
+  Asked to add to the cart from 102 things that cannot, it returned `more`, then
+  `scroll up`, then nothing. No prompt can fix that.
+- **⚠️ AND IT IS NOT A TOKEN BUDGET — the obvious fix is FALSIFIED, do not retry
+  it.** The decision call returned empty three times, which reads exactly like the
+  recorded reasoning-model landmine. MEASURED
+  (`scripts/_measure_decision_budget.py`) on the two real pages:
+  `product page (12,689-char prompt) → EMPTY at 2048 / 4096 / 8192 / 12288`
+  against `search page (12,653-char prompt) → PARSED at every one of them`. A
+  near-identical prompt answered at every budget on one page and none on the
+  other, so the empty reply is the PAGE. Raising `_DECISION_MAX_TOKENS` would have
+  been the third "timing fix" in this project to measure at zero; the finding is
+  recorded at the constant.
+- **THE BUY BOX IS FOUND IN THE PAGE, NEVER THROUGH THE ELEMENT LIST**
+  (`session.find_buy_box`, rule **R1**: a buy form that is not inside ANOTHER
+  product's card, the card walk bounded exactly as `soldOutOf` is). "Another
+  product" is derived from THIS page's own URL — a link whose first path segment
+  matches ours and whose path does not — so there is no vocabulary list of what a
+  product URL looks like. MEASURED against the live page, R1 is the only rule that
+  selects it uniquely: `R1 → [form 0]` vs `R2 (an id appears in the URL) → [0,4,11,14]`
+  and `R3 (a variant picker binds) → 14 forms`. A code-authored submit then names
+  the `BUY_BOX_INDEX` sentinel and the submit branch reads the contract it already
+  holds. **Zero new authority**: `submit` has only ever meant "hand this form to
+  the user", and the one-shot permit, the signature and the approval gate are
+  untouched.
+- **⚠️ THREE MEASUREMENTS KILLED THE OBVIOUS VERSIONS OF THAT LEG, and the first
+  would have been HARMFUL.** The page carries **fifteen** cart-labelled elements:
+  thirteen say "Quick add" and are **not in a form at all**, and the two that say
+  **"Add to bag" belong to RELATED PRODUCTS** (`pid PM300147` / `PL300088`). So
+  "the only add-to-cart control" could never fire, and **"the control that SAYS
+  add to cart" would have added somebody else's item to the cart.** The page's own
+  button reads **"Select Size"** — and on another product **"Out of stock"** — so
+  the label is useless as a finder. An out-of-stock buy box with no axis to change
+  it is now REPORTED in the site's own words rather than submitted.
+- **A SIZE SAID IN WORDS NOW LANDS.** MEASURED: the axis is a radio group offering
+  `XS/S/M/L/XL/XXL` with XS/XL/XXL out of stock, and the user said "large" —
+  which matched nothing, because `_compact` needs an exact string and
+  `_tokens("L")` is EMPTY. `_SIZE_WORDS` canonicalises both sides, so "large"
+  matches "L" and "L" matches "Large". **The prose path is gated on the user
+  naming the axis** (`_mentions_axis`): "select SIZE large" is an answer, while
+  "the small grey shirt" describes the product — a distinction an existing test
+  asserted and which I honoured rather than overwrote.
+- **⚠️ THE VARIANT HAS TO ACTUALLY REACH THE FORM, and this defect is only
+  findable live.** `choose_form_option` returns "ok" and the radio is checked
+  instantly — but MEASURED, the theme resolves the hidden variant `id`
+  **asynchronously, ~1.0s later**, and `settle()` is a DOM-quiet detector that
+  returns in ~250ms. So the approval card would have named a size in words over a
+  contract carrying **no variant at all**. Two more wrong answers before the right
+  one, each caught by running it: *"wait for the fields to CHANGE"* returns in
+  **20ms** (the swatch updates `Size` and the barcode synchronously), *"wait for
+  them to be STABLE"* returns in **200ms**. `await_form_change` waits for the
+  BLANK FIELD TO FILL — the precise question the approval card rests on.
+- **TWO INDEPENDENT SUPPRESSORS HID THE ITEM QUESTION, so fixing either alone
+  changed nothing.** (1) `target_tokens` appends adjacent-joined pairs so
+  "100 ml" can match "100ml", and counting them as extra IDEAS made word order
+  decide: `Black Kameez Shalwar → 3` (the pair `blackkameez` is adjacent) against
+  `Black Cotton Casual Kameez Shalwar → 2`, so a unique leader existed where the
+  user saw equals. `_score` counts CONCEPTS now — a pair covers the two ideas it
+  is made of, once. (2) Shopify prints the query INTO the title
+  (`Search: 1000 results found for "black kameez kurta"`), so `page_subject`
+  scored **5 against a best candidate of 2** and the belt meaning "this page IS
+  the thing" fired **on a search results page**. `page_subject` already refused
+  the `?q=` string for exactly this circularity — **the title is the same request
+  arriving by another channel**, and the guard's own recorded measurement
+  ("search page 1 vs candidates 1 → asks") held **only because that query was ONE
+  WORD**. Both measured; the four black garments now tie and the question is asked.
+- **A STEERED RESUME NO LONGER RESTARTS THE JOURNEY.** `may_code_search` fired at
+  step 0 of the resumed run — standing on the very page the user had answered
+  about — clicked the search toggle, re-typed the original query and opened a
+  different product. `page_covers_target` cannot help and that is the point: the
+  page legitimately lacks some of the user's original words, which is WHY they
+  were asked. The direct fact does (the `answered_here` shape): this run resumed
+  carrying their answer.
+- **"SUBMITTED" IS A FACT ABOUT THE REQUEST, NOT THE OUTCOME.** A storefront can
+  accept an add and drop it, and on an AJAX add the page never moves so the
+  response diff cannot tell either. `_verify_cart` compares the page's **own cart
+  count** before and after — free, no navigation — and only when there is no
+  number to compare does it follow the page's **own cart link**, read it, and come
+  back. It reports a verdict only where it has one: confirmed with the numbers,
+  an honest "unchanged", or nothing.
+- `_MAX_TARGET_CHOICES` 2 → 3: an item question plus a size question already
+  spent the whole budget, leaving nothing for a colour, and those are separate
+  FACTS the user holds rather than successive guesses at one.
+- **⚠️ FIVE PROBES AND ONE FALSIFICATION WERE THE THING THAT WAS WRONG**, which is
+  now the sixth recorded instance: a card selector that matched the nav bar; a
+  buy-box finder that found a rail form; an assertion that the word "cart" was
+  absent from a URL containing `/cart/add`; a verification probe still driving
+  `reread_commit_form()` after the round had replaced that path; and a
+  falsification whose "regression" asserted the new scoring magnitudes and so
+  failed too (**a regression that also fails proves nothing**).
+- Tests: NEW `test_browse_add_to_cart.py` (29) + 9 in `test_browse_item_choice.py`,
+  every fixture taken from the live page. **12/12 falsifications valid**
+  (`scripts/_falsify_ecommerce_flow.py`, importing the existing harness).
+  **RUNTIME-VERIFIED against the real site, 20/20**
+  (`scripts/_verify_ecommerce_flow_runtime.py`): the listing asks with 8 equal
+  black garments and none sold out; the buy box is found with the page's own SKU
+  `JJKSA30729R52AP`; the size axis offers only `S/M/L`; "select size large"
+  settles L; the real control takes it and the form's variant id becomes
+  `58054819250336` — **and nothing was ever submitted** (the session's commit
+  counter is zero and no approved request was observed leaving).
+- **HONEST LIMITS.** R1 needs the page's product links to share a path prefix with
+  its own URL; where they do not, `find_buy_box` returns several candidates and
+  refuses, which is today's behaviour. Quantity is still not askable on this
+  storefront (the measured form carries no quantity control). And the round is
+  correctness-only — the **latency is untouched and still bad**: `ready_wait` was
+  231s of a 350s run, though the same pages measured `ready_wait=4.2s` on a clean
+  machine minutes later, so that investigation must start with `perf_probe.py`
+  and `browse_observe_profile.py`, not with moving a constant.
+
+### "open <site>" fetched the page instead of opening it (2026-08-11)
+Live: five tasks in one session worked; `open junaidjamshed.com` came back as
+*"Done — 1 step(s) completed"* followed by the site's entire homepage — country
+picker, sale countdown, SIGN IN / TRACKING INFO / GIFTING, the nav menu twice.
+**The wall of text is the symptom; the harm is that NOTHING WAS EVER OPENED.**
+Root-caused from `backend.log:17559-17568` before any code was read.
+
+- **⚠️ THERE IS NO BROWSE TRACE FOR THAT RUN, AND THAT IS THE DIAGNOSIS.**
+  `~/.jarvis/logs/browse/` jumps 13:37 → 13:41 across a 13:34 task, because
+  `browse` never ran: `Tool executed: read_webpage(url='https://junaidjamshed.com')`.
+  So `_fmt_browse`'s `destination_only` suppression (2026-08-01) was never in the
+  path — the step was `read_webpage`, whose formatter returns the page's content,
+  correctly, because that is what that tool is *for*. A missing artifact is
+  evidence; look for the trace before theorising about the renderer.
+- **ROUTING WAS RIGHT, AND MAXIMALLY CERTAIN.** `_is_bare_navigation` decided
+  BROWSE **in code, zero LLM calls** — the shortcut added 2026-08-01 precisely
+  because "the classifier does not agree with itself on this message shape", and
+  whose own comment uses this exact message as its example. The verdict was then
+  thrown away by everything downstream.
+- **⚠️ THE PROMPT STEERED IT THERE.** Plan RULE 20 said verbatim *"read_webpage
+  is the DEFAULT way to open a URL"*. The user said "open". The model complied.
+  Same defect class as 2026-08-06, where rule 25's *"use run_command for anything
+  else"* steered an open-folder into a DESTRUCTIVE shell card — **a plan rule
+  claiming a user-facing verb it cannot deliver.** Latent since `917eb7d`
+  (Phase 14), which is why the same goal succeeded on other days.
+- **THE ONE GUARD THAT EXISTS WAS SWITCHED OFF.** `_browse_downgrade_violation`
+  refuses read-only web tools in a browse task — but is gated on
+  `plan.is_browse_task`, seeded by `_looks_like_browse_goal`, which **requires a
+  submit/sign-in/checkout VERB**. A bare "open <site>" has none, so it returned
+  `None` on its first line; the latch (which fires once an accepted draft carries
+  a browse step) never got a chance either.
+- **THE FIX IS A COMPARATOR THAT WAS ALREADY ON THE PLAN.** NEW
+  `planner._browse_substitution`, in the `_generate_steps` reject chain beside
+  its sibling. The fact it checks against is computed BEFORE and INDEPENDENTLY of
+  the draft: the router's own verdict, carried as `agent_key == "browser"`. That
+  is the shape of every real guard here (`_recipient_violation` against the
+  user's words, `_event_id_violation` against completed reads) and the reason a
+  rule alone was never going to hold — *"a rule with nothing to check it is a
+  suggestion"*, measured at zero three times in this codebase.
+- **⚠️ DELIBERATELY NARROWER THAN FLIPPING `is_browse_task`.** It fires only on
+  SUBSTITUTION — a browser-agent plan with **no** browse/browse_commit step at
+  all — never on a read-only web tool used ALONGSIDE the browser. Seeding
+  `is_browse_task` from the agent would have been fewer lines and would have
+  blocked a legitimate `web_search → browse` feeder chain, which matters because
+  `_collapse_browse_apply` exists precisely to fold such a step in. A plan with
+  no read-only web tool either (a lone `stop_media` for "stop the music") is not
+  a substitution and passes untouched. **Rejected too: stripping the three read
+  tools from the browser `AgentSpec`** — it kills `_collapse_browse_apply`'s
+  `web_search` branch for this agent; **and a renderer special-case** — that
+  treats the symptom, and "clipping harder is WORSE" is already recorded.
+- **THE PROMPT REWORD SHIPPED AS BELT AND MEASURED AS CAUSE.** Rule 20 now owns
+  READING a URL's content and says it never puts a window on screen; rule 21 owns
+  "open/go to `<site>`". A/B against the real model
+  (`scripts/_measure_open_url_routing.py`, 7 phrasings × 3 runs × 2 arms,
+  paraphrases not the rule's own words): **17/21 → 21/21**, both content-read
+  controls unchanged at 3/3, and **the incident goal 0/3 → 3/3** — it never once
+  drafted `browse` under the old wording. Unlike 2026-08-06, whose analogous
+  catalog edit measured 12/12 in BOTH arms and was honestly recorded as belt.
+  ⚠️ **THE FIRST RUN OF THAT A/B REPORTED 12/21 → 21/21 AND WAS CONFOUNDED**: at
+  `max_tokens=2048` five BEFORE-arm calls came back `<unparseable>` — the
+  recorded reasoning-budget landmine, not a tool choice. Re-run at 8192 with zero
+  unparseables in either arm. **A prompt A/B has to clear the token cap before
+  its numbers mean anything.**
+- **WHAT THE USER GETS NOW**, measured end-to-end: `browse` terminates at step 0
+  via `_destination_reached` (zero LLM decision calls), the completion is
+  *"Browsed to **J. Junaid Jamshed Official Website** — https://www.junaidjamshed.com/
+  — … is open — that was the whole goal."* (**238 chars against ~1800+**), and the
+  real Chrome window stays open, which is what "open" means.
+- Tests: NEW `test_browse_open_site.py` (12) — the incident driven through the
+  REAL `_generate_steps` with the real reject chain (asserting `provider.calls ==
+  2`, i.e. the first draft was genuinely rejected), the feeder-chain regression
+  twin, the stop_media / research-agent / general-agent negatives, the
+  one-line render, and both prompt contracts. **4/4 falsifications valid**
+  (`scripts/_falsify_open_url.py`, importing the existing harness), and
+  **deliberately in BOTH directions**: three remove a guarantee so the INCIDENT
+  test fails, one removes the guard's NARROWNESS so the FEEDER test fails
+  instead — a round that only falsifies one way has tested the middle, not the
+  boundary. Two anchors had to be widened first: dropping only the lambda left a
+  dangling `(GUARD_X,` and dropping the early-out ate the statement after it —
+  both SyntaxErrors, which fail every test for the wrong reason.
+- **RUNTIME-VERIFIED on the REAL `main.py` lifespan** (isolated :18011, scratch
+  DB, real DeepSeek, real Chromium, real site): **14/14**. ⚠️ It drives the CHAT
+  surface, not `/api/agent/execute` — that endpoint builds an `AgentPlanner` with
+  no agent, i.e. GENERAL, so the guard correctly never fires there and a green
+  result would have been about nothing. Routed BROWSE with `classifier_ms=None`,
+  owned by the browser agent, plan steps `['browse']` with `read_webpage` absent,
+  `window_open=True`, `destination_only=True`, `commits=0`, completion 238 chars
+  with no homepage dump.
+- Gates: **3956 passing, 27 skipped, 0 failed** (+12, zero regressions), exit
+  code captured directly rather than through a pipe. `browse_bench` NOT re-run
+  and unaffected **by construction, verified not assumed**: it calls
+  `BrowseTool().safe_execute()` directly and never touches the planner, so the
+  reject chain is unreachable from it.
+- **HONEST LIMITS.** The guard cannot fire on a goal the router sent elsewhere —
+  a bare navigation misrouted WEB reaches the research agent, where `read_webpage`
+  is the right tool and this never runs. And the reword is a prompt: 21/21 on
+  seven phrasings is a measurement, not a proof, which is exactly why the code
+  comparator is the guarantee and the wording is the belt.
+
 ### Browser stack — CURRENT STATE (authoritative; supersedes the log above)
 
 Everything above this heading is the build log. This section is what the code does
@@ -6039,7 +6994,8 @@ belt) · **`window.py`** (THE SHARED WINDOW: one persistent context, many tabs �
 one-run-at-a-time lock) · `session.py` (a TAB's lifecycle, launch chain,
 interception, profile lock, the site-keyed tab registry, the five held-window
 registries) · `observe.py` (DOM → numbered element list, index/obs-id
-staleness contract, cross-frame union, challenge probe, screenshots) ·
+staleness contract, cross-frame union, challenge probe, dialog membership,
+screenshots) ·
 **`extract.py`** (deterministic structured extraction) · `loop.py` (observe→decide→
 act, fast paths, wall detectors, budgets) · `commit_flow.py` (discover → approve →
 submit, multi-commit) · `grounding.py` (origin/fill/upload grounding) ·
@@ -6048,7 +7004,9 @@ vocabulary) · **`choice.py`** (which of several matching things did you mean �
 pure, no LLM) · **`series_api.py`** (which season is airing, from AniList/TMDb —
 zero LLM, and no key needed for anime) · **`season.py`** (the same question read
 out of web prose, the FALLBACK for what no catalog carries; a catalog names the
-SEASON, the page counts the EPISODES) ·
+SEASON, the page counts the EPISODES; and the entry SCORING — ordinal
+normalisation, companion-release and series-membership exclusions — that a
+numbered season is matched with) ·
 **`trace.py`** (per-run JSONL trace) · `publicsuffix.py`.
 The old `app/core/browser_*` and `app/agents/browser_*` paths are `sys.modules`
 self-replacement shims (~100 test monkeypatches target them; Phase 8 of the refactor
@@ -6099,7 +7057,82 @@ does:
   the thing the user named — its own title/path matching their words strictly
   better than anything listed on it (`choice.page_is_the_target`) — the run acts
   instead of re-asking, so a "you may also like" rail can never re-open a
-  question the user already answered.
+  question the user already answered. **AND ONCE THEY HAVE ANSWERED, THE ANSWER
+  IS THE TEST** (2026-08-09, `choice.answered_here`): that score comparison is a
+  PROXY for "have we selected yet?", and MEASURED it cannot fire on a product
+  page whose rail carries the page's own product name (9 vs 9, and it needs
+  strictly greater) — which is exactly the inconsistency reported live, since
+  the proxy's verdict depends on how specific the user's words happened to be.
+  Once a choice has been made, "we are standing on their pick" is a fact and
+  nothing needs inferring. All of this lives in ONE `_item_tie` closure the
+  three sites share; before that they had already drifted, two passing the whole
+  tie to the proxy and the third the truncated eight.
+  **AND SOLD-OUT ITEMS ARE NEVER OFFERED** (2026-08-09): `observe.Element.
+  sold_out` (a walk of the card's own ancestry — the signal is on the CARD, never
+  on the title link) feeds `Candidate.available`, and `choice.item_choice`
+  applies `unresolved_axis`'s rules one layer up — an unbuyable item is not an
+  option, ONE survivor is forced so code takes it, and nothing buyable still asks
+  but says plainly that none can be added. Availability is a FIELD and never
+  filters `candidates_of`: `locate` is the enforcement of what the user
+  answered, and someone who deliberately picks a sold-out item must still be
+  honoured. Fail-open — a theme this does not understand offers everything.
+  **THE QUESTION IS NOW RAISED BEFORE THE MODEL IS ASKED, NOT AFTER** (2026-08-08):
+  a tie makes the decision unanswerable, so asking the model to choose is asking
+  it to guess — and the old gate read `action["action"] == "click"`, which meant a
+  model that could not answer produced no gate at all and the browse DIED
+  ("couldn't work out a safe next action", live). Three sites raise it through one
+  helper so they cannot drift: before the decision (from step 1 on), when the
+  decision comes back unusable for ANY reason, and when the model's own click
+  commits to one of the tied things. Up to `MAX_CHOICE_OPTIONS = 8` are shown and
+  `choice_total` reports the whole tie, because twenty products really do carry
+  one product name and a silently shortened list reads as the complete answer.
+- **THE PAGE'S OWN BUY BOX IS REACHED IN CODE, NOT THROUGH THE ELEMENT LIST**
+  (2026-08-10, `session.find_buy_box`). MEASURED: a storefront disables its buy
+  button until a variant is chosen and `observe.eligible()` drops disabled
+  elements, so on a real product page **neither the buy button nor the size
+  picker is in the observation at all** — the model is blind, not confused, and
+  no prompt or index can reach them. When the goal plainly asked for a cart and
+  the page's own subject carries at least one of the user's words, the buy form is
+  found in the page by rule **R1** (a buy form not inside ANOTHER product's card,
+  "another product" derived from this page's own URL rather than a vocabulary
+  list), and a code-authored `submit` carries its contract via the
+  `BUY_BOX_INDEX` sentinel. It then flows through the EXISTING machinery — the
+  variant gate, the approval card, the one-shot permit, the signature. **Zero new
+  authority**; `submit` still only ever means "hand this form to the user".
+  Ambiguity refuses: MEASURED, a listing page yields 21 candidates and the
+  homepage 27, and both are declined. An out-of-stock buy box with no axis to
+  change it is reported in the site's own words rather than submitted. And the
+  button's LABEL is never the finder — measured, the page's own reads "Select
+  Size" or "Out of stock" while the RAIL products are the ones saying "Add to bag".
+- **A CODE-SET VARIANT IS WAITED FOR, NOT ASSUMED** (2026-08-10,
+  `session.await_form_change`). MEASURED: clicking the swatch updates `Size` and
+  the barcode synchronously while the theme resolves the hidden variant `id`
+  ~1.0s later, and `settle()` returns in ~250ms — so the approval card would name
+  a size in words over a contract carrying no variant. It waits for the field the
+  form left BLANK to fill; "wait for a change" (20ms) and "wait for stability"
+  (200ms) were both measured too early. A form that never settles returns as it
+  is at the deadline.
+- **"SUBMITTED" IS A FACT ABOUT THE REQUEST, NOT THE OUTCOME** (2026-08-10,
+  `commit_flow._verify_cart`). After a fired add-to-cart the site's own cart
+  count is compared before and after — free, no navigation — and only when there
+  is no number does it follow the page's own cart LINK, read it, and come back. A
+  verdict is reported only where there is one.
+- **AND A COMMIT NEVER SUBMITS A FORM WHOSE VARIANT NOBODY CHOSE** (2026-08-08).
+  The form contract now also reports the AXES the form offers — every named group
+  of controls with more than one value, read from the ARMED form (never the page:
+  a real product page's only visible `<select>` is the review-sort dropdown).
+  `choice.unresolved_axis` then decides who is entitled to choose: the user's own
+  words win; an axis with nothing in stock is the site's answer, not a question;
+  **one buyable value is forced, so code takes it** (MEASURED: six sizes, one in
+  stock — offering all six offers five dead ends); an axis the page pre-selected
+  is disclosed on the card; otherwise the run STOPS and asks with only the values
+  that can be bought. Nothing is hardcoded per site or per category — Size on a
+  kurta, 30ml/100ml on a perfume and a quantity `<select>` are one rule, because
+  the factors come from the form. `axes` is a SEPARATE key from `fields`, so it is
+  fingerprint-invariant by construction: a cosmetic read can never refuse or
+  accept an approved submit. A direct reply is matched EXACTLY (the token scorer
+  drops one-letter sizes), and the scoring corpus is the USER'S words, not the
+  planner's paraphrase.
 - **A TAB IS GUARDED BEFORE IT IS DRIVEN** (2026-08-01). `enter_playback_mode`
   deliberately lifts interception when a tab is handed to the user, so a tab
   coming back has to be re-armed: `acquire_browse_tab` never reuses a tab HELD in
@@ -6134,6 +7167,26 @@ does:
   number, so withholding it is what stops the jump to the canonical entry); a
   belt additionally holds that leg while a known season is unreached, releasing
   the moment the catalogs settle to "unknown".
+- **AN EXPLICITLY NUMBERED SEASON NEEDS NO CATALOG AT ALL** (2026-08-08). "season
+  4" IS the answer; the only question is which entry on the page carries it, so
+  `_target_season` (the twin of `_target_episode`) drives the SAME
+  `_season_entry_action` with no web lookup and no LLM call. Three structural rules
+  make the scoring survive a real listing, each measured against anikoto's own 40
+  rows: **ordinal normalisation** (one site spells its seasons `-4`, `-season-6`
+  and `-5th-season` in ONE result set), a **companion-release exclusion** (the
+  slug-side twin of `series_api.SEASON_FORMATS` — without it a film carrying the
+  same digit tied with the season), and **series membership** (the search is FUZZY,
+  so "Season 4" also matched an unrelated show's season 4; this is
+  `series_api.MATCH_FLOOR`'s rule applied to the slug side). Seasons 3-7 resolve
+  uniquely where before it was 1 in 3. A genuine tie ASKS, reusing
+  `Handoff.TARGET_CHOICE` with `choice_kind="season"`, and the answered pick is
+  clicked in code — that leg runs FIRST among the deterministic legs, or the season
+  leg would re-ask on the resume the very question just answered. **The guard that
+  matters more than the feature:** the episode swap is HELD while a named season is
+  unreached, because `_episode_action` rewrites the number in whatever URL it is
+  standing on — landing on season 1 and swapping to episode 4 is a different show,
+  reported as done. `part 4` is deliberately not read as a season (in these
+  catalogs a part is a subdivision of one as often as it is one).
 - **A NEW TAB IS ADOPTED ONLY WHERE THE LOOP MAY GO, AND NEVER ON A PROMISE**
   (2026-08-07, rounds 1 and 3). A pop-under to a non-allowlisted origin is somewhere
   Rule 3 already forbids navigating, so following it was incoherent — and it cost
@@ -6151,11 +7204,72 @@ does:
   `observe()` retries its top-level evaluate once — on ANY exception, since the
   driver's "Execution context was destroyed" wording is not a contract — then
   propagates, so a genuinely dead page still reports itself.
+- **A COMMIT JOURNEY CAN SEARCH THE SITE** (2026-08-09). The deterministic
+  search used to be gated `step == 0 and not commit`, so a goal that ENDS in a
+  submit could never search on the way there — and a commit goal is a JOURNEY
+  ("add janan perfume to cart" = navigate → find the product → open it → fill →
+  submit) of which only the last step mutates anything. It is enabled in commit
+  mode now, guarded by `choice.page_covers_target` so a start URL that already IS
+  the product page is never abandoned for a search. Nothing below it needed to
+  change, which is the tell that the guard was over-broad rather than
+  load-bearing: `_is_action_gesture` has always classified a genuine search
+  submit as READING, and the form's own submit is still reached ONLY through
+  `arm_commit` → `submit_commit` under a signature approval.
+- **A SEARCH BOX HIDDEN BEHIND AN ICON IS OPENED** (2026-08-09,
+  `_open_search_ui_action`). MEASURED live: the junaidjamshed.com homepage has
+  **ZERO text inputs** — search is behind a link named `drawer-search` — so on
+  every storefront theme that hides search behind a magnifier the loop's only
+  search mechanism silently disappeared and the model clicked a category
+  instead, which on a catalog is exactly wrong. A deterministic leg (the
+  2026-08-08 Escape/overlay-dismiss shape): one search toggle + a term to search
+  for + no typeable box → click it, **once per RUN** — clicking a toggle CHANGES
+  the page (junaidjamshed's navigates to `/search`), so a per-page bound would
+  not hold and a chain of "search"-named controls would be clicked through one by
+  one. The code-search window re-opens for exactly the step after, so the drawer
+  just opened is usable; if it revealed nothing the model takes over.
+- **THE FILL TARGET MUST BE TYPEABLE, not merely "a search thing"**
+  (2026-08-09). Two live defects with one cause: the homepage's lone candidate
+  is a LINK (the old lone-candidate branch took it unchecked and would have
+  typed a product name into it), and the search page carries a real box PLUS an
+  "Upload an image for search" BUTTON — both `form_search=True` since they share
+  the form — so the old rule called it ambiguous and deferred with a box in
+  front of it. One rule now: candidates gather on role/`form_search`/name, and
+  the fill target is the single TYPEABLE one. `_is_search_target` (the SAFETY
+  predicate, "would submitting this be reading?") is unchanged.
+- **THE DETERMINISTIC PATHS READ THE USER'S WORDS ON THE COMMIT PATH TOO**
+  (2026-08-09). `_inject_user_words` was scoped `if step.tool != "browse"`,
+  justified by a signature argument its own three siblings had already disproven
+  — they iterate `_BROWSE_TOOLS` (which includes `browse_commit`) and skip
+  APPROVAL-BOUND steps instead, which is the real rule and is strictly safer (a
+  plan parked before the change keeps its contract and is left alone). It now
+  uses that predicate, and `commit_flow` threads `intent_text` to both
+  `run_browse` call sites. Shopping verbs (`add`/`buy`/`purchase`, never
+  `order` — "the Order of the Phoenix") and a trailing cart phrase joined the
+  extraction chain: MEASURED, 7 of 7 shopping goals previously yielded a junk
+  search term.
+- **A DEAD END IS A QUESTION, NOT A DEATH** (2026-08-09, `Handoff.STUCK`). When
+  the loop reads a page, produces no action, and no other gate fires, it used to
+  return "couldn't work out a safe next action on this page", close the window
+  and end the task with nothing to show. It now pauses and asks, in free text,
+  naming the page and the layer's own reason; the answer is authoritative (the
+  user was looking at it), is replayed onto every pending browse step by
+  `_inject_stuck_advice`, and reaches BOTH the decision prompt and the scoring
+  corpus — which is what makes the ask terminate rather than repeat. Ask-not-
+  fail, the `_fallback_question` pattern, with a FACT for a comparator (no
+  action was produced) rather than a judgement about confusion. **STUCK is LAST
+  in the precedence order** — it means "nothing else fired", so anywhere earlier
+  it would shadow a real pause, most damagingly a discovered contract. Bounded
+  at one ask per run and `_MAX_BROWSE_STUCK` per plan; a spent budget falls back
+  to the step's own honest failure, i.e. the behaviour that predates it, so this
+  can only ever add a question and never turn a working path into a failing one.
+  `_inject_stuck_advice` skips approval-bound steps, because the advice lives in
+  step `parameters` and would otherwise move a signature the user already
+  approved.
 - **A PAUSE KEEPS THE PAGE IT IS ASKING ABOUT** (2026-08-02). An
   `action_approval` or `origin_approval` hand-off leaves its tab open — the user
   is deciding about that page, and the resumed run reuses it instead of
-  navigating again. Only `login`/`challenge` still close, because a sign-in window
-  is a separate Chrome process needing the whole single profile. No gesture has
+  navigating again. Since 2026-08-08 `login` keeps its tab too (see below), so
+  every pause branch now hands over in place on the first attempt. No gesture has
   fired at a pause, the one-shot permit is unspent, and the tab is re-armed by
   `resume_agent_control()` before it is driven again.
 - **CLOSING A TAB IS THE USER'S CALL.** `release_after_run()` closes only a tab
@@ -6171,6 +7285,24 @@ does:
   from the same site within 10 minutes escalates to it. Both challenge modes keep
   their window in the commit flow too, and a re-attached held session is re-armed
   before it is driven.
+- **NOR DOES A SIGN-IN WALL** (2026-08-08) — the same fix in the branch the 2026-08-03
+  round did not reach, which still closed the session and then `close_all()`'d every
+  tab before opening a clean window at whatever page the loop had stopped on. Same
+  shape now: hand the tab over in place, escalate to the clean window only on a
+  fresh repeat from the same site. The escalation memory takes a KIND
+  (`note_handoff` / `handed_over_recently`, keyed on `(kind, site)`), so a challenge
+  and a wall never escalate each other, and `HandoffPayload.in_place` tells the pause
+  text where to look — it must never claim a window about a tab already on screen.
+- **A CREDENTIAL FORM INSIDE A DIALOG IS AN OFFER, NOT A WALL** (2026-08-08). Sites
+  routinely ship a sign-in modal in the markup of every page (anikoto has one on
+  every watch page), and walling on any visible password field aborted working
+  tasks. `observe` marks each element `in_dialog` from its own ancestry;
+  `credential_overlay_site` is the ONE definition of the demotion, read by both the
+  detector and the recovery; the loop presses Escape once per page fingerprint —
+  and **a dialog that survives that IS a wall**, because a wall is exactly the
+  credential form you cannot get rid of. Never demoted: a dedicated auth HOST, a
+  `/login`/`/register` ROUTE, a form in the page's own flow, or a dialog with no
+  page content behind it. Nothing about credential handling changes.
 - **Grounding** is unchanged and is the exfiltration bound: origins, fill values and
   upload paths must trace to the user's words or their curated profile — never to
   page content. Autofill secrets are DPAPI-encrypted at rest and never enter a
@@ -6189,6 +7321,20 @@ sets `BrowseOutcome.destination_only`, which suppresses the `keep_open` media
 hand-off — opening a page is not asking for anything to be played. Before it
 existed, a satisfied navigation goal had no way to finish and the fast path
 invented work: see "A navigation goal is not a search goal".
+
+**A BROWSER-AGENT PLAN MUST DRIVE THE BROWSER** (2026-08-11,
+`planner._browse_substitution`). All of the above only runs if `browse` is the
+tool the plan actually drafted — and until this guard existed a bare "open
+`<site>`" was routinely planned as a single `read_webpage`, which fetches the
+HTML server-side and opens nothing. The comparator is the ROUTER's own verdict,
+carried on the plan as `agent_key`: a browser-agent plan with NO
+browse/browse_commit step that reaches for read_webpage / browse_page /
+web_search is rejected with retry feedback. Narrow by design — it fires only on
+SUBSTITUTION, so a `web_search → browse` feeder chain still plans (which
+`_collapse_browse_apply` depends on) and a lone `stop_media` is untouched. Plan
+rules 20/21 carry the same split (20 READS a URL's content and says it never
+puts a window on screen; 21 owns "open/go to a site"), measured 17/21 → 21/21 —
+but the rule is the belt and the guard is the guarantee.
 
 **Perception is DOM-FIRST** (2026-07-26, owner decision, reversing the 2026-07-21
 vision-first decision on measurement — vision was spending up to 12s a step on

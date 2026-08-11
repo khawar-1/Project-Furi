@@ -1,0 +1,173 @@
+{
+  "when": "2026-08-08_17-29-45",
+  "passed": 4,
+  "scored": 5,
+  "blocked": 1,
+  "total": 6,
+  "tasks": [
+    {
+      "id": "daraz-compare",
+      "passed": true,
+      "seconds": 25.5,
+      "actions": 2,
+      "records": 40,
+      "url": "https://www.daraz.pk/catalog/?spm=a2a0e.tm80335142.search.d_go&q=Yonex%20badminton%20rackets",
+      "tool_success": true,
+      "error": "",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": true,
+          "detail": "40 records (needed 3)"
+        },
+        {
+          "kind": "field_present",
+          "passed": true,
+          "detail": "40/40 records carry 'price'"
+        },
+        {
+          "kind": "price_grounded",
+          "passed": true,
+          "detail": "40/40 prices grounded"
+        }
+      ],
+      "sample": [
+        {
+          "name": "Pair Of 2 Yonex badminton racket With gut and grip",
+          "price": "Rs. 2,299"
+        },
+        {
+          "name": "Yonex, VS badminton Racket (single) premium quality",
+          "price": "Rs. 1,492"
+        },
+        {
+          "name": "Yonex, Hi Qua badminton Racket (single) premium quality",
+          "price": "Rs. 1,663"
+        }
+      ]
+    },
+    {
+      "id": "books-toscrape-extract",
+      "passed": true,
+      "seconds": 44.9,
+      "actions": 1,
+      "records": 20,
+      "url": "https://books.toscrape.com/",
+      "tool_success": false,
+      "error": "couldn't work out a safe next action on this page",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": true,
+          "detail": "20 records (needed 10)"
+        },
+        {
+          "kind": "field_present",
+          "passed": true,
+          "detail": "20/20 records carry 'price'"
+        },
+        {
+          "kind": "price_grounded",
+          "passed": true,
+          "detail": "20/20 prices grounded"
+        }
+      ],
+      "sample": [
+        {
+          "name": "A Light in the ...",
+          "price": "£51.77"
+        },
+        {
+          "name": "Tipping the Velvet",
+          "price": "£53.74"
+        },
+        {
+          "name": "Add to basket",
+          "price": "£50.10"
+        }
+      ]
+    },
+    {
+      "id": "books-toscrape-navigate",
+      "passed": true,
+      "seconds": 10.7,
+      "actions": 2,
+      "records": 11,
+      "url": "https://books.toscrape.com/catalogue/category/books/travel_2/index.html",
+      "tool_success": true,
+      "error": "",
+      "checks": [
+        {
+          "kind": "url_contains",
+          "passed": true,
+          "detail": "final url 'https://books.toscrape.com/catalogue/category/books/travel_2/index.html'"
+        },
+        {
+          "kind": "records_at_least",
+          "passed": true,
+          "detail": "11 records (needed 2)"
+        }
+      ],
+      "sample": [
+        {
+          "name": "It's Only the Himalayas",
+          "price": "£45.17"
+        },
+        {
+          "name": "Full Moon over Noah’s ...",
+          "price": "£49.43"
+        },
+        {
+          "name": "See America: A Celebration ...",
+          "price": "£48.87"
+        }
+      ]
+    },
+    {
+      "id": "quotes-pagination",
+      "passed": false,
+      "seconds": 257.2,
+      "actions": 12,
+      "records": 0,
+      "url": "https://quotes.toscrape.com/page/2/",
+      "tool_success": false,
+      "error": "couldn't work out a safe next action on this page",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": false,
+          "detail": "0 records (needed 12)"
+        }
+      ],
+      "sample": []
+    },
+    {
+      "id": "ebay-search",
+      "passed": null,
+      "blocked": "a CAPTCHA / verification wall (never auto-solved)",
+      "seconds": 42.8,
+      "actions": null,
+      "records": 0,
+      "url": null,
+      "error": ""
+    },
+    {
+      "id": "wikipedia-read",
+      "passed": true,
+      "seconds": 8.3,
+      "actions": 0,
+      "records": 0,
+      "url": "https://en.wikipedia.org/wiki/Eiffel_Tower",
+      "tool_success": true,
+      "error": "",
+      "checks": [
+        {
+          "kind": "text_contains_any",
+          "passed": true,
+          "detail": "found '1889'"
+        }
+      ],
+      "sample": []
+    }
+  ]
+}

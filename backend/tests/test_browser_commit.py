@@ -1536,6 +1536,56 @@ def _discover_rig(monkeypatch):
     return opened
 
 
+async def test_discover_hands_the_users_own_words_to_the_loop(
+    _discover_rig, monkeypatch
+):
+    """⚠️ THE WIRING, tested because the 2026-08-09 defect WAS a wiring gap.
+
+    2026-08-08 added two commit-mode-only consumers of the user's own words (the
+    item tie gate and the variant-axis gate) and fixed the READER in run_browse
+    (`intent = intent_text or goal`) — while nothing ever passed `intent_text`
+    on this path. So the reader's fallback fired every time, both gates scored
+    the planner's paraphrase, and the live tie question read "janan perfume BY
+    SUBMITTING form". A no-op that reported success.
+
+    Asserting the two functions each behave correctly cannot catch that; only
+    driving the real discover() and reading what it HANDED ON can."""
+    seen: dict = {}
+
+    async def fake_run_browse(session, goal, provider, **kwargs):
+        seen.update(kwargs)
+        seen["goal"] = goal
+        return browser_loop.BrowseOutcome(success=True, actions_taken=1)
+
+    monkeypatch.setattr(browser_loop, "run_browse", fake_run_browse)
+    params = dict(_CHAL_PARAMS)
+    params["user_words"] = "add janan perfume to cart"
+
+    await browser_commit.discover(params)
+
+    assert seen["intent_text"] == "add janan perfume to cart"
+    # `goal` keeps its own job — the planner's instruction for the page.
+    assert seen["goal"] == _CHAL_PARAMS["goal"]
+
+
+async def test_discover_without_user_words_passes_an_empty_intent(
+    _discover_rig, monkeypatch
+):
+    """The regression twin: a step stamped before this shipped (or any caller
+    that never sets it) still works — run_browse falls back to `goal`."""
+    seen: dict = {}
+
+    async def fake_run_browse(session, goal, provider, **kwargs):
+        seen.update(kwargs)
+        return browser_loop.BrowseOutcome(success=True, actions_taken=1)
+
+    monkeypatch.setattr(browser_loop, "run_browse", fake_run_browse)
+
+    await browser_commit.discover(dict(_CHAL_PARAMS))
+
+    assert seen["intent_text"] == ""
+
+
 def _challenge_outcome(mode="embedded", kind="reCAPTCHA"):
     return browser_loop.BrowseOutcome(
         success=False, actions_taken=3,

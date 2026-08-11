@@ -1,0 +1,877 @@
+[
+  {
+    "url": "https://www.junaidjamshed.com/pages/men-collections",
+    "title": "Men's Collection Online in Pakistan - JunaidJamshed \u2013 J.",
+    "intent": "go to junaidjamshed.com in the men kameez shalwar section add black plain sharwar kameez to cart",
+    "chosen_target": "",
+    "elements": 102,
+    "candidates": 70,
+    "target_words": [
+      "men",
+      "kameez",
+      "shalwar",
+      "section",
+      "black",
+      "plain",
+      "sharwar"
+    ],
+    "page_subject": "men collection pakistan junaidjamshed",
+    "page_score": 1,
+    "top_score": 4,
+    "runner_up_score": 3,
+    "tied": 2,
+    "tied_detail": [
+      {
+        "label": "DARK GREEN PLAIN KAMEEZ SHALWAR",
+        "index": 51,
+        "role": "link",
+        "href": "/collections/mens-stitched/products/dark-green-blended-plain-kameez-shalwar-jjksa47592",
+        "price": ""
+      },
+      {
+        "label": "BLACK COTTON CASUAL KAMEEZ SHALWAR",
+        "index": 57,
+        "role": "link",
+        "href": "/collections/mens-stitched/products/black-cotton-casual-kameez-shalwar-jjkss60094",
+        "price": ""
+      }
+    ],
+    "ranked": [
+      {
+        "score": 4,
+        "label": "DARK GREEN PLAIN KAMEEZ SHALWAR",
+        "href": "/collections/mens-stitched/products/dark-green-blended-plain-kameez-shalwar-jjksa47592",
+        "index": 51
+      },
+      {
+        "score": 4,
+        "label": "BLACK COTTON CASUAL KAMEEZ SHALWAR",
+        "href": "/collections/mens-stitched/products/black-cotton-casual-kameez-shalwar-jjkss60094",
+        "index": 57
+      },
+      {
+        "score": 3,
+        "label": "KAMEEZ SHALWAR",
+        "href": "/collections/mens-kameez-shalwar",
+        "index": 21
+      },
+      {
+        "score": 3,
+        "label": "MIDNIGHT BLUE SEMI-FORMAL KAMEEZ SHALWAR",
+        "href": "/collections/mens-stitched/products/midnight-blue-semi-formal-kameez-shalwar-jjksa60033",
+        "index": 54
+      },
+      {
+        "score": 3,
+        "label": "GREY SEMI-FORMAL KAMEEZ SHALWAR",
+        "href": "/collections/mens-stitched/products/grey-semi-formal-kameez-shalwar-jjksa60076",
+        "index": 60
+      },
+      {
+        "score": 3,
+        "label": "MAROON COTTON CASUAL KAMEEZ SHALWAR",
+        "href": "/collections/mens-stitched/products/maroon-cotton-casual-kameez-shalwar-jjksa60066",
+        "index": 63
+      },
+      {
+        "score": 3,
+        "label": "BLUE CASUAL KAMEEZ SHALWAR",
+        "href": "/collections/mens-stitched/products/blue-casual-kameez-shalwar-jjksa47658",
+        "index": 66
+      },
+      {
+        "score": 1,
+        "label": "MEN",
+        "href": "/pages/men-collections",
+        "index": 5
+      }
+    ],
+    "page_is_the_target": false,
+    "page_covers_chosen": null,
+    "self_named_candidates": [],
+    "stock_rows": [
+      {
+        "idx": 51,
+        "label": "DARK GREEN PLAIN KAMEEZ SHALWAR",
+        "dead_by": "card.buy_disabled",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-slider__slide hdt-pr-style8 is-selected is-in-view",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|-\n40\n%",
+          "txt": "- 40 % Add to Wishlist Quick add DARK GREEN PLAIN KAMEEZ SHALWAR Regular price PKR.8,490 Sale price PKR.5,094",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": true
+        }
+      },
+      {
+        "idx": 57,
+        "label": "BLACK COTTON CASUAL KAMEEZ SHALWAR",
+        "dead_by": "card.buy_disabled",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-slider__slide hdt-pr-style8 is-selected is-in-view",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|-\n25\n%",
+          "txt": "- 25 % Add to Wishlist Quick add BLACK COTTON CASUAL KAMEEZ SHALWAR Sale price PKR.6,368 - PKR.8,490",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": true
+        }
+      }
+    ],
+    "stock_summary": {
+      "tied_probed": 2,
+      "dead": 2,
+      "by_signal": [
+        "card.buy_disabled"
+      ]
+    }
+  },
+  {
+    "url": "https://www.junaidjamshed.com/collections/mens-stitched/products/black-cotton-casual-kameez-shalwar-jjkss60094",
+    "title": "Black Cotton Casual Kameez Shalwar \u2013 J.",
+    "intent": "go to junaidjamshed.com in the men kameez shalwar section add black plain sharwar kameez to cart",
+    "chosen_target": "BLACK COTTON CASUAL KAMEEZ SHALWAR",
+    "elements": 99,
+    "candidates": 64,
+    "target_words": [
+      "men",
+      "kameez",
+      "shalwar",
+      "section",
+      "black",
+      "plain",
+      "sharwar",
+      "cotton",
+      "casual"
+    ],
+    "page_subject": "black cotton casual kameez shalwar mens stitched jjkss60094",
+    "page_score": 9,
+    "top_score": 9,
+    "runner_up_score": 7,
+    "tied": 2,
+    "tied_detail": [
+      {
+        "label": "BLACK COTTON CASUAL KAMEEZ SHALWAR",
+        "index": 38,
+        "role": "link",
+        "href": "/products/black-cotton-casual-kameez-shalwar-jjksa60184?pr_prod_strat=e5_desc&pr_rec_id=5e2071e53&pr",
+        "price": ""
+      },
+      {
+        "label": "BLACK COTTON CASUAL KAMEEZ SHALWAR",
+        "index": 47,
+        "role": "link",
+        "href": "/products/black-cotton-casual-kurta-trousers-jjksa47622r1?pr_prod_strat=e5_desc&pr_rec_id=5e2071e53&",
+        "price": ""
+      }
+    ],
+    "ranked": [
+      {
+        "score": 9,
+        "label": "BLACK COTTON CASUAL KAMEEZ SHALWAR",
+        "href": "/products/black-cotton-casual-kameez-shalwar-jjksa60184?pr_prod_strat=e5_desc&pr_rec_id=5e2071e53&pr",
+        "index": 38
+      },
+      {
+        "score": 9,
+        "label": "BLACK COTTON CASUAL KAMEEZ SHALWAR",
+        "href": "/products/black-cotton-casual-kurta-trousers-jjksa47622r1?pr_prod_strat=e5_desc&pr_rec_id=5e2071e53&",
+        "index": 47
+      },
+      {
+        "score": 7,
+        "label": "BLACK COTTON PLAIN KAMEEZ SHALWAR",
+        "href": "/products/black-cotton-plain-kameez-shalwar-jjksa47673?pr_prod_strat=e5_desc&pr_rec_id=5e2071e53&pr_",
+        "index": 53
+      },
+      {
+        "score": 7,
+        "label": "GREY COTTON CASUAL KAMEEZ SHALWAR",
+        "href": "/products/grey-cotton-casual-kameez-shalwar-jjksa60132?pr_prod_strat=e5_desc&pr_rec_id=5e2071e53&pr_",
+        "index": 59
+      },
+      {
+        "score": 5,
+        "label": "OLIVE GREEN CASUAL KAMEEZ SHALWAR",
+        "href": "/products/olive-green-casual-kameez-shalwar-jjksa60136?pr_prod_strat=jac&pr_rec_id=5e2071e53&pr_rec_",
+        "index": 41
+      },
+      {
+        "score": 4,
+        "label": "WHITE PLAIN KAMEEZ SHALWAR",
+        "href": "/products/white-plain-kameez-shalwar-jjksa30728r35ap?pr_prod_strat=jac&pr_rec_id=5e2071e53&pr_rec_pi",
+        "index": 56
+      },
+      {
+        "score": 3,
+        "label": "BLACK COTTON SEMI-FORMAL KURTA TROUSERS",
+        "href": "/products/black-cotton-semi-formal-kurta-trousers-jjkps33900?pr_prod_strat=jac&pr_rec_id=5e2071e53&p",
+        "index": 35
+      },
+      {
+        "score": 3,
+        "label": "MIDNIGHT BLUE SEMI-FORMAL KAMEEZ SHALWAR",
+        "href": "/products/midnight-blue-semi-formal-kameez-shalwar-jjksa60033?pr_prod_strat=jac&pr_rec_id=5e2071e53&",
+        "index": 50
+      },
+      {
+        "score": 1,
+        "label": "MEN",
+        "href": "/pages/men-collections",
+        "index": 5
+      },
+      {
+        "score": 1,
+        "label": "MEN READY TO WEAR",
+        "href": "/collections/mens-stitched",
+        "index": 21
+      },
+      {
+        "score": 1,
+        "label": "CHARCOAL COTTON SEMI FORMAL KURTA TROUSERS",
+        "href": "/products/charcoal-cotton-semi-formal-kurta-trousers-jjkps33898?pr_prod_strat=jac&pr_rec_id=5e2071e5",
+        "index": 62
+      }
+    ],
+    "page_is_the_target": false,
+    "page_covers_chosen": true,
+    "self_named_candidates": [
+      {
+        "label": "BLACK COTTON CASUAL KAMEEZ SHALWAR",
+        "href": "/products/black-cotton-casual-kameez-shalwar-jjksa60184?pr_prod_strat=e5_desc&pr_rec_id=5e2071e53&pr",
+        "role": ""
+      },
+      {
+        "label": "BLACK COTTON CASUAL KAMEEZ SHALWAR",
+        "href": "/products/black-cotton-casual-kurta-trousers-jjksa47622r1?pr_prod_strat=e5_desc&pr_rec_id=5e2071e53&",
+        "role": ""
+      }
+    ],
+    "stock_rows": [
+      {
+        "idx": 38,
+        "label": "BLACK COTTON CASUAL KAMEEZ SHALWAR",
+        "dead_by": "card.buy_disabled",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-slider__slide hdt-pr-style8 is-selected is-in-view",
+          "badge": "hdt-badge__wrapp hdt-pe-none |",
+          "txt": "Add to Wishlist Quick add BLACK COTTON CASUAL KAMEEZ SHALWAR Sale price PKR.8,490",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": true
+        }
+      },
+      {
+        "idx": 47,
+        "label": "BLACK COTTON CASUAL KAMEEZ SHALWAR",
+        "dead_by": "card.buy_disabled",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-slider__slide hdt-pr-style8 is-selected is-in-view",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|-\n25\n%",
+          "txt": "- 25 % Add to Wishlist Quick add BLACK COTTON CASUAL KAMEEZ SHALWAR Regular price PKR.8,990 Sale price PKR.6,743",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": true
+        }
+      }
+    ],
+    "stock_summary": {
+      "tied_probed": 2,
+      "dead": 2,
+      "by_signal": [
+        "card.buy_disabled"
+      ]
+    }
+  },
+  {
+    "url": "https://www.junaidjamshed.com/search?q=janan",
+    "title": "Search: 1000 results found for \"janan\" \u2013 J.",
+    "intent": "go to junaidjamshed.com and add janan in cart",
+    "chosen_target": "",
+    "elements": 99,
+    "candidates": 73,
+    "target_words": [
+      "janan"
+    ],
+    "page_subject": "1000 found janan",
+    "page_score": 1,
+    "top_score": 1,
+    "runner_up_score": 0,
+    "tied": 20,
+    "tied_detail": [
+      {
+        "label": "JANAN GOLD - 100ML",
+        "index": 27,
+        "role": "link",
+        "href": "/products/janan-gold-100ml?_pos=1&_sid=1c4522707&_ss=r",
+        "price": ""
+      },
+      {
+        "label": "JANAN SPORT - 100ML",
+        "index": 30,
+        "role": "link",
+        "href": "/products/janan-sport?_pos=2&_sid=1c4522707&_ss=r",
+        "price": ""
+      },
+      {
+        "label": "JANAN SPORT - 30ML",
+        "index": 33,
+        "role": "link",
+        "href": "/products/janan-sport-30ml?_pos=3&_sid=1c4522707&_ss=r",
+        "price": ""
+      },
+      {
+        "label": "JANAN PLATINUM - 100ML",
+        "index": 36,
+        "role": "link",
+        "href": "/products/janan-platinum?_pos=4&_sid=1c4522707&_ss=r",
+        "price": ""
+      },
+      {
+        "label": "JANAN GIFT SET (30ML)",
+        "index": 38,
+        "role": "link",
+        "href": "/products/janan-gift-set-30ml?_pos=5&_sid=1c4522707&_ss=r",
+        "price": ""
+      },
+      {
+        "label": "JANAN INTENSE",
+        "index": 40,
+        "role": "link",
+        "href": "/products/janan-intense?_pos=6&_sid=1c4522707&_ss=r",
+        "price": ""
+      },
+      {
+        "label": "JANAN OUD",
+        "index": 42,
+        "role": "link",
+        "href": "/products/janan-oud-100ml?_pos=7&_sid=1c4522707&_ss=r",
+        "price": ""
+      },
+      {
+        "label": "JANAN GOLD - GIFT SET",
+        "index": 44,
+        "role": "link",
+        "href": "/products/janan-gold-gift-set?_pos=8&_sid=1c4522707&_ss=r",
+        "price": ""
+      },
+      {
+        "label": "JANAN POUR FEMME - 30ML",
+        "index": 46,
+        "role": "link",
+        "href": "/products/janan-pour-femme-30ml?_pos=9&_sid=1c4522707&_ss=r",
+        "price": ""
+      },
+      {
+        "label": "JANAN PLATINIUM SHOWER GEL",
+        "index": 48,
+        "role": "link",
+        "href": "/products/janan-platinum-shower-gel-250ml-cm000009?_pos=10&_sid=1c4522707&_ss=r",
+        "price": ""
+      },
+      {
+        "label": "JANAN POUR FEMME",
+        "index": 50,
+        "role": "link",
+        "href": "/products/janan-pour-femme?_pos=11&_sid=1c4522707&_ss=r",
+        "price": ""
+      },
+      {
+        "label": "JANAN GOLD POUR HOMME PERFUME BODY SPRAY",
+        "index": 53,
+        "role": "link",
+        "href": "/products/janan-gold-body-spray?_pos=12&_sid=1c4522707&_ss=r",
+        "price": ""
+      }
+    ],
+    "ranked": [
+      {
+        "score": 1,
+        "label": "JANAN GOLD - 100ML",
+        "href": "/products/janan-gold-100ml?_pos=1&_sid=1c4522707&_ss=r",
+        "index": 27
+      },
+      {
+        "score": 1,
+        "label": "JANAN SPORT - 100ML",
+        "href": "/products/janan-sport?_pos=2&_sid=1c4522707&_ss=r",
+        "index": 30
+      },
+      {
+        "score": 1,
+        "label": "JANAN SPORT - 30ML",
+        "href": "/products/janan-sport-30ml?_pos=3&_sid=1c4522707&_ss=r",
+        "index": 33
+      },
+      {
+        "score": 1,
+        "label": "JANAN PLATINUM - 100ML",
+        "href": "/products/janan-platinum?_pos=4&_sid=1c4522707&_ss=r",
+        "index": 36
+      },
+      {
+        "score": 1,
+        "label": "JANAN GIFT SET (30ML)",
+        "href": "/products/janan-gift-set-30ml?_pos=5&_sid=1c4522707&_ss=r",
+        "index": 38
+      },
+      {
+        "score": 1,
+        "label": "JANAN INTENSE",
+        "href": "/products/janan-intense?_pos=6&_sid=1c4522707&_ss=r",
+        "index": 40
+      },
+      {
+        "score": 1,
+        "label": "JANAN OUD",
+        "href": "/products/janan-oud-100ml?_pos=7&_sid=1c4522707&_ss=r",
+        "index": 42
+      },
+      {
+        "score": 1,
+        "label": "JANAN GOLD - GIFT SET",
+        "href": "/products/janan-gold-gift-set?_pos=8&_sid=1c4522707&_ss=r",
+        "index": 44
+      },
+      {
+        "score": 1,
+        "label": "JANAN POUR FEMME - 30ML",
+        "href": "/products/janan-pour-femme-30ml?_pos=9&_sid=1c4522707&_ss=r",
+        "index": 46
+      },
+      {
+        "score": 1,
+        "label": "JANAN PLATINIUM SHOWER GEL",
+        "href": "/products/janan-platinum-shower-gel-250ml-cm000009?_pos=10&_sid=1c4522707&_ss=r",
+        "index": 48
+      },
+      {
+        "score": 1,
+        "label": "JANAN POUR FEMME",
+        "href": "/products/janan-pour-femme?_pos=11&_sid=1c4522707&_ss=r",
+        "index": 50
+      },
+      {
+        "score": 1,
+        "label": "JANAN GOLD POUR HOMME PERFUME BODY SPRAY",
+        "href": "/products/janan-gold-body-spray?_pos=12&_sid=1c4522707&_ss=r",
+        "index": 53
+      },
+      {
+        "score": 1,
+        "label": "JANAN GOLD - 30ML",
+        "href": "/products/janan-gold-30ml?_pos=13&_sid=1c4522707&_ss=r",
+        "index": 56
+      },
+      {
+        "score": 1,
+        "label": "JANAN MUSK - 30ML",
+        "href": "/products/janan-musk-30ml?_pos=14&_sid=1c4522707&_ss=r",
+        "index": 58
+      },
+      {
+        "score": 1,
+        "label": "JANAN PLATINUM - 200ML",
+        "href": "/products/janan-platinums?_pos=15&_sid=1c4522707&_ss=r",
+        "index": 60
+      },
+      {
+        "score": 1,
+        "label": "JANAN LEATHER",
+        "href": "/products/janan-leather?_pos=16&_sid=1c4522707&_ss=r",
+        "index": 62
+      },
+      {
+        "score": 1,
+        "label": "JANAN SPORT - GIFT SET",
+        "href": "/products/janan-sport-gift-set?_pos=17&_sid=1c4522707&_ss=r",
+        "index": 64
+      },
+      {
+        "score": 1,
+        "label": "JANAN VANILLA",
+        "href": "/products/janan-vanilla-100ml?_pos=18&_sid=1c4522707&_ss=r",
+        "index": 66
+      },
+      {
+        "score": 1,
+        "label": "JANAN VANILLA - 30ML",
+        "href": "/products/janan-vanilla-30ml?_pos=19&_sid=1c4522707&_ss=r",
+        "index": 68
+      },
+      {
+        "score": 1,
+        "label": "JANAN OUD - 30ML",
+        "href": "/products/janan-oud-30ml?_pos=20&_sid=1c4522707&_ss=r",
+        "index": 70
+      }
+    ],
+    "page_is_the_target": false,
+    "page_covers_chosen": null,
+    "self_named_candidates": [],
+    "stock_rows": [
+      {
+        "idx": 27,
+        "label": "JANAN GOLD - 100ML",
+        "dead_by": "card.class",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8 hdt-pr-sold_out",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|SOLD OUT",
+          "txt": "SOLD OUT Add to Wishlist View product JANAN GOLD - 100ML Regular price PKR.6,800 Sale price PKR.5,780",
+          "cls_dead": true,
+          "txt_dead": true,
+          "buy_disabled": null
+        }
+      },
+      {
+        "idx": 30,
+        "label": "JANAN SPORT - 100ML",
+        "dead_by": "card.class",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8 hdt-pr-sold_out",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|SOLD OUT",
+          "txt": "SOLD OUT Add to Wishlist View product JANAN SPORT - 100ML Regular price PKR.6,800 Sale price PKR.5,780",
+          "cls_dead": true,
+          "txt_dead": true,
+          "buy_disabled": null
+        }
+      },
+      {
+        "idx": 33,
+        "label": "JANAN SPORT - 30ML",
+        "dead_by": "card.class",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8 hdt-pr-sold_out",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|SOLD OUT",
+          "txt": "SOLD OUT Add to Wishlist View product JANAN SPORT - 30ML Sale price PKR.2,400",
+          "cls_dead": true,
+          "txt_dead": true,
+          "buy_disabled": null
+        }
+      },
+      {
+        "idx": 36,
+        "label": "JANAN PLATINUM - 100ML",
+        "dead_by": "card.class",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8 hdt-pr-sold_out",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|SOLD OUT",
+          "txt": "SOLD OUT Add to Wishlist View product JANAN PLATINUM - 100ML Regular price PKR.6,900 Sale price PKR.5,865",
+          "cls_dead": true,
+          "txt_dead": true,
+          "buy_disabled": null
+        }
+      },
+      {
+        "idx": 38,
+        "label": "JANAN GIFT SET (30ML)",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none |",
+          "txt": "Add to Wishlist Add to bag JANAN GIFT SET (30ML) Sale price PKR.11,500",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      },
+      {
+        "idx": 40,
+        "label": "JANAN INTENSE",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|-\n15\n%",
+          "txt": "- 15 % Add to Wishlist Add to bag JANAN INTENSE Regular price PKR.7,300 Sale price PKR.6,205",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      },
+      {
+        "idx": 42,
+        "label": "JANAN OUD",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|-\n15\n%",
+          "txt": "- 15 % Add to Wishlist Add to bag JANAN OUD Regular price PKR.7,300 Sale price PKR.6,205",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      },
+      {
+        "idx": 44,
+        "label": "JANAN GOLD - GIFT SET",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none |",
+          "txt": "Add to Wishlist Add to bag JANAN GOLD - GIFT SET Sale price PKR.9,500",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      },
+      {
+        "idx": 46,
+        "label": "JANAN POUR FEMME - 30ML",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none |",
+          "txt": "Add to Wishlist Add to bag JANAN POUR FEMME - 30ML Sale price PKR.2,800",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      },
+      {
+        "idx": 48,
+        "label": "JANAN PLATINIUM SHOWER GEL",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none |",
+          "txt": "Add to Wishlist Add to bag JANAN PLATINIUM SHOWER GEL Sale price PKR.1,300",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      },
+      {
+        "idx": 50,
+        "label": "JANAN POUR FEMME",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|-\n15\n%",
+          "txt": "- 15 % Add to Wishlist Add to bag JANAN POUR FEMME Regular price PKR.6,900 Sale price PKR.5,865",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      },
+      {
+        "idx": 53,
+        "label": "JANAN GOLD POUR HOMME PERFUME BODY SPRAY",
+        "dead_by": "card.class",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8 hdt-pr-sold_out",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|SOLD OUT",
+          "txt": "SOLD OUT Add to Wishlist View product JANAN GOLD POUR HOMME PERFUME BODY SPRAY Sale price PKR.750",
+          "cls_dead": true,
+          "txt_dead": true,
+          "buy_disabled": null
+        }
+      },
+      {
+        "idx": 56,
+        "label": "JANAN GOLD - 30ML",
+        "dead_by": "card.class",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8 hdt-pr-sold_out",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|SOLD OUT",
+          "txt": "SOLD OUT Add to Wishlist View product JANAN GOLD - 30ML Sale price PKR.2,400",
+          "cls_dead": true,
+          "txt_dead": true,
+          "buy_disabled": null
+        }
+      },
+      {
+        "idx": 58,
+        "label": "JANAN MUSK - 30ML",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|-\n15\n%",
+          "txt": "- 15 % Add to Wishlist Add to bag JANAN MUSK - 30ML Regular price PKR.2,800 Sale price PKR.2,380",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      },
+      {
+        "idx": 60,
+        "label": "JANAN PLATINUM - 200ML",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|-\n15\n%",
+          "txt": "- 15 % Add to Wishlist Add to bag JANAN PLATINUM - 200ML Regular price PKR.12,000 Sale price PKR.10,200",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      },
+      {
+        "idx": 62,
+        "label": "JANAN LEATHER",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none |NEW IN",
+          "txt": "NEW IN Add to Wishlist Add to bag JANAN LEATHER Sale price PKR.7,300",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      },
+      {
+        "idx": 64,
+        "label": "JANAN SPORT - GIFT SET",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none |",
+          "txt": "Add to Wishlist Add to bag JANAN SPORT - GIFT SET Sale price PKR.9,500",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      },
+      {
+        "idx": 66,
+        "label": "JANAN VANILLA",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|-\n15\n%",
+          "txt": "- 15 % Add to Wishlist Add to bag JANAN VANILLA Regular price PKR.7,300 Sale price PKR.6,205",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      },
+      {
+        "idx": 68,
+        "label": "JANAN VANILLA - 30ML",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|-\n15\n%",
+          "txt": "- 15 % Add to Wishlist Add to bag JANAN VANILLA - 30ML Regular price PKR.2,800 Sale price PKR.2,380",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      },
+      {
+        "idx": 70,
+        "label": "JANAN OUD - 30ML",
+        "dead_by": "",
+        "own_class": "hdt-card-product__title hdt-text-sm hdt-font-normal hdt-line-clamp",
+        "aria": null,
+        "card": {
+          "depth": 3,
+          "tag": "hdt-card-product",
+          "cls": "hdt-card-product hdt-pr-style8",
+          "badge": "hdt-badge__wrapp hdt-pe-none js-intent|-\n15\n%",
+          "txt": "- 15 % Add to Wishlist Add to bag JANAN OUD - 30ML Regular price PKR.2,800 Sale price PKR.2,380",
+          "cls_dead": false,
+          "txt_dead": false,
+          "buy_disabled": false
+        }
+      }
+    ],
+    "stock_summary": {
+      "tied_probed": 20,
+      "dead": 6,
+      "by_signal": [
+        "card.class"
+      ]
+    }
+  }
+]

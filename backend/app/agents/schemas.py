@@ -307,6 +307,20 @@ class AgentPlan(BaseModel):
     # ask parks the plan, so a counter that did not survive would restart at zero
     # on every resume and never terminate.
     target_choices: int = 0
+    # THE BROWSE STOPPED WITH NO SAFE NEXT ACTION and asked what to do
+    # (2026-08-09). `pending_stuck` is the page it stopped on, held while the
+    # question is open; `stuck_advice` is the user's free-text answer, replayed
+    # onto every browse step by _inject_stuck_advice — the _inject_target_choices
+    # rule, and needed for the same reason: a revise round re-drafts pending
+    # steps from a goal that says nothing about what went wrong, so an excluded
+    # field would silently drop the one thing that could unblock the run.
+    # `browse_stucks` is its own small budget on top of browse_handoffs: asking a
+    # second time after the user has already steered means their instruction did
+    # not help, and asking again is chaining questions off a question. All
+    # SERIALIZED — the ask PARKS the plan — and defaulted for old payloads.
+    pending_stuck: Optional[str] = None
+    stuck_advice: str = ""
+    browse_stucks: int = 0
     # STRUCTURAL browse hand-offs made so far (missing form value / optional
     # sign-in offer / off-site origin approval) — counted SEPARATELY from
     # questions_asked because a real application legitimately needs many, and the

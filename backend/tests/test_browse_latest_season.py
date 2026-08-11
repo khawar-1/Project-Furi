@@ -276,11 +276,20 @@ def test_the_media_handoff_reads_the_user_not_the_paraphrase():
 
 
 # ------------------------------------------------- the planner-side injector
-def test_user_words_are_stamped_on_browse_and_never_on_browse_commit():
-    """⚠️ SCOPING IS A SAFETY PROPERTY, not tidiness. `browse` is READ, so a new
-    parameter costs nothing; `browse_commit` is DESTRUCTIVE and its signature() is
-    built from `parameters`, so stamping one there would invalidate an approval
-    the user had already granted."""
+def test_user_words_reach_a_commit_step_that_is_still_in_discovery():
+    """⚠️ THIS TEST PINNED THE DEFECT UNTIL 2026-08-09, and its own docstring was
+    the argument against it. It read "SCOPING IS A SAFETY PROPERTY… browse_commit
+    is DESTRUCTIVE and its signature() is built from parameters, so stamping one
+    there would invalidate an approval the user had already granted" — while
+    constructing a commit step with NO contract, i.e. one where nothing has been
+    discovered, shown or approved. There was no approval to invalidate.
+
+    The real predicate is the one _inject_user_words' three siblings already
+    used: is this step APPROVAL-BOUND (does it carry a contract)? — never "is
+    this tool destructive?". Getting it wrong cost the whole feature: the two
+    2026-08-08 consumers of these words are commit-mode ONLY, so they scored the
+    planner's paraphrase and the live question read "janan perfume BY SUBMITTING
+    form"."""
     from app.agents.planner import _inject_user_words
     from app.agents.schemas import AgentPlan, PlanStep
     from app.core.base_tool import PermissionLevel
@@ -300,12 +309,43 @@ def test_user_words_are_stamped_on_browse_and_never_on_browse_commit():
             ),
         ],
     )
-    before = plan.steps[1].signature()
     _inject_user_words(plan)
 
     assert plan.steps[0].parameters["user_words"] == USER_WORDS
-    assert "user_words" not in plan.steps[1].parameters
-    assert plan.steps[1].signature() == before  # the approval still binds
+    assert plan.steps[1].parameters["user_words"] == USER_WORDS
+
+
+def test_user_words_are_never_stamped_on_an_approval_bound_step():
+    """THE SAFETY PROPERTY, pinned where it actually lives. Once a commit step
+    carries a discovered contract it is what the user said yes to, so its
+    signature must not move — the _inject_target_choices rule, verbatim. This is
+    also what makes the change safe for a plan parked BEFORE it shipped: that
+    plan's commit step already has its contract, so it is left alone and its
+    granted approval still binds."""
+    from app.agents.planner import _inject_user_words
+    from app.agents.schemas import AgentPlan, PlanStep
+    from app.browser.state import COMMIT_PARAM
+    from app.core.base_tool import PermissionLevel
+
+    plan = AgentPlan(
+        goal=USER_WORDS,
+        steps=[
+            PlanStep(
+                description="commit", tool="browse_commit",
+                parameters={
+                    "goal": "submit it",
+                    "start_url": "https://x.test",
+                    COMMIT_PARAM: {"url": "https://x.test/cart/add", "method": "POST"},
+                },
+                permission_level=PermissionLevel.DESTRUCTIVE, requires_approval=True,
+            ),
+        ],
+    )
+    before = plan.steps[0].signature()
+    _inject_user_words(plan)
+
+    assert "user_words" not in plan.steps[0].parameters
+    assert plan.steps[0].signature() == before  # the approval still binds
 
 
 def test_injection_is_a_no_op_without_a_goal():

@@ -263,19 +263,28 @@ def test_the_second_ask_is_suppressed_on_the_chosen_products_own_page():
     target = choice.target_tokens(_STEP_GOAL, _PDP_URL, extra=["JANAN SPORT - 30ML"])
     subject = choice.page_subject(_PDP_TITLE, _PDP_URL)
 
-    assert [choice._score(target, t) for t in _RAIL] == [3, 3, 3]  # a real tie
-    assert choice._score(target, subject) == 5  # and the page outranks it
+    # [3,3,3] vs 5 when written; [2,2,2] vs 3 since the 2026-08-10 coverage
+    # scoring dropped the joined-pair bonus. The RELATION is the assertion.
+    assert [choice._score(target, t) for t in _RAIL] == [2, 2, 2]  # a real tie
+    assert choice._score(target, subject) == 3  # and the page outranks it
     assert _subject_beats(target, _PDP_TITLE, _PDP_URL, _RAIL) is True
 
 
 def test_a_results_page_never_claims_to_be_the_thing_it_lists():
-    """⚠️ THE LOAD-BEARING HALF, and why the comparison is STRICT. A listing
-    page's title echoes the query, so it ties with the products it lists: 1 vs 1.
-    With `>=` this suppresses the one question that MUST be asked."""
+    """⚠️ THE LOAD-BEARING HALF. A listing page's title echoes the query, so it
+    used to TIE with the products it lists (1 vs 1) and was saved only by the
+    comparison being STRICT — which held for this ONE-WORD query and, MEASURED
+    on 2026-08-10, failed for every multi-word one (a title echoing all three
+    words scored 5 against a best product of 2, and suppressed the question).
+
+    Since then `page_subject` drops the request's own words wherever they
+    appear, so the subject collapses to '1000 found' and scores 0: the page
+    cannot claim to be what it lists, whatever the strictness. Both halves are
+    asserted — the strict comparison is still what protects a one-word tie."""
     target = choice.target_tokens(_STEP_GOAL, _SITE)
     subject = choice.page_subject(_SEARCH_TITLE, _SITE)
 
-    assert choice._score(target, subject) == 1
+    assert choice._score(target, subject) == 0
     assert choice._score(target, "JANAN SPORT - 200ml") == 1
     assert _subject_beats(target, _SEARCH_TITLE, _SITE, _RAIL) is False
 

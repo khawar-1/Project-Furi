@@ -1,0 +1,186 @@
+{
+  "when": "2026-08-09_12-02-46",
+  "passed": 4,
+  "scored": 5,
+  "blocked": 1,
+  "total": 6,
+  "tasks": [
+    {
+      "id": "daraz-compare",
+      "passed": true,
+      "seconds": 36.7,
+      "actions": 2,
+      "records": 40,
+      "url": "https://www.daraz.pk/catalog/?spm=a2a0e.tm80335142.search.d_go&q=Yonex%20badminton%20rackets",
+      "tool_success": true,
+      "error": "",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": true,
+          "detail": "40 records (needed 3)"
+        },
+        {
+          "kind": "field_present",
+          "passed": true,
+          "detail": "40/40 records carry 'price'"
+        },
+        {
+          "kind": "price_grounded",
+          "passed": true,
+          "detail": "40/40 prices grounded"
+        }
+      ],
+      "sample": [
+        {
+          "name": "YONEX Nanoray 10F Hi-Flex Pre-Strung Badminton Racquet Badminton Rackets in Premium Quality with 1 Shuttle and carrying bag (Single)",
+          "price": "Rs. 1,747"
+        },
+        {
+          "name": "Yonex,Star Badminton Racket for kids ( Pair )",
+          "price": "Rs. 1,021"
+        },
+        {
+          "name": "Yonex Badminton Racket with joint 1 Pair With Bag",
+          "price": "Rs. 1,299"
+        }
+      ]
+    },
+    {
+      "id": "books-toscrape-extract",
+      "passed": true,
+      "seconds": 47.0,
+      "actions": 1,
+      "records": 20,
+      "url": "https://books.toscrape.com/",
+      "tool_success": false,
+      "error": "couldn't work out a safe next action on this page",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": true,
+          "detail": "20 records (needed 10)"
+        },
+        {
+          "kind": "field_present",
+          "passed": true,
+          "detail": "20/20 records carry 'price'"
+        },
+        {
+          "kind": "price_grounded",
+          "passed": true,
+          "detail": "20/20 prices grounded"
+        }
+      ],
+      "sample": [
+        {
+          "name": "A Light in the ...",
+          "price": "£51.77"
+        },
+        {
+          "name": "Tipping the Velvet",
+          "price": "£53.74"
+        },
+        {
+          "name": "Add to basket",
+          "price": "£50.10"
+        }
+      ]
+    },
+    {
+      "id": "books-toscrape-navigate",
+      "passed": true,
+      "seconds": 10.0,
+      "actions": 2,
+      "records": 11,
+      "url": "https://books.toscrape.com/catalogue/category/books/travel_2/index.html",
+      "tool_success": true,
+      "error": "",
+      "checks": [
+        {
+          "kind": "url_contains",
+          "passed": true,
+          "detail": "final url 'https://books.toscrape.com/catalogue/category/books/travel_2/index.html'"
+        },
+        {
+          "kind": "records_at_least",
+          "passed": true,
+          "detail": "11 records (needed 2)"
+        }
+      ],
+      "sample": [
+        {
+          "name": "It's Only the Himalayas",
+          "price": "£45.17"
+        },
+        {
+          "name": "Full Moon over Noah’s ...",
+          "price": "£49.43"
+        },
+        {
+          "name": "See America: A Celebration ...",
+          "price": "£48.87"
+        }
+      ]
+    },
+    {
+      "id": "quotes-pagination",
+      "passed": false,
+      "seconds": 151.8,
+      "actions": 5,
+      "records": 10,
+      "url": "https://quotes.toscrape.com/page/1/",
+      "tool_success": false,
+      "error": "couldn't work out a safe next action on this page",
+      "checks": [
+        {
+          "kind": "records_at_least",
+          "passed": false,
+          "detail": "10 records (needed 12)"
+        }
+      ],
+      "sample": [
+        {
+          "quote": "“This life is what you make it. No matter what, you're going to mess up sometimes, it's a universal truth. But the good part is you get to decide how you're going to mess it up. Girls will be your friends - they'll act like it anyway. But just remember, some come, some go. The ones that stay with you through everything - they're your true best friends. Don't let go of them. Also remember, sisters make the best friends in the world. As for lovers, well, they'll come and go too. And baby, I hate to say it, most of them - actually pretty much all of them are going to break your heart, but you can't give up because if you give up, you'll never find your soulmate. You'll never find that half who makes you whole and that goes for everything. Just because you fail once, doesn't mean you're gonna fail at everything. Keep trying, hold on, and always, always, always believe in yourself, because if you don't, then who will, sweetie? So keep your head high, keep your chin up, and most importantly, keep smiling, because life's a beautiful thing and there's so much to smile about.”",
+          "author": "[{\"name\": \"Marilyn Monroe\"}]"
+        },
+        {
+          "quote": "“It takes a great deal of bravery to stand up to our enemies, but just as much to stand up to our friends.”",
+          "author": "[{\"name\": \"J.K. Rowling\"}]"
+        },
+        {
+          "quote": "“If you can't explain it to a six year old, you don't understand it yourself.”",
+          "author": "[{\"name\": \"Albert Einstein\"}]"
+        }
+      ]
+    },
+    {
+      "id": "ebay-search",
+      "passed": null,
+      "blocked": "a CAPTCHA / verification wall (never auto-solved)",
+      "seconds": 27.8,
+      "actions": null,
+      "records": 0,
+      "url": null,
+      "error": ""
+    },
+    {
+      "id": "wikipedia-read",
+      "passed": true,
+      "seconds": 17.6,
+      "actions": 2,
+      "records": 0,
+      "url": "https://en.wikipedia.org/wiki/Eiffel_Tower",
+      "tool_success": true,
+      "error": "",
+      "checks": [
+        {
+          "kind": "text_contains_any",
+          "passed": true,
+          "detail": "found '1889'"
+        }
+      ],
+      "sample": []
+    }
+  ]
+}

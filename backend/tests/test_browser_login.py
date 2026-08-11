@@ -423,22 +423,33 @@ async def test_a_failed_hand_over_falls_back_to_the_clean_window(monkeypatch):
     assert "I've opened the page" in result.error
 
 
-async def test_browse_tool_opens_the_sign_in_window_and_signals_login(monkeypatch):
-    """The BrowseTool closes its agent session, opens a USER-DRIVEN sign-in
-    window (handling no credential itself), and returns a STRUCTURED login
-    result the planner can pause on."""
+def _login_tool_harness(monkeypatch, *, release_ok: bool = True):
+    """The BrowseTool driven to a genuine sign-in wall, with every window
+    operation recorded. The twin of _captcha_tool_harness, and for the same
+    reason: the fake models whether the session was CLOSED and whether it was
+    RELEASED, because a fake that could not tell those apart would pass whichever
+    way the code went."""
     opened: list[str] = []
     created: list = []
 
     class FakeBrowseSession:
         def __init__(self):
             self.closed = False
+            self.released = False
+            self.tab_reused = False
 
         async def goto(self, url):
             pass
 
+        async def release_to_user(self):
+            self.released = release_ok
+            return release_ok
+
         async def close(self):
             self.closed = True
+
+        async def release_after_run(self):
+            pass
 
     async def fake_session_open(allowlist):
         s = FakeBrowseSession()
@@ -460,6 +471,9 @@ async def test_browse_tool_opens_the_sign_in_window_and_signals_login(monkeypatc
     async def fake_close_login():
         return False
 
+    async def fake_close_result():
+        return False
+
     async def fake_run_browser(coro, *, timeout=None):
         return await coro  # run the coroutine on this loop — the fakes are loop-agnostic
 
@@ -473,23 +487,84 @@ async def test_browse_tool_opens_the_sign_in_window_and_signals_login(monkeypatc
     monkeypatch.setattr(browser_loop, "run_browse", fake_run_browse)
     monkeypatch.setattr(browser_session, "open_login_window", fake_open_login)
     monkeypatch.setattr(browser_session, "close_login_window", fake_close_login)
+    monkeypatch.setattr(browser_session, "close_result_window", fake_close_result)
     monkeypatch.setattr(browser_runtime, "run_browser", fake_run_browser)
     monkeypatch.setattr("app.providers.factory.build_provider", lambda: FakeProv())
 
     from app.tools.browser_agent_tools import BrowseTool
 
-    result = await BrowseTool().execute(
-        goal="play jane on youtube",
-        start_url="https://youtube.com",
-        allowed_origins=["youtube.com"],
-        keep_open=True,
-    )
+    async def run():
+        return await BrowseTool().execute(
+            goal="play jane on youtube",
+            start_url="https://youtube.com",
+            allowed_origins=["youtube.com"],
+            keep_open=True,
+        )
+
+    return opened, created, run
+
+
+async def test_a_sign_in_wall_hands_over_the_tab_instead_of_closing_the_browser(
+    monkeypatch,
+):
+    """THE 2026-08-08 INCIDENT, frozen — and it is the 2026-08-03 CAPTCHA fix in
+    the branch that round did not reach.
+
+    Live: a false wall on anikoto closed EVERY tab (open_login_window's first act
+    is _window.close_all()) and reopened a normal window on the wrong episode,
+    which the user reasonably read as "it played episode 1 when I asked for 4".
+
+    A wall is on a page already on screen, so it is handed to the user there:
+    nothing closed, no separate window opened, and the pause text says where to
+    look rather than claiming a window was opened."""
+    opened, created, run = _login_tool_harness(monkeypatch)
+
+    result = await run()
 
     assert result.success is False
     assert result.output["login_required"] is True
     assert result.output["login_site"] == "accounts.google.com"
-    assert opened == ["https://accounts.google.com/"]       # sign-in window opened
-    assert created and created[0].closed is True            # agent session freed
+    # The incident, in three assertions.
+    assert opened == []                              # no separate window
+    assert created and created[0].closed is False    # the tab is still there
+    assert created[0].released is True               # and it is the user's now
+    assert result.output["login_in_place"] is True
+    assert result.output["window_open"] is True
+    # The user is told where the sign-in page actually is.
+    assert "already on your screen" in result.error
+    assert "I've opened a sign-in window" not in result.error
+
+
+async def test_a_site_that_walls_again_escalates_to_the_clean_window(monkeypatch):
+    """The clean window is not deleted, it is EARNED — the challenge branch's
+    rule, and it is true of a wall for the same reason: a site that fingerprints
+    the automated browser can re-issue the wall however often a human signs in."""
+    opened, created, run = _login_tool_harness(monkeypatch)
+
+    first = await run()
+    assert first.output["login_in_place"] is True
+    assert opened == []
+
+    second = await run()
+
+    assert second.output["login_in_place"] is False
+    assert opened == ["https://accounts.google.com/"]  # user-driven window at the wall
+    assert created[-1].closed is True                  # agent session freed for the profile
+    assert "I've opened a sign-in window" in second.error
+
+
+async def test_a_failed_login_hand_over_falls_back_to_the_clean_window(monkeypatch):
+    """release_to_user() returning False must not strand the user with a sign-in
+    page nobody can reach: the old destructive path is still the fallback,
+    because a window that costs tabs beats no window at all."""
+    opened, created, run = _login_tool_harness(monkeypatch, release_ok=False)
+
+    result = await run()
+
+    assert result.output["login_in_place"] is False
+    assert opened == ["https://accounts.google.com/"]
+    assert created[-1].closed is True
+    assert "I've opened a sign-in window" in result.error
 
 
 async def test_the_pause_text_points_at_the_tab_it_was_handed_over_on(monkeypatch):
@@ -525,3 +600,90 @@ async def test_the_pause_text_points_at_the_tab_it_was_handed_over_on(monkeypatc
         }
     )
     assert "I've opened the page" in escalated.text
+
+
+async def test_the_login_pause_text_points_at_the_tab_it_was_handed_over_on():
+    """The login twin of the rule above (2026-08-08). Since the wall is now
+    handed over IN PLACE, the sign-in page is normally on a tab the user is
+    already looking at — and in the live incident, saying "I've opened a sign-in
+    window" about it made the (wrong) episode that tab was showing read as
+    Jarvis's answer rather than as the page it had stopped on."""
+    from app.agents.planner import _login_wall_question
+
+    in_place = _login_wall_question(
+        {
+            "login_site": "anikoto.cz",
+            "login_window_opened": True,
+            "login_in_place": True,
+            "wall_kind": "login",
+        }
+    )
+    assert "already on your screen" in in_place.text
+    assert "i've opened a sign-in window" not in in_place.text.lower()
+    # The guest path is always offered — many sites work without an account.
+    assert "Continue without signing in" in in_place.options
+
+    # The escalated hand-off still says a window was opened, because one was.
+    escalated = _login_wall_question(
+        {
+            "login_site": "anikoto.cz",
+            "login_window_opened": True,
+            "login_in_place": False,
+            "wall_kind": "login",
+        }
+    )
+    assert "i've opened a sign-in window" in escalated.text.lower()
+
+    # A sign-up wall says sign-up, in place or not.
+    signup = _login_wall_question(
+        {
+            "login_site": "shop.test",
+            "login_window_opened": True,
+            "login_in_place": False,
+            "wall_kind": "signup",
+        }
+    )
+    assert "i've opened a sign-up window" in signup.text.lower()
+
+
+def test_the_in_place_flag_survives_the_handoff_payload():
+    """⚠️ THE PLUMBING THAT WAS MISSING. _challenge_wall_question has read
+    `challenge_in_place` since 2026-08-03 and NOTHING ever passed it, so the
+    pause text claimed a window had been opened even on the in-place path — the
+    exact defect that round fixed one layer down. One field on HandoffPayload now
+    carries it for every kind, so neither can drift again."""
+    from app.browser import state as browse_state
+
+    login = browse_state.handoff_from_flags(
+        {
+            "login_required": True,
+            "login_site": "anikoto.cz",
+            "login_url": "https://anikoto.cz/watch/x/ep-1",
+            "login_in_place": True,
+            "wall_kind": "login",
+        }
+    )
+    assert login is not None
+    assert login.reason is browse_state.Handoff.LOGIN
+    assert login.in_place is True
+
+    challenge = browse_state.handoff_from_flags(
+        {
+            "challenge_required": True,
+            "challenge_site": "www.ebay.com",
+            "challenge_kind": "CAPTCHA",
+            "challenge_in_place": True,
+        }
+    )
+    assert challenge is not None and challenge.in_place is True
+
+    # And it survives a park/restore round trip, since the ask parks the plan.
+    restored = browse_state.HandoffPayload.from_dict(login.to_dict())
+    assert restored is not None and restored.in_place is True
+
+    # A payload parked BEFORE this field existed still deserializes, defaulting
+    # to "a window was opened" — the behaviour that predates the flag.
+    old = dict(login.to_dict())
+    old.pop("in_place")
+    legacy = browse_state.HandoffPayload.from_dict(old)
+    assert legacy is not None and legacy.in_place is False

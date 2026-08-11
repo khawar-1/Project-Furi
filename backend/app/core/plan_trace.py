@@ -142,6 +142,7 @@ GUARD_BROWSE_ORIGIN = "browse_origin"
 GUARD_UPLOAD_PATH = "upload_path"
 GUARD_FILL = "fill"
 GUARD_BROWSE_DOWNGRADE = "browse_downgrade"
+GUARD_BROWSE_SUBSTITUTION = "browse_substitution"
 GUARD_COMPLETED_DUPLICATE = "completed_duplicate"
 
 

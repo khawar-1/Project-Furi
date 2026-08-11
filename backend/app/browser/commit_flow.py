@@ -146,6 +146,126 @@ def _page_moved(before_url: str, after_url: str) -> bool:
     return before_url.split("#", 1)[0].rstrip("/") != after_url.split("#", 1)[0].rstrip("/")
 
 
+# DID THE CART ACTUALLY CHANGE? (2026-08-10)
+#
+# "submitted" means the interceptor OBSERVED the approved request leave. That is
+# a strong fact about the REQUEST and says nothing about the OUTCOME: a
+# storefront can accept an add and drop it (a variant that went out of stock
+# between the read and the submit, a session cookie it did not like), and on an
+# AJAX add the page does not move, so the response diff has nothing to show
+# either. That failure is invisible today, and "I added it" would be a claim we
+# cannot support — the exact overclaim this codebase keeps unpicking.
+#
+# The comparator is the page's OWN cart indicator, read before and after. It
+# costs nothing (no navigation) and it is the site's own count, not ours. When
+# the page carries no count, `_read_cart_page` follows the page's own cart LINK
+# and reads it — a GET, with the one-shot permit already spent and interception
+# re-armed, and we come back to where we were.
+_CART_MARKER_JS = """
+() => {
+  const out = {count: null, href: '', label: ''};
+  const CART_TEXT = /\\b(cart|bag|basket|trolley)\\b/i;
+  const CART_PATH = /\\/(cart|basket|bag|checkout\\/cart)(\\/|$|\\?)/;
+  const seen = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    let u = null;
+    try { u = new URL(a.getAttribute('href'), location.href); } catch (e) { continue; }
+    const txt = String(a.innerText || a.getAttribute('aria-label') || '').trim();
+    // The PATH is the reliable signal; the text is the fallback, because a link
+    // reading "BAG 1" may be an icon whose href is the cart.
+    const byPath = CART_PATH.test(u.pathname.toLowerCase());
+    if (!byPath && !CART_TEXT.test(txt)) continue;
+    seen.push({href: u.href, txt: txt, byPath: byPath});
+  }
+  const best = seen.find((s) => s.byPath) || seen[0];
+  if (!best) return out;
+  out.href = best.href;
+  out.label = best.txt.slice(0, 60);
+  // A count, wherever one of the cart links carries it.
+  for (const s of seen) {
+    const m = String(s.txt).match(/(\\d+)/);
+    if (m) { out.count = parseInt(m[1], 10); break; }
+  }
+  return out;
+}
+"""
+
+# What a cart page is allowed to contribute to the report.
+_CART_PROSE_MAX_CHARS = 600
+
+
+async def _read_cart_marker(session: Any) -> dict:
+    """The page's own cart link and item count, or empty. Never raises."""
+    try:
+        raw = await session.page.evaluate(_CART_MARKER_JS)
+    except Exception as exc:  # noqa: BLE001 — verification never breaks a submit
+        logger.debug(f"cart marker: {type(exc).__name__}: {exc}")
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+async def _read_cart_page(session: Any, href: str, back_to: str) -> str:
+    """Follow the page's OWN cart link, read it, and come back.
+
+    A GET on a URL the page itself published — never a guessed `/cart`. Used
+    only when the cheap comparator (the count) could not answer, so a storefront
+    that shows a count pays nothing for this."""
+    if not href:
+        return ""
+    from app.core import dom_observe  # local, the module's own idiom
+
+    try:
+        await session.goto(href)
+        await session.settle()
+        observation = await dom_observe.observe(session.page)
+        prose = _observed_prose(observation)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"cart read: {type(exc).__name__}: {exc}")
+        return ""
+    finally:
+        # Put the window back where the user left it, whatever happened.
+        if back_to:
+            try:
+                await session.goto(back_to)
+                await session.settle()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"cart return: {type(exc).__name__}: {exc}")
+    return prose[:_CART_PROSE_MAX_CHARS]
+
+
+async def _verify_cart(
+    session: Any, before: dict, back_to: str
+) -> dict:
+    """Did the approved add really land? Returns the facts, never a verdict the
+    evidence does not support:
+
+        cart_verified True   the site's own count went UP
+        cart_verified False  the count is available and did NOT move
+        cart_verified None   no count to compare — `cart_text` carries what the
+                             cart page itself says, when one could be read
+
+    Wholly best-effort: a submission that fired is still a submission that
+    fired, and a verification that cannot run must never turn it into a failure.
+    """
+    facts: dict = {"cart_verified": None, "cart_before": None, "cart_after": None,
+                   "cart_text": ""}
+    after = await _read_cart_marker(session)
+    if not after:
+        return facts
+    before_count = before.get("count") if isinstance(before, dict) else None
+    after_count = after.get("count")
+    facts["cart_before"] = before_count
+    facts["cart_after"] = after_count
+    if isinstance(before_count, int) and isinstance(after_count, int):
+        facts["cart_verified"] = after_count > before_count
+        if facts["cart_verified"]:
+            return facts   # confirmed by the site's own number — read nothing more
+    facts["cart_text"] = await _read_cart_page(
+        session, str(after.get("href") or ""), back_to
+    )
+    return facts
+
+
 def _response_prose(before: str, after: str, *, page_changed: bool) -> str:
     """The prose the SUBMISSION PRODUCED — never the page it was submitted from.
 
@@ -327,6 +447,13 @@ class CommitDiscovery:
     choice_target: str = ""
     choice_field: str = ""
     choice_options: list = field(default_factory=list)
+    # The size of the WHOLE tie, when it is longer than the question shows.
+    choice_total: int = 0
+    # Every offered item is sold out (2026-08-09) — the question says so.
+    choice_unbuyable: bool = False
+    # No safe next action here (2026-08-09) — ask the user rather than die.
+    stuck_required: bool = False
+    stuck_page: str = ""
 
 
 async def _load_vision_config():
@@ -359,6 +486,12 @@ _DISCOVERY_HOLD_REASONS = {
     # asked about the very page in front of them, and the answer only unblocks
     # the next click. Nothing to navigate to, so the re-attach stays put.
     Handoff.TARGET_CHOICE: "choice",
+    # "I can't work out a safe next move HERE" is a question about the page the
+    # user is looking at, so the window has to survive it — that window closing
+    # is literally the reported defect (backend.log 14:24:11: stopping → session
+    # summary → "last tab closed"). Like a fill, the answer unblocks the next
+    # action on this page, so the re-attach stays put and navigates nowhere.
+    Handoff.STUCK: "stuck",
 }
 
 
@@ -485,10 +618,21 @@ def _discovery_from_handoff(
             choice_target=payload.choice_target,
             choice_field=payload.choice_field,
             choice_options=list(payload.choice_options),
+            choice_total=int(payload.choice_total or 0),
+            choice_unbuyable=bool(payload.choice_unbuyable),
             error=(
                 outcome_error
                 or f"several things {where} match — needs you to choose one"
             ),
+        )
+    if reason is Handoff.STUCK:
+        return CommitDiscovery(
+            stuck_required=True,
+            stuck_page=payload.site or "",
+            # The loop's own words for what it could not do, verbatim — the
+            # 2026-07-26 "failure is self-diagnosing" rule: a pause that cannot
+            # say what stopped it sends the reader to the wrong layer.
+            error=outcome_error or "couldn't work out a safe next action on this page",
         )
     return CommitDiscovery(error=outcome_error or "unexpected browse hand-off")
 
@@ -647,6 +791,15 @@ async def discover(
             outcome = await browser_loop.run_browse(
                 session, goal, provider, commit=True,
                 stop_check=stop_check,
+                # THE USER'S OWN REQUEST (2026-08-09), stamped by
+                # planner._inject_user_words. `goal` stays the planner's
+                # instruction for the page; `intent_text` is what the loop's
+                # DETERMINISTIC paths read — the search term to type and the
+                # words the tie/axis gates score page items against. Without it
+                # both gates scored the paraphrase: the live question read
+                # "janan perfume BY SUBMITTING form" and no term could be
+                # extracted at all, so the journey never searched.
+                intent_text=str(params.get("user_words") or "").strip(),
                 upload_path=str(params.get("upload_path") or "").strip() or None,
                 profile=profile,
                 fill_grounding=fill_grounding,
@@ -659,6 +812,8 @@ async def discover(
                 # them in CODE, never by re-asking the model (browser/choice.py).
                 chosen_target=str(params.get("chosen_target") or "").strip(),
                 chosen_option=str(params.get("chosen_option") or "").strip(),
+                # What the user said to do when a previous run stopped stuck.
+                stuck_advice=str(params.get("stuck_advice") or "").strip(),
             )
 
             # Every non-commit stop is a HAND-OFF: derive its payload once and
@@ -775,6 +930,7 @@ async def perform(
     fill_grounding: str = "",
     fields: Optional[dict] = None,
     vision_config: Any = None,
+    intent_text: str = "",
 ) -> dict:
     """SUBMIT phase — the one approved mutation. Takes the held session,
     re-verifies the form is UNCHANGED from what was approved (fail closed), arms
@@ -806,6 +962,7 @@ async def perform(
     returned so the completion text is GROUNDED in what the server actually said,
     not the goal."""
     from app.agents import interruption
+    from app.agents import browser_loop
     from app.core import browser_runtime, browser_session, dom_observe
 
     budget = max(1, int(max_commits or 1))
@@ -856,6 +1013,15 @@ async def perform(
                 str(approved.get("method") or "POST"),
                 str(approved.get("url") or ""),
             )
+            # The site's own cart count BEFORE the submit — the comparator for
+            # "did it really land?". Read here so it is the state the approved
+            # request is about to change. Best-effort; a page without one simply
+            # leaves the verification to the cart page itself.
+            cart_before = (
+                await _read_cart_marker(session)
+                if browser_loop.wants_cart(intent_text or goal)
+                else {}
+            )
             form_found = await session.submit_commit()
             # WAIT FOR THE REQUEST, NOT FOR THE PAINT (2026-07-26). This used to
             # be settle() alone — a DOM-quiet detector that returns in ~250ms on
@@ -892,6 +1058,20 @@ async def perform(
                     session.commits_done = 1
             commits_done = int(getattr(session, "commits_done", 0) or 0)
 
+            # DID IT ACTUALLY LAND? Only worth asking when something fired and
+            # the user asked for a cart — see _verify_cart for why "submitted"
+            # alone is a fact about the REQUEST and not about the outcome.
+            cart_facts: dict = {}
+            if fired and browser_loop.wants_cart(intent_text or goal):
+                cart_facts = await _verify_cart(
+                    session, cart_before, str(summary.get("url") or before_url)
+                )
+                logger.info(
+                    "browse-commit: cart check — "
+                    f"verified={cart_facts.get('cart_verified')} "
+                    f"{cart_facts.get('cart_before')}→{cart_facts.get('cart_after')}"
+                )
+
             result = {
                 "submitted": fired,
                 "submitted_url": _submitted_url(session),
@@ -917,6 +1097,7 @@ async def perform(
                 # must end the plan, never go round the replan loop and submit a
                 # second time.
                 "fired_unconfirmed": (not fired) and _fired_unconfirmed(form_found),
+                **cart_facts,
             }
 
             # MULTI-COMMIT (15.1): budget remaining → resume the SAME session
@@ -928,6 +1109,7 @@ async def perform(
                     vision_config,
                     stop_check=stop_check,
                     auth_resolved=set(getattr(session, "auth_resolved", None) or set()),
+                    intent_text=intent_text,
                 )
                 payload = (
                     handoff_from_outcome(outcome) if outcome is not None else None
@@ -1023,6 +1205,7 @@ async def _resume_for_next_form(
     vision_config: Any = None,
     stop_check: Optional[Any] = None,
     auth_resolved: Optional[set] = None,
+    intent_text: str = "",
 ) -> Optional[Any]:
     """Drive the SAME (now read-only again) session onward toward the next form
     for the goal. Returns the full BrowseOutcome — a reached form
@@ -1044,6 +1227,10 @@ async def _resume_for_next_form(
         return await browser_loop.run_browse(
             session, goal, provider, commit=True,
             stop_check=stop_check,
+            # The multi-commit journey to form N+1 is the same READ navigation as
+            # the journey to form 1, so it reads the user's words for the same
+            # reasons — see the discover() call site.
+            intent_text=intent_text,
             upload_path=(str(upload_path).strip() or None) if upload_path else None,
             profile=profile,
             fill_grounding=fill_grounding,

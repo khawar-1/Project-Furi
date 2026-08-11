@@ -201,6 +201,34 @@ READY_STALL_POLLS = 4        # settled this long ⇒ done even if still thin
 # equality would read that jitter as growth and poll to the deadline every time.
 READY_GROWTH_TOLERANCE = 1.02
 READY_GROWTH_FLOOR = 2
+# SUBSTANTIVE BUT NEVER STILL (2026-08-08) — the answer to the question the
+# 2026-08-07 round instrumented instead of guessing. It recorded what a page
+# looked like when the budget ran out precisely so this could be decided on a
+# number, and the number arrived:
+#
+#     readiness gave up after 15000ms (nodes= 817 acts=234 complete=False still=0)
+#     readiness gave up after 15000ms (nodes=1003 acts=170 complete=False still=0)
+#     readiness gave up after 15000ms (nodes=1271 acts=215 complete=False still=0)
+#     readiness gave up after 15000ms (nodes=1003 acts=170 complete=False still=0)
+#
+# `acts` in the low hundreds says the page was richly actionable on the FIRST
+# poll; `still=0` says anikoto's DOM never stops growing (a video player, ad
+# slots and lazy carousels mutate forever). Every exit above requires
+# `settled >= 4`, so there was no leg for this shape at all and the loop paid the
+# full 15s four times — ready_wait=117.9s of a 325s run. Raising READY_POLL_MS
+# would buy exactly nothing, which is what that round said to check first.
+#
+# ⚠️ THE TIME BOUND IS THE REAL GUARD, NOT THE ACT FLOOR, and the daraz
+# measurement above is why. At 3.82s daraz already had acts=322 — far past any
+# sane floor — while the products it was loading did not arrive until 5.79s and
+# it did not go still until 6.36s. A floor alone would therefore fire on daraz at
+# ~4s and re-introduce the exact "observed the wrong page" defect
+# READY_STABLE_POLLS exists to prevent. So the busy exit waits LONGER than the
+# slowest page ever measured to settle, and the floor is the second guard: a page
+# that is both never-still and thin keeps its full budget, because a shell that
+# has not filled in yet is still worth waiting for.
+READY_BUSY_MS = 8_000    # > daraz's measured 6.36s settle, so it never fires first
+READY_BUSY_ACTS = 120    # >> daraz's 54 at its false-ready moment; << anikoto's 170
 # The navigation-timeout types goto() retries on. Playwright's TimeoutError is
 # resolved ONCE here, guarded so a base install without Playwright never fails at
 # import (the lazy-dependency rule) — a missing Playwright yields the builtin
@@ -921,7 +949,72 @@ _FORM_CONTRACT_JS_BODY = """
     if (label && label !== v) entry.label = label;
     fields.push(entry);
   }
-  return { action: String(action), method: method, fields: fields, has_password: hasPassword };
+  // THE CHOICES THIS FORM OFFERS (2026-08-08). `fields` above is what a submit
+  // WOULD SEND; this is what the form lets you choose between. They are
+  // different questions, and `axes` lives in its own key precisely so it CANNOT
+  // move the approval fingerprint — _commit_fingerprint reads fields + uploads
+  // and nothing else, so this is fingerprint-invariant by construction.
+  //
+  // ⚠️ BOTH HALVES BELOW ARE MEASURED, and neither is guessable:
+  //   * the variant radios are form-ASSOCIATED, not form-DESCENDANTS — this
+  //     theme puts them OUTSIDE the <form> and links them with `form=`, so
+  //     form.querySelectorAll returns 0 for a radio form.elements just yielded.
+  //     They are found through the document and filtered by `.form === form`.
+  //   * "you cannot buy this one" is signalled TWO DIFFERENT WAYS ON ONE PAGE:
+  //     the main product marks only the LABEL (`is-disabled`) and leaves the
+  //     input enabled, while the related-product cards mark the INPUT
+  //     (`disabled`). Reading either signal alone offers the user sizes that
+  //     cannot be added to the cart.
+  // A control whose markup carries NO stock signal reads as available, so a
+  // theme this does not understand degrades to "offer everything", never to
+  // "everything is sold out" (which would switch the gate off silently).
+  const axes = [];
+  const axisSeen = Object.create(null);
+  const AXIS_MAX = 24;
+  const DEAD_RE = /disabled|sold[\\s_-]*out|unavailable|out[\\s_-]*of[\\s_-]*stock/i;
+  const buyable = (el, cls) => {
+    try {
+      if (el.disabled) return false;
+      if (String(el.getAttribute && el.getAttribute('aria-disabled') || '') === 'true') return false;
+      return !DEAD_RE.test(String(cls || ''));
+    } catch (e) { return true; }
+  };
+  for (const c of Array.from(form.elements || [])) {
+    const type = (c.type || '').toLowerCase();
+    if (type === 'password' || !c.name || axisSeen[c.name]) continue;
+    axisSeen[c.name] = 1;   // a radio group yields every member; price it once
+    let opts = null;
+    if (c.tagName === 'SELECT') {
+      opts = Array.from(c.options || []).slice(0, AXIS_MAX).map((o) => ({
+        value: String(o.value == null ? '' : o.value).slice(0, 120),
+        label: String(o.textContent || '').trim().slice(0, 120),
+        chosen: !!o.selected,
+        available: buyable(o, o.className),
+      }));
+    } else if (type === 'radio') {
+      let group = [];
+      try {
+        group = Array.from(document.querySelectorAll(
+          'input[name="' + CSS.escape(c.name) + '"]')).filter((r) => r.form === form);
+      } catch (e) { group = []; }
+      opts = group.slice(0, AXIS_MAX).map((r) => {
+        const lab = (r.labels && r.labels.length) ? r.labels[0] : null;
+        const txt = String((lab && (lab.innerText || lab.textContent)) ||
+                           r.getAttribute('aria-label') || '').trim();
+        return {
+          value: String(r.value == null ? '' : r.value).slice(0, 120),
+          label: txt.slice(0, 120),
+          chosen: !!r.checked,
+          available: buyable(r, String(r.className || '') + ' ' +
+                                (lab ? String(lab.className || '') : '')),
+        };
+      });
+    }
+    if (!opts || opts.length < 2) continue;
+    axes.push({ name: String(c.name), options: opts });
+  }
+  return { action: String(action), method: method, fields: fields,
+           has_password: hasPassword, axes: axes };
 """
 
 _READ_COMMIT_FORM_JS = ("""(el) => {
@@ -939,6 +1032,201 @@ _REREAD_COMMIT_FORM_JS = ("""() => {
   const form = document.querySelector('form[data-jarvis-commit]');
   if (!form) return null;
 """ + _FORM_CONTRACT_JS_BODY + "}")
+
+
+# How many R1 survivors are still an ANSWER rather than a shrug. A page holds one
+# buy box, sometimes rendered twice (a buy panel plus a sticky bar); more than
+# this means the card detector did not understand the page, and a detector that
+# has failed must not be allowed to pick.
+_MAX_BUY_BOX_CANDIDATES = 3
+
+# How long to wait for a storefront to resolve the variant a code-set size
+# implies. MEASURED on the live product page: the hidden id landed between 0.5s
+# and 2.0s after the swatch was clicked, so 4s carries margin and a page that
+# resolves instantly pays one poll.
+VARIANT_SETTLE_SECONDS = 4.0
+VARIANT_SETTLE_STEP = 0.2
+
+
+def _fields_key(contract: Any) -> tuple:
+    """What a form would SEND, as a comparable key. Used to tell "the variant
+    landed" from "nothing happened yet"."""
+    if not isinstance(contract, dict):
+        return ()
+    return tuple(
+        (str(f.get("name")), str(f.get("value")))
+        for f in (contract.get("fields") or [])
+        if isinstance(f, dict)
+    )
+
+# THE PAGE'S OWN BUY BOX (2026-08-10). Measured, because every guess about this
+# was wrong — see scripts/_measure_buybox_rules.py against the live incident:
+#
+#   * "the only add-to-cart control" — there were FIFTEEN cart-labelled elements
+#     on one product page.
+#   * "the control that SAYS add to cart" — the two buttons reading "Add to bag"
+#     were RELATED PRODUCTS (a rail), while the page's own button read
+#     "Select Size" (and on another product, "Out of stock"). A leg keyed on the
+#     label would have added somebody else's item to the cart.
+#   * "the one in the element list" — it is DISABLED until a size is chosen, and
+#     observe.eligible() drops disabled elements, so the buy box was not in the
+#     observation AT ALL. That is why the model produced "more", "scroll up" and
+#     then nothing: the action did not exist in its world.
+#
+# So the form is found HERE, in the page, and never through the element list.
+# The rule (R1) is the only one measured to select it uniquely: a buy form that
+# is not inside ANOTHER product's card. "Another product" is derived from THIS
+# page's own URL — a link whose first path segment matches ours and whose path
+# does not — so there is no vocabulary list of what a product URL looks like.
+#
+#   MEASURED on /products/black-blended-kameez-shalwar-jjksa30729r52ap:
+#     R1 -> [form 0]         (its Product ID is the page's own SKU, and it
+#                             carries Size(6) with XS/XL/XXL out of stock)
+#     R2 (an id appears in the URL) -> [0, 4, 11, 14]   ambiguous
+#     R3 (a variant picker binds)   -> 14 forms         ambiguous
+#
+# The card walk is bounded exactly as `soldOutOf` is, and for the same reason:
+# unbounded it reaches the whole grid, where every product is "near" every other.
+_FIND_BUY_BOX_JS = ("""() => {
+  const path = (location.pathname || '').toLowerCase();
+  const ourSeg = path.split('/').filter(Boolean)[0] || '';
+  const CARD_TEXT_MAX = 600;   // the soldOutOf boundary
+  const WALK_MAX = 8;
+
+  const otherProductNear = (form) => {
+    if (!ourSeg) return false;          // not on a product-shaped URL at all
+    let node = form;
+    for (let i = 0; i < WALK_MAX && node && node !== document.body; i++) {
+      const links = node.querySelectorAll ? node.querySelectorAll('a[href]') : [];
+      for (const a of links) {
+        let p = '';
+        try { p = new URL(a.getAttribute('href'), location.href).pathname.toLowerCase(); }
+        catch (e) { continue; }
+        if ((p.split('/').filter(Boolean)[0] || '') !== ourSeg) continue;
+        if (p !== path) return true;    // this form sits in another item's card
+      }
+      if (String(node.innerText || '').length > CARD_TEXT_MAX) break;
+      node = node.parentElement;
+    }
+    return false;
+  };
+
+  // A BUY form, by any of the signals a storefront actually gives — never by the
+  // submit button's words, which are measured unreliable. Shopify posts to
+  // /cart/add; Magento to /checkout/cart/add/...; WooCommerce posts to the
+  // product URL carrying an `add-to-cart` control.
+  const isBuyForm = (f) => {
+    const act = String(f.getAttribute('action') || '').toLowerCase();
+    if (/cart/.test(act) && /add|post/i.test(act + ' ' + (f.method || ''))) return true;
+    for (const c of f.elements) {
+      const n = String(c.name || '').toLowerCase();
+      if (n === 'add-to-cart' || n === 'add_to_cart' || n === 'add') return true;
+    }
+    return false;
+  };
+
+  const axisCount = (f) => {
+    const groups = {};
+    for (const c of f.elements) {
+      const t = (c.type || '').toLowerCase();
+      if (!c.name) continue;
+      if (t === 'radio') groups[c.name] = (groups[c.name] || 0) + 1;
+      else if (t === 'select-one') groups[c.name] = (c.options || []).length;
+    }
+    return Object.values(groups).filter((n) => n > 1).length;
+  };
+
+  const own = [];
+  for (const f of Array.from(document.querySelectorAll('form'))) {
+    if (!isBuyForm(f)) continue;
+    if (otherProductNear(f)) continue;
+    own.push(f);
+  }
+  if (!own.length) return {found: false, reason: 'no buy form for this page'};
+  if (own.length > """ + str(_MAX_BUY_BOX_CANDIDATES) + """)
+    return {found: false, reason: 'several buy forms and no way to tell them apart',
+            candidates: own.length};
+
+  // Prefer the one offering a CHOICE — on a page rendering the buy box twice,
+  // that is the interactive panel rather than the sticky bar. DOM order breaks a
+  // tie: the page's own ordering is the only ranking signal there is.
+  let form = own[0], best = -1;
+  for (const f of own) {
+    const n = axisCount(f);
+    if (n > best) { best = n; form = f; }
+  }
+
+  document.querySelectorAll('[data-jarvis-commit]').forEach(
+    (f) => f.removeAttribute('data-jarvis-commit'));
+  form.setAttribute('data-jarvis-commit', '1');
+
+  const btn = form.querySelector('button[name=add],button[type=submit],input[type=submit]');
+  const contract = (() => {""" + _FORM_CONTRACT_JS_BODY + """})();
+  contract.found = true;
+  // WHY A SUBMIT MAY NOT BE POSSIBLE YET, in the page's own words. `disabled`
+  // is the signal a storefront uses for "choose a variant first" AND for "this
+  // is out of stock", and the two need different answers.
+  contract.submit_label = btn ? String(btn.textContent || btn.value || '').trim().slice(0, 60) : '';
+  contract.submit_disabled = btn ? !!btn.disabled : false;
+  contract.submit_present = !!btn;
+  return contract;
+}""")
+
+# Set ONE axis on the stamped form to a value CODE decided (2026-08-08) — the
+# user's own words, or the only value in stock. Returns a STATUS STRING, not a
+# bool, so a caller can say WHICH thing went wrong (the 2026-07-26 rule: a
+# submit that never had a form to fire and one whose request we failed to
+# recognise must not produce the identical message).
+#
+# The gesture is a LABEL CLICK where there is one, because that is what a person
+# does and these swatches hide the input itself behind styled boxes. Setting the
+# property directly is the last resort for a control styled out of reach, and it
+# tells the page (input + change, bubbling) so a theme's own listener updates the
+# hidden variant id — without that the form keeps the id it had.
+_CHOOSE_FORM_OPTION_JS = """(arg) => {
+  const form = document.querySelector('form[data-jarvis-commit]');
+  if (!form) return 'no-form';
+  const name = String(arg.name || '');
+  const want = String(arg.value == null ? '' : arg.value);
+  const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  const labelOf = (el) => {
+    const lab = (el.labels && el.labels.length) ? el.labels[0] : null;
+    return norm((lab && (lab.innerText || lab.textContent)) ||
+                el.getAttribute('aria-label') || '');
+  };
+  for (const c of Array.from(form.elements || [])) {
+    if (c.name !== name || c.tagName !== 'SELECT') continue;
+    let hit = null;
+    for (const o of Array.from(c.options || [])) {
+      if (String(o.value) === want || norm(o.textContent) === norm(want)) { hit = o; break; }
+    }
+    if (!hit) return 'no-option';
+    c.value = hit.value;
+    c.dispatchEvent(new Event('input', { bubbles: true }));
+    c.dispatchEvent(new Event('change', { bubbles: true }));
+    return String(c.value) === String(hit.value) ? 'ok' : 'refused';
+  }
+  let group = [];
+  try {
+    group = Array.from(document.querySelectorAll(
+      'input[name="' + CSS.escape(name) + '"]')).filter((r) => r.form === form);
+  } catch (e) { group = []; }
+  let target = null;
+  for (const r of group) {
+    if (String(r.value) === want || labelOf(r) === norm(want)) { target = r; break; }
+  }
+  if (!target) return 'no-option';
+  const lab = (target.labels && target.labels.length) ? target.labels[0] : null;
+  try { if (lab) lab.click(); else target.click(); } catch (e) {}
+  if (!target.checked) {
+    try {
+      target.checked = true;
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+      target.dispatchEvent(new Event('change', { bubbles: true }));
+    } catch (e) {}
+  }
+  return target.checked ? 'ok' : 'refused';
+}"""
 
 # Fire the stamped form's own submit. requestSubmit() runs validation and fires
 # the submit event (an SPA handler can intercept it); .submit() is the fallback.
@@ -2620,6 +2908,18 @@ class BrowserSession:
             if settled >= READY_STALL_POLLS and int(state.get("acts") or 0) >= 1:
                 return _ready("still-but-thin")
 
+            # SUBSTANTIVE BUT NEVER STILL (see READY_BUSY_MS): a page carrying
+            # hundreds of actionable elements whose DOM keeps mutating forever.
+            # Waiting the rest of the budget cannot improve the observation — the
+            # measured shape is `still=0` right up to the deadline — so take what
+            # is demonstrably there. Deliberately the LAST exit tried: every rule
+            # above is a stronger claim about the page being finished.
+            if (
+                time.monotonic() - started >= READY_BUSY_MS / 1000.0
+                and int(state.get("acts") or 0) >= READY_BUSY_ACTS
+            ):
+                return _ready("substantive-but-busy")
+
             if time.monotonic() >= deadline:
                 try:
                     self.stats.ready_wait_seconds += time.monotonic() - started
@@ -2891,6 +3191,128 @@ class BrowserSession:
             logger.debug(f"read_commit_target eval: {type(exc).__name__}: {exc}")
             return None
         return raw if isinstance(raw, dict) else None
+
+    async def find_buy_box(self) -> Optional[dict[str, Any]]:
+        """The contract for THIS page's own buy form, found in the page rather
+        than through the element list — and stamped, so every later step
+        (`reread_commit_form`, `choose_form_option`, `submit_commit`) works on it
+        exactly as if a model had named it.
+
+        Returns the same shape `read_commit_target` returns, plus `found`,
+        `submit_label`, `submit_disabled` and `submit_present`. `None` (or a
+        dict with `found` False and a `reason`) means "this page has no buy box
+        I can identify" — which is the honest answer, and leaves the run doing
+        what it did before this existed. Never raises: an unreadable page is a
+        normal "nothing to add here"."""
+        try:
+            raw = await self.page.evaluate(_FIND_BUY_BOX_JS)
+        except Exception as exc:
+            logger.debug(f"find_buy_box: {type(exc).__name__}: {exc}")
+            return None
+        if not isinstance(raw, dict):
+            return None
+        return raw
+
+    async def reread_commit_form(self) -> Optional[dict[str, Any]]:
+        """Re-read the STAMPED form — same contract, no element handle needed.
+
+        Used after code settles a variant (2026-08-08): the click may re-render
+        the swatches, which invalidates the observation's element stamps, so
+        re-reading through `read_commit_target` would be a stale-index gamble.
+        The form's own marker survives, because nothing navigated."""
+        try:
+            raw = await self.page.evaluate(_REREAD_COMMIT_FORM_JS)
+        except Exception as exc:
+            logger.debug(f"reread_commit_form: {type(exc).__name__}: {exc}")
+            return None
+        return raw if isinstance(raw, dict) else None
+
+    async def choose_form_option(self, name: str, value: str) -> str:
+        """Set one axis on the stamped form to `value` — a choice CODE made from
+        the user's own words or from the only value in stock, never the model's.
+
+        Returns 'ok' | 'no-form' | 'no-option' | 'refused' | 'error'. NEVER
+        raises: a control that will not take the value is an event the caller
+        reacts to (ask the user instead), not a crash. This changes only what the
+        form would send — the submit itself still needs the one-shot arm and the
+        user's signature approval, both untouched."""
+        if not str(name or "").strip():
+            return "no-option"
+        try:
+            status = await self.page.evaluate(
+                _CHOOSE_FORM_OPTION_JS, {"name": str(name), "value": str(value)}
+            )
+        except Exception as exc:
+            logger.debug(f"choose_form_option: {type(exc).__name__}: {exc}")
+            return "error"
+        return str(status or "error")
+
+    async def await_form_change(
+        self, before: Any, timeout: float = VARIANT_SETTLE_SECONDS
+    ) -> Optional[dict[str, Any]]:
+        """Re-read the stamped form until setting a variant has actually CHANGED
+        what it would send — or the budget runs out. Returns the last read.
+
+        ⚠️ QUIET IS NOT THE SIGNAL, THE CHANGE IS (2026-08-10). This used to be
+        `settle()` + one re-read, and MEASURED on the live product page that is
+        too early: the radio is checked immediately, but the theme resolves the
+        hidden variant id ASYNCHRONOUSLY —
+
+            +0.0s  L checked, id=''
+            +0.5s  L checked, id=''
+            +2.0s  L checked, id='58054819250336'
+
+        — and `settle()` is a DOM-quiet detector that returns in ~250ms on an
+        already-painted page. So the approval card would have named a size in
+        words while the contract underneath it carried NO variant at all, and the
+        submit would have added an unspecified one. The same lesson as
+        `wait_for_commit` (2026-07-26), one gesture earlier.
+
+        Deliberately watches the WHOLE field set rather than a field called
+        `id`: which field carries the variant is the platform's business, and
+        "what would this form send?" is the question the approval card rests on.
+
+        ⚠️ THE SIGNAL IS THE BLANK FIELD FILLING, and getting there took two
+        wrong answers, both caught by running it against the real page:
+
+          "wait for the fields to CHANGE"     returned in 20ms — the swatch
+                                              updates `Size` and the barcode
+                                              synchronously while `id` is still
+                                              empty. That IS the defect.
+          "wait for the fields to be STABLE"  returned in 200ms — they stop
+                                              moving long before the id lands.
+
+        MEASURED, the variant id arrives ~1.0s after the click, and what the
+        approval card needs is precisely that a field the form had left BLANK is
+        now filled. So the blank fields of the snapshot are the thing waited on;
+        stability is only the fallback for a form that had none.
+
+        A form that never settles simply returns as it is at the deadline —
+        honest, and exactly what happened before this existed."""
+        snapshot = _fields_key(before)
+        blanks = {name for name, value in snapshot if not str(value).strip()}
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        latest: Optional[dict[str, Any]] = None
+        previous = snapshot
+        changed = False
+        while True:
+            latest = await self.reread_commit_form()
+            current = _fields_key(latest)
+            filled = {name for name, value in current if str(value).strip()}
+            if current != snapshot:
+                changed = True
+            if blanks:
+                # The precise question: has the form finished identifying what it
+                # would send? Anything it left blank and has now filled is that.
+                if blanks <= filled:
+                    return latest
+            elif changed and current == previous:
+                # Nothing was blank, so "it stopped moving" is all there is.
+                return latest
+            previous = current
+            if time.monotonic() >= deadline:
+                return latest
+            await asyncio.sleep(VARIANT_SETTLE_STEP)
 
     async def upload_file(
         self, observation: Any, index: int, path: str
@@ -3614,41 +4036,56 @@ def pending_challenge() -> Optional[dict[str, Any]]:
 # A restart forgets and starts with the NON-destructive path, which is the safe
 # default. A second challenge on the same site more than this far apart is a
 # genuinely new one, not a solve that failed to stick.
+# ⚠️ THE SAME REASONING IS TRUE OF A SIGN-IN WALL (2026-08-08), so this pair takes
+# a KIND rather than being copied for it. A site can re-issue a login wall after
+# an in-place sign-in for exactly the reasons above, and a second copy of this
+# logic is the hole this codebase has now recorded seven times. Keyed on
+# (kind, site) so a challenge hand-off and a login hand-off never cross-trigger.
 _CHALLENGE_HANDOFF_TTL_SECONDS = 600.0
-_challenge_handoffs: dict[str, float] = {}
+_handoffs: dict[tuple[str, str], float] = {}
 
 
 def _challenge_key(site: str) -> str:
     return (site or "").strip().lower().lstrip(".")
 
 
-def note_challenge_handoff(site: str) -> None:
-    """Record that this site's challenge was handed over IN PLACE, so a repeat
+def note_handoff(site: str, kind: str = "challenge") -> None:
+    """Record that this site's `kind` hand-off was made IN PLACE, so a repeat
     inside the TTL escalates to the clean window instead of asking the user to
-    solve the same uncooperative check twice in the same tab."""
+    deal with the same uncooperative page twice in the same tab."""
     key = _challenge_key(site)
     if key:
-        _challenge_handoffs[key] = time.monotonic()
+        _handoffs[(kind, key)] = time.monotonic()
 
 
-def challenge_handed_over_recently(site: str) -> bool:
-    """True when an in-place hand-over for this site is still fresh — i.e. the
-    user already solved it there and the site is challenging again anyway."""
+def handed_over_recently(site: str, kind: str = "challenge") -> bool:
+    """True when an in-place hand-over of this kind for this site is still fresh
+    — i.e. the user already dealt with it there and the site is asking again."""
     key = _challenge_key(site)
     if not key:
         return False
-    stamped = _challenge_handoffs.get(key)
+    stamped = _handoffs.get((kind, key))
     if stamped is None:
         return False
     if time.monotonic() - stamped > _CHALLENGE_HANDOFF_TTL_SECONDS:
-        _challenge_handoffs.pop(key, None)
+        _handoffs.pop((kind, key), None)
         return False
     return True
 
 
+# The original names, kept as one-line delegations (the _deterministic_text
+# convention) so every existing caller and test reads the same fact.
+def note_challenge_handoff(site: str) -> None:
+    note_handoff(site, "challenge")
+
+
+def challenge_handed_over_recently(site: str) -> bool:
+    return handed_over_recently(site, "challenge")
+
+
 def reset_challenge_handoffs() -> None:
     """Test/shutdown hook — the reset_context_store precedent."""
-    _challenge_handoffs.clear()
+    _handoffs.clear()
 
 
 # ------------------------------------------------------- discovery sessions

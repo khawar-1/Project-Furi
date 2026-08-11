@@ -394,8 +394,41 @@ async def resolve_latest_season(
 # season?", and that is a most-tokens-matched test, not a fewest-extras one.
 
 
+# ONE SEASON, FIVE SPELLINGS (2026-08-08). MEASURED on the real anikoto listing
+# for "my hero academia", where the same site names its seasons every one of
+# these ways in one result set:
+#
+#     my-hero-academia-2            bare number
+#     my-hero-academia-season-6     the word
+#     my-hero-academia-5th-season   an ordinal
+#     my-hero-academia-final-season no number at all
+#
+# Without normalisation "Season 5" scored ZERO against every entry, because
+# `5th` and `5` are different tokens. Word ordinals are included for the sites
+# that spell them out ("Second Season" is a common Crunchyroll/MAL rendering).
+_ORDINAL_WORDS = {
+    "first": "1", "second": "2", "third": "3", "fourth": "4", "fifth": "5",
+    "sixth": "6", "seventh": "7", "eighth": "8", "ninth": "9", "tenth": "10",
+    "eleventh": "11", "twelfth": "12",
+}
+_ORDINAL_SUFFIX_RE = re.compile(r"^(\d{1,2})(?:st|nd|rd|th)$")
+
+
+def _normalize_token(token: str) -> str:
+    """`5th` → `5`, `second` → `2`; everything else unchanged.
+
+    Anchored to the WHOLE token, so anikoto's id suffixes are untouched: `2izxu`
+    matches neither rule and stays one opaque token, exactly as _tokens' own
+    comment requires."""
+    match = _ORDINAL_SUFFIX_RE.match(token)
+    if match:
+        return match.group(1)
+    return _ORDINAL_WORDS.get(token, token)
+
+
 def _tokens(text: str) -> set[str]:
-    """Lowercased alphanumeric tokens of a name or slug.
+    """Lowercased alphanumeric tokens of a name or slug, with ordinals
+    normalised to their digit (see _normalize_token).
 
     Like loop.py's `_title_tokens` (length > 1) EXCEPT that a bare digit is kept.
     MEASURED 2026-08-07: the resolver returns "Season 2" for a series with no
@@ -405,10 +438,72 @@ def _tokens(text: str) -> set[str]:
     non-alphanumerics, so anikoto's `bleach-…-2izxu` yields the token "2izxu",
     never "2" — only a genuinely standalone number becomes one."""
     return {
-        t
-        for t in re.split(r"[^a-z0-9]+", (text or "").lower())
-        if len(t) > 1 or t.isdigit()
+        normalized
+        for normalized in (
+            _normalize_token(t)
+            for t in re.split(r"[^a-z0-9]+", (text or "").lower())
+        )
+        if len(normalized) > 1 or normalized.isdigit()
     }
+
+
+# ⚠️ A MOVIE IS NOT A SEASON, and the asymmetry that let one win is exactly why
+# this exists (2026-08-08). series_api.SEASON_FORMATS has always excluded
+# MOVIE/SPECIAL/OVA/MUSIC on the CATALOG side; nothing did on the SLUG side. So
+# scoring "Season 4" over the real anikoto listing produced:
+#
+#     1  my-hero-academia-4-mt2j9                  <- the season
+#     1  my-hero-academia-the-movie-4-you-re-next  <- a film released that year
+#
+# — a TIE, so best_entry returned None and the model picked blind. That is the
+# live incident's step 1.
+_COMPANION_RE = re.compile(
+    r"\b(movie|movies|film|ova|ona|special|specials|recap|music|pv|trailer)\b",
+    re.IGNORECASE,
+)
+
+
+def belongs_to_series(candidate: str, title: str = "") -> bool:
+    """True when this entry is an entry OF the series the user named.
+
+    Every significant word of the title must be present. Measured against
+    anikoto's real 40-row result set for "my hero academia", where a fuzzy site
+    search returns a dozen other franchises:
+
+        my-hero-academia-4-mt2j9                          kept
+        my-hero-academia-vigilantes-season-2              kept (a real spin-off;
+                                                          it competes honestly,
+                                                          and a tie ASKS)
+        that-time-i-got-reincarnated-as-a-slime-season-4  dropped
+        my-heroic-husband-2nd-season                      dropped
+        hitorijime-my-hero                                dropped
+        boku-no-hero-academia-memories                    dropped (the Japanese
+                                                          title — a real MHA
+                                                          special, but nothing
+                                                          here can know that)
+
+    NO TITLE MEANS NO CONSTRAINT, so every caller that scores without one keeps
+    exactly the behaviour it had. And a site that renders the title differently
+    from the user's words drops to zero matches, where the caller defers to the
+    model — the safe direction, and today's behaviour."""
+    want = _tokens(title) - _NOISE
+    if not want:
+        return True
+    return want <= _tokens((candidate or "").replace("-", " "))
+
+
+def is_companion_release(candidate: str, title: str = "") -> bool:
+    """True when this entry is a film/OVA/special rather than a season.
+
+    Title words are DISCOUNTED: a franchise actually called "… the Movie" would
+    otherwise have every one of its entries excluded, and scoring nothing is a
+    worse answer than scoring everything. There the caller falls back to the
+    model, which is today's behaviour."""
+    text = (candidate or "").replace("-", " ")
+    hits = {m.group(0).lower() for m in _COMPANION_RE.finditer(text)}
+    if not hits:
+        return False
+    return bool(hits - _tokens(title))
 
 
 # Words that carry no identity: every entry of a series shares them, so counting
@@ -427,6 +522,26 @@ def score_entry(candidate: str, season_name: str, title: str = "") -> int:
     said is airing. Words from the series title itself are excluded when supplied,
     because every entry has them and they can only add a constant. Returns 0 when
     nothing meaningful matches, which the caller reads as "not this one"."""
+    # ⚠️ IT MUST BE THE RIGHT SHOW FIRST (2026-08-08). Found by the runtime check,
+    # against anikoto's real results for "my hero academia" — which are FUZZY and
+    # return 40 entries from a dozen franchises. Scoring "Season 4" over them tied
+    #
+    #     my-hero-academia-4-mt2j9
+    #     that-time-i-got-reincarnated-as-a-slime-season-4
+    #
+    # at 1 apiece, because the digit is all a numbered season has to match on and
+    # nothing required the candidate to BELONG to the series. The question that
+    # produced was not merely wrong, it was nonsense — pick between two unrelated
+    # shows. This is series_api.MATCH_FLOOR ("the catalog must have answered about
+    # the right show at all") applied to the slug side, where it was missing.
+    #
+    # A season NAME was never this exposed, which is why the 2026-08-07 round did
+    # not need it: "The Calamity" is distinctive where "4" is not.
+    if not belongs_to_series(candidate, title):
+        return 0
+    # A companion release is never a season, whatever number it happens to carry.
+    if is_companion_release(candidate, title):
+        return 0
     want = _tokens(season_name) - _NOISE - _tokens(title)
     if not want:
         return 0
@@ -449,15 +564,28 @@ def best_entry(
     model then decides, with the season name in its goal. None when nothing
     matches at all, so a season the site does not carry falls back rather than
     forcing a wrong entry."""
+    winners = top_entries(candidates, season_name, title, key=key)
+    return winners[0] if len(winners) == 1 else None
+
+
+def top_entries(
+    candidates: list[str],
+    season_name: str,
+    title: str = "",
+    key: Optional[Callable[[str], Optional[str]]] = None,
+) -> list[str]:
+    """Every candidate tied at the best non-zero score — [] when none match.
+
+    best_entry is the "did code settle it?" reading of this; a caller that can
+    ASK the user reads the list instead (2026-08-08). ONE scoring pass behind
+    both, so the answer code acts on and the options it offers can never
+    disagree — the second-copy hole this codebase keeps recording."""
     def _text(c: str) -> str:
         return (key(c) if key is not None else c) or c
 
     scored = [(score_entry(_text(c), season_name, title), c) for c in candidates]
     scored = [(s, c) for s, c in scored if s > 0]
     if not scored:
-        return None
+        return []
     best = max(s for s, _ in scored)
-    winners = [c for s, c in scored if s == best]
-    if len(winners) != 1:
-        return None
-    return winners[0]
+    return [c for s, c in scored if s == best]

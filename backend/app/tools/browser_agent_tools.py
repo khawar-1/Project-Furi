@@ -517,23 +517,84 @@ class BrowseTool(BaseTool):
                 # browse runs authenticated. The planner turns login_required
                 # into an AWAITING_CHOICE pause ("sign in, then say continue");
                 # answering re-runs this browse. Jarvis never sees the password.
+                #
+                # ⚠️ AND THE TAB STAYS (2026-08-08). This branch was the last one
+                # still doing the pre-multi-tab thing: close the session, then
+                # open_login_window — whose FIRST act is _window.close_all(). Under
+                # one-tab-per-window that cost nothing, and this code was written
+                # then. Under the shared window it demolishes the whole browser,
+                # which is exactly the defect the 2026-08-03 CAPTCHA round fixed;
+                # that round's own comment calls the challenge branch "the one pause
+                # branch that still closed", overlooking this one forty lines above
+                # it. Live 2026-08-08: a false wall on anikoto closed every tab and
+                # reopened a normal window on the WRONG EPISODE, which the user
+                # reasonably read as "it played episode 1 when I asked for 4".
+                #
+                # Handing over IN PLACE is also the honest thing: the tab is already
+                # showing the sign-in page. release_to_user() lifts interception so
+                # our rules cannot interfere with a human typing, and
+                # resume_agent_control() re-arms before anything drives it again.
                 if outcome.login_required:
-                    await session.close()
-                    session = None  # the finally must not double-close it
-                    login_opened = True
-                    try:
-                        await browser_session.open_login_window(
-                            outcome.login_url or browser_session.DEFAULT_LOGIN_URL
+                    login_site = outcome.login_site or site
+                    # The clean window stays EARNED, not presumed — same reasoning
+                    # as the challenge branch: a site that fingerprints the
+                    # automated browser can re-issue the wall however often a human
+                    # signs in, and dropping the clean window would trade one
+                    # live-observed defect for another.
+                    escalate = browser_session.handed_over_recently(
+                        login_site, "login"
+                    )
+                    login_in_place = False
+                    if not escalate:
+                        login_in_place = await session.release_to_user()
+                    if login_in_place:
+                        browser_session.note_browse_tab(
+                            session,
+                            title=output["title"],
+                            url=output["url"],
+                            goal=goal,
                         )
-                    except Exception as exc:
-                        login_opened = False
-                        logger.warning(
-                            f"could not open sign-in window: {type(exc).__name__}: {exc}"
+                        browser_session.note_handoff(login_site, "login")
+                        handed_off = True  # the finally must not close it
+                        login_opened = True
+                        output["window_open"] = True
+                        logger.info(
+                            f"browser: {outcome.wall_kind or 'login'} wall at "
+                            f"{login_site} — handed this tab to the user "
+                            "(every other tab left alone)"
                         )
+                    else:
+                        # Escalation, or the lift failed: the separate clean
+                        # window, which needs the single profile and therefore
+                        # every tab. Destructive, and now only ever paid once the
+                        # cheap path has been tried and observed to fail.
+                        if escalate:
+                            logger.info(
+                                f"browser: {login_site} is walling again after an "
+                                "in-place hand-over — escalating to a clean window "
+                                "(this closes the browser tabs)"
+                            )
+                        await session.close()
+                        session = None  # the finally must not double-close it
+                        login_opened = True
+                        try:
+                            await browser_session.open_login_window(
+                                outcome.login_url or browser_session.DEFAULT_LOGIN_URL
+                            )
+                        except Exception as exc:
+                            login_opened = False
+                            logger.warning(
+                                f"could not open sign-in window: {type(exc).__name__}: {exc}"
+                            )
                     output["login_required"] = True
                     output["login_site"] = outcome.login_site
                     output["login_url"] = outcome.login_url
                     output["login_window_opened"] = login_opened
+                    # WHERE THE USER SHOULD LOOK. The pause text must not say "I've
+                    # opened a sign-in window" about a tab that was already open —
+                    # that is what sent the user hunting for a window that never
+                    # appeared and reading the page it showed as a wrong answer.
+                    output["login_in_place"] = login_in_place
                     output["wall_kind"] = outcome.wall_kind
                     return output
 
@@ -891,15 +952,26 @@ class BrowseTool(BaseTool):
             site = output.get("login_site") or "the site"
             opened = output.get("login_window_opened", True)
             kind = str(output.get("wall_kind") or "login").lower()
+            # Three different worlds, three different sentences (2026-08-08, the
+            # challenge branch's rule applied here). The wall is normally on a tab
+            # ALREADY on screen, and telling the user "I've opened a window" about
+            # it sends them hunting for one that never appeared — which is exactly
+            # how the live incident's episode-1 page read as a wrong answer.
+            in_place = bool(output.get("login_in_place"))
+            noun = "sign-up" if kind == "signup" else "sign-in"
+            if in_place:
+                where = "It's open in the browser window already on your screen"
+            elif opened:
+                where = f"I've opened a {noun} window"
+            else:
+                where = "Open the Jarvis browser window"
             if kind == "signup":
-                where = "I've opened a sign-up window" if opened else "Open the Jarvis browser window"
                 error = (
                     f"Account sign-up required at {site} — I won't create an "
                     f"account for you. {where} — please sign up there yourself, "
                     "then say 'continue'."
                 )
             else:
-                where = "I've opened a sign-in window" if opened else "Open the Jarvis browser window"
                 error = (
                     f"Sign-in required at {site} — I won't enter your credentials. "
                     f"{where} — please sign in there yourself, then say 'continue'."
@@ -911,6 +983,10 @@ class BrowseTool(BaseTool):
                     "login_site": site,
                     "login_url": output.get("login_url", ""),
                     "login_window_opened": opened,
+                    # The tab was handed over in place, so the window is still open
+                    # and the planner's pause text must point AT it.
+                    "login_in_place": in_place,
+                    "window_open": bool(output.get("window_open")),
                     "wall_kind": kind,
                 },
                 error=error,
@@ -1189,6 +1265,10 @@ class BrowseCommitTool(BaseTool):
             fill_grounding=goal,
             fields=fields,
             vision_config=vision_config,
+            # Only used by the multi-commit resume, whose journey to form N+1
+            # is READ navigation and needs the user's own words for the same
+            # reasons the first journey does (2026-08-09).
+            intent_text=str(kwargs.get("user_words") or "").strip(),
         )
         if not result.get("submitted"):
             # Not submitted is a real failure — but perform() has usually READ the
@@ -1312,6 +1392,19 @@ class BrowseCommitTool(BaseTool):
                             "to the user is rejected). Curated personal data (name, "
                             "email, resume) lives in the autofill profile and is "
                             "filled automatically — do not repeat it here."
+                        ),
+                    },
+                    # DELIBERATELY NOT ADVERTISED, exactly as on `browse`: it is
+                    # stamped in code by _inject_user_words and is worthless as a
+                    # field the model fills, since the entire point is that it
+                    # carries the USER's phrasing rather than the model's.
+                    # Declared only so the schema is honest about a parameter the
+                    # tool reads.
+                    "user_words": {
+                        "type": "string",
+                        "description": (
+                            "Set by Jarvis in code, never by you — the user's own "
+                            "request, verbatim. Do not supply this."
                         ),
                     },
                 },

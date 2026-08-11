@@ -429,3 +429,166 @@ async def test_the_full_name_is_what_makes_the_grid_readable(page):
     assert cards, "the grid produced no card element at all"
     assert all(len(c.name) <= dom_observe._NAME_MAX for c in cards)
     assert any("Rs. 24,999" in c.name_full for c in cards)
+
+
+# ------------------------------------- 5. dialog membership (2026-08-08, D1)
+# THE ANIKOTO SKELETON, taken from the live page rather than invented. Fetching
+# https://anikoto.cz/watch/my-hero-academia-4-mt2j9/ep-1 during the incident
+# post-mortem returned THREE `type="password"` inputs, nested exactly like this:
+#
+#   <div class="modal fade" id="sign" aria-hidden="true">
+#     <div class="modal-dialog modal-dialog-centered with-image contents">
+#       <div data-content="login" class="modal-content login">          <- password
+#       <div data-content="register" class="modal-content register"     <- password x2
+#            style="display: none">
+#
+# Bootstrap's own CSS keeps `.modal` display:none until it is opened; set_content
+# ships no CSS, so the login modal here is OPEN — which is the state that produced
+# the incident and the only state worth testing.
+_MODAL_PAGE = """
+<html><body>
+  <header><a href="/">Anikoto</a><a href="/filter">Browse</a></header>
+  <main>
+    <h1>My Hero Academia 4</h1>
+    <a href="/watch/my-hero-academia-4-mt2j9/ep-1">Episode 1</a>
+    <a href="/watch/my-hero-academia-4-mt2j9/ep-2">Episode 2</a>
+    <a href="/watch/my-hero-academia-4-mt2j9/ep-3">Episode 3</a>
+    <a href="/watch/my-hero-academia-4-mt2j9/ep-4">Episode 4</a>
+    <a href="/watch/my-hero-academia-4-mt2j9/ep-5">Episode 5</a>
+  </main>
+  <div class="modal fade" id="sign" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered with-image contents">
+      <div data-content="login" class="modal-content login">
+        <div class="modal-header"><h5 class="modal-title">Login</h5></div>
+        <div class="modal-body">
+          <input type="text" name="email" placeholder="Email" style="width:240px;height:30px">
+          <input type="password" name="password" placeholder="Password"
+                 id="password" style="width:240px;height:30px">
+          <button type="submit">Login</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</body></html>
+"""
+
+
+async def test_a_modal_password_field_is_marked_in_dialog(page):
+    """THE D1 SIGNAL, against a real browser. detect_login_wall walls on any
+    visible password field, so without a structural way to say "this one is
+    inside a modal" it cannot tell a sign-in PAGE from a page that merely SHIPS a
+    sign-in modal — and anikoto ships one on every watch page."""
+    obs = await _observe(page, _MODAL_PAGE)
+
+    passwords = [e for e in obs.elements if e.role == "password"]
+    assert passwords, f"no password field listed at all: {[e.role for e in obs.elements]}"
+    assert all(e.in_dialog for e in passwords), (
+        "the modal's password field was not recognised as dialog-borne"
+    )
+
+
+async def test_the_pages_own_content_is_not_in_dialog(page):
+    """The other half, and it is what stops the flag demoting a real login page:
+    the episode links behind the modal belong to the PAGE, not to the dialog."""
+    obs = await _observe(page, _MODAL_PAGE)
+
+    episodes = [e for e in obs.elements if "Episode" in (e.name or "")]
+    assert episodes, "the page's own links vanished"
+    assert not any(e.in_dialog for e in episodes), (
+        "page content was misread as dialog content — every credential form "
+        "would then look dismissible"
+    )
+
+
+async def test_the_real_page_shape_reads_as_an_overlay_not_a_wall(page):
+    """END TO END through the real extractor: the incident page produces an
+    OVERLAY verdict, so the browse carries on instead of aborting."""
+    from app.browser import loop as browser_loop
+
+    obs = await _observe(page, _MODAL_PAGE)
+
+    assert browser_loop.credential_overlay_site(obs) is not None
+    assert browser_loop.detect_login_wall(obs) is None, (
+        "the incident: a sign-in modal on a usable page read as a hard wall"
+    )
+
+
+# ============================================ 5. stock, on the measured markup
+# The listing card shape measured on junaidjamshed.com/search?q=janan
+# (2026-08-09, scripts/_measure_ecommerce_round.py). Two things a hand-written
+# fixture would get wrong, and both are why the walk exists:
+#
+#   1. THE SIGNAL IS NOT ON THE ELEMENT THE USER IS OFFERED. The offered
+#      candidate is the title <a>; the sold-out marker is a class on the CARD
+#      ancestor (`hdt-pr-sold_out`) three levels up. A per-element read sees
+#      nothing.
+#   2. THE GRID CARRIES BOTH KINDS AT ONCE, so a walk that runs past the card
+#      finds SOME sold-out badge and condemns every product on the page — which
+#      is exactly what the first cut of the measurement script did.
+_STOCK_GRID = """
+<!doctype html><html><body>
+  <div class="hdt-collection-products">
+    <div class="hdt-card-product hdt-pr-style8 hdt-pr-sold_out">
+      <div class="hdt-card-product__wrapper">
+        <div class="hdt-badge__wrapp"><span class="hdt-badge">SOLD OUT</span></div>
+        <div class="hdt-card-product__info">
+          <a href="/products/janan-gold-100ml">JANAN GOLD - 100ML</a>
+          <span class="price">PKR.5,780</span>
+        </div>
+        <a href="/products/janan-gold-100ml" class="view">View product</a>
+      </div>
+    </div>
+    <div class="hdt-card-product hdt-pr-style8">
+      <div class="hdt-card-product__wrapper">
+        <div class="hdt-badge__wrapp"></div>
+        <div class="hdt-card-product__info">
+          <a href="/products/janan-oud-100ml">JANAN OUD</a>
+          <span class="price">PKR.6,205</span>
+        </div>
+        <button class="add">Add to bag</button>
+      </div>
+    </div>
+  </div>
+</body></html>
+"""
+
+
+async def test_a_sold_out_card_marks_only_its_own_product(page):
+    """THE MEASURED SHAPE. The signal sits on an ancestor of the offered link,
+    and the walk must reach it WITHOUT reaching the grid — or one product's
+    badge condemns the whole page."""
+    obs = await _observe(page, _STOCK_GRID)
+    by_name = {e.name: e for e in obs.elements if e.name}
+
+    gold = next(e for n, e in by_name.items() if "JANAN GOLD" in n)
+    oud = next(e for n, e in by_name.items() if "JANAN OUD" in n)
+
+    assert gold.sold_out is True, (
+        "the sold-out class is on the CARD, not the link — the walk must find it"
+    )
+    assert oud.sold_out is False, (
+        "the walk ran past the card into the grid and condemned a buyable product"
+    )
+
+
+async def test_the_stock_flag_is_not_rendered_into_the_prompt(page):
+    """CODE data, like in_dialog. If it ever renders it moves the element
+    budget, the action signature AND the page fingerprint."""
+    obs = await _observe(page, _STOCK_GRID)
+    gold = next(e for e in obs.elements if "JANAN GOLD" in (e.name or ""))
+    assert gold.sold_out is True
+    assert "sold" not in gold.render().lower()
+
+
+async def test_a_page_with_no_stock_markup_reads_as_available(page):
+    """FAIL-OPEN: an unfamiliar theme must keep offering everything, never hide
+    everything."""
+    obs = await _observe(
+        page,
+        "<!doctype html><html><body><ul>"
+        "<li><a href='/products/a'>PRODUCT A</a></li>"
+        "<li><a href='/products/b'>PRODUCT B</a></li>"
+        "</ul></body></html>",
+    )
+    links = [e for e in obs.elements if (e.name or "").startswith("PRODUCT")]
+    assert links and not any(e.sold_out for e in links)

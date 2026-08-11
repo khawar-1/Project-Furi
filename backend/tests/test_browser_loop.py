@@ -333,6 +333,16 @@ class FakeOption:
         return self.text
 
 
+class FakeKeyboard:
+    """Page-level key input, the shape _act's press_key path reaches for."""
+
+    def __init__(self, page):
+        self.page = page
+
+    async def press(self, key):
+        self.page.record(None, "key", key)
+
+
 class ScriptedPage:
     """A page that advances to the NEXT scripted payload whenever an action
     navigates (a click or an Enter). `acted` records every action taken."""
@@ -363,10 +373,21 @@ class ScriptedPage:
     async def wait_for_load_state(self, *a, **k):
         pass
 
+    @property
+    def keyboard(self):
+        """A real Playwright Page has one; without it _act's press_key path takes
+        its "keyboard input is unavailable" branch and every Escape silently
+        fails (2026-08-08). A fake that cannot express the contract cannot test
+        it — the shape this codebase has now shipped four times."""
+        return FakeKeyboard(self)
+
     def record(self, index, kind, value):
         self.acted.append((self.i, index, kind, value))
-        # A click or Enter is a navigation — advance to the next scripted page.
-        if kind in ("click", "press") and self.i < len(self.payloads) - 1:
+        # A click, an Enter, or a page-level key press is a change — advance to
+        # the next scripted page. For a key press that is the point: Escape
+        # closing a dialog changes the DOM, and a test where the dialog SURVIVES
+        # simply scripts the same payload twice.
+        if kind in ("click", "press", "key") and self.i < len(self.payloads) - 1:
             self.i += 1
             self.url = self.payloads[self.i].get("url", self.url)
 
@@ -430,12 +451,26 @@ class FakeProvider:
         return LLMResponse(content=content, model="fake", provider="fake")
 
 
-def _el(index, role="link", name="x", value="", href="", form=None, options=None):
+def _el(
+    index, role="link", name="x", value="", href="", form=None, options=None,
+    in_dialog=False, sold_out=False,
+):
     item = {"index": index, "role": role, "name": name, "value": value, "href": href}
     if form is not None:
         item["form"] = form
     if options is not None:
         item["options"] = list(options)
+    # DIALOG MEMBERSHIP (2026-08-08). The real extractor emits this for every
+    # element; without it here no fake page could express "a password field
+    # inside a modal", which is the whole of the D1 incident.
+    if in_dialog:
+        item["in_dialog"] = True
+    # STOCK (2026-08-09), and for the same reason: the real extractor emits this
+    # for every element, and without it no fake listing could express "six of
+    # these twenty cannot be bought" — which is the whole of that incident. A
+    # fake that cannot state the contract cannot test it.
+    if sold_out:
+        item["sold_out"] = True
     return item
 
 

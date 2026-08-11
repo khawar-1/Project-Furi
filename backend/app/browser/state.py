@@ -57,6 +57,7 @@ class Handoff(str, Enum):
     NEXT_COMMIT = "next_commit"          # multi-commit: next form ready
     WINDOW_EXPIRED = "window_expired"    # a resume found its held window gone
     SITE_UNRESOLVED = "site_unresolved"  # the named domain does not exist
+    STUCK = "stuck"                      # no safe next action — ask, don't die
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,15 @@ class HandoffPayload:
     challenge_mode: str = ""      # CHALLENGE: "interstitial" | "embedded"
     auth_signin: bool = False     # AUTH_OFFER: the page offers sign-in
     auth_signup: bool = False     # AUTH_OFFER: the page offers sign-up
+    # LOGIN / SIGNUP / CHALLENGE: the tab was handed to the user IN PLACE rather
+    # than a separate window being opened (2026-08-08). WHERE THE USER SHOULD
+    # LOOK — the pause text must not say "I've opened a window" about a tab that
+    # was already on screen, which is how the live incident's episode-1 page read
+    # as Jarvis's answer instead of as the page it had stopped on. One field for
+    # every kind, because the question is identical for all of them; the CHALLENGE
+    # branch has read `challenge_in_place` since 2026-08-03 and nothing had ever
+    # passed it, so it also closes that.
+    in_place: bool = False
     # TARGET_CHOICE: which kind of thing is ambiguous ("item" = a product on a
     # listing, "option" = a value in a form control), what the user asked for in
     # their own words, the control's name when it is an option, and the real
@@ -84,6 +94,17 @@ class HandoffPayload:
     choice_target: str = ""
     choice_field: str = ""
     choice_options: list = dataclasses.field(default_factory=list)
+    # How many matched in TOTAL, which exceeds len(choice_options) once the tie is
+    # longer than a question may show (2026-08-08). The pause text reports it, so
+    # a shortened list can never be read as the whole answer. 0 = "same as what is
+    # shown", which is what a parked payload written before this field says.
+    choice_total: int = 0
+    # Every offered item is sold out (2026-08-09). Normally the unbuyable ones
+    # are simply not offered; this is the case where none survived, so the
+    # question has to say none can be added rather than present dead ends.
+    # Defaults False — what a payload parked before this field says, and the
+    # behaviour that predates it.
+    choice_unbuyable: bool = False
     # dataclasses.field spelled out: the attribute named `field` above shadows
     # the bare name inside this class body.
     commit_state: dict = dataclasses.field(default_factory=dict)
@@ -104,10 +125,13 @@ class HandoffPayload:
             "challenge_mode": self.challenge_mode,
             "auth_signin": self.auth_signin,
             "auth_signup": self.auth_signup,
+            "in_place": self.in_place,
             "choice_kind": self.choice_kind,
             "choice_target": self.choice_target,
             "choice_field": self.choice_field,
             "choice_options": list(self.choice_options),
+            "choice_total": self.choice_total,
+            "choice_unbuyable": self.choice_unbuyable,
             "commit_state": dict(self.commit_state),
             "commits_done": self.commits_done,
         }
@@ -133,10 +157,13 @@ class HandoffPayload:
             challenge_mode=str(data.get("challenge_mode") or ""),
             auth_signin=bool(data.get("auth_signin")),
             auth_signup=bool(data.get("auth_signup")),
+            in_place=bool(data.get("in_place")),
             choice_kind=str(data.get("choice_kind") or ""),
             choice_target=str(data.get("choice_target") or ""),
             choice_field=str(data.get("choice_field") or ""),
             choice_options=[str(o) for o in (data.get("choice_options") or [])],
+            choice_total=int(data.get("choice_total") or 0),
+            choice_unbuyable=bool(data.get("choice_unbuyable")),
             commit_state=dict(data.get("commit_state") or {}),
             commits_done=int(data.get("commits_done") or 0),
         )
@@ -175,6 +202,8 @@ def handoff_from_outcome(outcome: Any) -> Optional[HandoffPayload]:
             choice_options=[
                 str(o) for o in (getattr(outcome, "choice_options", None) or [])
             ],
+            choice_total=int(getattr(outcome, "choice_total", 0) or 0),
+            choice_unbuyable=bool(getattr(outcome, "choice_unbuyable", False)),
             url=str(getattr(outcome, "url", "") or ""),
         )
     if getattr(outcome, "fill_required", False):
@@ -197,6 +226,9 @@ def handoff_from_outcome(outcome: Any) -> Optional[HandoffPayload]:
             reason=_wall_reason(getattr(outcome, "wall_kind", "login")),
             site=str(getattr(outcome, "login_site", "") or ""),
             url=str(getattr(outcome, "login_url", "") or ""),
+            # Set by the TOOL, not the loop, so it is absent on a raw
+            # BrowseOutcome — getattr's default is the right answer there.
+            in_place=bool(getattr(outcome, "login_in_place", False)),
         )
     if getattr(outcome, "challenge_required", False):
         return HandoffPayload(
@@ -205,6 +237,7 @@ def handoff_from_outcome(outcome: Any) -> Optional[HandoffPayload]:
             url=str(getattr(outcome, "challenge_url", "") or ""),
             challenge_kind=str(getattr(outcome, "challenge_kind", "") or ""),
             challenge_mode=str(getattr(outcome, "challenge_mode", "") or ""),
+            in_place=bool(getattr(outcome, "challenge_in_place", False)),
         )
     if getattr(outcome, "origin_approval_required", False):
         return HandoffPayload(
@@ -224,6 +257,24 @@ def handoff_from_outcome(outcome: Any) -> Optional[HandoffPayload]:
         return HandoffPayload(
             reason=Handoff.COMMIT,
             commit_state=dict(getattr(outcome, "commit_state", None) or {}),
+        )
+    # LAST, and that placement is the whole meaning of this one (2026-08-09).
+    # STUCK says "nothing else fired": the loop produced no action on a page
+    # that raised no wall, no challenge, no tie and no contract. Anywhere
+    # earlier it would shadow a real pause — most damagingly a discovered form,
+    # which is a run that SUCCEEDED. Being the fallthrough is also what makes it
+    # safe to add at all: every existing flag still wins, so no working path
+    # changes shape.
+    if getattr(outcome, "stuck_required", False):
+        return HandoffPayload(
+            reason=Handoff.STUCK,
+            # No new field: the page rides `url` like every other payload, and
+            # what the loop was trying rides the outcome's own `error`, which
+            # `_discovery_from_handoff` already threads through. A payload with
+            # nothing new to serialize cannot break a parked plan written before
+            # it existed.
+            url=str(getattr(outcome, "url", "") or ""),
+            site=str(getattr(outcome, "stuck_page", "") or ""),
         )
     return None
 

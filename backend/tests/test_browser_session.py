@@ -780,6 +780,180 @@ async def test_a_painted_but_quiet_spa_exits_on_the_growth_stall(fake_browser):
     assert polls["n"] <= 6, f"should exit on the stall, polled {polls['n']} times"
 
 
+def test_the_busy_exit_constants_match_the_measurements():
+    """THE MEASUREMENT, PINNED, so moving a constant fails loudly instead of
+    quietly re-introducing the defect on either side.
+
+    Two live measurements bound READY_BUSY_MS/READY_BUSY_ACTS from opposite
+    directions, and both are recorded at the constants:
+
+      daraz.pk  (2026-07-26)  acts= 54 at its false-ready 2.31s, settled at 6.36s
+      anikoto   (2026-08-08)  acts=170..234, still=0, complete=False, at 15.0s
+
+    The busy exit must fire for the second and never for the first."""
+    from app.browser import session as sess_mod
+
+    daraz_settle_seconds = 6.36
+    daraz_false_ready_acts = 54
+    anikoto_min_acts = 170
+
+    assert sess_mod.READY_BUSY_MS / 1000.0 > daraz_settle_seconds, (
+        "the busy exit would fire before the slowest page ever measured goes "
+        "still — that is the 'observed the wrong page' defect READY_STABLE_POLLS "
+        "exists to prevent"
+    )
+    assert daraz_false_ready_acts < sess_mod.READY_BUSY_ACTS < anikoto_min_acts, (
+        "the act floor must sit between daraz's thin false-ready state and "
+        "anikoto's genuinely busy one"
+    )
+    assert sess_mod.READY_BUSY_MS < sess_mod.READY_POLL_MS, (
+        "an exit that fires no earlier than the deadline is not an exit"
+    )
+
+
+async def test_a_busy_page_that_never_settles_stops_waiting(fake_browser):
+    """THE ANIKOTO INCIDENT, frozen. A video page whose DOM never stops growing
+    (player + ad slots + lazy carousels) but which carries hundreds of actionable
+    elements from the first poll. Every exit above requires stillness, so before
+    this the loop paid the full 15s — four times in one run, ready_wait=117.9s of
+    325s — for an observation that could not improve."""
+    from app.browser import session as sess_mod
+
+    session = await _session(allowlist={"example.com"})
+    polls = {"n": 0}
+
+    async def _forever_growing(expression, *args):
+        polls["n"] += 1
+        # The measured shape: richly actionable, never 'complete', never still.
+        return {
+            "ready": True,
+            "complete": False,
+            "acts": 200,
+            "text": 2000,
+            "nodes": 800 + 50 * polls["n"],
+        }
+
+    async def _committed_goto(url, **kwargs):
+        fake_browser.page.url = url
+
+    fake_browser.page.goto = _committed_goto
+    fake_browser.page.evaluate = _forever_growing
+
+    step, busy, budget = (
+        sess_mod.READY_STEP_MS,
+        sess_mod.READY_BUSY_MS,
+        sess_mod.READY_POLL_MS,
+    )
+    # Scale the clock, not the logic: the ratios that decide the outcome are
+    # preserved, so the test measures the rule rather than the wall clock.
+    sess_mod.READY_STEP_MS, sess_mod.READY_BUSY_MS, sess_mod.READY_POLL_MS = 5, 100, 400
+    try:
+        started = time.monotonic()
+        await session.goto("https://example.com/watch/ep-1")
+        elapsed = time.monotonic() - started
+    finally:
+        sess_mod.READY_STEP_MS, sess_mod.READY_BUSY_MS, sess_mod.READY_POLL_MS = (
+            step,
+            busy,
+            budget,
+        )
+
+    assert elapsed < 0.38, (
+        f"waited {elapsed:.2f}s of a 0.40s budget — it sat out the whole poll on "
+        "a page that was actionable from the first look"
+    )
+    assert session.stats.slow_navigations == 0, (
+        "a page we chose to stop waiting on is not a slow navigation"
+    )
+
+
+async def test_the_daraz_measurement_still_beats_the_busy_exit(fake_browser):
+    """⚠️ THE NON-REGRESSION THAT JUSTIFIES THE TIME BOUND, with daraz's REAL
+    numbers rather than invented ones.
+
+    At 3.82s daraz already had acts=322 — far past any sane act floor — while its
+    products did not arrive until 5.79s. A busy exit gated on the floor ALONE
+    would fire there and hand the loop a header, which is precisely the defect
+    READY_STABLE_POLLS was measured into existence to prevent. It is the 8s time
+    bound, not the floor, that keeps this page waiting."""
+    from app.browser import session as sess_mod
+
+    session = await _session(allowlist={"example.com"})
+    polls = {"n": 0}
+    # (acts, nodes) at each measured moment; from poll 4 on it is still.
+    stages = [(54, 345), (322, 2558), (1026, 4838), (1026, 4838)]
+
+    async def _daraz(expression, *args):
+        polls["n"] += 1
+        acts, nodes = stages[min(polls["n"] - 1, len(stages) - 1)]
+        return {"ready": True, "complete": False, "acts": acts, "text": 4000, "nodes": nodes}
+
+    async def _committed_goto(url, **kwargs):
+        fake_browser.page.url = url
+
+    fake_browser.page.goto = _committed_goto
+    fake_browser.page.evaluate = _daraz
+
+    step = sess_mod.READY_STEP_MS
+    sess_mod.READY_STEP_MS = 5
+    try:
+        await session.goto("https://example.com/search")
+    finally:
+        sess_mod.READY_STEP_MS = step
+
+    assert polls["n"] >= 3 + sess_mod.READY_STABLE_POLLS, (
+        f"returned after {polls['n']} polls — the busy exit stole the page from "
+        "under the stability rule before its products had arrived"
+    )
+
+
+async def test_a_busy_but_thin_page_keeps_its_full_budget(fake_browser):
+    """The floor is the second guard, and this is what it buys: a page that is
+    never still AND has almost nothing on it is a shell that has not filled in
+    yet, not a page worth observing. It keeps every millisecond of its budget."""
+    from app.browser import session as sess_mod
+
+    session = await _session(allowlist={"example.com"})
+    polls = {"n": 0}
+
+    async def _thin_and_growing(expression, *args):
+        polls["n"] += 1
+        return {
+            "ready": False,
+            "complete": False,
+            "acts": 3,  # far below READY_BUSY_ACTS
+            "text": 20,
+            "nodes": 100 + 40 * polls["n"],
+        }
+
+    async def _committed_goto(url, **kwargs):
+        fake_browser.page.url = url
+
+    fake_browser.page.goto = _committed_goto
+    fake_browser.page.evaluate = _thin_and_growing
+
+    step, busy, budget = (
+        sess_mod.READY_STEP_MS,
+        sess_mod.READY_BUSY_MS,
+        sess_mod.READY_POLL_MS,
+    )
+    sess_mod.READY_STEP_MS, sess_mod.READY_BUSY_MS, sess_mod.READY_POLL_MS = 5, 100, 400
+    try:
+        started = time.monotonic()
+        await session.goto("https://example.com/shell")
+        elapsed = time.monotonic() - started
+    finally:
+        sess_mod.READY_STEP_MS, sess_mod.READY_BUSY_MS, sess_mod.READY_POLL_MS = (
+            step,
+            busy,
+            budget,
+        )
+
+    assert elapsed >= 0.38, (
+        f"gave up after {elapsed:.2f}s on a thin page — the act floor is not holding"
+    )
+
+
 async def test_an_unrecognised_evaluate_result_is_treated_as_ready(fake_browser):
     """THE TEST-SHAPE RULE, and it is production-correct too. The suite's fake
     pages return canned dicts from evaluate(); without this every navigating

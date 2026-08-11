@@ -1,0 +1,52 @@
+[
+ {
+  "url": "https://www.junaidjamshed.com/search?q=janan",
+  "goto_ms": 5063.966200046707,
+  "goto_error": "",
+  "settle_ms": 1977.1824999479577,
+  "top_eval_ms": 198.1674000271596,
+  "top_error": "",
+  "elements_top": 97,
+  "text_len": 2739,
+  "frame_scan_ms": 63.02109995158389,
+  "frames": 0,
+  "frame_eval_ms": 0.000900006853044033,
+  "observe_ms": 167.02619998250157,
+  "observe_error": "",
+  "render_ms": 0.42039999971166253,
+  "elements_total": 97,
+  "rendered_chars": 8885,
+  "run": 1
+ },
+ {
+  "url": "https://www.junaidjamshed.com/search?q=janan",
+  "goto_ms": 2975.605799991172,
+  "goto_error": "",
+  "settle_ms": 760.2346999919973,
+  "top_eval_ms": 181.6730999853462,
+  "top_error": "",
+  "elements_top": 98,
+  "text_len": 2739,
+  "frame_scan_ms": 39.14250002708286,
+  "frames": 0,
+  "frame_eval_ms": 0.000400003045797348,
+  "observe_ms": 136.02500001434237,
+  "observe_error": "",
+  "render_ms": 0.41340000461786985,
+  "elements_total": 98,
+  "rendered_chars": 8898,
+  "run": 2
+ },
+ {
+  "url": "https://www.junaidjamshed.com/search?q=janan",
+  "run": 1,
+  "raw_eval_ms": 375.5618999712169,
+  "raw_error": ""
+ },
+ {
+  "url": "https://www.junaidjamshed.com/search?q=janan",
+  "run": 2,
+  "raw_eval_ms": 553.0501999892294,
+  "raw_error": ""
+ }
+]

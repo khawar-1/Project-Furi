@@ -815,9 +815,31 @@ def _one_commit_block(commit: dict, *, label: str = "") -> str:
     sent_to = str(commit.get("submitted_url") or "").strip()
     if sent_to:
         head += f" (Sent as {sent_to}.)"
+    # DID IT ACTUALLY LAND? (2026-08-10) "Submitted" is a fact about the REQUEST
+    # — the interceptor watched it leave — and says nothing about the outcome. A
+    # storefront can accept an add and drop it, and on an AJAX add the page never
+    # moves, so the response prose cannot tell either. The site's own cart count
+    # can, so when it was read it is reported: as a confirmation, as an honest
+    # "it did not change", or not at all when there was nothing to compare.
+    verified = commit.get("cart_verified")
+    before, after = commit.get("cart_before"), commit.get("cart_after")
+    if verified is True:
+        head += (
+            f" The cart went from {before} to {after} item(s), so it is in."
+            if isinstance(before, int) and isinstance(after, int)
+            else " The cart is confirmed changed."
+        )
+    elif verified is False:
+        head += (
+            f" ⚠️ The cart still shows {after} item(s) — unchanged — so it does "
+            "not look like it was added."
+        )
     response = str(commit.get("response_text") or "").strip()
+    cart_text = str(commit.get("cart_text") or "").strip()
     if response:
         return head + "\nThe page shows:\n" + _fence(response)
+    if cart_text:
+        return head + "\nThe cart now shows:\n" + _fence(cart_text)
     return head
 
 

@@ -1,0 +1,868 @@
+[
+  {
+    "url": "https://www.junaidjamshed.com/",
+    "title": "J. Junaid Jamshed Official Website",
+    "elements": 103,
+    "text_len": 1955,
+    "candidates": 68,
+    "with_price": 0,
+    "rendered_chars": 8063,
+    "decision_cap": 2048,
+    "phrasings": {
+      "add janan to cart": {
+        "target": [
+          "janan"
+        ],
+        "matched": 0,
+        "tied": 0,
+        "top_score": 0,
+        "options": [],
+        "hrefs": [],
+        "page_is_the_target": false
+      },
+      "add janan sports to cart": {
+        "target": [
+          "janan",
+          "sports"
+        ],
+        "matched": 0,
+        "tied": 0,
+        "top_score": 0,
+        "options": [],
+        "hrefs": [],
+        "page_is_the_target": false
+      },
+      "add janan sports 100ml to cart": {
+        "target": [
+          "janan",
+          "sports",
+          "100ml"
+        ],
+        "matched": 0,
+        "tied": 0,
+        "top_score": 0,
+        "options": [],
+        "hrefs": [],
+        "page_is_the_target": false
+      }
+    },
+    "goal_target": [
+      "junadjamshed",
+      "janan"
+    ],
+    "intent_target": [
+      "junadjamshed",
+      "janan"
+    ],
+    "goal_tied": 0,
+    "by_role": {
+      "link": 91,
+      "button": 11,
+      "input": 1
+    },
+    "controls": [
+      {
+        "role": "button",
+        "name": "PAK",
+        "index": 12,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "",
+        "index": 45,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "",
+        "index": 46,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "",
+        "index": 47,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Quick add",
+        "index": 50,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Quick add",
+        "index": 53,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Quick add",
+        "index": 56,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Quick add",
+        "index": 59,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Quick add",
+        "index": 62,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Quick add",
+        "index": 65,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "input",
+        "name": "EMAIL ADDRESS",
+        "index": 97,
+        "value": "khawarmohiuddin5@gmail.com",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "",
+        "index": 98,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      }
+    ],
+    "control_count": 12
+  },
+  {
+    "url": "https://www.junaidjamshed.com/search?q=janan",
+    "title": "Search: 1000 results found for \"janan\" \u2013 J.",
+    "elements": 98,
+    "text_len": 2746,
+    "candidates": 70,
+    "with_price": 0,
+    "rendered_chars": 8901,
+    "decision_cap": 2048,
+    "phrasings": {
+      "add janan to cart": {
+        "target": [
+          "janan"
+        ],
+        "matched": 20,
+        "tied": 20,
+        "top_score": 1,
+        "options": [
+          "JANAN GOLD - 100ML",
+          "JANAN SPORT - 30ML",
+          "JANAN PLATINUM - 100ML",
+          "JANAN GIFT SET (30ML)",
+          "JANAN INTENSE",
+          "JANAN OUD",
+          "JANAN GOLD - GIFT SET",
+          "JANAN POUR FEMME - 30ML",
+          "JANAN POUR FEMME",
+          "JANAN PLATINIUM SHOWER GEL",
+          "JANAN SPORT POUR HOMME PERFUME BODY SPRAY",
+          "JANAN PLATINUM - 200ML",
+          "JANAN MUSK - 30ML",
+          "JANAN GOLD - 30ML",
+          "JANAN LEATHER",
+          "JANAN SPORT - 200ML",
+          "JANAN SPORT - GIFT SET",
+          "JANAN VANILLA",
+          "JANAN VANILLA - 30ML",
+          "JANAN OUD - 30ML"
+        ],
+        "hrefs": [
+          "/products/janan-gold-100ml?_pos=1&_sid=42c12419d&_ss=r",
+          "/products/janan-sport-30ml?_pos=2&_sid=42c12419d&_ss=r",
+          "/products/janan-platinum?_pos=3&_sid=42c12419d&_ss=r"
+        ],
+        "page_is_the_target": false
+      },
+      "add janan sports to cart": {
+        "target": [
+          "janan",
+          "sports"
+        ],
+        "matched": 20,
+        "tied": 4,
+        "top_score": 3,
+        "options": [
+          "JANAN SPORT - 30ML",
+          "JANAN SPORT POUR HOMME PERFUME BODY SPRAY",
+          "JANAN SPORT - 200ML",
+          "JANAN SPORT - GIFT SET"
+        ],
+        "hrefs": [
+          "/products/janan-sport-30ml?_pos=2&_sid=42c12419d&_ss=r",
+          "/products/janan-sport-body-spray?_pos=11&_sid=42c12419d&_ss=r",
+          "/products/janan-sports?_pos=16&_sid=42c12419d&_ss=r"
+        ],
+        "page_is_the_target": false
+      },
+      "add janan sports 100ml to cart": {
+        "target": [
+          "janan",
+          "sports",
+          "100ml"
+        ],
+        "matched": 20,
+        "tied": 4,
+        "top_score": 3,
+        "options": [
+          "JANAN SPORT - 30ML",
+          "JANAN SPORT POUR HOMME PERFUME BODY SPRAY",
+          "JANAN SPORT - 200ML",
+          "JANAN SPORT - GIFT SET"
+        ],
+        "hrefs": [
+          "/products/janan-sport-30ml?_pos=2&_sid=42c12419d&_ss=r",
+          "/products/janan-sport-body-spray?_pos=11&_sid=42c12419d&_ss=r",
+          "/products/janan-sports?_pos=16&_sid=42c12419d&_ss=r"
+        ],
+        "page_is_the_target": false
+      }
+    },
+    "goal_target": [
+      "junadjamshed",
+      "janan"
+    ],
+    "intent_target": [
+      "junadjamshed",
+      "janan"
+    ],
+    "goal_tied": 20,
+    "by_role": {
+      "link": 89,
+      "button": 8,
+      "input": 1
+    },
+    "controls": [
+      {
+        "role": "button",
+        "name": "PAK",
+        "index": 12,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Switch to grid view 3",
+        "index": 20,
+        "value": "3",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Switch to grid view 4",
+        "index": 21,
+        "value": "4",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Switch to grid view 6",
+        "index": 22,
+        "value": "6",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "FILTER AND SORT",
+        "index": 23,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 28,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 34,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "input",
+        "name": "EMAIL ADDRESS",
+        "index": 92,
+        "value": "khawarmohiuddin5@gmail.com",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "",
+        "index": 93,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      }
+    ],
+    "control_count": 9
+  },
+  {
+    "url": "https://www.junaidjamshed.com/search?q=trouser",
+    "title": "Search: 1000 results found for \"trouser\" \u2013 J.",
+    "elements": 96,
+    "text_len": 2716,
+    "candidates": 67,
+    "with_price": 0,
+    "rendered_chars": 8866,
+    "decision_cap": 2048,
+    "phrasings": {
+      "add janan to cart": {
+        "target": [
+          "janan"
+        ],
+        "matched": 0,
+        "tied": 0,
+        "top_score": 0,
+        "options": [],
+        "hrefs": [],
+        "page_is_the_target": false
+      },
+      "add janan sports to cart": {
+        "target": [
+          "janan",
+          "sports"
+        ],
+        "matched": 0,
+        "tied": 0,
+        "top_score": 0,
+        "options": [],
+        "hrefs": [],
+        "page_is_the_target": false
+      },
+      "add janan sports 100ml to cart": {
+        "target": [
+          "janan",
+          "sports",
+          "100ml"
+        ],
+        "matched": 0,
+        "tied": 0,
+        "top_score": 0,
+        "options": [],
+        "hrefs": [],
+        "page_is_the_target": false
+      }
+    },
+    "goal_target": [
+      "junadjamshed",
+      "janan"
+    ],
+    "intent_target": [
+      "junadjamshed",
+      "janan"
+    ],
+    "goal_tied": 0,
+    "by_role": {
+      "link": 85,
+      "button": 10,
+      "input": 1
+    },
+    "controls": [
+      {
+        "role": "button",
+        "name": "PAK",
+        "index": 12,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Switch to grid view 3",
+        "index": 20,
+        "value": "3",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Switch to grid view 4",
+        "index": 21,
+        "value": "4",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Switch to grid view 6",
+        "index": 22,
+        "value": "6",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "FILTER AND SORT",
+        "index": 23,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Quick add",
+        "index": 25,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Quick add",
+        "index": 28,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Quick add",
+        "index": 31,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Quick add",
+        "index": 34,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "input",
+        "name": "EMAIL ADDRESS",
+        "index": 90,
+        "value": "khawarmohiuddin5@gmail.com",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "",
+        "index": 91,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      }
+    ],
+    "control_count": 11
+  },
+  {
+    "url": "https://www.junaidjamshed.com/products/janan-gold-100ml?_pos=1&_sid=42c12419d&_ss=r&variant=53160352383136",
+    "title": "Buy JANAN GOLD Perfume for Men online at J. Junaid Jamshed",
+    "elements": 103,
+    "text_len": 3917,
+    "candidates": 63,
+    "with_price": 0,
+    "rendered_chars": 10164,
+    "decision_cap": 2048,
+    "phrasings": {
+      "add janan to cart": {
+        "target": [
+          "janan"
+        ],
+        "matched": 8,
+        "tied": 8,
+        "top_score": 1,
+        "options": [
+          "JANAN GOLD - 200ML",
+          "JANAN OUD",
+          "JANAN GOLD - GIFT SET",
+          "JANAN INTENSE",
+          "JANAN POUR FEMME",
+          "JANAN SPORT - 200ML",
+          "JANAN INTENSE - 30ML",
+          "JANAN SPORT - 30ML"
+        ],
+        "hrefs": [
+          "/products/janan-golds?pr_prod_strat=e5_desc&pr_rec_id=0c427db5e&pr_rec_pid=15280137240736&pr_ref_pid",
+          "/products/janan-oud-100ml?pr_prod_strat=jac&pr_rec_id=0c427db5e&pr_rec_pid=15280203366560&pr_ref_pid",
+          "/products/janan-gold-gift-set?pr_prod_strat=e5_desc&pr_rec_id=0c427db5e&pr_rec_pid=15280071868576&pr"
+        ],
+        "page_is_the_target": false
+      },
+      "add janan sports to cart": {
+        "target": [
+          "janan",
+          "sports"
+        ],
+        "matched": 8,
+        "tied": 2,
+        "top_score": 3,
+        "options": [
+          "JANAN SPORT - 200ML",
+          "JANAN SPORT - 30ML"
+        ],
+        "hrefs": [
+          "/products/janan-sports?pr_prod_strat=e5_desc&pr_rec_id=0c427db5e&pr_rec_pid=15280137273504&pr_ref_pi",
+          "/products/janan-sport-30ml?_pos=2&_sid=e327779d9&_ss=r"
+        ],
+        "page_is_the_target": false
+      },
+      "add janan sports 100ml to cart": {
+        "target": [
+          "janan",
+          "sports",
+          "100ml"
+        ],
+        "matched": 8,
+        "tied": 2,
+        "top_score": 3,
+        "options": [
+          "JANAN SPORT - 200ML",
+          "JANAN SPORT - 30ML"
+        ],
+        "hrefs": [
+          "/products/janan-sports?pr_prod_strat=e5_desc&pr_rec_id=0c427db5e&pr_rec_pid=15280137273504&pr_ref_pi",
+          "/products/janan-sport-30ml?_pos=2&_sid=e327779d9&_ss=r"
+        ],
+        "page_is_the_target": false
+      }
+    },
+    "goal_target": [
+      "junadjamshed",
+      "janan"
+    ],
+    "intent_target": [
+      "junadjamshed",
+      "janan"
+    ],
+    "goal_tied": 8,
+    "by_role": {
+      "link": 68,
+      "button": 30,
+      "summary": 3,
+      "select": 1,
+      "input": 1
+    },
+    "controls": [
+      {
+        "role": "button",
+        "name": "PAK",
+        "index": 12,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "See all reviews",
+        "index": 20,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to Wishlist",
+        "index": 21,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "",
+        "index": 22,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "summary",
+        "name": "PRODUCT DETAILS",
+        "index": 23,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "summary",
+        "name": "CARE & USAGE",
+        "index": 24,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "summary",
+        "name": "SHIPPING & RETURNS INFO",
+        "index": 25,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "100% (32) reviews with 5 star rating",
+        "index": 29,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "0% (0) reviews with 4 star rating",
+        "index": 30,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "0% (0) reviews with 3 star rating",
+        "index": 31,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "0% (0) reviews with 2 star rating",
+        "index": 32,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "0% (0) reviews with 1 star rating",
+        "index": 33,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Write a review",
+        "index": 34,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Filters",
+        "index": 35,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "select",
+        "name": "Most recent Highest rating Lowest rating Only pictures Pictures first ",
+        "index": 36,
+        "value": "created_at",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Go to page 1",
+        "index": 37,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Go to page 2",
+        "index": 38,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Go to page 3",
+        "index": 39,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Go to page 4",
+        "index": 40,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Go to page 7",
+        "index": 41,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Go to next page",
+        "index": 42,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 44,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 47,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 50,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 53,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 56,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 59,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 62,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 65,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 68,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 71,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 74,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "Add to bag",
+        "index": 77,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "input",
+        "name": "EMAIL ADDRESS",
+        "index": 97,
+        "value": "khawarmohiuddin5@gmail.com",
+        "form": false,
+        "in_dialog": false
+      },
+      {
+        "role": "button",
+        "name": "",
+        "index": 98,
+        "value": "",
+        "form": false,
+        "in_dialog": false
+      }
+    ],
+    "control_count": 35
+  }
+]
