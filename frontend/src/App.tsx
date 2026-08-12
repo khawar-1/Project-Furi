@@ -234,15 +234,22 @@ export default function App() {
   // renderer, strictly opt-in. Start/stop it whenever the voice master + the
   // wake-word toggle change. No-op in a plain browser (getUserMedia/ONNX still
   // load, but the module fails soft). Detection audio never leaves the machine.
-  const wakeWordOn =
-    useVoiceStore((s) => !!s.settings?.enabled && !!s.settings?.wake_word);
+  // ⚠️ THE MODE IS PART OF THE KEY, not just the on/off. `startWakeWord` reads
+  // `wake_mode` ONCE at start (it decides whether to spin up an ONNX worker at
+  // all), so switching modes in Settings without restarting would leave the old
+  // detector running and the new setting silently inert — the "a toggle that
+  // does nothing until some later trigger" class. The phrase is read live per
+  // utterance, so it deliberately does NOT force a restart.
+  const wakeWordKey = useVoiceStore((s) =>
+    s.settings?.enabled && s.settings?.wake_word ? s.settings.wake_mode || 'speech' : ''
+  );
   useEffect(() => {
-    if (wakeWordOn) {
+    if (wakeWordKey) {
       void startWakeWord();
       return () => stopWakeWord();
     }
     stopWakeWord();
-  }, [wakeWordOn]);
+  }, [wakeWordKey]);
 
   return (
     <div className="flex flex-col h-screen w-screen bg-surface overflow-hidden">

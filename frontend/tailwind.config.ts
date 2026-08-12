@@ -54,6 +54,14 @@ const config: Config = {
         'glow-pulse': 'glowPulse 2s ease-in-out infinite',
         'typing': 'typing 1.4s ease-in-out infinite',
         'stream-in': 'streamIn 0.15s ease-out',
+        // ---- Voice-mode sphere. ROTATION ONLY, and deliberately so: it is
+        // compositor-work, and the reduced-motion rule in index.css can switch
+        // it all off with one selector. The level response and the idle breathe
+        // are driven by the orb's rAF loop through CSS variables instead, so
+        // they can share a single transform without fighting a keyframe.
+        'orb-spin': 'orbSpin 60s linear infinite',
+        'orb-spin-fast': 'orbSpin 24s linear infinite',
+        'orb-spin-reverse': 'orbSpinReverse 90s linear infinite',
       },
       keyframes: {
         fadeIn: {
@@ -79,6 +87,14 @@ const config: Config = {
         streamIn: {
           from: { opacity: '0' },
           to: { opacity: '1' },
+        },
+        orbSpin: {
+          from: { transform: 'rotate(0deg)' },
+          to: { transform: 'rotate(360deg)' },
+        },
+        orbSpinReverse: {
+          from: { transform: 'rotate(360deg)' },
+          to: { transform: 'rotate(0deg)' },
         },
       },
       boxShadow: {

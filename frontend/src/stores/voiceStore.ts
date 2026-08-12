@@ -18,9 +18,15 @@
 import { create } from 'zustand';
 import type { VoiceSettings } from '@/types';
 import { voiceApi } from '@/lib/api';
-import { startRecording, type RecordingHandle } from '@/lib/voiceInput';
+import {
+  CONVERSATION_SILENCE_STOP_MS,
+  startRecording,
+  type RecordingHandle,
+} from '@/lib/voiceInput';
 import { markNextTurnVoice, speakText, stopSpeaking } from '@/lib/voiceOutput';
 import { tryApproveByVoice } from '@/lib/spokenApproval';
+import { hasOpenInteractivePlan } from '@/lib/planGate';
+import { voiceAutoSend, voiceLoopActive, voiceModeActive } from '@/lib/voiceMode';
 import { useChatStore } from '@/stores/chatStore';
 
 export type VoicePhase = 'idle' | 'recording' | 'transcribing';
@@ -33,8 +39,41 @@ export type VoiceMode = 'hold' | 'summon' | 'followup';
 
 /** Phase 12.1: the never-heard-speech grace for a follow-up window. Kept short
  *  so a quiet user closes the conversation quickly instead of waiting the full
- *  8s summon grace. */
+ *  8s summon grace. Does NOT apply while voice mode is open — see OPEN_MIC_GRACE. */
 const FOLLOWUP_INITIAL_SILENCE_MS = 5_000;
+
+/**
+ * ⚠️ THE OPEN-MIC RULE — the fix for "it stops listening after the first time
+ * I speak".
+ *
+ * A follow-up window used to give the user FOLLOWUP_INITIAL_SILENCE_MS to start
+ * talking and then end the conversation for good; from the user's chair, one
+ * exchange worked and everything after it needed a tap. Five seconds is a
+ * perfectly ordinary pause after hearing an answer, so the loop was ending on
+ * the most normal thing a person does.
+ *
+ * While voice mode is open the mic simply does not time out. Voice mode is an
+ * explicit, sustained, visible intent — a full-screen sphere the user opened and
+ * can close with one key — so "keep listening until I leave" is what being open
+ * MEANS. Nothing here is persisted; leaving restores the configured behaviour
+ * (lib/voiceMode.ts).
+ *
+ * The MAX_RECORDING_MS cap still bounds any single window; a window that closes
+ * on the cap having heard nothing is re-opened by endHold without spending a
+ * transcription on the silence.
+ */
+const OPEN_MIC_GRACE = Number.POSITIVE_INFINITY;
+
+/**
+ * Whisper's averaged `no_speech_prob` at or above which a hands-free transcript
+ * is discarded as room noise rather than sent.
+ *
+ * Deliberately high. Below this the transcript is sent even if the model was
+ * unsure, because the cost of dropping something the user really said (they
+ * repeat themselves, and wonder whether Jarvis is broken) is worse than the cost
+ * of an occasional junk turn (they see it and move on).
+ */
+const NO_SPEECH_DROP_PROB = 0.7;
 
 interface VoiceState {
   phase: VoicePhase;
@@ -71,8 +110,11 @@ interface VoiceState {
    *  capture path so review/speak rules and continuous conversation all apply. */
   beginWakeListen: () => Promise<void>;
   /** Phase 12.1: after a spoken reply, re-open a short hands-free window so the
-   *  user can talk back without re-triggering. Driven by voiceConversation.ts. */
-  beginFollowUpListen: () => Promise<void>;
+   *  user can talk back without re-triggering. Driven by voiceConversation.ts.
+   *  `initialSilenceMs` overrides the never-heard-speech grace — voice mode's
+   *  FIRST window passes the longer summon grace, because a cold entry deserves
+   *  more than the mid-conversation 5s before it gives up. */
+  beginFollowUpListen: (initialSilenceMs?: number) => Promise<void>;
   /** Release: stop, transcribe, then auto-send (or draft, per settings). */
   endHold: () => Promise<void>;
   /** Esc / pointer left: discard the recording, transcribe nothing. */
@@ -142,6 +184,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
    *  and endHold aborts the in-flight request before the final transcribe. */
   const handlePartial = (blob: Blob) => {
     if (partialBusy || get().phase !== 'recording') return;
+    // ⚠️ NEVER TRANSCRIBE AN IDLE MIC. Voice mode holds the window open until
+    // someone speaks, and a partial fires every PARTIAL_INTERVAL_MS regardless —
+    // so without this gate an open mic runs Whisper on silence continuously,
+    // competing for the same GPU the real transcription needs and heating a
+    // laptop that is already short of VRAM. Costs nothing to ask.
+    if (!activeRecording?.heardSpeech()) return;
     partialBusy = true;
     partialAbort = new AbortController();
     voiceApi
@@ -168,13 +216,27 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
    *  beginFollowUpListen share everything but the trigger + silence semantics.
    *  'summon' and 'followup' both auto-stop on silence; 'followup' uses a
    *  shorter never-heard-speech grace so a quiet user ends the conversation. */
-  const startCapture = async (mode: VoiceMode) => {
+  const startCapture = async (mode: VoiceMode, initialSilenceMs?: number) => {
     const { settings } = get();
     // Barge-in (Part 4): opening the mic silences Jarvis instantly —
     // you can't listen while you're being talked over.
     stopSpeaking();
     set({ error: null });
     const handsFree = mode === 'summon' || mode === 'followup';
+    // An explicit grace wins; then the OPEN-MIC rule (voice mode never times
+    // out); then the short mid-conversation one; then voiceInput's default.
+    const grace =
+      initialSilenceMs ??
+      (mode === 'followup'
+        ? voiceModeActive()
+          ? OPEN_MIC_GRACE
+          : FOLLOWUP_INITIAL_SILENCE_MS
+        : undefined);
+    // A conversation's turn-taking pause is much shorter than a dictated
+    // command's. Scoped to 'followup' deliberately: the report was about voice
+    // mode, and cutting a summoned "remind me at 6 to call Jamil" off at a
+    // mid-sentence breath would be a regression bought with someone else's bug.
+    const quietGap = mode === 'followup' ? CONVERSATION_SILENCE_STOP_MS : undefined;
     try {
       activeRecording = await startRecording(
         {
@@ -190,9 +252,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         },
         {
           silenceStop: handsFree,
-          ...(mode === 'followup'
-            ? { initialSilenceMs: FOLLOWUP_INITIAL_SILENCE_MS }
-            : {}),
+          ...(grace !== undefined ? { initialSilenceMs: grace } : {}),
+          ...(quietGap !== undefined ? { silenceStopMs: quietGap } : {}),
         }
       );
       set({ phase: 'recording', mode, level: 0, interimText: '' });
@@ -209,6 +270,32 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
               : 'Could not start the microphone.',
       });
     }
+  };
+
+  /**
+   * A hands-free window produced nothing while voice mode is open → open another
+   * one instead of ending the conversation. Returns true when it took over.
+   *
+   * ⚠️ IT STILL RESPECTS THE APPROVAL GATE. A plan can pause for approval DURING
+   * a listening window (a background task hitting a write), and re-opening over
+   * its card would put the mic on top of a decision the user has to see. Same
+   * predicate voiceConversation's re-arm uses (lib/planGate.ts), so the two
+   * cannot drift.
+   *
+   * Terminating: this is only ever reached from endHold, i.e. after a window has
+   * actually closed, and a failed startCapture lands in 'idle' with an error and
+   * queues nothing further — so there is no path that spins.
+   *
+   * Goes through beginFollowUpListen rather than startCapture directly, for its
+   * `phase !== 'idle'` guard: endHold sets 'idle' and the capture is async, so a
+   * concurrent open (an Esc, a tap) would otherwise overwrite `activeRecording`
+   * and leak the first recording's stream.
+   */
+  const reopenOpenMic = (entryMode: VoiceMode): boolean => {
+    if (entryMode !== 'followup' || !voiceModeActive()) return false;
+    if (hasOpenInteractivePlan()) return false;
+    void get().beginFollowUpListen();
+    return true;
   };
 
   return {
@@ -266,11 +353,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       await startCapture('summon');
     },
 
-    beginFollowUpListen: async () => {
+    beginFollowUpListen: async (initialSilenceMs?: number) => {
       const { phase, settings } = get();
-      if (!settings?.enabled || !settings.continuous_conversation) return;
+      // voiceLoopActive: the persisted continuous_conversation setting OR an
+      // open voice mode, which IS that intent (lib/voiceMode.ts).
+      if (!voiceLoopActive(settings)) return;
       if (phase !== 'idle') return;
-      await startCapture('followup');
+      await startCapture('followup', initialSilenceMs);
     },
 
     endHold: async () => {
@@ -280,23 +369,46 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
       // The mode the recording STARTED in decides the empty-transcript and
       // conversation semantics below (the transcribing set clears it to 'hold').
       const entryMode = get().mode;
+      // ⚠️ EVERY "was that really speech?" GUARD BELOW IS HANDS-FREE ONLY.
+      // A held mic is the user deliberately asking to be heard — discarding
+      // that because a meter or a model was unsure would be a far worse bug
+      // than the noise turns these guards exist to prevent. (And the meter can
+      // genuinely be unsure: a softly-spoken hold sits near the threshold.)
+      const handsFree = entryMode === 'summon' || entryMode === 'followup';
+      // Asked BEFORE stop(), while the meter's state is still the window's own.
+      const spoke = recording.heardSpeech();
       // The final transcript is authoritative — abort any interim request
       // so it never races the real one, and clear the interim display.
       stopPartials();
       set({ phase: 'transcribing', mode: 'hold', level: 0, interimText: '' });
       try {
         const blob = await recording.stop();
-        if (!blob) {
-          // Accidental tap (<300ms) — silently discard. A follow-up that was
-          // too short to be speech ends the conversation quietly.
+        if (!blob || (handsFree && !spoke)) {
+          // Nothing was said: an accidental tap (<300ms), or a hands-free window
+          // that closed on its cap or its grace having heard only the room.
+          // ⚠️ NOT SENT TO WHISPER. Transcribing silence costs a GPU round trip
+          // and returns either "" or an invented sentence — and in an open mic
+          // that invented sentence would become a chat message nobody said.
           set({ phase: 'idle' });
+          if (reopenOpenMic(entryMode)) return;
           if (entryMode === 'followup') set({ conversationActive: false });
           return;
         }
         const result = await voiceApi.transcribe(blob);
-        const text = result.text.trim();
+        // ⚠️ WHISPER'S OWN VERDICT, not a list of phrases we guessed it invents.
+        // Given a window of room noise it does not return "" — it returns a
+        // confident short sentence ("Thank you.", "Bye."), and in an always-open
+        // mic that becomes a chat message nobody said. `no_speech_prob` is the
+        // model reporting that it heard no speech, which is a real comparator.
+        // Hands-free only, for the reason given where `handsFree` is computed.
+        const noise =
+          handsFree && (result.no_speech_prob ?? 0) >= NO_SPEECH_DROP_PROB;
+        const text = noise ? '' : result.text.trim();
         set({ phase: 'idle' });
         if (!text) {
+          // While voice mode is open, keep listening — an empty transcript is
+          // just a noise that fooled the meter, not the end of a conversation.
+          if (reopenOpenMic(entryMode)) return;
           // A silent follow-up window is the NATURAL end of a conversation —
           // close it quietly, never with a "didn't catch that" error.
           if (entryMode === 'followup') {
@@ -339,7 +451,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
         const chat = useChatStore.getState();
         // Review mode — and a turn already streaming — both land the words
         // in the input box instead: never auto-send, never lose a transcript.
-        if (get().settings?.review_before_send || chat.isStreaming) {
+        // voiceAutoSend: review_before_send exists so a typed-surface user can
+        // proofread; in voice mode there is no input box in front of them.
+        if (!voiceAutoSend(get().settings) || chat.isStreaming) {
           chat.setDraftMessage(text);
         } else {
           // A voice-initiated turn speaks its reply (Part 4). Review-mode
@@ -347,7 +461,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
           markNextTurnVoice();
           // Phase 12.1: mark the conversation active so voiceConversation.ts
           // re-opens a follow-up window after the reply is spoken.
-          if (get().settings?.continuous_conversation) {
+          if (voiceLoopActive(get().settings)) {
             set({ conversationActive: true });
           }
           await chat.sendMessage(text);

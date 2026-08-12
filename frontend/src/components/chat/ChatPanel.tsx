@@ -9,59 +9,73 @@
  */
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { clsx } from 'clsx';
-import { Trash2, Zap, ChevronDown, Volume2, VolumeX, Square } from 'lucide-react';
+import { Trash2, Zap, Volume2, VolumeX, Square, AudioLines } from 'lucide-react';
 import { useChatStore } from '@/stores/chatStore';
 import { useVoiceStore } from '@/stores/voiceStore';
+import { useUIStore } from '@/stores/uiStore';
 import { useShallow } from 'zustand/react/shallow';
 import { voiceApi, voiceUpdatePayload } from '@/lib/api';
 import { stopSpeaking } from '@/lib/voiceOutput';
+import { VoiceModeOverlay } from '@/components/voice/VoiceModeOverlay';
+import { VoiceComposer } from '@/components/voice/VoiceComposer';
 import { MessageBubble } from './MessageBubble';
 import { ChatInput } from './ChatInput';
 import { StreamingIndicator } from './StreamingIndicator';
-import type { LLMProviderName } from '@/types';
 
-const PROVIDERS: Array<{ value: LLMProviderName; label: string }> = [
-  { value: 'gemini', label: 'Gemini' },
-  { value: 'groq', label: 'Groq' },
-  { value: 'ollama', label: 'Ollama' },
-  { value: 'openrouter', label: 'OpenRouter' },
+/** Greeting by time of day. Deliberately does NOT address the user by a
+ *  placeholder: the old copy read "Good to see you, Human", which is the single
+ *  most AI-ish thing in the product — the app has no idea what the user is
+ *  called at this point, and a stand-in noun is worse than no name at all. */
+function greeting(now = new Date()): string {
+  const h = now.getHours();
+  if (h < 5) return 'Still up';
+  if (h < 12) return 'Good morning';
+  if (h < 18) return 'Good afternoon';
+  return 'Good evening';
+}
+
+/**
+ * ⚠️ THE STARTER PROMPTS ASK JARVIS TO DO THINGS, NOT TO DESCRIBE ITSELF.
+ * All four used to be about the product ("What can you do?", "Tell me about
+ * your memory system", "How do tools work?", "What's planned for future
+ * phases?") — the last one naming our internal build phases. A first screen
+ * whose every suggestion is a question about the assistant reads like a demo;
+ * these are things someone actually opens Jarvis to get done, and each one
+ * exercises a different capability that really exists.
+ */
+const STARTERS = [
+  "What's on my calendar today?",
+  'Any new email I should know about?',
+  'Find the PDF about cloud computing',
+  'Remind me at 6 to call Jamil',
 ];
 
 function EmptyState() {
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-8 animate-fade-in">
-      {/* Logo */}
+    <div className="flex h-full flex-col items-center justify-center gap-7 px-8 animate-fade-in">
+      {/* Mark */}
       <div className="relative">
-        <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-cyan-500/10 to-blue-600/10 hud-border-active flex items-center justify-center animate-glow-pulse">
-          <Zap size={32} className="text-cyan-400 text-glow-cyan" />
+        <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-cyan-500/25 bg-gradient-to-br from-cyan-500/10 to-blue-600/10">
+          <Zap size={28} className="text-cyan-400" />
         </div>
-        <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-emerald-500 border-2 border-surface animate-pulse" />
       </div>
 
       {/* Greeting */}
-      <div className="text-center space-y-2 max-w-md">
-        <h1 className="text-2xl font-semibold text-slate-100">
-          Good to see you, <span className="text-cyan-400 text-glow-cyan">Human</span>
-        </h1>
-        <p className="text-slate-500 text-sm leading-relaxed">
-          I'm Jarvis, your personal AI operating system. I remember your preferences,
-          know your contacts, and can execute tasks across your digital life.
+      <div className="max-w-md space-y-2 text-center">
+        <h1 className="text-2xl font-semibold text-slate-100">{greeting()}</h1>
+        <p className="text-sm leading-relaxed text-slate-500">
+          Ask me anything, or give me something to do — I can search your files, handle
+          your mail and calendar, drive a browser, and act on this machine.
         </p>
       </div>
 
-      {/* Suggestion chips */}
-      <div className="flex flex-wrap gap-2 justify-center max-w-lg">
-        {[
-          'What can you do?',
-          'Tell me about your memory system',
-          'How do tools work?',
-          'What\'s planned for future phases?',
-        ].map((suggestion) => (
+      {/* Starter prompts */}
+      <div className="flex max-w-lg flex-wrap justify-center gap-2">
+        {STARTERS.map((suggestion) => (
           <button
             key={suggestion}
-            className="px-3 py-1.5 rounded-full bg-surface-2 border border-surface-border text-xs text-slate-400 hover:border-cyan-500/40 hover:text-cyan-400 transition-smooth"
+            className="rounded-full border border-surface-border bg-surface-2/60 px-3.5 py-1.5 text-xs text-slate-400 outline-none transition-colors hover:border-cyan-500/40 hover:bg-surface-2 hover:text-cyan-300 focus-visible:ring-2 focus-visible:ring-cyan-400/50"
             onClick={() => {
-              // Will be wired below via ref
               const event = new CustomEvent('jarvis:suggestion', { detail: suggestion });
               window.dispatchEvent(event);
             }}
@@ -75,18 +89,15 @@ function EmptyState() {
 }
 
 export function ChatPanel() {
-  const { messages, isStreaming, sendMessage, clearConversation, activeProvider, setProvider, error } =
-    useChatStore(
-      useShallow((state) => ({
-        messages: state.messages,
-        isStreaming: state.isStreaming,
-        sendMessage: state.sendMessage,
-        clearConversation: state.clearConversation,
-        activeProvider: state.activeProvider,
-        setProvider: state.setProvider,
-        error: state.error,
-      }))
-    );
+  const { messages, isStreaming, sendMessage, clearConversation, error } = useChatStore(
+    useShallow((state) => ({
+      messages: state.messages,
+      isStreaming: state.isStreaming,
+      sendMessage: state.sendMessage,
+      clearConversation: state.clearConversation,
+      error: state.error,
+    }))
+  );
   const { voiceSettings, speaking, applySettings } = useVoiceStore(
     useShallow((state) => ({
       voiceSettings: state.settings,
@@ -94,6 +105,7 @@ export function ChatPanel() {
       applySettings: state.applySettings,
     }))
   );
+  const isVoiceMode = useUIStore((state) => state.isVoiceMode);
   // A speaker-toggle PUT is in flight — ignore further clicks until settled.
   const [togglingSpeaker, setTogglingSpeaker] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -129,6 +141,12 @@ export function ChatPanel() {
     scrollToBottom();
   }, [messages, scrollToBottom]);
 
+  // `inert` is a real Chromium attribute (this app only ever runs in Electron)
+  // but React 18's typings predate it, hence the cast.
+  const coveredProps = isVoiceMode
+    ? ({ inert: '' } as unknown as React.HTMLAttributes<HTMLDivElement>)
+    : {};
+
   // Handle suggestion chip clicks
   useEffect(() => {
     const handler = (e: CustomEvent<string>) => {
@@ -145,6 +163,12 @@ export function ChatPanel() {
         <div className="flex items-center gap-3">
           <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shadow-sm" style={{ boxShadow: '0 0 6px rgba(16, 185, 129, 0.6)' }} />
           <h2 className="text-sm font-semibold text-slate-200">Jarvis Chat</h2>
+          {isVoiceMode && (
+            <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-[10px] font-mono text-cyan-400">
+              <AudioLines size={10} />
+              Voice mode
+            </span>
+          )}
           {isStreaming && (
             <span className="text-[10px] font-mono text-cyan-400/70 animate-pulse-cyan">
               ● Generating
@@ -187,22 +211,16 @@ export function ChatPanel() {
               {voiceSettings.output_enabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
             </button>
           )}
-          {/* Provider selector */}
-          <div className="relative">
-            <select
-              id="provider-selector"
-              value={activeProvider}
-              onChange={(e) => setProvider(e.target.value as LLMProviderName)}
-              className="appearance-none pl-2 pr-7 py-1 rounded-lg bg-surface-2 border border-surface-border text-xs text-slate-400 font-mono cursor-pointer hover:border-cyan-500/40 transition-fast outline-none focus:border-cyan-500/60"
-            >
-              {PROVIDERS.map((p) => (
-                <option key={p.value} value={p.value}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
-            <ChevronDown size={10} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
-          </div>
+          {/* ⚠️ THE PROVIDER SELECTOR WAS REMOVED, AND IT WAS A DEAD CONTROL
+              THAT ALSO REPORTED THE WRONG ANSWER. `ChatRequest.provider` is
+              accepted by the backend and IGNORED — `get_llm_provider()` returns
+              `create_provider()`, which reads `settings.LLM_PROVIDER` — so
+              choosing "Groq" changed nothing. Worse, the list did not contain
+              deepseek, the provider actually configured, so the header sat
+              there displaying "Gemini" while every reply came from DeepSeek.
+              CLAUDE.md states the intended mechanism: "Switching providers is a
+              .env + backend restart, no code changes." The live provider and
+              model are shown truthfully in the StatusBar, read from /health. */}
 
           {/* Clear conversation */}
           {hasMessages && (
@@ -225,35 +243,55 @@ export function ChatPanel() {
         </div>
       )}
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto">
-        {!hasMessages ? (
-          <EmptyState />
-        ) : (
-          <div className="py-4">
-            {messages.map((message) => (
-              <MessageBubble key={message.id} message={message} />
-            ))}
+      {/* Messages. `relative` anchors the voice-mode overlay to THIS region —
+          the header, sidebar and status bar stay live and usable.
+          ⚠️ The list stays MOUNTED underneath while voice mode covers it, so
+          scroll position survives and leaving voice mode is instant. */}
+      <div className="flex-1 overflow-y-auto relative">
+        {/* `display: contents` adds no box, so EmptyState's h-full still
+            resolves against the scroll container above. `inert` takes the
+            covered chat out of the tab order — without it, focus could still
+            reach a PlanCard's Approve button sitting behind the sphere. */}
+        <div
+          style={{ display: 'contents' }}
+          aria-hidden={isVoiceMode || undefined}
+          {...coveredProps}
+        >
+          {!hasMessages ? (
+            <EmptyState />
+          ) : (
+            <div className="py-4">
+              {messages.map((message) => (
+                <MessageBubble key={message.id} message={message} />
+              ))}
 
-            {/* Show streaming indicator only when the assistant hasn't started outputting yet */}
-            {isStreaming &&
-              messages[messages.length - 1]?.role === 'assistant' &&
-              messages[messages.length - 1]?.content === '' && (
-                <StreamingIndicator />
-              )}
+              {/* Show streaming indicator only when the assistant hasn't started outputting yet */}
+              {isStreaming &&
+                messages[messages.length - 1]?.role === 'assistant' &&
+                messages[messages.length - 1]?.content === '' && (
+                  <StreamingIndicator />
+                )}
 
-            <div ref={messagesEndRef} />
-          </div>
-        )}
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+        </div>
+
+        {isVoiceMode && <VoiceModeOverlay />}
       </div>
 
-      {/* Input */}
+      {/* Input. A SWAP, not a hide: ChatInput owns window-level Ctrl+Space and
+          Escape bindings that would fight the overlay's — see VoiceComposer. */}
       <div className="flex-shrink-0 border-t border-surface-border">
-        <ChatInput
-          onSend={sendMessage}
-          isStreaming={isStreaming}
-          disabled={false}
-        />
+        {isVoiceMode ? (
+          <VoiceComposer />
+        ) : (
+          <ChatInput
+            onSend={sendMessage}
+            isStreaming={isStreaming}
+            disabled={false}
+          />
+        )}
       </div>
     </div>
   );

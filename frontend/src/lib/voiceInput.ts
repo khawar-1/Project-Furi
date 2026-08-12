@@ -31,8 +31,50 @@ export const MAX_RECORDING_MS = 60_000;
 export const SILENCE_LEVEL_THRESHOLD = 0.08;
 /** Once speech was heard, this long below the threshold ends the utterance. */
 export const SILENCE_STOP_MS = 2_000;
+/** A conversation's turn-taking gap (voice mode). Reported live: *"when i
+ *  stopped talking its listning was still avtive for like 4 seconds"* — the 2s
+ *  above is right for a one-shot dictated command and far too patient for
+ *  back-and-forth, where the pause IS the handover. */
+export const CONVERSATION_SILENCE_STOP_MS = 900;
 /** Never heard speech at all — stop waiting after this long. */
 export const MAX_INITIAL_SILENCE_MS = 8_000;
+
+/**
+ * Speech must be sustained this long before the window counts as an utterance.
+ *
+ * ⚠️ THIS IS WHAT MAKES AN ALWAYS-OPEN MIC SURVIVABLE. Voice mode holds the mic
+ * open indefinitely, so a door, a cough or a keyboard clatter would otherwise
+ * arm the detector, start the post-speech countdown, and send Whisper a second
+ * of noise — which it answers with a hallucinated "Thank you." that becomes a
+ * chat message nobody typed.
+ *
+ * The value sits in the gap between the two things it has to tell apart: an
+ * impact transient is tens of milliseconds (a key click ~20ms, a knock ~50ms),
+ * while the shortest real word is a single syllable at ~150-250ms. Deliberately
+ * at the BOTTOM of the word range rather than the middle — the cost of admitting
+ * a long thump is one junk turn the user can see and ignore, and the cost of
+ * rejecting a spoken "no" is an answer that silently never arrives.
+ */
+export const MIN_SPEECH_MS = 150;
+
+/**
+ * The END-of-speech threshold adapts to the room; the ARM threshold does not.
+ *
+ * A fan, an air conditioner or a nearby laptop can hold the meter above a FIXED
+ * 0.08 forever, and then the post-speech quiet gap never elapses and the mic
+ * never closes — a worse failure than the one being fixed, because it looks like
+ * Jarvis has stopped responding. So the quiet test uses a floor derived from the
+ * quietest moment actually observed in this recording.
+ *
+ * Asymmetric on purpose, and this is the safety direction: ARMING still uses the
+ * fixed threshold, so detecting that someone started talking is exactly as
+ * sensitive as it has always been. Only the decision that they STOPPED consults
+ * the room, and it is bounded — a recording that has not yet contained a quiet
+ * moment can raise the bar at most to NOISE_CEILING, so the worst case is
+ * ending an utterance a little eagerly, never refusing to hear one.
+ */
+export const NOISE_MULTIPLIER = 2.5;
+export const NOISE_CEILING = 0.22;
 
 // ---- Live partial transcripts (Phase 7, Part 6).
 /** MediaRecorder timeslice: chunks accumulate steadily so a mid-recording
@@ -59,7 +101,10 @@ export interface RecorderOptions {
   silenceStop?: boolean;
   /** Phase 12.1 (continuous conversation): override the never-heard-speech
    *  grace. A follow-up window uses a shorter grace so a quiet user closes the
-   *  conversation quickly. Defaults to MAX_INITIAL_SILENCE_MS. */
+   *  conversation quickly. Defaults to MAX_INITIAL_SILENCE_MS.
+   *
+   *  `Infinity` means NEVER give up waiting — the open-mic mode voice mode uses.
+   *  Only the MAX_RECORDING_MS cap ends such a window, and the caller re-opens. */
   initialSilenceMs?: number;
   /** Override the post-speech quiet gap that ends an utterance. Defaults to
    *  SILENCE_STOP_MS. */
@@ -73,6 +118,16 @@ export interface RecordingHandle {
   cancel: () => void;
   /** The mime type actually being recorded (for the upload filename). */
   mimeType: string;
+  /**
+   * Did anyone actually speak into this window? True once MIN_SPEECH_MS of
+   * above-threshold audio has accumulated.
+   *
+   * ⚠️ THE CALLER USES THIS TO NOT TRANSCRIBE SILENCE. An always-open mic
+   * closes on its 60s cap with nothing in it many times an hour; sending that to
+   * Whisper costs a GPU round trip and returns either "" or an invented
+   * sentence. Asking here is free.
+   */
+  heardSpeech: () => boolean;
 }
 
 /** The first recorder mime type this browser supports, opus preferred. */
@@ -137,13 +192,19 @@ export async function startRecording(
   let cancelled = false;
 
   // Silence auto-stop state (only consulted when options.silenceStop): the
-  // detector "arms" on the first level above the threshold, then a sustained
-  // quiet gap ends the utterance. Fires the same onAutoStop path as the cap.
-  let heardSpeech = false;
+  // detector "arms" once MIN_SPEECH_MS of above-threshold audio has accumulated,
+  // then a sustained quiet gap ends the utterance. Fires the same onAutoStop
+  // path as the cap.
+  let loudMs = 0;
+  let lastFrameAt = startedAt;
   let lastLoudAt = startedAt;
   let autoStopFired = false;
+  /** The quietest level seen so far — this recording's noise floor (see
+   *  NOISE_MULTIPLIER). Starts at 1 so the first frame sets it. */
+  let quietestLevel = 1;
   const silenceStopMs = options.silenceStopMs ?? SILENCE_STOP_MS;
   const initialSilenceMs = options.initialSilenceMs ?? MAX_INITIAL_SILENCE_MS;
+  const spokeEnough = () => loudMs >= MIN_SPEECH_MS;
 
   let rafId = 0;
   const meter = () => {
@@ -158,13 +219,24 @@ export async function startRecording(
     callbacks.onLevel?.(level);
     // Phase 13: feed the arousal proxy (gated/consumed inside affectiveSensing).
     recordVoiceEnergy(level);
+    const now = Date.now();
+    const frameMs = Math.min(now - lastFrameAt, 100); // a throttled tab can gap
+    lastFrameAt = now;
+    if (level < quietestLevel) quietestLevel = level;
+    // Arming stays on the FIXED threshold; only the quiet test adapts.
+    if (level >= SILENCE_LEVEL_THRESHOLD) {
+      loudMs += frameMs;
+      lastLoudAt = now;
+    }
     if (options.silenceStop && !autoStopFired && !finished && !cancelled) {
-      const now = Date.now();
-      if (level >= SILENCE_LEVEL_THRESHOLD) {
-        heardSpeech = true;
+      const quietBar = Math.min(
+        NOISE_CEILING,
+        Math.max(SILENCE_LEVEL_THRESHOLD, quietestLevel * NOISE_MULTIPLIER)
+      );
+      if (level >= quietBar) {
         lastLoudAt = now;
       } else if (
-        heardSpeech
+        spokeEnough()
           ? now - lastLoudAt >= silenceStopMs
           : now - startedAt >= initialSilenceMs
       ) {
@@ -211,6 +283,8 @@ export async function startRecording(
 
   return {
     mimeType: mimeType || 'audio/webm',
+
+    heardSpeech: spokeEnough,
 
     stop: async (): Promise<Blob | null> => {
       if (cancelled) return null;

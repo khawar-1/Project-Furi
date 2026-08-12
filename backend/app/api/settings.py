@@ -12,6 +12,7 @@ the manual "Send now" trigger (and the deterministic hook for the verify skill);
 it is read-only end to end, so there is nothing to approve.
 """
 import re
+from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -20,16 +21,17 @@ from app.core.app_settings import (
     VOICE_DEVICES,
     VOICE_SPOKEN_APPROVAL_LEVELS,
     VOICE_STT_COMPUTE_TYPES,
+    VOICE_STT_LANGUAGES,
     VOICE_STT_MODELS,
-    VOICE_TTS_VOICE_IDS,
     VOICE_TTS_VOICES,
+    VOICE_WAKE_MODES,
     BriefingConfig,
-    VoiceConfig,
     get_briefing_config,
     get_briefing_job_id,
     get_voice_config,
     set_briefing_config,
     set_voice_config,
+    voice_config_from_dict,
 )
 from app.core.daily_briefing import run_briefing_now, sync_briefing_job
 from app.core.dependencies import get_db
@@ -116,36 +118,37 @@ class VoiceUpdate(BaseModel):
     # Phase 12 ambient fields — defaulted so an older-shaped PUT stays valid.
     continuous_conversation: bool = False
     wake_word: bool = False
+    # The wake word's phrase and how it is detected (speech | model). Defaulted
+    # so an older-shaped PUT stays valid.
+    wake_mode: str = "speech"
+    wake_phrase: str = "furi"
+    # The spoken language pinned for transcription ("auto" to detect). Defaulted
+    # to English — see VOICE_STT_LANGUAGES for why detection is not the default.
+    stt_language: str = "en"
     # How far spoken consent may go: off | write | all. Defaulted to the
     # SAFE end so an older-shaped PUT can never widen it by omission.
     spoken_approval: str = "off"
 
 
 async def _voice_payload(db) -> dict:
-    """Config + the live model state + the preset-voice list, so the settings
-    card renders one fetch. stt_status()/tts_status() are purely local (no I/O)
-    — safe on every GET."""
+    """Config + the live model state + the choice lists, so the settings card
+    renders one fetch. stt_status()/tts_status() are purely local (no I/O) — safe
+    on every GET.
+
+    ⚠️ THE CONFIG HALF IS `asdict`, NOT A HAND-LISTED DICT. It used to name every
+    field, which made it one of the copies `set_voice_config`'s docstring warns
+    about — and the failure is silent in the read direction too: a field the
+    payload forgot simply never reaches the UI, so the control renders its
+    default and the user's setting looks like it did not save."""
     config = await get_voice_config(db)
     return {
-        "enabled": config.enabled,
-        "stt_model": config.stt_model,
-        "review_before_send": config.review_before_send,
-        "output_enabled": config.output_enabled,
-        "voice": config.voice,
-        "speak_proactive": config.speak_proactive,
-        "speak_all_responses": config.speak_all_responses,
-        "listen_on_summon": config.listen_on_summon,
-        "tts_speed": config.tts_speed,
-        "stt_device": config.stt_device,
-        "tts_device": config.tts_device,
-        "stt_compute_type": config.stt_compute_type,
-        "continuous_conversation": config.continuous_conversation,
-        "wake_word": config.wake_word,
-        "spoken_approval": config.spoken_approval,
+        **asdict(config),
         "stt_models": list(VOICE_STT_MODELS),
         "voices": [{"id": vid, "label": label} for vid, label in VOICE_TTS_VOICES],
         "devices": list(VOICE_DEVICES),
         "stt_compute_types": list(VOICE_STT_COMPUTE_TYPES),
+        "stt_languages": list(VOICE_STT_LANGUAGES),
+        "wake_modes": list(VOICE_WAKE_MODES),
         "spoken_approval_levels": list(VOICE_SPOKEN_APPROVAL_LEVELS),
         "stt_status": stt_status(),
         "tts_status": tts_status(),
@@ -164,50 +167,25 @@ async def put_voice(update: VoiceUpdate, db=Depends(get_db)) -> dict:
             status_code=400,
             detail=f"stt_model must be one of: {', '.join(VOICE_STT_MODELS)}",
         )
-    # `voice` is a Kokoro preset id. An unknown id falls back to the default
-    # rather than 400 (forward/backward compatibility — the picker and the
-    # whitelist should never disagree, but be lenient if they do).
-    voice = update.voice if update.voice in VOICE_TTS_VOICE_IDS else "af_heart"
-    # Device/compute are lenient too — an out-of-whitelist value falls back to
-    # "auto" rather than 400 (set_voice_config re-validates via _coerce_voice).
-    stt_device = update.stt_device if update.stt_device in VOICE_DEVICES else "auto"
-    tts_device = update.tts_device if update.tts_device in VOICE_DEVICES else "auto"
-    stt_compute = (
-        update.stt_compute_type
-        if update.stt_compute_type in VOICE_STT_COMPUTE_TYPES
-        else "auto"
-    )
-    # An unknown level falls back to "off" — the safe end, matching the
-    # coercer. Consent settings never fail open.
-    spoken_approval = (
-        update.spoken_approval
-        if update.spoken_approval in VOICE_SPOKEN_APPROVAL_LEVELS
-        else "off"
-    )
-    await set_voice_config(db, VoiceConfig(
-        enabled=update.enabled,
-        stt_model=update.stt_model,
-        review_before_send=update.review_before_send,
-        output_enabled=update.output_enabled,
-        voice=voice,
-        speak_proactive=update.speak_proactive,
-        speak_all_responses=update.speak_all_responses,
-        listen_on_summon=update.listen_on_summon,
-        tts_speed=update.tts_speed,
-        stt_device=stt_device,
-        tts_device=tts_device,
-        stt_compute_type=stt_compute,
-        continuous_conversation=update.continuous_conversation,
-        wake_word=update.wake_word,
-        spoken_approval=spoken_approval,
-    ))
+    # ⚠️ ONE VALIDATION PATH. Every out-of-whitelist value (voice, device,
+    # compute type, language, wake mode/phrase, and the consent level, which
+    # falls back to the SAFE "off") is coerced by voice_config_from_dict — the
+    # same coercer a stored row is read back through. This used to be a dozen
+    # inline `x if x in WHITELIST else default` lines plus a hand-listed
+    # VoiceConfig(...) call, i.e. a fifth copy of the field list; adding a field
+    # there and forgetting one line is how `spoken_approval` was silently
+    # dropped once already.
+    config = voice_config_from_dict(update.model_dump())
+    await set_voice_config(db, config)
     # Enabling (or switching device) kicks the model load NOW — the FileIndexCard
     # enable-flow lesson: a toggle that silently does nothing until some later
     # trigger is a recorded live-bug class. A device change reloads the engine
     # (ensure_* is keyed on device); switching preset voices needs no reload.
     # ensure returns immediately; the card polls /api/voice/status through it.
-    if update.enabled:
-        await ensure_model_loaded(update.stt_model, stt_device, stt_compute)
-        if update.output_enabled:
-            await ensure_engine_loaded(tts_device)
+    if config.enabled:
+        await ensure_model_loaded(
+            config.stt_model, config.stt_device, config.stt_compute_type
+        )
+        if config.output_enabled:
+            await ensure_engine_loaded(config.tts_device)
     return await _voice_payload(db)

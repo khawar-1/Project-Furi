@@ -73,3 +73,7 @@ backend/check_contacts.py
 backend/delete_phantom.py
 backend/verify_db.py
 backend/migrate_*.py
+
+# Compiled output of frontend/src/lib/__verify__ (see its header for how it is
+# run). Build artefact, never committed.
+.verify/

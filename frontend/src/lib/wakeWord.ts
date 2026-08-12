@@ -29,6 +29,8 @@
  * Everything is best-effort: a model-load or inference failure logs once and
  * degrades to "no wake word", never a crash or a broken chat turn.
  */
+import { voiceApi } from '@/lib/api';
+import { SpeechGate, encodeWav, matchesWakePhrase } from '@/lib/wakePhrase';
 import { useVoiceStore } from '@/stores/voiceStore';
 import melspecUrl from '@/assets/wakeword/melspectrogram.onnx?url';
 import embeddingUrl from '@/assets/wakeword/embedding_model.onnx?url';
@@ -73,6 +75,17 @@ const CRASH_GUARD_FRESH_MS = 10 * 60_000;
 let running = false;
 let suspended = false;
 let worker: Worker | null = null;
+/**
+ * 'speech' — the energy gate + local transcript match (lib/wakePhrase.ts). Works
+ *            for any phrase the user types, which the ONNX path cannot: its
+ *            phrase lives in the model weights.
+ * 'model'  — the bundled "Hey Jarvis" classifier. Near-zero cost, one phrase.
+ */
+let mode: 'speech' | 'model' = 'speech';
+let gate: SpeechGate | null = null;
+/** At most one wake transcription in flight — a busy gate skips, so a slow
+ *  machine self-paces instead of queueing requests behind each other. */
+let wakeBusy = false;
 
 let stream: MediaStream | null = null;
 let audioCtx: AudioContext | null = null;
@@ -141,38 +154,58 @@ function clearStrikes(): void {
  *  running. Best-effort — any failure logs and leaves wake word inactive. */
 export async function startWakeWord(): Promise<void> {
   if (running) return;
-  const guard = readStrikes();
-  if (
-    guard.strikes >= CRASH_GUARD_LIMIT &&
-    Date.now() - guard.at < CRASH_GUARD_FRESH_MS
-  ) {
-    console.warn(
-      '[WakeWord] not starting: the previous renderer sessions crashed right ' +
-        `after wake-word start (crash-loop breaker; last stage reached: ` +
-        `${guard.stage ?? 'unknown'}). Will retry on a later launch.`
-    );
-    return;
-  }
-  try {
-    localStorage.setItem(
-      CRASH_GUARD_KEY,
-      JSON.stringify({ strikes: guard.strikes + 1, at: Date.now(), stage: 'starting' })
-    );
-  } catch {
-    // Best-effort.
+  const settings = useVoiceStore.getState().settings;
+  mode = settings?.wake_mode === 'model' ? 'model' : 'speech';
+  // ⚠️ THE CRASH-LOOP BREAKER IS SCOPED TO THE MODEL PATH, which is what it was
+  // written for: onnxruntime-web's wasm once killed the renderer natively
+  // (0xC0000005), and nothing inside a renderer can catch its own process death.
+  // The speech path loads no wasm and starts no worker, so applying the breaker
+  // there would only let an unrelated crash disable a feature that cannot cause
+  // one.
+  if (mode === 'model') {
+    const guard = readStrikes();
+    if (
+      guard.strikes >= CRASH_GUARD_LIMIT &&
+      Date.now() - guard.at < CRASH_GUARD_FRESH_MS
+    ) {
+      console.warn(
+        '[WakeWord] not starting: the previous renderer sessions crashed right ' +
+          `after wake-word start (crash-loop breaker; last stage reached: ` +
+          `${guard.stage ?? 'unknown'}). Will retry on a later launch.`
+      );
+      return;
+    }
+    try {
+      localStorage.setItem(
+        CRASH_GUARD_KEY,
+        JSON.stringify({ strikes: guard.strikes + 1, at: Date.now(), stage: 'starting' })
+      );
+    } catch {
+      // Best-effort.
+    }
   }
   running = true;
   suspended = false;
   inferredOnce = false;
+  wakeBusy = false;
   try {
-    noteStage('loading-models');
-    await startWorker();
+    if (mode === 'model') {
+      noteStage('loading-models');
+      await startWorker();
+    }
     noteStage('opening-mic');
     await openMic();
     subscribeSuspend();
     noteStage('running');
     // Survived startup: after a stable window the strike is forgiven.
-    crashGuardTimer = window.setTimeout(clearStrikes, CRASH_GUARD_STABLE_MS);
+    if (mode === 'model') {
+      crashGuardTimer = window.setTimeout(clearStrikes, CRASH_GUARD_STABLE_MS);
+    }
+    console.log(
+      mode === 'speech'
+        ? `[WakeWord] listening for "${settings?.wake_phrase ?? 'furi'}" (speech mode)`
+        : '[WakeWord] listening for "hey jarvis" (model mode)'
+    );
   } catch (e) {
     console.warn('[WakeWord] failed to start; wake word inactive:', e);
     stopWakeWord();
@@ -185,9 +218,12 @@ export function stopWakeWord(): void {
   // because App.tsx calls this on mount before settings load — an unconditional
   // clear would wipe the strikes before startWakeWord ever reads them and the
   // breaker could never trip.
-  if (running) clearStrikes();
+  if (running && mode === 'model') clearStrikes();
   running = false;
   suspended = false;
+  gate?.reset();
+  gate = null;
+  wakeBusy = false;
   if (unsubStore) {
     unsubStore();
     unsubStore = null;
@@ -348,11 +384,18 @@ async function openMic(): Promise<void> {
   // A zero-gain sink keeps the graph pulled without routing the mic to speakers.
   sink = audioCtx.createGain();
   sink.gain.value = 0;
+  gate = mode === 'speech' ? new SpeechGate(TARGET_RATE, handleUtterance) : null;
   workletNode.port.onmessage = (e: MessageEvent) => {
-    if (!running || suspended || !worker) return;
+    if (!running || suspended) return;
     const buf = resampleTo16k(e.data as Float32Array);
     if (buf.length === 0) return;
-    worker.postMessage({ type: 'audio', buf }, [buf.buffer]);
+    if (mode === 'speech') {
+      gate?.push(buf);
+      return;
+    }
+    // Transferring the buffer is what keeps the model path cheap; the gate
+    // above KEEPS its frames, so it must never be handed a transferred one.
+    if (worker) worker.postMessage({ type: 'audio', buf }, [buf.buffer]);
   };
   source.connect(workletNode);
   workletNode.connect(sink);
@@ -391,12 +434,52 @@ function subscribeSuspend(): void {
     if (shouldSuspend && !suspended) {
       suspended = true;
       worker?.postMessage({ type: 'reset' });
+      // Drop the half-captured utterance too: resuming mid-phrase would post a
+      // fragment, and Jarvis's own voice must never buffer into a wake check.
+      gate?.reset();
     } else if (!shouldSuspend && suspended) {
       suspended = false;
     }
   };
   evaluate();
   unsubStore = useVoiceStore.subscribe(evaluate);
+}
+
+// ------------------------------------------------- trigger (speech mode)
+
+/**
+ * One short utterance closed — transcribe it locally and see whether it was the
+ * wake phrase. Best-effort throughout: a failed transcription is a wake word
+ * that did not fire, never an error the user sees.
+ */
+function handleUtterance(samples: Float32Array): void {
+  if (!running || suspended || wakeBusy) return;
+  const now = Date.now();
+  if (now - lastTriggerAt < COOLDOWN_MS) return;
+  const settings = useVoiceStore.getState().settings;
+  const phrase = settings?.wake_phrase || 'furi';
+  wakeBusy = true;
+  void voiceApi
+    .transcribe(encodeWav(samples, TARGET_RATE))
+    .then((result) => {
+      const text = (result.text || '').trim();
+      if (!text) return;
+      const hit = matchesWakePhrase(text, phrase);
+      // Logged either way: the phrase is a free-text setting the user tunes by
+      // ear, and without seeing what was heard there is nothing to tune against.
+      console.log(`[WakeWord] heard "${text}"${hit ? ` → "${phrase}" MATCH` : ''}`);
+      if (!hit) return;
+      // Re-check liveness: the mic may have opened while this was in flight.
+      if (!running || suspended) return;
+      if (useVoiceStore.getState().phase !== 'idle') return;
+      lastTriggerAt = Date.now();
+      gate?.reset(); // don't re-fire on this utterance's tail
+      void useVoiceStore.getState().beginWakeListen();
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      wakeBusy = false;
+    });
 }
 
 // ------------------------------------------------------------- trigger

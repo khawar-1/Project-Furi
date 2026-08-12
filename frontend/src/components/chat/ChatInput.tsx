@@ -10,10 +10,11 @@
  */
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { clsx } from 'clsx';
-import { Send, Mic, X } from 'lucide-react';
+import { Send, Mic, X, AudioLines } from 'lucide-react';
 import { useChatStore } from '@/stores/chatStore';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { voiceCaptureSupported } from '@/lib/voiceInput';
+import { enterVoiceMode } from '@/lib/voiceModeControl';
 import { useShallow } from 'zustand/react/shallow';
 
 interface ChatInputProps {
@@ -91,6 +92,17 @@ export function ChatInput({ onSend, isStreaming, disabled = false }: ChatInputPr
         : sttStatus === 'error'
           ? `Voice model failed to load: ${voiceSettings?.stt_status.error ?? 'unknown error'}`
           : 'Hold to talk (or hold Ctrl+Space) — release to send, Esc to cancel';
+  // Same capability ladder as the mic: voice mode needs the SAME model, so it
+  // is available in exactly the same conditions.
+  const voiceModeTitle = !voiceSupported
+    ? 'Microphone capture is not supported here'
+    : !voiceSettings?.enabled
+      ? 'Voice mode needs voice turned on in Settings'
+      : sttStatus === 'loading'
+        ? 'The voice model is still downloading — voice mode opens once it’s ready'
+        : sttStatus === 'error'
+          ? `Voice model failed to load: ${voiceSettings?.stt_status.error ?? 'unknown error'}`
+          : 'Voice mode — a hands-free conversation';
 
   const handleSend = useCallback(() => {
     const trimmed = draftMessage.trim();
@@ -259,6 +271,26 @@ export function ChatInput({ onSend, isStreaming, disabled = false }: ChatInputPr
 
         {/* Action Buttons */}
         <div className="flex items-center gap-2 flex-shrink-0">
+          {/* Voice mode — the hands-free sphere. Sits beside push-to-talk
+              rather than replacing it: holding the mic for one sentence and
+              opening a conversation are different intentions. */}
+          <button
+            id="voice-mode-btn"
+            type="button"
+            title={voiceModeTitle}
+            aria-label={voiceModeTitle}
+            disabled={!voiceEnabled || isRecording || isTranscribing}
+            onClick={enterVoiceMode}
+            className={clsx(
+              'w-8 h-8 rounded-lg flex items-center justify-center transition-all duration-150',
+              voiceEnabled && !isRecording && !isTranscribing
+                ? 'text-muted hover:text-cyan-400 hover:bg-surface-3'
+                : 'text-muted opacity-40 cursor-not-allowed'
+            )}
+          >
+            <AudioLines size={16} />
+          </button>
+
           {/* Push-to-talk mic (Phase 7, Part 2) — hold to record */}
           <button
             id="voice-input-btn"

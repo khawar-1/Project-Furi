@@ -266,31 +266,85 @@ async def wait_for_load() -> None:
         await _load_task
 
 
-def _transcribe_sync(model: Any, data: bytes) -> dict:
+def _language_for(model_name: str, language: str) -> Optional[str]:
+    """The `language=` to hand faster-whisper, or None to let it detect.
+
+    ⚠️ AN `.en` MODEL IS ENGLISH-ONLY, so naming any other language for one is a
+    request it cannot honour — it would either raise or produce nonsense. Those
+    models are pinned to English whatever the setting says, which is also the
+    honest reading: choosing `small.en` IS choosing English."""
+    if model_name.endswith(".en"):
+        return "en"
+    if not language or language == "auto":
+        return None
+    return language
+
+
+def _transcribe_sync(
+    model: Any, data: bytes, model_name: str, language: str
+) -> dict:
     """Runs in a worker thread. PyAV (a faster-whisper dependency) decodes the
-    renderer's webm/opus container directly from the byte stream."""
+    renderer's webm/opus container directly from the byte stream.
+
+    Two decode options beyond the device/beam ones, both fixing observed defects:
+
+    `language` — pinned by default (see VOICE_STT_LANGUAGES). Passing None here
+    is what produced Arabic script for spoken English: Whisper's language ID gets
+    one short, accented clip and a wrong guess changes the alphabet of the answer.
+    It also costs a detection pass we can simply skip.
+
+    `condition_on_previous_text=False` — the previous window's text is not fed
+    forward as a prompt. That prompt is why Whisper falls into repeat loops and
+    into inventing filler ("Thank you.", "Please subscribe.") on near-silence; a
+    voice turn is a standalone utterance with no previous window worth carrying,
+    so the feature has nothing to offer here and a real failure mode to cause.
+    """
     segments, info = model.transcribe(
-        io.BytesIO(data), beam_size=STT_BEAM_SIZE, vad_filter=True
+        io.BytesIO(data),
+        beam_size=STT_BEAM_SIZE,
+        vad_filter=True,
+        language=_language_for(model_name, language),
+        condition_on_previous_text=False,
     )
-    # `segments` is a lazy generator — joining it here IS the transcription.
-    text = " ".join(seg.text.strip() for seg in segments).strip()
+    # `segments` is a lazy generator — joining it here IS the transcription, and
+    # the per-segment confidences below are only available once it is drained.
+    collected = list(segments)
+    text = " ".join(seg.text.strip() for seg in collected).strip()
+    # Whisper's OWN verdict on whether it heard speech at all, averaged over the
+    # segments it produced. The caller uses it to drop a hallucinated utterance
+    # rather than sending it as a chat message — a real comparator from the model,
+    # not a list of phrases we guessed it might invent.
+    no_speech = [
+        float(getattr(seg, "no_speech_prob", 0.0) or 0.0) for seg in collected
+    ]
     return {
         "text": text,
         "language": getattr(info, "language", None),
         "duration": float(getattr(info, "duration", 0.0) or 0.0),
+        "no_speech_prob": (sum(no_speech) / len(no_speech)) if no_speech else 0.0,
     }
 
 
 async def transcribe_audio(
-    data: bytes, model_name: str, device: str = "auto", compute_type: str = "auto"
+    data: bytes,
+    model_name: str,
+    device: str = "auto",
+    compute_type: str = "auto",
+    language: str = "en",
 ) -> dict:
-    """Transcribe one recorded utterance → {text, language, duration}.
+    """Transcribe one recorded utterance → {text, language, duration,
+    no_speech_prob}.
 
     Not ready → kick the load (self-healing: a stray early call starts the
     download instead of failing inertly) and raise ModelNotReadyError for the
-    API layer to surface as "still loading, try again shortly"."""
+    API layer to surface as "still loading, try again shortly".
+
+    `language` is a spoken-language code or "auto"; it is a DECODE option, not a
+    model identity, so changing it never triggers a reload."""
     desired = (model_name, device, compute_type)
     if _status != "ready" or _loaded != desired or _model is None:
         await ensure_model_loaded(model_name, device, compute_type)
         raise ModelNotReadyError(_status, _error or "")
-    return await asyncio.to_thread(_transcribe_sync, _model, data)
+    return await asyncio.to_thread(
+        _transcribe_sync, _model, data, model_name, language
+    )

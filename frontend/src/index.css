@@ -112,6 +112,154 @@
 }
 
 /* ============================================================
+   Voice-mode sphere — typed custom properties
+
+   Registering these lets the sphere's colours CROSS-FADE when it moves between
+   states (listening → thinking → speaking). An unregistered custom property is
+   a plain token: it swaps instantly and reads as a flicker.
+
+   --orb-level and --orb-breathe are written ~60x/s by the orb's rAF loop and
+   are deliberately NOT in the transition list — interpolating a value that is
+   rewritten every frame would fight the loop.
+   ============================================================ */
+@property --orb-core {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #0e7490;
+}
+@property --orb-mid {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #155e75;
+}
+@property --orb-deep {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #0b3b4a;
+}
+@property --orb-shell {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #071e28;
+}
+@property --orb-edge {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #22d3ee;
+}
+@property --orb-glow {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgba(6, 182, 212, 0.3);
+}
+@property --orb-level {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+@property --orb-breathe {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+
+.jarvis-orb {
+  transition:
+    --orb-core 600ms ease,
+    --orb-mid 600ms ease,
+    --orb-deep 600ms ease,
+    --orb-shell 600ms ease,
+    --orb-edge 600ms ease,
+    --orb-glow 600ms ease;
+}
+
+/* ============================================================
+   Voice-mode sphere — hover & active states
+
+   WHY NOT `transform: scale()` ON THE BUTTON?
+   The orb's rAF loop drives child `transform` properties via CSS variables
+   (~60x/s). A parent element with `transition-transform` creates a new
+   stacking context. When that stacking context changes (hover), the browser
+   re-composites every child layer simultaneously — causing a visible jump in
+   all the orb's animated transforms. This is the "sphere breaks on hover" bug.
+
+   FIX: Use the CSS `scale` property (Level 4 individual transform), which is
+   compositor-only and never creates a stacking context conflict with child
+   `transform` animations. The hover ring uses `box-shadow` for visual feedback
+   (also compositor-cheap) and lives on a sibling div, not the orb itself.
+   ============================================================ */
+.orb-btn-tappable {
+  /* The CSS `scale` property is a compositor hint — it composites on its own
+     layer and does NOT create a new stacking context for child transforms. */
+  transition: scale 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.orb-btn-tappable:hover {
+  scale: 1.025;
+}
+
+.orb-btn-tappable:active {
+  scale: 0.975;
+  transition-duration: 80ms;
+}
+
+/* The glow ring is a sibling of the button — it reacts to the button's hover
+   via the `:has()` selector, keeping visual feedback without touching the orb. */
+.orb-hover-ring {
+  transition:
+    box-shadow 280ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 280ms ease;
+  opacity: 0;
+}
+
+/* Parent div contains both the ring and the button; ring brightens on hover */
+div:has(> .orb-btn-tappable:hover) .orb-hover-ring {
+  opacity: 1;
+  box-shadow:
+    0 0 0 3px rgba(6, 182, 212, 0.18),
+    0 0 60px 8px rgba(6, 182, 212, 0.14),
+    0 0 120px 20px rgba(6, 182, 212, 0.07);
+}
+
+div:has(> .orb-btn-tappable:active) .orb-hover-ring {
+  opacity: 0.6;
+  box-shadow:
+    0 0 0 2px rgba(6, 182, 212, 0.12),
+    0 0 30px 4px rgba(6, 182, 212, 0.1);
+}
+
+/* ============================================================
+   Voice-mode sphere — reduced motion
+   The orb is decorative; its state is always ALSO carried by the caption
+   text, so stopping every rotation costs no information. Only a gentle
+   opacity breathe remains so the surface doesn't read as frozen.
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  .jarvis-orb *,
+  .jarvis-orb {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .jarvis-orb .orb-halo {
+    animation: orbReducedPulse 4s ease-in-out infinite !important;
+  }
+}
+
+/* Defined here rather than reused from Tailwind's `animate-pulse-cyan`: that
+   keyframe only exists in the bundle while some component still uses that
+   class, and a silently missing animation is worse than a duplicated one. */
+@keyframes orbReducedPulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+/* ============================================================
    Markdown Content Styles (chat messages)
    ============================================================ */
 @layer components {

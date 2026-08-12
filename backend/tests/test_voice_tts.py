@@ -287,6 +287,43 @@ def test_sanitize_code_fence_omitted():
     assert sanitize_for_speech(text) == "Here is the script: (code omitted) Run it."
 
 
+# ---- machine-shaped residue (2026-08-12: "it speaks all the things that are
+# fed to it, like all the symbols, commas, hashes, dashes"). These survived
+# every markdown rule above because they are not markdown — they are the
+# written conventions this codebase's own deterministic renderers use.
+
+
+def test_sanitize_written_plural_is_spoken_as_a_plural():
+    """`file(s)` is exactly right in writing and is read aloud as "file open
+    bracket s close bracket". Spoken text has no reason to hedge about number."""
+    assert sanitize_for_speech("Found 7 matching file(s).") == "Found 7 matching files."
+    assert sanitize_for_speech("Done — 2 step(s) completed") == "Done, 2 steps completed"
+
+
+def test_sanitize_drops_a_folders_trailing_slash():
+    """`list_directory` marks folders with a trailing slash; it is a written
+    convention, not a word."""
+    assert sanitize_for_speech("notes.txt image.png sub/") == "notes.txt image.png sub"
+
+
+def test_sanitize_reads_a_layout_dash_as_a_pause():
+    assert sanitize_for_speech("phase3test — 3 items") == "phase3test, 3 items"
+
+
+def test_sanitize_leaves_hyphenated_words_and_ranges_alone():
+    """The dash rule is scoped to a SPACED em/en dash — a layout separator.
+    A hyphen inside a word is part of the word."""
+    assert sanitize_for_speech("report-final.pdf is well-known") == (
+        "report-final.pdf is well-known"
+    )
+
+
+def test_sanitize_leaves_ordinary_parentheses_alone():
+    assert sanitize_for_speech("The file (a big one) is ready.") == (
+        "The file (a big one) is ready."
+    )
+
+
 def test_sanitize_unclosed_fence_omitted():
     text = "Sure:\n```bash\nrm -rf build"
     assert sanitize_for_speech(text) == "Sure: (code omitted)"

@@ -76,6 +76,7 @@ async def post_transcribe(file: UploadFile = File(...), db=Depends(get_db)) -> d
             model_name=config.stt_model,
             device=config.stt_device,
             compute_type=config.stt_compute_type,
+            language=config.stt_language,
         )
     except ModelNotReadyError as e:
         # 409, not 400: the request was fine — the model just isn't there yet.

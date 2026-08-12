@@ -26,6 +26,8 @@
  */
 import { useVoiceStore } from '@/stores/voiceStore';
 import { useChatStore } from '@/stores/chatStore';
+import { hasOpenInteractivePlan } from '@/lib/planGate';
+import { voiceAutoSend, voiceLoopActive, voiceOutputActive } from '@/lib/voiceMode';
 
 /** Wait this long after speech stops before opening the follow-up window — long
  *  enough to ride over the tiny gaps between two streamed sentences, short
@@ -42,19 +44,6 @@ function clearTimer(): void {
   }
 }
 
-/** An interactive plan the user must resolve is on screen — its card owns the
- *  turn, so a follow-up window must not open over it. */
-function hasOpenInteractivePlan(): boolean {
-  return useChatStore.getState().messages.some(
-    (m) =>
-      m.planNeededApproval === true &&
-      m.plan != null &&
-      (m.plan.status === 'awaiting_approval' ||
-        m.plan.status === 'awaiting_choice' ||
-        m.plan.status === 'executing')
-  );
-}
-
 /** Re-evaluate the full predicate against LIVE state (not the transition that
  *  scheduled us) and open the follow-up window if everything still holds. */
 function tryArm(): void {
@@ -67,10 +56,11 @@ function tryArm(): void {
     v.phase === 'idle' &&
     spokeThisTurn &&
     !useChatStore.getState().isStreaming &&
-    !!s?.enabled &&
-    s.output_enabled &&
-    s.continuous_conversation &&
-    !s.review_before_send &&
+    // The three settings gates, each read through lib/voiceMode.ts so an open
+    // voice mode widens them all in ONE place rather than three inline checks.
+    voiceOutputActive(s) &&
+    voiceLoopActive(s) &&
+    voiceAutoSend(s) &&
     !hasOpenInteractivePlan()
   ) {
     spokeThisTurn = false;

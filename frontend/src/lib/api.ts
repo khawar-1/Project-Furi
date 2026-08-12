@@ -788,8 +788,11 @@ export interface VoiceUpdateBody {
   stt_device: string;
   tts_device: string;
   stt_compute_type: string;
+  stt_language: string;
   continuous_conversation: boolean;
   wake_word: boolean;
+  wake_mode: string;
+  wake_phrase: string;
   spoken_approval: string;
 }
 
@@ -814,8 +817,11 @@ export function voiceUpdatePayload(
     stt_device: settings.stt_device,
     tts_device: settings.tts_device,
     stt_compute_type: settings.stt_compute_type,
+    stt_language: settings.stt_language,
     continuous_conversation: settings.continuous_conversation,
     wake_word: settings.wake_word,
+    wake_mode: settings.wake_mode,
+    wake_phrase: settings.wake_phrase,
     spoken_approval: settings.spoken_approval,
     ...patch,
   };
@@ -901,7 +907,12 @@ export const voiceApi = {
    *  human-readable `detail` ("model not ready yet", "voice disabled", ...). */
   transcribe: async (audio: Blob, signal?: AbortSignal): Promise<TranscribeResult> => {
     const form = new FormData();
-    form.append('file', audio, 'utterance.webm');
+    // Name the part after what it actually is. The wake-phrase gate posts WAV
+    // (it has raw worklet samples, not a MediaRecorder container), and a `.webm`
+    // filename on WAV bytes is a small lie that would make any decode failure
+    // read as the wrong bug.
+    const ext = audio.type.includes('wav') ? 'wav' : 'webm';
+    form.append('file', audio, `utterance.${ext}`);
     const response = await fetch(`${getBaseUrl()}/api/voice/transcribe`, {
       method: 'POST',
       // Auth header ONLY — never a Content-Type here: the browser must set

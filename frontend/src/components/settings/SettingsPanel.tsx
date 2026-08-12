@@ -58,6 +58,13 @@ import {
   type HomeSettings,
   type VoiceUpdateBody,
 } from '@/lib/api';
+import {
+  SettingsCard,
+  SettingsRow,
+  SettingsSection,
+  StatusPill,
+  Toggle,
+} from './SettingsControls';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { useContextStore } from '@/stores/contextStore';
 import { speakText } from '@/lib/voiceOutput';
@@ -152,39 +159,23 @@ function GoogleAccountCard() {
   const connecting = status?.connecting ?? false;
 
   return (
-    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
-      {/* Card header */}
-      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
-        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
-          <Link2 size={15} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-slate-200">Google account</h2>
-          <p className="text-xs text-muted truncate">
-            {connected
-              ? `Connected${status?.account_email ? ` as ${status.account_email}` : ''}`
-              : connecting
-                ? 'Waiting for you to finish in the browser…'
-                : 'Powers email and calendar features'}
-          </p>
-        </div>
-        <span
-          className={clsx(
-            'text-[10px] px-2 py-0.5 rounded-full border font-mono flex items-center gap-1.5',
-            connected
-              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-              : connecting
-                ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                : 'bg-surface-2 text-slate-500 border-surface-border'
-          )}
-        >
-          {connecting && <Loader2 size={10} className="animate-spin" />}
+    <SettingsCard
+      icon={<Link2 size={15} />}
+      title="Google account"
+      summary={
+        connected
+          ? `Connected${status?.account_email ? ` as ${status.account_email}` : ''}`
+          : connecting
+            ? 'Waiting for you to finish in the browser…'
+            : 'Powers email and calendar features'
+      }
+      accessory={
+        <StatusPill tone={connected ? 'good' : connecting ? 'busy' : 'neutral'}>
           {connected ? 'connected' : connecting ? 'connecting' : 'off'}
-        </span>
-      </div>
-
-      {/* Card body */}
-      <div className="px-4 py-3.5 space-y-3">
+        </StatusPill>
+      }
+    >
+      <div className="space-y-3">
         <div className="space-y-1.5">
           {SCOPE_SUMMARY.map((line) => (
             <div key={line} className="flex items-center gap-2 text-xs text-slate-400">
@@ -231,7 +222,7 @@ function GoogleAccountCard() {
           )}
         </div>
       </div>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -324,34 +315,19 @@ function RemoteAccessCard() {
   const full = !!status && devices.filter((d) => d.live).length >= status.max_devices;
 
   return (
-    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
-      {/* Card header */}
-      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
-        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
-          <Smartphone size={15} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-slate-200">Remote access</h2>
-          <p className="text-xs text-muted truncate">
-            {enabled
-              ? `Listening on ${status?.address}:${status?.port} · ${liveCount} device${liveCount === 1 ? '' : 's'} paired`
-              : 'Approve work from your phone — currently off'}
-          </p>
-        </div>
-        <span
-          className={clsx(
-            'text-[10px] px-2 py-0.5 rounded-full border font-mono',
-            enabled
-              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-              : 'bg-surface-2 text-slate-500 border-surface-border'
-          )}
-        >
-          {enabled ? 'on' : 'off'}
-        </span>
-      </div>
-
-      {/* Card body */}
-      <div className="px-4 py-3.5 space-y-3">
+    <SettingsCard
+      icon={<Smartphone size={15} />}
+      title="Remote access"
+      summary={
+        enabled
+          ? `Listening on ${status?.address}:${status?.port} · ${liveCount} device${liveCount === 1 ? '' : 's'} paired`
+          : 'Approve work from your phone — currently off'
+      }
+      accessory={
+        <StatusPill tone={enabled ? 'good' : 'neutral'}>{enabled ? 'on' : 'off'}</StatusPill>
+      }
+    >
+      <div className="space-y-3">
         <div className="space-y-1.5">
           {REMOTE_SUMMARY.map((line) => (
             <div key={line} className="flex items-center gap-2 text-xs text-slate-400">
@@ -480,7 +456,7 @@ function RemoteAccessCard() {
           </div>
         )}
       </div>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -528,44 +504,27 @@ function DailyBriefingCard() {
   const nextRun = settings?.next_run_at ? new Date(settings.next_run_at) : null;
 
   return (
-    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
-      {/* Card header */}
-      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
-        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-amber-400/80">
-          <Sunrise size={15} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-slate-200">Daily briefing</h2>
-          <p className="text-xs text-muted truncate">
-            {enabled
-              ? nextRun
-                ? `Next: ${nextRun.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}`
-                : `Every day at ${time}`
-              : 'A morning summary of your day — off'}
-          </p>
-        </div>
-        {/* Enable toggle */}
-        <button
-          role="switch"
-          aria-checked={enabled}
+    <SettingsCard
+      icon={<Sunrise size={15} />}
+      accent="text-amber-400/80"
+      title="Daily briefing"
+      summary={
+        enabled
+          ? nextRun
+            ? `Next: ${nextRun.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}`
+            : `Every day at ${time}`
+          : 'A morning summary of your day — off'
+      }
+      accessory={
+        <Toggle
+          checked={enabled}
           disabled={isBusy || !settings}
-          onClick={() => void save({ enabled: !enabled, time })}
-          className={clsx(
-            'relative w-10 h-5 rounded-full transition-colors flex-shrink-0 disabled:opacity-40',
-            enabled ? 'bg-cyan-500/70' : 'bg-surface-2 border border-surface-border'
-          )}
-        >
-          <span
-            className={clsx(
-              'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform',
-              enabled ? 'translate-x-5' : 'translate-x-0.5'
-            )}
-          />
-        </button>
-      </div>
-
-      {/* Card body */}
-      <div className="px-4 py-3.5 space-y-3">
+          onToggle={() => void save({ enabled: !enabled, time })}
+          label="Daily briefing on/off"
+        />
+      }
+    >
+      <div className="space-y-3">
         <p className="text-xs text-slate-400">
           Each morning Jarvis gathers today's calendar, unread email, birthdays, and notes
           into one message. Read-only — nothing is sent or changed.
@@ -600,7 +559,7 @@ function DailyBriefingCard() {
           {justSent ? 'Briefing sent' : 'Send now'}
         </button>
       </div>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -669,49 +628,34 @@ function InitiativeCard() {
   const nextRun = settings?.next_run_at ? new Date(settings.next_run_at) : null;
 
   return (
-    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
-      {/* Card header */}
-      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
-        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
-          <Sparkles size={15} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-slate-200">Initiative engine</h2>
-          <p className="text-xs text-muted truncate">
-            {enabled
-              ? nextRun
-                ? `Next check: ${nextRun.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}`
-                : `Checking every ${settings?.interval_minutes ?? 45} min`
-              : 'Jarvis volunteers helpful suggestions — off'}
-          </p>
-        </div>
-        <button
-          role="switch"
-          aria-checked={enabled}
+    <SettingsCard
+      icon={<Sparkles size={15} />}
+      title="Initiative engine"
+      summary={
+        enabled
+          ? nextRun
+            ? `Next check: ${nextRun.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}`
+            : `Checking every ${settings?.interval_minutes ?? 45} min`
+          : 'Jarvis volunteers helpful suggestions — off'
+      }
+      accessory={
+        <Toggle
+          checked={enabled}
           disabled={isBusy || !settings}
-          onClick={() => void patch({ enabled: !enabled })}
-          className={clsx(
-            'relative w-10 h-5 rounded-full transition-colors flex-shrink-0 disabled:opacity-40',
-            enabled ? 'bg-cyan-500/70' : 'bg-surface-2 border border-surface-border'
-          )}
-        >
-          <span
-            className={clsx(
-              'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform',
-              enabled ? 'translate-x-5' : 'translate-x-0.5'
-            )}
-          />
-        </button>
-      </div>
+          onToggle={() => void patch({ enabled: !enabled })}
+          label="Initiative engine on/off"
+        />
+      }
+    >
+      {/* The description shows either way — an opened card that renders nothing
+          reads as broken. Only the controls are gated on being enabled. */}
+      <p className="text-xs text-slate-400">
+        On a throttled schedule, Jarvis reviews your day (calendar, inbox, notes, and
+        activity) and surfaces a few timely suggestions in the Suggestions panel.
+      </p>
 
-      {/* Card body — only meaningful when enabled */}
       {enabled && settings && (
-        <div className="px-4 py-3.5 space-y-3.5">
-          <p className="text-xs text-slate-400">
-            On a throttled schedule, Jarvis reviews your day (calendar, inbox, notes, and
-            activity) and surfaces a few timely suggestions in the Suggestions panel.
-          </p>
-
+        <div className="mt-3.5 space-y-3.5">
           {/* Autonomy */}
           <div className="space-y-1.5">
             <label className="text-xs text-slate-400" htmlFor="initiative-autonomy">
@@ -832,7 +776,7 @@ function InitiativeCard() {
           )}
         </div>
       )}
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -1032,41 +976,24 @@ function FileIndexCard() {
   const lastIndexed = status?.last_indexed_at ? new Date(status.last_indexed_at) : null;
 
   return (
-    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
-      {/* Card header */}
-      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
-        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
-          <Database size={15} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-slate-200">File search index</h2>
-          <p className="text-xs text-muted truncate">
-            {enabled
-              ? `${status?.indexed_files ?? 0} file(s) indexed`
-              : 'Search your documents by meaning — off'}
-          </p>
-        </div>
-        <button
-          role="switch"
-          aria-checked={enabled}
+    <SettingsCard
+      icon={<Database size={15} />}
+      title="File search index"
+      summary={
+        enabled
+          ? `${status?.indexed_files ?? 0} file(s) indexed`
+          : 'Search your documents by meaning — off'
+      }
+      accessory={
+        <Toggle
+          checked={enabled}
           disabled={isBusy || !config}
-          onClick={() => void toggleEnabled()}
-          className={clsx(
-            'relative w-10 h-5 rounded-full transition-colors flex-shrink-0 disabled:opacity-40',
-            enabled ? 'bg-cyan-500/70' : 'bg-surface-2 border border-surface-border'
-          )}
-        >
-          <span
-            className={clsx(
-              'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform',
-              enabled ? 'translate-x-5' : 'translate-x-0.5'
-            )}
-          />
-        </button>
-      </div>
-
-      {/* Card body */}
-      <div className="px-4 py-3.5 space-y-4">
+          onToggle={() => void toggleEnabled()}
+          label="File search index on/off"
+        />
+      }
+    >
+      <div className="space-y-4">
         <p className="text-xs text-slate-400">
           Jarvis indexes the text of your documents (.txt, .md, .pdf, .docx) in the folders
           below so you can find them by meaning, not just filename. Indexing runs locally —
@@ -1176,41 +1103,7 @@ function FileIndexCard() {
           </button>
         </div>
       </div>
-    </div>
-  );
-}
-
-/** The shared switch control (the DailyBriefingCard/FileIndexCard toggle). */
-function ToggleSwitch({
-  checked,
-  disabled,
-  onToggle,
-  label,
-}: {
-  checked: boolean;
-  disabled?: boolean;
-  onToggle: () => void;
-  label: string;
-}) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={onToggle}
-      className={clsx(
-        'relative w-10 h-5 rounded-full transition-colors flex-shrink-0 disabled:opacity-40',
-        checked ? 'bg-cyan-500/70' : 'bg-surface-2 border border-surface-border'
-      )}
-    >
-      <span
-        className={clsx(
-          'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform',
-          checked ? 'translate-x-5' : 'translate-x-0.5'
-        )}
-      />
-    </button>
+    </SettingsCard>
   );
 }
 
@@ -1246,30 +1139,19 @@ function ModelStatusRow({
       <div className="flex items-center gap-2">
         <span className="flex-1 min-w-0 text-xs text-slate-400 truncate">{title}</span>
         {deviceLabel && (
-          <span
-            className={clsx(
-              'text-[10px] px-1.5 py-0.5 rounded-full border font-mono flex-shrink-0',
-              status.device === 'cuda'
-                ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20'
-                : 'bg-surface-2 text-slate-500 border-surface-border'
-            )}
-          >
-            {deviceLabel}
-          </span>
+          <StatusPill tone={status.device === 'cuda' ? 'on' : 'neutral'}>{deviceLabel}</StatusPill>
         )}
-        <span
-          className={clsx(
-            'text-[10px] px-2 py-0.5 rounded-full border font-mono flex items-center gap-1.5 flex-shrink-0',
+        <StatusPill
+          tone={
             status.status === 'ready'
-              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+              ? 'good'
               : status.status === 'loading'
-                ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                ? 'busy'
                 : status.status === 'error'
-                  ? 'bg-red-500/10 text-red-400 border-red-500/20'
-                  : 'bg-surface-2 text-slate-500 border-surface-border'
-          )}
+                  ? 'bad'
+                  : 'neutral'
+          }
         >
-          {status.status === 'loading' && <Loader2 size={10} className="animate-spin" />}
           {status.status === 'loading'
             ? percent !== null
               ? `downloading ${percent}%`
@@ -1277,7 +1159,7 @@ function ModelStatusRow({
             : status.status === 'not_loaded'
               ? 'not loaded'
               : status.status}
-        </span>
+        </StatusPill>
       </div>
       {status.status === 'loading' && (
         <div className="h-1 rounded-full bg-surface-2 overflow-hidden">
@@ -1297,6 +1179,25 @@ function ModelStatusRow({
     </div>
   );
 }
+
+/** Display names for the recognition languages the backend offers. A code with
+ *  no entry falls back to the code itself, so this can never gate the list. */
+const LANGUAGE_LABELS: Record<string, string> = {
+  en: 'English',
+  ur: 'Urdu',
+  hi: 'Hindi',
+  ar: 'Arabic',
+  es: 'Spanish',
+  fr: 'French',
+  de: 'German',
+  it: 'Italian',
+  pt: 'Portuguese',
+  ru: 'Russian',
+  tr: 'Turkish',
+  zh: 'Chinese',
+  ja: 'Japanese',
+  ko: 'Korean',
+};
 
 function VoiceCard() {
   const { settings, phase, applySettings, fetchSettings } = useVoiceStore(
@@ -1426,38 +1327,32 @@ function VoiceCard() {
         },
         {
           key: 'wake_word',
-          label: 'Wake word (“Hey Jarvis”)',
-          hint: 'Always-on microphone; detection runs on-device and audio never leaves this machine',
+          label: 'Wake word',
+          hint: 'Always-on microphone; everything is processed on this machine and audio never leaves it',
           value: settings.wake_word,
         },
       ]
     : [];
 
   return (
-    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
-      {/* Card header */}
-      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
-        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
-          <Mic size={15} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-slate-200">Voice</h2>
-          <p className="text-xs text-muted truncate">
-            {enabled
-              ? 'Push-to-talk and spoken replies — everything runs locally'
-              : 'Talk to Jarvis and hear it answer — off'}
-          </p>
-        </div>
-        <ToggleSwitch
+    <SettingsCard
+      icon={<Mic size={15} />}
+      title="Voice"
+      summary={
+        enabled
+          ? 'Push-to-talk and spoken replies — everything runs locally'
+          : 'Talk to Jarvis and hear it answer — off'
+      }
+      accessory={
+        <Toggle
           checked={enabled}
           disabled={isBusy || !settings}
           onToggle={() => void patch({ enabled: !enabled })}
           label="Voice on/off"
         />
-      </div>
-
-      {/* Card body */}
-      <div className="px-4 py-3.5 space-y-4">
+      }
+    >
+      <div className="space-y-4">
         <p className="text-xs text-slate-400">
           Speech recognition (Whisper) and speech synthesis (Kokoro) both run on this
           machine — audio never leaves it. Enabling downloads the models once. With
@@ -1475,7 +1370,7 @@ function VoiceCard() {
                   {t.hint}
                 </p>
               </div>
-              <ToggleSwitch
+              <Toggle
                 checked={t.value}
                 disabled={isBusy || !settings || !enabled}
                 onToggle={() => void patch({ [t.key]: !t.value })}
@@ -1514,7 +1409,51 @@ function VoiceCard() {
           </div>
         )}
 
-        {/* Recognition model + speaking voice + speed */}
+        {/* Wake word — the phrase and how it is heard. Only meaningful while
+            the wake word is on, so it appears with it. */}
+        {enabled && settings?.wake_word && (
+          <div className="rounded-lg border border-surface-border bg-surface-2/40 px-3 py-2.5 space-y-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="text-xs font-medium text-slate-300" htmlFor="voice-wake-phrase">
+                Wake phrase
+              </label>
+              <input
+                id="voice-wake-phrase"
+                type="text"
+                defaultValue={settings.wake_phrase ?? 'furi'}
+                disabled={isBusy || settings.wake_mode === 'model'}
+                // On blur, not on every keystroke: each PUT re-validates and can
+                // restart detection, and doing that per character would fight
+                // the person typing.
+                onBlur={(e) => {
+                  const next = e.target.value.trim().toLowerCase();
+                  if (next && next !== settings.wake_phrase) void patch({ wake_phrase: next });
+                }}
+                className="w-36 px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+              />
+              <label className="text-xs text-slate-400" htmlFor="voice-wake-mode">
+                Detected by
+              </label>
+              <select
+                id="voice-wake-mode"
+                value={settings.wake_mode ?? 'speech'}
+                disabled={isBusy}
+                onChange={(e) => void patch({ wake_mode: e.target.value })}
+                className="px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+              >
+                <option value="speech">Speech — any phrase you type</option>
+                <option value="model">Model — “Hey Jarvis” only</option>
+              </select>
+            </div>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              {settings.wake_mode === 'model'
+                ? 'The bundled detector recognises “Hey Jarvis” and nothing else — the phrase is built into it. Switch to Speech to use your own.'
+                : 'Jarvis notices when someone speaks, then checks locally whether they said your phrase. Any phrase works, and it costs a little more power than the fixed detector.'}
+            </p>
+          </div>
+        )}
+
+        {/* Recognition model + language + speaking voice + speed */}
         <div className="flex flex-wrap items-center gap-3">
           <label className="text-xs text-slate-400" htmlFor="voice-stt-model">
             Recognition model
@@ -1529,6 +1468,27 @@ function VoiceCard() {
             {(settings?.stt_models ?? []).map((m) => (
               <option key={m} value={m}>
                 {m}
+              </option>
+            ))}
+          </select>
+          {/* ⚠️ PINNED, NOT DETECTED, and it is not a cosmetic preference:
+              letting Whisper guess turned spoken English into Arabic script
+              live, and guessing also costs a detection pass (measured: 343ms →
+              264ms median once pinned). "Detect" is there for people who really
+              do switch languages mid-conversation. */}
+          <label className="text-xs text-slate-400" htmlFor="voice-stt-language">
+            I speak
+          </label>
+          <select
+            id="voice-stt-language"
+            value={settings?.stt_language ?? 'en'}
+            disabled={isBusy || !settings}
+            onChange={(e) => void patch({ stt_language: e.target.value })}
+            className="px-2.5 py-1.5 rounded-lg text-xs bg-surface-2 border border-surface-border text-slate-200 disabled:opacity-40 focus:outline-none focus:border-cyan-500/40"
+          >
+            {(settings?.stt_languages ?? ['en']).map((code) => (
+              <option key={code} value={code}>
+                {code === 'auto' ? 'Detect each time' : LANGUAGE_LABELS[code] ?? code}
               </option>
             ))}
           </select>
@@ -1675,7 +1635,7 @@ function VoiceCard() {
           )}
         </div>
       </div>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -1737,28 +1697,23 @@ function ContextSensingCard() {
   const hasBridge = typeof window.jarvis?.startScreenSensing === 'function';
 
   return (
-    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
-      {/* Header + master kill switch */}
-      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
-        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-emerald-400/80">
-          <Eye size={15} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-slate-200">Context & sensing</h2>
-          <p className="text-xs text-muted truncate">
-            {enabled ? 'Sensing on — local only, nothing stored' : 'Off — Jarvis senses nothing'}
-          </p>
-        </div>
-        <ToggleSwitch
+    <SettingsCard
+      icon={<Eye size={15} />}
+      accent="text-emerald-400/80"
+      title="Context & sensing"
+      summary={
+        enabled ? 'Sensing on — local only, nothing stored' : 'Off — Jarvis senses nothing'
+      }
+      accessory={
+        <Toggle
           checked={enabled}
           disabled={!settings}
           onToggle={() => void updateSettings({ enabled: !enabled })}
           label="Master sensing switch"
         />
-      </div>
-
-      {/* Body */}
-      <div className="px-4 py-3.5 space-y-3">
+      }
+    >
+      <div className="space-y-3">
         <p className="text-xs text-slate-400">
           Lets Jarvis know what you're doing right now — presence, the active app, and
           (optionally) what's on screen — so it can be genuinely helpful later. Everything
@@ -1775,7 +1730,7 @@ function ContextSensingCard() {
                 <p className="text-xs text-slate-300">Presence & active app</p>
                 <p className="text-[11px] text-muted">Active window title + idle time (no screenshots)</p>
               </div>
-              <ToggleSwitch
+              <Toggle
                 checked={deviceSensing}
                 onToggle={() => void updateSettings({ device_sensing: !deviceSensing })}
                 label="Device sensing"
@@ -1791,7 +1746,7 @@ function ContextSensingCard() {
                   On-screen text, captured automatically and read locally while this is on.
                 </p>
               </div>
-              <ToggleSwitch
+              <Toggle
                 checked={screenOcr}
                 onToggle={() => void updateSettings({ screen_ocr: !screenOcr })}
                 label="Screen OCR capability"
@@ -1809,7 +1764,7 @@ function ContextSensingCard() {
                     text to the language model when you chat).
                   </p>
                 </div>
-                <ToggleSwitch
+                <Toggle
                   checked={screenInChat}
                   onToggle={() => void updateSettings({ screen_in_chat: !screenInChat })}
                   label="Screen-aware chat"
@@ -1842,7 +1797,7 @@ function ContextSensingCard() {
                   to be briefer and hold non-urgent nudges. Timing only, never keystrokes or audio.
                 </p>
               </div>
-              <ToggleSwitch
+              <Toggle
                 checked={affectiveSensing}
                 onToggle={() => void updateSettings({ affective_sensing: !affectiveSensing })}
                 label="Affective sensing"
@@ -1912,7 +1867,7 @@ function ContextSensingCard() {
           </div>
         )}
       </div>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -1967,31 +1922,17 @@ function BrowserAccountCard() {
   };
 
   return (
-    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
-      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
-        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
-          <Chrome size={15} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-slate-200">Browser account</h2>
-          <p className="text-xs text-muted truncate">
-            Sign into YouTube/Google so Jarvis plays as you
-          </p>
-        </div>
-        <span
-          className={clsx(
-            'text-[10px] px-2 py-0.5 rounded-full border font-mono flex items-center gap-1.5',
-            loginOpen
-              ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-              : 'bg-surface-2 text-slate-500 border-surface-border'
-          )}
-        >
-          {loginOpen && <Loader2 size={10} className="animate-spin" />}
+    <SettingsCard
+      icon={<Chrome size={15} />}
+      title="Browser account"
+      summary="Sign into YouTube/Google so Jarvis plays as you"
+      accessory={
+        <StatusPill tone={loginOpen ? 'busy' : 'neutral'}>
           {loginOpen ? 'window open' : 'ready'}
-        </span>
-      </div>
-
-      <div className="px-4 py-3.5 space-y-3">
+        </StatusPill>
+      }
+    >
+      <div className="space-y-3">
         <p className="text-xs text-slate-400">
           Jarvis drives its own <span className="text-slate-300">Chrome</span> window with a
           private profile — separate from your everyday Chrome. Sign in once here and it stays
@@ -2037,7 +1978,7 @@ function BrowserAccountCard() {
           )}
         </div>
       </div>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -2077,26 +2018,26 @@ function BrowserVisionCard() {
   const configured = state?.configured ?? false;
 
   return (
-    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
-      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
-        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
-          <Eye size={15} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-slate-200">Browser vision fallback</h2>
-          <p className="text-xs text-muted truncate">
-            Let Jarvis "look" at a page when text alone can't find a control
-          </p>
-        </div>
-        <ToggleSwitch
+    <SettingsCard
+      icon={<Eye size={15} />}
+      title="Browser vision fallback"
+      summary={
+        !configured
+          ? 'Needs an image-capable model configured in .env'
+          : enabled
+            ? 'On — used only when the page structure is not enough'
+            : `Let Jarvis "look" at a page when text alone can't find a control`
+      }
+      accessory={
+        <Toggle
           checked={enabled}
           disabled={isBusy || !configured}
           onToggle={() => void handleToggle()}
           label="Enable browser vision fallback"
         />
-      </div>
-
-      <div className="px-4 py-3.5 space-y-3">
+      }
+    >
+      <div className="space-y-3">
         <p className="text-xs text-slate-400">
           When driving a live site, Jarvis reads the page's structure to decide what to click.
           On pages with icon-only buttons or visual-only controls that can fail. With this on,
@@ -2129,7 +2070,7 @@ function BrowserVisionCard() {
           </div>
         )}
       </div>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -2193,20 +2134,18 @@ function AutofillCard() {
     f.is_secret ? '••••••••' : f.value ?? '';
 
   return (
-    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
-      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
-        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
-          <ShieldCheck size={15} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-slate-200">Autofill profile</h2>
-          <p className="text-xs text-muted truncate">
-            Your data for filling web forms — grounded, never invented
-          </p>
-        </div>
-      </div>
-
-      <div className="px-4 py-3.5 space-y-3">
+    <SettingsCard
+      icon={<ShieldCheck size={15} />}
+      title="Autofill profile"
+      summary={
+        fields.length > 0
+          ? `${fields.length} field${fields.length === 1 ? '' : 's'} saved`
+          : 'Your data for filling web forms — grounded, never invented'
+      }
+      /* No accessory: the summary already states the count, and a bare "2"
+         chip beside "2 fields saved" is the same fact twice. */
+    >
+      <div className="space-y-3">
         <p className="text-[11px] text-slate-500">
           When Jarvis fills a form on a live site, every value must come from this profile
           or your own words — never from the page. Secrets are hidden from the AI and only
@@ -2293,7 +2232,7 @@ function AutofillCard() {
           </button>
         </div>
       </div>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -2306,8 +2245,8 @@ function AutofillCard() {
  * can it reach?" without the user running a plan to find out. It is read-only —
  * the agent path goes through the tools and their approval gate, never here.
  */
-/** One capability sub-toggle. Extracted because this card has five of them and
- *  five hand-written copies of the same markup is how they drift apart. */
+/** One capability sub-toggle — now just the shared row plus the shared switch,
+ *  so it cannot drift away from every other toggle in the panel. */
 function SubToggle({
   label,
   hint,
@@ -2322,27 +2261,13 @@ function SubToggle({
   onToggle: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3">
-      <div className="min-w-0">
-        <div className="text-xs text-slate-300">{label}</div>
-        <div className="text-[11px] text-slate-600">{hint}</div>
-      </div>
-      <button
-        onClick={onToggle}
-        disabled={disabled}
-        className={clsx(
-          'relative w-9 h-5 rounded-full transition-colors flex-shrink-0 disabled:opacity-30',
-          checked ? 'bg-cyan-500/70' : 'bg-surface-2 border border-surface-border',
-        )}
-      >
-        <span
-          className={clsx(
-            'absolute top-0.5 w-4 h-4 rounded-full bg-slate-200 transition-all',
-            checked ? 'left-[18px]' : 'left-0.5',
-          )}
-        />
-      </button>
-    </div>
+    <SettingsRow
+      label={label}
+      hint={hint}
+      control={
+        <Toggle checked={checked} disabled={disabled} onToggle={onToggle} label={label} />
+      }
+    />
   );
 }
 
@@ -2405,30 +2330,26 @@ function DesktopControlCard() {
   const off = !settings.enabled;
 
   return (
-    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
-      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
-        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
-          <Monitor size={15} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-slate-200">Desktop control</h2>
-          <p className="text-xs text-muted truncate">
-            Windows, apps, volume and the clipboard on this machine
-          </p>
-        </div>
-        <span
-          className={clsx(
-            'text-[10px] px-2 py-0.5 rounded-full border font-mono',
-            settings.enabled
-              ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20'
-              : 'bg-surface-2 text-slate-500 border-surface-border',
-          )}
-        >
-          {settings.enabled ? 'on' : 'off'}
-        </span>
-      </div>
-
-      <div className="px-4 py-3.5 space-y-3">
+    <SettingsCard
+      icon={<Monitor size={15} />}
+      title="Desktop control"
+      summary={
+        !settings.supported
+          ? 'Not available on this platform'
+          : settings.enabled
+            ? 'On — windows, apps, volume and the clipboard'
+            : 'Windows, apps, volume and the clipboard — off'
+      }
+      accessory={
+        <Toggle
+          checked={settings.enabled}
+          disabled={isBusy || !settings.supported}
+          onToggle={() => void save({ enabled: !settings.enabled })}
+          label="Desktop control on/off"
+        />
+      }
+    >
+      <div className="space-y-3">
         <p className="text-xs text-slate-400">
           Jarvis already sees which window you have open. This lets it act: switch to a
           window, open an app, turn the volume down. Every action is shown to you for
@@ -2441,14 +2362,8 @@ function DesktopControlCard() {
           </div>
         )}
 
-        <SubToggle
-          label="Enable desktop control"
-          hint="Off by default — Jarvis cannot touch this machine until you turn it on."
-          checked={settings.enabled}
-          disabled={isBusy || !settings.supported}
-          onToggle={() => void save({ enabled: !settings.enabled })}
-        />
-
+        {/* The master switch lives in the card header (reachable without
+            opening the card); this section is only what it may then do. */}
         <div className="pt-1 space-y-2.5 border-t border-surface-border/60">
           <p className="text-[10px] uppercase tracking-wide text-slate-600 pt-2.5">
             What it may do
@@ -2547,7 +2462,7 @@ function DesktopControlCard() {
 
         {error && <p className="text-[11px] text-red-400/80">{error}</p>}
       </div>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -2629,59 +2544,31 @@ function HomeCard() {
   const connected = settings.enabled && settings.configured;
 
   return (
-    <div className="bg-surface-1 border border-surface-border rounded-xl overflow-hidden">
-      <div className="flex items-center gap-3 px-4 py-3.5 border-b border-surface-border">
-        <div className="w-8 h-8 rounded-lg bg-surface-2 border border-surface-border flex items-center justify-center text-cyan-400/80">
-          <Home size={15} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-slate-200">Home &amp; devices</h2>
-          <p className="text-xs text-muted truncate">
-            Lights, locks, blinds and heating through Home Assistant
-          </p>
-        </div>
-        <span
-          className={clsx(
-            'text-[10px] px-2 py-0.5 rounded-full border font-mono',
-            connected
-              ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20'
-              : 'bg-surface-2 text-slate-500 border-surface-border',
-          )}
-        >
-          {connected ? 'on' : settings.enabled ? 'needs setup' : 'off'}
-        </span>
-      </div>
-
-      <div className="px-4 py-3.5 space-y-3">
+    <SettingsCard
+      icon={<Home size={15} />}
+      title="Home &amp; devices"
+      summary={
+        connected
+          ? `Connected${devices ? ` · ${devices.devices.length} device(s)` : ''}`
+          : settings.enabled
+            ? 'Needs a hub address and token'
+            : 'Lights, locks, blinds and heating — off'
+      }
+      accessory={
+        <Toggle
+          checked={settings.enabled}
+          disabled={isBusy || (!settings.enabled && !baseUrl.trim())}
+          onToggle={() => void save({ enabled: !settings.enabled })}
+          label="Home control on/off"
+        />
+      }
+    >
+      <div className="space-y-3">
         <p className="text-xs text-slate-400">
           Connect your Home Assistant hub and Jarvis can read and control the devices in
           your home. Every change — a light, a lock, the thermostat — is shown to you for
           approval first, naming the exact device and room.
         </p>
-
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-xs text-slate-300">Enable home control</div>
-            <div className="text-[11px] text-slate-600">
-              Off by default — Jarvis sees no devices until you turn this on.
-            </div>
-          </div>
-          <button
-            onClick={() => void save({ enabled: !settings.enabled })}
-            disabled={isBusy || (!settings.enabled && !baseUrl.trim())}
-            className={clsx(
-              'relative w-9 h-5 rounded-full transition-colors flex-shrink-0 disabled:opacity-40',
-              settings.enabled ? 'bg-cyan-500/70' : 'bg-surface-2 border border-surface-border',
-            )}
-          >
-            <span
-              className={clsx(
-                'absolute top-0.5 w-4 h-4 rounded-full bg-slate-200 transition-all',
-                settings.enabled ? 'left-[18px]' : 'left-0.5',
-              )}
-            />
-          </button>
-        </div>
 
         <div className="space-y-2">
           <label className="block">
@@ -2781,50 +2668,68 @@ function HomeCard() {
           </div>
         )}
       </div>
-    </div>
+    </SettingsCard>
   );
 }
 
+/**
+ * Every card is COLLAPSED by default, which is the whole answer to the panel
+ * feeling cluttered: twelve features used to render every control they own at
+ * once, so opening Settings to change one thing meant scrolling past a hundred
+ * others. Now it reads as a list — one line per feature, saying what state it
+ * is in — and the one you came for opens on a click.
+ */
 export function SettingsPanel() {
   return (
-    <div className="flex flex-col h-full bg-surface overflow-hidden">
+    <div className="flex h-full flex-col overflow-hidden bg-surface">
       {/* ── Header ── */}
-      <div className="flex-shrink-0 px-6 py-4 border-b border-surface-border bg-surface-1/50">
+      <div className="flex-shrink-0 border-b border-surface-border bg-surface-1/50 px-6 py-4">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500/20 to-blue-600/20 border border-cyan-500/20 flex items-center justify-center">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-500/20 bg-gradient-to-br from-cyan-500/20 to-blue-600/20">
             <SettingsIcon size={16} className="text-cyan-400" />
           </div>
           <div>
             <h1 className="text-base font-semibold text-slate-200">Settings</h1>
-            <p className="text-xs text-muted">Integrations and app configuration</p>
+            <p className="text-xs text-muted">
+              Everything is off until you turn it on — open a card to see what it does
+            </p>
           </div>
         </div>
       </div>
 
       {/* ── Body ── */}
-      <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3 max-w-2xl">
-        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1">Integrations</p>
-        <GoogleAccountCard />
-        <BrowserAccountCard />
-        <BrowserVisionCard />
-        <AutofillCard />
-        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">
-          This machine
-        </p>
-        <DesktopControlCard />
-        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Home</p>
-        <HomeCard />
-        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Files</p>
-        <FileIndexCard />
-        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Proactive</p>
-        <DailyBriefingCard />
-        <InitiativeCard />
-        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Voice</p>
-        <VoiceCard />
-        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Awareness</p>
-        <ContextSensingCard />
-        <p className="text-[10px] uppercase tracking-wide text-slate-600 px-1 pt-2">Remote</p>
-        <RemoteAccessCard />
+      <div className="flex-1 overflow-y-auto px-6 py-5">
+        <div className="max-w-2xl space-y-6 pb-8">
+          <SettingsSection label="Integrations">
+            <GoogleAccountCard />
+            <BrowserAccountCard />
+            <BrowserVisionCard />
+            <AutofillCard />
+          </SettingsSection>
+
+          <SettingsSection label="This machine">
+            <DesktopControlCard />
+            <FileIndexCard />
+            <ContextSensingCard />
+          </SettingsSection>
+
+          <SettingsSection label="Home">
+            <HomeCard />
+          </SettingsSection>
+
+          <SettingsSection label="Voice">
+            <VoiceCard />
+          </SettingsSection>
+
+          <SettingsSection label="Proactive">
+            <DailyBriefingCard />
+            <InitiativeCard />
+          </SettingsSection>
+
+          <SettingsSection label="Remote">
+            <RemoteAccessCard />
+          </SettingsSection>
+        </div>
       </div>
     </div>
   );

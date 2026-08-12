@@ -612,15 +612,24 @@ export interface VoiceSettings {
   /** Phase 12.1: after a spoken reply, re-open a short hands-free window so
    *  the user can talk back without re-triggering (opt-in). */
   continuous_conversation: boolean;
-  /** Phase 12.2: always-on on-device "Hey Jarvis" detection in the renderer
-   *  (opt-in; raw audio never leaves the machine). */
+  /** Phase 12.2: always-on wake-word detection in the renderer (opt-in; audio
+   *  is only ever sent to the loopback-local transcriber). */
   wake_word: boolean;
+  /** How the wake word is detected: 'speech' (transcribe-and-match — works for
+   *  any phrase) | 'model' (the bundled "Hey Jarvis" ONNX classifier). */
+  wake_mode: string;
+  /** The phrase to listen for, in 'speech' mode. */
+  wake_phrase: string;
+  /** The spoken language pinned for transcription, or 'auto' to detect. */
+  stt_language: string;
   stt_models: string[];
   /** The selectable preset voices. */
   voices: VoiceOption[];
-  /** The selectable device options and whisper compute types. */
+  /** The selectable device options, whisper compute types and languages. */
   devices: string[];
   stt_compute_types: string[];
+  stt_languages: string[];
+  wake_modes: string[];
   stt_status: SttStatus;
   tts_status: TtsStatus;
 }
@@ -630,6 +639,10 @@ export interface TranscribeResult {
   text: string;
   language: string | null;
   duration: number;
+  /** Whisper's own averaged "this was not speech" probability for the segments
+   *  it produced. High on a window that held only room noise — which is what it
+   *  answers with an invented sentence rather than an empty string. */
+  no_speech_prob?: number;
 }
 
 // ============================================================

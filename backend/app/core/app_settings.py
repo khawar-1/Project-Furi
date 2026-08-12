@@ -13,6 +13,7 @@ daily briefing "on by default at 08:00" true before the user ever opens
 Settings.
 """
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -250,6 +251,50 @@ VOICE_DEVICES = ("auto", "cpu", "cuda")
 #: (CUDA → int8_float16, the VRAM-safe near-float16 default; CPU → int8).
 VOICE_STT_COMPUTE_TYPES = ("auto", "float16", "int8_float16", "int8")
 
+#: ⚠️ THE SPOKEN LANGUAGE, PINNED — and it defaults to English rather than to
+#: Whisper's own guess, because that guess was a live defect. Reported: *"there
+#: were some arabic or urdu words when i spoke in the voice mode, my words were
+#: converted to arabic"*. With `language=None` (what shipped) Whisper runs
+#: language identification on each utterance, and on a SHORT, accented, or noisy
+#: clip of English it lands on Urdu or Arabic — after which it transcribes in
+#: that script, confidently. There is nothing to detect for a user who knows what
+#: language they speak, so the default states it.
+#:
+#: "auto" restores detection for genuinely multilingual use. A curated list, not
+#: Whisper's full 99: this feeds a picker, and an unknown code would reach
+#: faster-whisper and raise. Adding one is a one-line change here.
+VOICE_STT_LANGUAGES = (
+    "auto",
+    "en",
+    "ur",
+    "hi",
+    "ar",
+    "es",
+    "fr",
+    "de",
+    "it",
+    "pt",
+    "ru",
+    "tr",
+    "zh",
+    "ja",
+    "ko",
+)
+
+#: How the always-on wake word is detected.
+#:  "speech" — a cheap energy gate notices that somebody spoke, then ~2s is
+#:             transcribed locally and checked against `wake_phrase`. Works for
+#:             ANY phrase the user types, today, with no model training.
+#:  "model"  — the openWakeWord ONNX classifier. Near-zero cost, but the phrase
+#:             is baked into the weights: the bundled model is "Hey Jarvis" and
+#:             nothing else, which is why it is no longer the default.
+VOICE_WAKE_MODES = ("speech", "model")
+
+#: Wake phrases must be plain spoken words: this is compared against a Whisper
+#: transcript, so punctuation and digits could never match anyway, and refusing
+#: them keeps a hand-edited row from turning into a regex.
+_WAKE_PHRASE_RE = re.compile(r"^[a-z][a-z ']{1,31}$")
+
 #: Curated Kokoro preset voices (id → display label). Kokoro ships ~54 voices
 #: across 8 languages; we expose a focused English set. `voice` is validated
 #: against these ids — a hand-edited row can never name a voice the pack does
@@ -324,8 +369,11 @@ class VoiceConfig:
     stt_device: str
     tts_device: str
     stt_compute_type: str
+    stt_language: str
     continuous_conversation: bool
     wake_word: bool
+    wake_mode: str
+    wake_phrase: str
     spoken_approval: str
 
 
@@ -343,8 +391,12 @@ def default_voice_config() -> VoiceConfig:
         stt_device="auto",
         tts_device="auto",
         stt_compute_type="auto",
+        # English, not "auto" — see VOICE_STT_LANGUAGES.
+        stt_language="en",
         continuous_conversation=False,
         wake_word=False,
+        wake_mode="speech",
+        wake_phrase="furi",
         # OFF by default. Voice approval is a real change to how consent
         # is given, so it is opted into like every other new capability.
         spoken_approval="off",
@@ -382,6 +434,15 @@ def _coerce_voice(raw: Any) -> VoiceConfig:
     stt_compute_type = raw.get("stt_compute_type", default.stt_compute_type)
     if stt_compute_type not in VOICE_STT_COMPUTE_TYPES:
         stt_compute_type = default.stt_compute_type
+    stt_language = raw.get("stt_language", default.stt_language)
+    if stt_language not in VOICE_STT_LANGUAGES:
+        stt_language = default.stt_language
+    wake_mode = raw.get("wake_mode", default.wake_mode)
+    if wake_mode not in VOICE_WAKE_MODES:
+        wake_mode = default.wake_mode
+    wake_phrase = str(raw.get("wake_phrase", default.wake_phrase) or "").strip().lower()
+    if not _WAKE_PHRASE_RE.match(wake_phrase):
+        wake_phrase = default.wake_phrase
     # An out-of-whitelist value falls back to "off" — the SAFE end. A
     # corrupt or hand-edited row must never widen who may approve a write.
     spoken_approval = raw.get("spoken_approval", default.spoken_approval)
@@ -400,12 +461,27 @@ def _coerce_voice(raw: Any) -> VoiceConfig:
         stt_device=stt_device,
         tts_device=tts_device,
         stt_compute_type=stt_compute_type,
+        stt_language=stt_language,
         continuous_conversation=bool(
             raw.get("continuous_conversation", default.continuous_conversation)
         ),
         wake_word=bool(raw.get("wake_word", default.wake_word)),
+        wake_mode=wake_mode,
+        wake_phrase=wake_phrase,
         spoken_approval=spoken_approval,
     )
+
+
+def voice_config_from_dict(raw: Any) -> VoiceConfig:
+    """A dict → a VALIDATED VoiceConfig — the ONE validation path.
+
+    Public because the settings PUT needs it too. Before this existed the API
+    re-implemented the whitelist checks field by field, which made `put_voice` a
+    fifth hand-kept copy of the field list beside the dataclass, the defaults,
+    this coercer and the GET payload. `set_voice_config`'s docstring records what
+    that costs: adding `spoken_approval` updated three of the copies and the
+    write silently dropped it. Every writer now goes through here."""
+    return _coerce_voice(raw)
 
 
 async def get_voice_config(db: AsyncSession) -> VoiceConfig:

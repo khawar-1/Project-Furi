@@ -16,16 +16,16 @@ interface UIState {
   healthData: HealthResponse | null;
   isCheckingHealth: boolean;
 
-  // Voice mode
+  /** Voice mode (the sphere) is open over the chat's interaction area.
+   *  Read by lib/voiceMode.ts, which is the ONE place that decides what it
+   *  means — never test this flag directly at a gate. */
   isVoiceMode: boolean;
-  isListening: boolean;
 
   // Actions
   setActivePanel: (panel: ActivePanel) => void;
   toggleSidebar: () => void;
   checkBackendHealth: () => Promise<void>;
   setVoiceMode: (enabled: boolean) => void;
-  setListening: (listening: boolean) => void;
 }
 
 export const useUIStore = create<UIState>((set) => ({
@@ -36,7 +36,6 @@ export const useUIStore = create<UIState>((set) => ({
   healthData: null,
   isCheckingHealth: false,
   isVoiceMode: false,
-  isListening: false,
 
   // ---- Actions
   setActivePanel: (panel: ActivePanel) => {
@@ -67,9 +66,5 @@ export const useUIStore = create<UIState>((set) => ({
 
   setVoiceMode: (enabled: boolean) => {
     set({ isVoiceMode: enabled });
-  },
-
-  setListening: (listening: boolean) => {
-    set({ isListening: listening });
   },
 }));

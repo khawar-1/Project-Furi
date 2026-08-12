@@ -1,0 +1,206 @@
+/**
+ * Jarvis OS — Voice Mode overlay
+ *
+ * Covers the chat's message area with the sphere while a hands-free
+ * conversation runs. The header, the sidebar and the status bar stay live, so
+ * the app never feels hijacked — only the reading surface is handed over.
+ *
+ * ⚠️ THE CHAT IS HIDDEN, NEVER DESTROYED. The message list stays mounted
+ * underneath and is merely covered, so scroll position survives and leaving is
+ * instant. Every voice turn is an ordinary chatStore message, so exiting
+ * reveals the conversation continued rather than replayed.
+ */
+import { useEffect, useMemo, useState } from 'react';
+import { clsx } from 'clsx';
+import { ShieldQuestion } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
+import { useChatStore } from '@/stores/chatStore';
+import { useVoiceStore } from '@/stores/voiceStore';
+import { exitVoiceMode, toggleVoiceListening } from '@/lib/voiceModeControl';
+import { VoiceOrb, type OrbState } from './VoiceOrb';
+
+/**
+ * `speaking` drops to false whenever the playback queue momentarily drains
+ * between two sentences (voiceOutput's pumpPlayback) — voiceConversation.ts
+ * debounces the same edge at 700ms for the same reason. Without this the orb
+ * strobes between "speaking" and "thinking" mid-reply.
+ */
+const SPEAKING_SETTLE_MS = 600;
+
+/** True the moment `value` is true; false only after it has been false for
+ *  `ms` without interruption. */
+function useSettledFlag(value: boolean, ms: number): boolean {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    if (value) {
+      setSettled(true);
+      return;
+    }
+    const timer = window.setTimeout(() => setSettled(false), ms);
+    return () => window.clearTimeout(timer);
+  }, [value, ms]);
+  return settled;
+}
+
+export function VoiceModeOverlay() {
+  const { phase, speaking, interimText, voiceError } = useVoiceStore(
+    useShallow((s) => ({
+      phase: s.phase,
+      speaking: s.speaking,
+      interimText: s.interimText,
+      voiceError: s.error,
+    }))
+  );
+  // Primitive selectors: the store fires on every streamed delta, and Zustand
+  // compares the RESULT — so the overlay re-renders when these flip, not when
+  // the message text grows.
+  const isStreaming = useChatStore((s) => s.isStreaming);
+  // `awaitsDecision`, NOT `hasOpenInteractivePlan` — the two differ on
+  // 'executing' and the contrast is documented where they live together
+  // (lib/planGate.ts). Subscribed through the store so the banner reacts.
+  const awaitingDecision = useChatStore((s) =>
+    s.messages.some(
+      (m) =>
+        m.planNeededApproval === true &&
+        m.plan != null &&
+        (m.plan.status === 'awaiting_approval' ||
+          m.plan.status === 'awaiting_choice')
+    )
+  );
+
+  const speakingSettled = useSettledFlag(speaking, SPEAKING_SETTLE_MS);
+
+  // Order matters: a live mic or an in-flight transcription always outranks a
+  // debounced speaking tail, so the settle window can never mask a mic that
+  // has genuinely re-opened.
+  const state: OrbState = useMemo(() => {
+    if (voiceError) return 'error';
+    if (phase === 'recording') return 'listening';
+    if (phase === 'transcribing') return 'thinking';
+    if (speakingSettled) return 'speaking';
+    if (isStreaming) return 'thinking';
+    return 'idle';
+  }, [voiceError, phase, speakingSettled, isStreaming]);
+
+  const caption =
+    voiceError ??
+    (state === 'listening'
+      ? interimText || 'Listening…'
+      : state === 'thinking'
+        ? phase === 'transcribing'
+          ? 'One moment…'
+          : 'Thinking…'
+        : state === 'speaking'
+          ? 'Speaking…'
+          : awaitingDecision
+            ? 'Waiting on your decision'
+            // The mic stays open for as long as voice mode is (voiceStore's
+            // OPEN-MIC rule), so 'idle' here means something genuinely stopped
+            // it — an error, or a decision. "Tap to talk" is the honest label
+            // for that, and it is now the exception rather than the norm.
+            : 'Tap the sphere to talk');
+
+  // Esc exits. Owned here rather than in the composer because the overlay is
+  // the thing that is always mounted while voice mode is open — and ChatInput
+  // (which binds Esc to cancelHold) is unmounted for the duration, so the two
+  // handlers are never live at once.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        exitVoiceMode();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  // ⚠️ NO exitVoiceMode() ON UNMOUNT, deliberately. React StrictMode
+  // double-invokes effects in dev, so an unmount cleanup that cleared the flag
+  // would fire the moment voice mode opened and close it again. The
+  // "a stale flag can never override the user's settings" guarantee lives in
+  // voiceModeActive() instead, which is derived and cannot be defeated by a
+  // teardown that does or does not run. The mic is closed by VoiceComposer's
+  // unmount, mirroring ChatInput.
+
+  const tappable = state !== 'thinking';
+
+  return (
+    <div
+      className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-8 px-8 animate-fade-in"
+      role="region"
+      aria-label="Voice conversation"
+      style={{
+        background: 'rgba(4, 7, 16, 0.96)',
+        backdropFilter: 'blur(10px)',
+        WebkitBackdropFilter: 'blur(10px)',
+        backgroundImage: [
+          'linear-gradient(rgba(34, 211, 238, 0.042) 1px, transparent 1px)',
+          'linear-gradient(90deg, rgba(34, 211, 238, 0.042) 1px, transparent 1px)',
+        ].join(', '),
+        backgroundSize: '42px 42px',
+      }}
+    >
+      {/* The canvas neural sphere handles its own hover-dispersal effect
+          internally via mouseenter/leave on this container div. No external
+          hover styling needed — the dispersal animation IS the feedback. */}
+      <div
+        className="relative"
+        style={{ width: 'min(52vh, 400px)', height: 'min(52vh, 400px)', overflow: 'visible' }}
+      >
+        <button
+          type="button"
+          onClick={toggleVoiceListening}
+          disabled={!tappable}
+          aria-label={
+            state === 'listening'
+              ? 'Send what you have said'
+              : state === 'speaking'
+                ? 'Interrupt Jarvis and talk'
+                : 'Start talking'
+          }
+          className={clsx(
+            'relative w-full h-full rounded-full outline-none',
+            'focus-visible:ring-2 focus-visible:ring-cyan-400/60',
+            tappable ? 'cursor-pointer' : 'cursor-default'
+          )}
+          style={{ overflow: 'visible' }}
+        >
+          <VoiceOrb state={state} className="w-full h-full" />
+        </button>
+      </div>
+
+      {/* Caption. aria-live so the state is announced, not just coloured. */}
+      <div className="flex flex-col items-center gap-2 text-center max-w-xl">
+        <p
+          aria-live="polite"
+          className={clsx(
+            'selectable text-sm leading-relaxed min-h-[2.5rem] flex items-center',
+            voiceError
+              ? 'text-danger font-mono text-xs'
+              : state === 'listening' && interimText
+                ? 'text-slate-200'
+                : 'text-slate-400 font-mono text-xs tracking-wide uppercase'
+          )}
+        >
+          {caption}
+        </p>
+
+        {awaitingDecision ? (
+          <button
+            type="button"
+            onClick={exitVoiceMode}
+            className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-semibold hover:bg-amber-500/20 transition-fast"
+          >
+            <ShieldQuestion size={13} />
+            Jarvis needs your approval — view in chat
+          </button>
+        ) : (
+          <p className="text-[10px] text-muted/50 font-mono">
+            Esc or ✕ to leave voice mode
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}

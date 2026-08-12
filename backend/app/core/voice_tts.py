@@ -506,6 +506,18 @@ _EMOJI_RE = re.compile(
     "\U0000200D"             # zero-width joiner
     "]+"
 )
+#: `file(s)` / `item(s)` / `step(s)` — the plural-agnostic form this codebase's
+#: deterministic renderers use everywhere ("Found 7 matching file(s)", "Done — 2
+#: step(s) completed"). It is exactly right in writing and unreadable aloud: the
+#: engine says "file open bracket s close bracket" or "file s". Spoken text has
+#: no reason to hedge about number, so the plural wins.
+_PAREN_PLURAL_RE = re.compile(r"\b(\w+?)\(s\)")
+#: A trailing separator on a word — `sub/` (a folder, as list_directory marks
+#: them), `Desktop\`. The slash is a written convention, not something to read.
+_TRAILING_SEP_RE = re.compile(r"(\w)[\\/](?=\s|$)")
+#: An em/en dash between two things is a spoken PAUSE, not a word. Kokoro reads
+#: a bare dash inconsistently; a comma is unambiguous.
+_DASH_RE = re.compile(r"\s+[—–]\s+")
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -539,4 +551,9 @@ def sanitize_for_speech(text: str) -> str:
     out = _LONE_UNDERSCORE_RE.sub("", out)   # _emphasis_ but not snake_case
     out = _PATH_RE.sub(_path_to_basename, out)
     out = _EMOJI_RE.sub("", out)
+    # Machine-shaped residue that survives the markdown rules above but is not
+    # speech: written-plural hedges, a folder's trailing slash, a layout dash.
+    out = _PAREN_PLURAL_RE.sub(r"\1s", out)
+    out = _TRAILING_SEP_RE.sub(r"\1", out)
+    out = _DASH_RE.sub(", ", out)
     return _WHITESPACE_RE.sub(" ", out).strip()

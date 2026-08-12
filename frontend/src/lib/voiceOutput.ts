@@ -24,6 +24,8 @@
  * async continuation).
  */
 import { voiceApi } from '@/lib/api';
+import { voiceOutputActive, voiceSpeakEveryTurn } from '@/lib/voiceMode';
+import { SpeechDigest, digestWholeText } from '@/lib/speechDigest';
 import { useVoiceStore } from '@/stores/voiceStore';
 
 /** Don't cut before this many chars — "e.g." / "3.5" / initials never make
@@ -228,6 +230,10 @@ interface QueueItem {
 const MAX_SYNTH_IN_FLIGHT = 2;
 
 let segmenter: SentenceSegmenter | null = null;
+/** Turn-scoped spoken-form filter (lib/speechDigest.ts): the segmenter decides
+ *  WHERE an utterance ends, this decides WHETHER it is speech at all. Paired
+ *  with `segmenter` through every lifecycle hook so neither can outlive a turn. */
+let digest: SpeechDigest | null = null;
 let speakingTurn = false;
 let nextTurnVoice = false;
 /** An approval contract was spoken for this turn — the rest of the turn is
@@ -255,6 +261,50 @@ function getAudioContext(): AudioContext {
   return audioCtx;
 }
 
+/** Output-side amplitude tap (voice mode): every scheduled source runs through
+ *  a shared analyser instead of straight to the speakers, so the sphere can
+ *  pulse with what Jarvis is ACTUALLY saying rather than a fake rhythm. */
+let outputAnalyser: AnalyserNode | null = null;
+// Inferred from the constructor rather than annotated `Uint8Array`: the bare
+// annotation widens to ArrayBufferLike, which getByteTimeDomainData rejects.
+let outputBins = new Uint8Array(0);
+
+/** The node sources connect to: source → analyser → destination. */
+function getOutputNode(): AudioNode {
+  const ctx = getAudioContext();
+  if (!outputAnalyser) {
+    outputAnalyser = ctx.createAnalyser();
+    outputAnalyser.fftSize = 512;
+    outputBins = new Uint8Array(outputAnalyser.fftSize);
+    outputAnalyser.connect(ctx.destination);
+  }
+  return outputAnalyser;
+}
+
+/**
+ * 0..1 RMS of the audio playing right now, using the same scale-and-clamp as
+ * the microphone meter (voiceInput.ts) so both ends of the conversation drive
+ * the sphere identically.
+ *
+ * ⚠️ SAMPLED, NEVER PUSHED. The orb's rAF loop calls this ~60×/s; writing it
+ * into a store instead would re-render the app every frame.
+ *
+ * HONEST LIMIT: the `playBlob` fallback (an <audio> element, used only when a
+ * stream fails before any audio) is not routed through the analyser and reads
+ * 0 here — the orb keeps its breathing animation rather than reporting a level
+ * it does not have.
+ */
+export function getOutputLevel(): number {
+  if (!outputAnalyser || outputBins.length === 0) return 0;
+  outputAnalyser.getByteTimeDomainData(outputBins);
+  let sumSquares = 0;
+  for (let i = 0; i < outputBins.length; i++) {
+    const centered = (outputBins[i] - 128) / 128;
+    sumSquares += centered * centered;
+  }
+  return Math.min(1, Math.sqrt(sumSquares / outputBins.length) * 3.5);
+}
+
 function setSpeaking(value: boolean) {
   if (useVoiceStore.getState().speaking !== value) {
     useVoiceStore.setState({ speaking: value });
@@ -275,20 +325,26 @@ export function beginTurn(): void {
   const settings = useVoiceStore.getState().settings;
   const voiceInitiated = nextTurnVoice;
   nextTurnVoice = false;
+  // Both gates read lib/voiceMode.ts so an open voice mode widens them in ONE
+  // place: a voice conversation with no voice is not a conversation, and a
+  // reply typed into the voice composer must be spoken too — the chat it would
+  // otherwise be read from is behind the sphere.
   speakingTurn =
-    !!settings?.enabled &&
-    !!settings.output_enabled &&
-    (voiceInitiated || !!settings.speak_all_responses);
+    voiceOutputActive(settings) &&
+    (voiceInitiated || voiceSpeakEveryTurn(settings));
   segmenter = speakingTurn ? new SentenceSegmenter() : null;
+  digest = speakingTurn ? new SpeechDigest() : null;
   contractSpoken = false;
 }
 
 /** One streamed delta (the single chatStore tap). Plan chunks never reach
  *  this — the plan branch returns before the delta append. */
 export function onDelta(delta: string): void {
-  if (!speakingTurn || !segmenter || !delta || contractSpoken) return;
+  if (!speakingTurn || !segmenter || !digest || !delta || contractSpoken) return;
   for (const sentence of segmenter.push(delta)) {
-    enqueue(sentence);
+    // The segmenter cuts; the digest decides what is worth saying (a list of 52
+    // files becomes one clause naming the count). Prose passes straight through.
+    for (const spoken of digest.push(sentence)) enqueue(spoken);
   }
 }
 
@@ -310,17 +366,25 @@ export function speakContractInsteadOfTurn(text: string): void {
   if (!speakingTurn || !trimmed) return;
   contractSpoken = true;
   segmenter = null; // nothing more from this turn is spoken
+  digest = null;
+  // NOT digested: spoken.py already produced the spoken form of this contract
+  // (it names a few files then counts the rest), and consent text must reach the
+  // user exactly as the backend composed it.
   enqueue(trimmed.slice(0, MAX_SPEAK_CHARS));
 }
 
 /** The stream finished — speak the remainder. */
 export function endTurn(): void {
-  if (speakingTurn && segmenter) {
+  if (speakingTurn && segmenter && digest) {
     const rest = segmenter.flush();
-    if (rest) enqueue(rest);
+    if (rest) for (const spoken of digest.push(rest)) enqueue(spoken);
+    // Data lines the turn ended on still owe their one clause.
+    const owed = digest.flush();
+    if (owed) enqueue(owed);
   }
   speakingTurn = false;
   segmenter = null;
+  digest = null;
   contractSpoken = false;
 }
 
@@ -329,6 +393,7 @@ export function endTurn(): void {
 export function cancelTurn(): void {
   speakingTurn = false;
   segmenter = null;
+  digest = null;
   contractSpoken = false;
 }
 
@@ -343,7 +408,10 @@ const MAX_SPEAK_CHARS = 2000;
  * silent types, mic-open) lives with the caller — this just speaks.
  */
 export function speakText(text: string): void {
-  const trimmed = text.trim();
+  // Digested like a streamed turn: a background task's outcome carries the SAME
+  // rendered file lists a inline reply does, and it arrives here whole. Without
+  // this, "Done — 2 steps completed" reads 52 filenames aloud from a toast.
+  const trimmed = digestWholeText(text).trim();
   if (!trimmed) return;
   enqueue(trimmed.slice(0, MAX_SPEAK_CHARS));
 }
@@ -397,7 +465,7 @@ async function playStream(stream: StreamedUtterance, gen: number): Promise<void>
     buffer.getChannelData(0).set(chunk);
     const source = ctx.createBufferSource();
     source.buffer = buffer;
-    source.connect(ctx.destination);
+    source.connect(getOutputNode());
     // A hair of scheduling headroom before the first chunk; later chunks
     // butt-join (or restart "now" after a production underrun).
     const startAt = Math.max(nextStart, ctx.currentTime + (scheduledAny ? 0 : 0.06));
@@ -493,6 +561,7 @@ export function stopSpeaking(): void {
   generation++;
   speakingTurn = false;
   segmenter = null;
+  digest = null;
   for (const item of queue) item.controller.abort();
   if (currentItem) currentItem.controller.abort();
   currentItem = null;
