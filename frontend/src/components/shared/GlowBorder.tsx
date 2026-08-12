@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — GlowBorder
+ * Furi OS — GlowBorder
  * Reusable wrapper that applies HUD-style glow border effects.
  */
 import { clsx } from 'clsx';

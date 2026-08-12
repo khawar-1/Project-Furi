@@ -1,5 +1,5 @@
 """
-Jarvis OS — OpenAI-compatible Provider
+Furi OS — OpenAI-compatible Provider
 Drives any OpenAI-compatible chat-completions endpoint (DeepSeek, OpenRouter,
 etc.) directly over httpx — NOT via the Groq SDK.
 

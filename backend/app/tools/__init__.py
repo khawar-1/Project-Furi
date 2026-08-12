@@ -1,5 +1,5 @@
 """
-Jarvis OS — Tool plugin package (Phase 3)
+Furi OS — Tool plugin package (Phase 3)
 Importing this package registers every built-in tool into the global
 registry. New tools: create a module here, decorate each tool class with
 @register_tool, and import the module below — no other code changes.

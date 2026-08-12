@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Notification Text Primitives (Phase 4, Part 3)
+ * Furi OS — Notification Text Primitives (Phase 4, Part 3)
  *
  * Derives the title/body a server-pushed event should be announced with. Since
  * Phase 12.3 the CHANNEL decision (toast vs voice vs in-app) lives in
@@ -34,7 +34,7 @@ function suggestionContent(
   if (!heading || !body) return null;
   const rationale = asText(payload.rationale);
   const priority = asText(payload.priority);
-  const title = priority === 'high' ? `⚡ ${heading}` : `Jarvis · ${heading}`;
+  const title = priority === 'high' ? `⚡ ${heading}` : `Furi · ${heading}`;
   // Lead with what it is; append why it matters when we have it.
   const fullBody = rationale ? `${body} — ${rationale}` : body;
   return { title, body: fullBody };
@@ -49,7 +49,7 @@ export function notificationContent(
   // Per-type intelligent framing (Phase 9). Other types fall through to the
   // generic title/body/message/text extraction (forward-compatible).
   if (event.type === 'suggestion') return suggestionContent(payload);
-  const title = asText(payload.title) ?? 'Jarvis';
+  const title = asText(payload.title) ?? 'Furi';
   const body =
     asText(payload.body) ??
     asText(payload.message) ??

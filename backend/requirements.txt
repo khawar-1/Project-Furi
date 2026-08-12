@@ -1,5 +1,5 @@
 # ============================================================
-# Jarvis OS — Backend Requirements
+# Furi OS — Backend Requirements
 # ============================================================
 
 # Web framework
@@ -144,14 +144,14 @@ playwright==1.48.0
 # Get the unpacked build from its GitHub releases and unzip into the folder above.
 #
 # IMPORTANT — WHERE IT ACTUALLY LOADS (proven live 2026-07-22): the extension
-# loads ONLY in the NORMAL (non-automation) windows Jarvis opens — the clean
+# loads ONLY in the NORMAL (non-automation) windows Furi opens — the clean
 # sign-in / hand-off windows AND the watch/play media window
 # (_default_clean_launcher / _default_clean_media_launcher, both via
 # _extension_load_args). It does NOT load in the AGENT-LOOP window: that window is
 # driven over the DevTools protocol (CDP), and current Chrome REFUSES to load an
 # unpacked extension in any CDP-controlled browser as a security measure
 # (chrome://extensions shows zero, no extension service worker registers, a known
-# ad script still loads — all four verified). This is Chrome policy, not a Jarvis
+# ad script still loads — all four verified). This is Chrome policy, not a Furi
 # limitation, and there is no clean bypass (Extensions.loadUnpacked is unavailable,
 # --disable-features and the CDP tricks were ineffective).
 #

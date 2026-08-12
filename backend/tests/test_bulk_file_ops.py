@@ -2,7 +2,7 @@
 Bulk file operations (2026-07-29 incident).
 
 THE INCIDENT, verbatim: "hey create a folder 'pddf2' on desktop and move all
-the pdf files that are in the downloads in that folder". Jarvis created the
+the pdf files that are in the downloads in that folder". Furi created the
 folder, searched, found 85 PDFs — and reported "Done — 2 step(s) completed"
 having moved ZERO files.
 

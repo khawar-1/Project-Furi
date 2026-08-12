@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Voice Output (Phase 7, Part 4)
+ * Furi OS — Voice Output (Phase 7, Part 4)
  *
  * Sentence-by-sentence speech WHILE the SSE response still streams. The chat
  * route is untouched: chatStore taps its delta stream into this module, an
@@ -263,7 +263,7 @@ function getAudioContext(): AudioContext {
 
 /** Output-side amplitude tap (voice mode): every scheduled source runs through
  *  a shared analyser instead of straight to the speakers, so the sphere can
- *  pulse with what Jarvis is ACTUALLY saying rather than a fake rhythm. */
+ *  pulse with what Furi is ACTUALLY saying rather than a fake rhythm. */
 let outputAnalyser: AnalyserNode | null = null;
 // Inferred from the constructor rather than annotated `Uint8Array`: the bare
 // annotation widens to ArrayBufferLike, which getByteTimeDomainData rejects.

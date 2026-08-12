@@ -1,6 +1,6 @@
 """Search the store — the 2026-08-09 incident.
 
-THE INCIDENT. "go to junaidjamshed.com and add janan perfume in cart". Jarvis
+THE INCIDENT. "go to junaidjamshed.com and add janan perfume in cart". Furi
 opened the homepage and clicked a NAV CATEGORY instead of searching for "janan",
 so the tie question then offered six items off the Fragrances listing and the one
 the user meant was not among them. Their report: "if it had searched janan then

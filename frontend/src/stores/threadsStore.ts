@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Goal Threads Store (Zustand)
+ * Furi OS — Goal Threads Store (Zustand)
  * List/resolve/dismiss state for the Threads panel (Phase 11.3). Threads are
  * mostly captured from conversation by the extractor; the Initiative Engine
  * nudges the open ones. Resolving one ("it landed") stops the nudges.

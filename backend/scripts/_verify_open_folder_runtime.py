@@ -13,7 +13,7 @@ A negative result is only evidence if the positive control passes in the same
 breath — which is why the real open at the end is not optional.
 
 ⚠️ IT OPENS EXACTLY ONE REAL WINDOW, on a scratch temp folder, announced. Every
-other check runs with the launcher stubbed. A verification of "can Jarvis open
+other check runs with the launcher stubbed. A verification of "can Furi open
 a folder" that never opens a folder is not a verification.
 
 Run:  venv\\Scripts\\python scripts\\_verify_open_folder_runtime.py
@@ -83,7 +83,7 @@ async def main() -> int:
 
     demo = scratch / "jarvis-open-folder-demo"
     demo.mkdir()
-    (demo / "hello.txt").write_text("opened by Jarvis", encoding="utf-8")
+    (demo / "hello.txt").write_text("opened by Furi", encoding="utf-8")
 
     try:
         async with httpx.AsyncClient(headers=headers, timeout=30) as http:

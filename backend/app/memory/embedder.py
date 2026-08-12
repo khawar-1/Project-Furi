@@ -1,5 +1,5 @@
 """
-Jarvis OS — Local Embedder
+Furi OS — Local Embedder
 Uses fastembed (BAAI/bge-small-en-v1.5) to generate 384-dim vectors locally.
 No API key, no extra services, no Docker — runs inside the Python process.
 """

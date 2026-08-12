@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Spoken approval, client side (2026-08-03, Tier 2 item 8)
+ * Furi OS — Spoken approval, client side (2026-08-03, Tier 2 item 8)
  *
  * ⚠️ THIS FILE DECIDES NOTHING ABOUT CONSENT. It remembers which contract was
  * read aloud, and it forwards what the user said. The BACKEND decides whether

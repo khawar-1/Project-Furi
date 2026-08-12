@@ -1,7 +1,7 @@
 """
-Jarvis OS — Desktop control tools (Feature 2)
+Furi OS — Desktop control tools (Feature 2)
 
-Nine tools over the machine Jarvis already watches:
+Nine tools over the machine Furi already watches:
 
   list_windows      READ    open windows: handle, title, process
   take_screenshot   READ    capture the screen to a FILE; returns a path
@@ -117,7 +117,7 @@ async def _gate(permission: Optional[str] = None) -> Optional[str]:
     if not config.enabled:
         return (
             "Desktop control is turned off. Enable it in Settings → Desktop "
-            "control to let Jarvis see and control this machine."
+            "control to let Furi see and control this machine."
         )
     if permission and not getattr(config, permission, False):
         human = {
@@ -519,7 +519,7 @@ class LaunchAppTool(BaseTool):
             hint = f" The closest installed names are: {', '.join(close)}." if close else ""
             return _fail(
                 self,
-                f"No installed application called '{name}'.{hint} Jarvis can only "
+                f"No installed application called '{name}'.{hint} Furi can only "
                 "start applications that appear in the Start Menu.",
             )
 

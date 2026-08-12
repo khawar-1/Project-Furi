@@ -1,5 +1,5 @@
 """
-Jarvis OS — Recurrence parser (Phase 10, Part 2 — scheduled routines)
+Furi OS — Recurrence parser (Phase 10, Part 2 — scheduled routines)
 
 Deterministic, conservative parsing of a recurring-schedule phrase in a teach
 command ("save this as a routine called X that runs every Friday at 4pm").

@@ -88,11 +88,11 @@ async def test_presence_unknown_without_signal(db_session):
 
 async def test_presence_active(db_session):
     await _enable(db_session, idle_threshold_seconds=300)
-    record_device_signal("Code.exe", "main.py — Jarvis", idle_seconds=5)
+    record_device_signal("Code.exe", "main.py — Furi", idle_seconds=5)
     model = await get_world_model(db_session, use_cache=False)
     assert model.presence == "active"
     assert model.active_app == "Code.exe"
-    assert model.window_title == "main.py — Jarvis"
+    assert model.window_title == "main.py — Furi"
     assert model.sensing["device_fresh"] is True
 
 

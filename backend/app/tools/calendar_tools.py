@@ -1,5 +1,5 @@
 """
-Jarvis OS — Calendar Tools (Phase 5, Part 4)
+Furi OS — Calendar Tools (Phase 5, Part 4)
 Five single-action tools over the user's Google Calendar (the "primary"
 calendar):
 

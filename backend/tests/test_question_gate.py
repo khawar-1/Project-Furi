@@ -3,7 +3,7 @@ Question self-resolution gate (planner hardening, 2026-07-10).
 Live incident: "list all the files in the desktop and delete all the files
 from phase3test and after doing all this remind me" — the draft paused on
 "What is the full path of the phase3test folder?" with no options, making
-the user do Jarvis's research. The gate answers such questions with a REAL
+the user do Furi's research. The gate answers such questions with a REAL
 search before they ever reach the user: found on attempt 1 → the question is
 rejected and the retry feedback carries the verified paths; found on attempt
 2 → the question goes through with the paths as verified clickable options;

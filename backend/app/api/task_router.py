@@ -1,5 +1,5 @@
 """
-Jarvis OS — Chat Task Router (Phase 3, Part 6)
+Furi OS — Chat Task Router (Phase 3, Part 6)
 
 Decides whether a chat message is a TASK REQUEST ("delete my temp files")
 or normal conversation, and routes task requests to the agent planner.
@@ -317,7 +317,7 @@ _STORED_RECALL_RE = re.compile(
     r"|\b(?:conversations?|chats?)\s+(?:where|about|in\s+which)\b"
 )
 
-# …EXCEPT when the message addresses Jarvis's MEMORY directly. "do you
+# …EXCEPT when the message addresses Furi's MEMORY directly. "do you
 # remember what i told you about jamil" is stored-content recall by every
 # test above, and routing it would be a worse answer rather than merely a
 # wasted call: `MemoryEngine.retrieve_context()` runs on EVERY chat turn and
@@ -366,8 +366,8 @@ _MEMORY_ADDRESS_RE = re.compile(
 _WH_WORD_RE = re.compile(r"\b(?:what|when|where|which|who|whose|why|how)\b")
 
 
-# Questions about Jarvis's OWN actions ("what have you done today?", "did you
-# delete anything?") often name no domain noun at all — the object is Jarvis's
+# Questions about Furi's OWN actions ("what have you done today?", "did you
+# delete anything?") often name no domain noun at all — the object is Furi's
 # action record, not a file. With recall_actions available they are TASK-class,
 # so a second-person action phrase is a strong signal in its own right (live
 # bug 2026-07-13: "what was the name of folder that u created?" reached the
@@ -407,7 +407,7 @@ _OWN_ACTION_AUX_RE = re.compile(r"\b(?:did|have|had)\s+(?:you|u)\b")
 # fires alone, in any wording). "Does this need current information?" is not
 # answerable from keywords; it is the exact question the classifier exists to
 # answer. The rule is therefore now: A QUESTION REACHES THE CLASSIFIER UNLESS
-# IT IS ABOUT THE USER OR JARVIS THEMSELVES.
+# IT IS ABOUT THE USER OR FURI THEMSELVES.
 #
 # Cost, accepted deliberately: one temperature-0 call on impersonal
 # conversational questions ("what is a monad") that the classifier answers
@@ -427,7 +427,7 @@ _OWN_ACTION_AUX_RE = re.compile(r"\b(?:did|have|had)\s+(?:you|u)\b")
 # Leading noise a question may hide behind: greetings, vocatives, fillers.
 _QUESTION_GREETING_RE = re.compile(
     r"^\W*(?:(?:hey|hi|hello|yo|ok|okay|so|well|now|yes|yeah|yep|sure|please|"
-    r"and|also|but|um+|uh+|jarvis)\b[\s,!.]*)*"
+    r"and|also|but|um+|uh+|furi|jarvis)\b[\s,!.]*)*"
 )
 
 # An explicit information-request frame. Two jobs, and the second is the
@@ -457,8 +457,8 @@ _QUESTION_WORD_RE = re.compile(
     r"is|are|was|were|did|does|do|has|have|had|will|can|could|should|any)\b"
 )
 
-# A question about the user, about Jarvis, or about the two of them is CHAT by
-# construction — Jarvis's own memory and context answer it, the web cannot.
+# A question about the user, about Furi, or about the two of them is CHAT by
+# construction — Furi's own memory and context answer it, the web cannot.
 # Applied to the SUBJECT (after the request frame is stripped), never to the
 # raw message.
 _SELF_REFERENTIAL_RE = re.compile(
@@ -468,7 +468,7 @@ _SELF_REFERENTIAL_RE = re.compile(
 
 # A question whose subject is a bare POINTER ("who is this?", "what is that?",
 # "who are they?") refers to something in the conversation, not out in the
-# world: Jarvis answers it from context and the web could not help. Matched
+# world: Furi answers it from context and the web could not help. Matched
 # only immediately after the question word and its copula — so "what's the
 # latest on that iphone rumour", where "that" is a determiner rather than a
 # pointer, still reaches the classifier.
@@ -525,7 +525,7 @@ def _question_subject(text: str) -> Optional[str]:
 def is_external_question(text: str) -> bool:
     """Deterministic: is this a question the classifier should judge? True for
     any question or information request whose subject is neither the user, nor
-    Jarvis, nor a pointer back into the conversation. The classifier makes the
+    Furi, nor a pointer back into the conversation. The classifier makes the
     real WEB/CHAT call."""
     subject = _question_subject(text)
     if subject is None:
@@ -568,7 +568,8 @@ def _is_browse_intent(text: str) -> bool:
 # and letting it reach the registry lookup would spend a Start Menu walk on
 # every shell request.
 _LAUNCH_VERB_RE = re.compile(
-    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|hey\s+jarvis[,\s]+|jarvis[,\s]+)*"
+    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|hey\s+(?:furi|jarvis)[,\s]+"
+    r"|(?:furi|jarvis)[,\s]+)*"
     r"(?:open|launch|start|fire\s+up|pull\s+up|bring\s+up)\s+(?:the\s+|my\s+)?(.+)$",
     re.IGNORECASE,
 )
@@ -648,7 +649,7 @@ def _is_desktop_intent(text: str) -> bool:
 # exactly today's behaviour: this rule only ever REPLACES a coin flip with a
 # certainty, never widens what reaches the browser.
 _NAV_ONLY_PREFIX_RE = re.compile(
-    r"^(?:(?:hey|ok|okay|yo)\s+)?(?:jarvis\b[\s,]*)?"
+    r"^(?:(?:hey|ok|okay|yo)\s+)?(?:(?:furi|jarvis)\b[\s,]*)?"
     r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+|pls\s+|just\s+)*"
     r"(?:go(?:ing)?\s+to|goto|navigate\s+to|head\s+(?:over\s+)?to|take\s+me\s+to|"
     r"bring\s+up|pull\s+up|visit|browse\s+to|launch|load|open\s+up|open)\s+",
@@ -820,11 +821,11 @@ def is_action_followup(goal: str, conversation: str) -> bool:
 
 
 # A live agent browser window is the ground truth that the user is mid-session
-# on a site. After Jarvis opens a page, a short next message that steers the
+# on a site. After Furi opens a page, a short next message that steers the
 # browser ("message him 'hi'", "click the first result", "scroll down") names
 # no site and no strong noun, so neither looks_like_task nor is_action_followup
 # (which keys on a STRONG-domain conversation noun, and a site NAME like
-# "linkedin" is not one) can fire on it. Live bug 2026-07-21: after Jarvis
+# "linkedin" is not one) can fire on it. Live bug 2026-07-21: after Furi
 # opened Anas's LinkedIn profile, "message him 'hi'" fell to plain chat, which
 # offered a magic-word rephrase instead of continuing from the open profile.
 # The open window lets the recall-first rule reach the classifier without a
@@ -874,8 +875,8 @@ def is_browse_followup(goal: str) -> bool:
 
 # ======================================================== LLM confirmation
 
-_CLASSIFY_PROMPT = """You route messages for Jarvis OS, a personal AI that can act on the user's computer and accounts with exactly these tool groups:
-- FILES/SYSTEM: search/read/list files and folders, OPEN A FOLDER in a file-explorer window on screen (or show the user where a file lives), create/move/rename/delete files, run terminal commands and scripts, recall Jarvis's OWN past actions from its audit log (what it created, deleted, moved, sent, or ran), find a saved document by its CONTENT or topic rather than its name, and search the user's OWN past conversations with Jarvis by what was discussed in them.
+_CLASSIFY_PROMPT = """You route messages for Furi OS, a personal AI that can act on the user's computer and accounts with exactly these tool groups:
+- FILES/SYSTEM: search/read/list files and folders, OPEN A FOLDER in a file-explorer window on screen (or show the user where a file lives), create/move/rename/delete files, run terminal commands and scripts, recall Furi's OWN past actions from its audit log (what it created, deleted, moved, sent, or ran), find a saved document by its CONTENT or topic rather than its name, and search the user's OWN past conversations with Furi by what was discussed in them.
 - EMAIL: search and read Gmail; draft, send, or reply to email.
 - CALENDAR: list/find Google Calendar events; create, update, or delete events.
 - WEB: search the web and open/read a web page to look up online information.
@@ -884,15 +885,15 @@ _CLASSIFY_PROMPT = """You route messages for Jarvis OS, a personal AI that can a
 - BROWSE: drive a real web browser to ACT on a live site the user names, or stop something it is already playing — play or watch a video (YouTube and the like), sign in to a site and navigate it, open something in a web app (a repo on GitHub, a page in an account), or fill in and submit a web form (e.g. apply to jobs).
 
 Reply with EXACTLY one word:
-TASK — asks Jarvis to perform a FILES/SYSTEM action now, INCLUDING opening a folder on screen ("open my downloads folder", "show me the phase3test folder", "where does that file live"), OR asks what Jarvis ITSELF did on the machine (the folder/file it created, what it deleted, what it has done today), OR asks Jarvis to FIND something it has stored: a document by what it is about, or what was said in an earlier conversation.
-EMAIL — asks Jarvis to search, read, draft, send, or reply to email now.
-CALENDAR — asks Jarvis to look at or change calendar events now.
-WEB — asks Jarvis to search the web or open/read a web page now, OR asks a factual question better answered from the live internet than from stale built-in knowledge. This covers two cases: (a) anything CURRENT or time-sensitive (news, release dates, upcoming seasons or products, prices, scores, weather), and (b) a factual question about a SPECIFIC real-world entity — a person, company, product, place, organization, or a creative work such as a show, anime, movie, game, or book ("what do you know about Black Clover", "who is the CEO of X", "tell me about the Framework laptop"). Jarvis looks these up rather than guessing, promising, or reciting possibly-outdated training data.
-DESKTOP — asks Jarvis to look at or change something on the COMPUTER IN FRONT OF THEM right now: open an app ("open spotify"), switch to or close a window, turn the volume up/down or mute it, pause/skip what is playing, take a screenshot, or read/replace the clipboard. This is the user's machine, not their house and not a website.
+TASK — asks Furi to perform a FILES/SYSTEM action now, INCLUDING opening a folder on screen ("open my downloads folder", "show me the phase3test folder", "where does that file live"), OR asks what Furi ITSELF did on the machine (the folder/file it created, what it deleted, what it has done today), OR asks Furi to FIND something it has stored: a document by what it is about, or what was said in an earlier conversation.
+EMAIL — asks Furi to search, read, draft, send, or reply to email now.
+CALENDAR — asks Furi to look at or change calendar events now.
+WEB — asks Furi to search the web or open/read a web page now, OR asks a factual question better answered from the live internet than from stale built-in knowledge. This covers two cases: (a) anything CURRENT or time-sensitive (news, release dates, upcoming seasons or products, prices, scores, weather), and (b) a factual question about a SPECIFIC real-world entity — a person, company, product, place, organization, or a creative work such as a show, anime, movie, game, or book ("what do you know about Black Clover", "who is the CEO of X", "tell me about the Framework laptop"). Furi looks these up rather than guessing, promising, or reciting possibly-outdated training data.
+DESKTOP — asks Furi to look at or change something on the COMPUTER IN FRONT OF THEM right now: open an app ("open spotify"), switch to or close a window, turn the volume up/down or mute it, pause/skip what is playing, take a screenshot, or read/replace the clipboard. This is the user's machine, not their house and not a website.
 
-HOME — asks Jarvis to look at or change something in the user's HOME right now: turn lights/switches/fans on or off, dim or colour a light, lock or unlock a door, open or close blinds/curtains/a garage, set the thermostat or heating/AC, or run a scene ("goodnight", "movie night"). This is the user's physical home, not their computer.
-BROWSE — asks Jarvis to DO something on a live website by driving a browser: play or watch a video ("play jane by the long faces on youtube", "watch the new trailer on youtube", "open youtube and play some lofi"); sign in to a site and then navigate or open something in it ("sign in to github and open my oldest repo", "log into my account and download the invoice"); operate an interactive web app; or fill in and submit a web form ("apply to the first 3 python jobs on weworkremotely"). This is ACTING on a live site — distinct from WEB, which only LOOKS UP information. Jarvis never asks the user for a password: if a site needs signing in, it opens the sign-in page for the user and continues after — so "sign in to X and ..." is BROWSE, never a request for credentials.
-CHAT — anything else: casual conversation; OPINION, reasoning, or general/timeless concepts Jarvis can reason about ("what do you think of vector databases", "explain recursion", "how does TCP work"); help writing or debugging code; questions about the user's own life or about Jarvis itself; sharing information about their life; talking ABOUT the user's own past or hypothetical actions; an answer to an earlier question; or a request none of these tools can do (reminders — handled elsewhere).
+HOME — asks Furi to look at or change something in the user's HOME right now: turn lights/switches/fans on or off, dim or colour a light, lock or unlock a door, open or close blinds/curtains/a garage, set the thermostat or heating/AC, or run a scene ("goodnight", "movie night"). This is the user's physical home, not their computer.
+BROWSE — asks Furi to DO something on a live website by driving a browser: play or watch a video ("play jane by the long faces on youtube", "watch the new trailer on youtube", "open youtube and play some lofi"); sign in to a site and then navigate or open something in it ("sign in to github and open my oldest repo", "log into my account and download the invoice"); operate an interactive web app; or fill in and submit a web form ("apply to the first 3 python jobs on weworkremotely"). This is ACTING on a live site — distinct from WEB, which only LOOKS UP information. Furi never asks the user for a password: if a site needs signing in, it opens the sign-in page for the user and continues after — so "sign in to X and ..." is BROWSE, never a request for credentials.
+CHAT — anything else: casual conversation; OPINION, reasoning, or general/timeless concepts Furi can reason about ("what do you think of vector databases", "explain recursion", "how does TCP work"); help writing or debugging code; questions about the user's own life or about Furi itself; sharing information about their life; talking ABOUT the user's own past or hypothetical actions; an answer to an earlier question; or a request none of these tools can do (reminders — handled elsewhere).
 
 Judge the INTENT, not the vocabulary:
 - "I sent him the files yesterday" or "my desktop is such a mess" is CHAT (mentioning files while talking), while "get rid of the txt files in that folder" is TASK even though it names no tool.
@@ -906,13 +907,13 @@ Judge the INTENT, not the vocabulary:
 - "sign in to github and open my oldest repo", "log into linkedin and open my messages", or "apply to the first 3 python jobs on weworkremotely" is BROWSE (act on a live site — signing in, navigating, or submitting a form), while "what is github" or "who founded linkedin" is WEB (just look it up).
 - A question about something CURRENT is WEB even when it never says "search": "when is the new season of Black Clover coming out?" or "what's the latest iPhone price?" needs up-to-date information — never answer it from stale knowledge or promise to look it up later.
 - A factual question about a SPECIFIC real-world thing is WEB even when it isn't time-sensitive and never says "search": "what do you know about Black Clover", "who is Grigori Perelman", "tell me about the Framework laptop" — look them up for an accurate, current answer rather than reciting possibly-stale training data. But a question of OPINION, REASONING, or a general/timeless concept is CHAT: "what do you think of Black Clover", "how does anime production work", "what is recursion".
-- Asking Jarvis to RETRIEVE something it has stored is TASK, not CHAT — it searches an index that reaches far further back than the messages still on screen: "find the pdf about cloud computing", "which report mentioned the outage" (a saved document, by its content) and "what did we discuss about the database migration", "find the conversation where we talked about pricing" (a past conversation, by its topic) are all TASK. But "we discussed this already" or "thanks for explaining that" is CHAT — commenting on a conversation rather than asking Jarvis to go and find one.
-- A question about JARVIS'S OWN actions is TASK, not CHAT — Jarvis answers it from its action record, never from memory: "what was the name of the folder you created?", "did you delete anything today?", "who created the jarvis_test folder?" (Jarvis may have) are all TASK; "I deleted a bunch of files yesterday" is CHAT (the user talking about their own actions).
-Any wording that asks for one of those actions now — or asks about actions Jarvis itself performed — gets its action label; anything else is CHAT.
+- Asking Furi to RETRIEVE something it has stored is TASK, not CHAT — it searches an index that reaches far further back than the messages still on screen: "find the pdf about cloud computing", "which report mentioned the outage" (a saved document, by its content) and "what did we discuss about the database migration", "find the conversation where we talked about pricing" (a past conversation, by its topic) are all TASK. But "we discussed this already" or "thanks for explaining that" is CHAT — commenting on a conversation rather than asking Furi to go and find one.
+- A question about FURI'S OWN actions is TASK, not CHAT — Furi answers it from its action record, never from memory: "what was the name of the folder you created?", "did you delete anything today?", "who created the jarvis_test folder?" (Furi may have) are all TASK; "I deleted a bunch of files yesterday" is CHAT (the user talking about their own actions).
+Any wording that asks for one of those actions now — or asks about actions Furi itself performed — gets its action label; anything else is CHAT.
 
 Then, for an ACTION label only (never for CHAT), add a SECOND word for how to run it:
-INLINE — a quick lookup Jarvis can answer in essentially one read, right now, that only READS and changes nothing: "what's on my desktop", "list my downloads", "open a folder on screen", "any new emails?", "what's my next meeting", "look up today's weather", "who is the CEO of X". The user waits a moment and gets the answer in the chat. Opening a folder is INLINE even when Jarvis has to search for it first — finding it is part of the same one quick answer.
-DELEGATE — real work: anything that CREATES, MOVES, DELETES, SENDS, or CHANGES something; drives a browser (every BROWSE); or clearly takes several steps. "organize my downloads", "email jamil about dinner", "delete the temp files", "apply to 3 jobs", "play a song on youtube". It runs in the background as its own agent while the user keeps talking, and Jarvis notifies them when it is done.
+INLINE — a quick lookup Furi can answer in essentially one read, right now, that only READS and changes nothing: "what's on my desktop", "list my downloads", "open a folder on screen", "any new emails?", "what's my next meeting", "look up today's weather", "who is the CEO of X". The user waits a moment and gets the answer in the chat. Opening a folder is INLINE even when Furi has to search for it first — finding it is part of the same one quick answer.
+DELEGATE — real work: anything that CREATES, MOVES, DELETES, SENDS, or CHANGES something; drives a browser (every BROWSE); or clearly takes several steps. "organize my downloads", "email jamil about dinner", "delete the temp files", "apply to 3 jobs", "play a song on youtube". It runs in the background as its own agent while the user keeps talking, and Furi notifies them when it is done.
 When unsure, choose DELEGATE.
 
 {context_block}USER MESSAGE:
@@ -949,7 +950,7 @@ _CLASSIFY_RETRY_NUDGE = (
 _CLASSIFY_CONTEXT_TEMPLATE = """RECENT CONVERSATION (context only — the user message below is the NEXT message in it):
 {context}
 
-A short follow-up that continues an action being discussed in that conversation — supplying a detail it was missing ("its in my downloads folder"), correcting it, or telling Jarvis to go ahead with it ("send it", "yes do that", "play it") — gets that action's label (TASK, EMAIL, CALENDAR, WEB, HOME, DESKTOP, or BROWSE): "send it" after an email was being discussed is EMAIL; "play it" after a song on YouTube was being discussed is BROWSE. A message merely commenting on a finished action ("thanks, that worked") is CHAT.
+A short follow-up that continues an action being discussed in that conversation — supplying a detail it was missing ("its in my downloads folder"), correcting it, or telling Furi to go ahead with it ("send it", "yes do that", "play it") — gets that action's label (TASK, EMAIL, CALENDAR, WEB, HOME, DESKTOP, or BROWSE): "send it" after an email was being discussed is EMAIL; "play it" after a song on YouTube was being discussed is BROWSE. A message merely commenting on a finished action ("thanks, that worked") is CHAT.
 
 """
 
@@ -1020,7 +1021,7 @@ async def _classify_message(
                 # NOT a tiny cap: on thinking models reasoning tokens count
                 # against max_tokens, so 8 produced ZERO output
                 # (finish_reason=MAX_TOKENS) and EVERY message fell open to chat
-                # — Jarvis stopped doing tasks entirely on Gemini (2026-07-13).
+                # — Furi stopped doing tasks entirely on Gemini (2026-07-13).
                 #
                 # RAISED 512 → 1024 (2026-08-06), self-inflicted in the same way
                 # the browse decision cap was: this prompt gained two whole tool
@@ -1362,7 +1363,7 @@ async def maybe_handle_task(
 
     # An open plan owns the next message: a clarifying question ("which
     # notes.txt?"), a plan the user paused, or — since 2026-08-03 — one holding
-    # an APPROVAL card. The user is answering Jarvis, not starting a new task.
+    # an APPROVAL card. The user is answering Furi, not starting a new task.
     # Typed answers and clicked buttons are equivalent (a click posts to
     # /api/agent/choose or /approve and consumes the plan first — hence the
     # second, atomic pop check).
@@ -1490,7 +1491,7 @@ _TYPED_APPROVAL_RE = re.compile(
 )
 # Filler that may trail an approval without making it an instruction.
 _TYPED_APPROVAL_NOISE = frozenset({
-    "then", "please", "now", "jarvis", "thanks", "thank", "you", "it", "that",
+    "then", "please", "now", "furi", "jarvis", "thanks", "thank", "you", "it", "that",
     "sir", "and", "just", "go", "ahead", "on", "with", "the", "task", "sure",
     "do", "this", "all", "of", "them", "yes", "ok", "okay", "fine",
 })

@@ -1,11 +1,11 @@
 """
-Jarvis OS — Question Self-Resolution Gate (planner hardening, 2026-07-10)
+Furi OS — Question Self-Resolution Gate (planner hardening, 2026-07-10)
 
-"Never ask the user something Jarvis can answer with its own tools."
+"Never ask the user something Furi can answer with its own tools."
 
 Live incident: asked to "list the desktop and delete all the files from
 phase3test", the draft paused on "What is the full path of the phase3test
-folder?" — an options-free question the user rightly called Jarvis's own
+folder?" — an options-free question the user rightly called Furi's own
 job. Round 9 policed invented OPTIONS (_validated_question); nothing policed
 the QUESTION. Prompt rule 3 ("a bare name means search-first") had been
 ignored live four separate times, so — like the approval gate, the pre-flight
@@ -20,7 +20,7 @@ question and the goal share:
     feedback hands the model the verified path(s): plan with them, don't ask.
   - something found, second attempt → the question goes through but carries
     the verified paths as clickable options — the user picks a truth instead
-    of doing Jarvis's research.
+    of doing Furi's research.
   - nothing found / nothing to look for → the question passes unchanged
     (an honest question beats a guess — ask-don't-guess still stands).
 
@@ -83,7 +83,7 @@ _STOPWORDS = frozenset("""
     under over between during after before again then than that this these
     those there here where which what whose when whom how why who all any
     each every some more most other another such only own same very just also
-    not but nor off out too you your yours yourself please jarvis want wants
+    not but nor off out too you your yours yourself please furi jarvis want wants
     wanted need needs needed know knows knew tell tells told give gives gave
     mean means meant like exact exactly correct right wrong full complete
     entire whole located location locations place places stored sitting
@@ -154,7 +154,7 @@ async def locate_name(
 ) -> list[str]:
     """Verified paths matching a name, via the REAL registered search_files
     tool (read level — no approval needed; audited in ActivityLog, so the
-    Timeline shows Jarvis looked for itself). Exact-name matches are
+    Timeline shows Furi looked for itself). Exact-name matches are
     preferred over substring hits ("phase3test" beats "phase3test_old.txt").
     Best-effort: any failure returns [] — verification must never break
     planning."""

@@ -1,5 +1,5 @@
 """
-Jarvis OS — Routine Chat Routing (Phase 6, Part 5 — teachable routines)
+Furi OS — Routine Chat Routing (Phase 6, Part 5 — teachable routines)
 
 Detects a TEACH ("save this as a routine called X") or RUN ("run my X
 routine" / a bare name that matches a saved routine) request in the latest

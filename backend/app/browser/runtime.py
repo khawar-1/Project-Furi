@@ -1,5 +1,5 @@
 """
-Jarvis OS — Browser runtime (Phase 14)
+Furi OS — Browser runtime (Phase 14)
 
 Why this module exists
 ----------------------

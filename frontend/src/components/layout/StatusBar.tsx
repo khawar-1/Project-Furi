@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Status Bar
+ * Furi OS — Status Bar
  * Bottom bar showing backend connection, active model, and app version.
  */
 import { useEffect, useState } from 'react';
@@ -70,7 +70,7 @@ export function StatusBar() {
     return () => clearInterval(t);
   }, [loadTasks]);
 
-  // Phase 9: a quiet "Jarvis may speak first" indicator. Proactivity state
+  // Phase 9: a quiet "Furi may speak first" indicator. Proactivity state
   // changes rarely, so a slow poll is plenty; failures keep the last value.
   useEffect(() => {
     let alive = true;
@@ -189,9 +189,9 @@ export function StatusBar() {
           </div>
         )}
 
-        {/* Initiative indicator (Phase 9) — Jarvis may volunteer suggestions */}
+        {/* Initiative indicator (Phase 9) — Furi may volunteer suggestions */}
         {initiativeOn && (
-          <div className="flex items-center gap-1" title="Initiative engine on — Jarvis may suggest things proactively">
+          <div className="flex items-center gap-1" title="Initiative engine on — Furi may suggest things proactively">
             <Sparkles size={10} className="text-cyan-400" />
             <span className="text-cyan-400">Initiative: On</span>
           </div>
@@ -322,7 +322,7 @@ export function StatusBar() {
 
       {/* Right: App version */}
       <div className="flex items-center gap-2 text-muted">
-        <span>Jarvis OS</span>
+        <span>Furi OS</span>
         <span className="text-surface-border">|</span>
         <span className="text-cyan-500/50">v{healthData?.version ?? '0.1.0'}</span>
       </div>

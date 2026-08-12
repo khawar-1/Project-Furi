@@ -1,5 +1,5 @@
 """
-Jarvis OS — Agent Plan Schemas (Phase 3, Part 4)
+Furi OS — Agent Plan Schemas (Phase 3, Part 4)
 Pydantic models for plans, steps, and the LLM planner's raw JSON output.
 
 Trust boundary: the LLM only ever supplies description / tool / parameters
@@ -52,7 +52,7 @@ class PlanQuestion(BaseModel):
 
     `kind` tags a question that is not an ordinary clarification so the UI can
     render it distinctly: "login"/"signup" mark a credential handoff where the
-    USER signs in / creates the account in the opened window (Jarvis never enters
+    USER signs in / creates the account in the opened window (Furi never enters
     the credentials). Empty = a plain clarifying question.
 
     `about_host` is set only on a "did you mean…?" (kind "site_correction") and

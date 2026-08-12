@@ -1,5 +1,5 @@
 """
-Jarvis OS — browser PAGE-LOAD speed harness (A/B against an un-intercepted control).
+Furi OS — browser PAGE-LOAD speed harness (A/B against an un-intercepted control).
 
 WHY THIS EXISTS. Three separate rounds have tuned this stack for speed by moving
 constants — the per-request tax (2026-07-19), the event-driven settle
@@ -113,7 +113,7 @@ async def _load_once(page, url: str, counter: dict) -> dict:
     network answer" number.
     `complete` — document.readyState === 'complete', i.e. the load event fired
     and every subresource finished. It is the one milestone the platform
-    defines, which is why it is measured here instead of Jarvis's own readiness
+    defines, which is why it is measured here instead of Furi's own readiness
     predicate: the control has no such predicate, and a metric only one arm can
     produce is not a comparison.
     """
@@ -315,7 +315,7 @@ async def _close_windows() -> None:
 
 def _reclaim() -> None:
     """Kill anything still holding OUR profile — the reaper matches only
-    --user-data-dir=<the Jarvis profile>, never the user's own Chrome."""
+    --user-data-dir=<the Furi profile>, never the user's own Chrome."""
     try:
         from app.browser.session import reclaim_orphaned_profile
 

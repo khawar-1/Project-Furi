@@ -1,5 +1,5 @@
 """
-Jarvis OS — does the WHOLE chain work once aimed at the right form? (2026-08-10)
+Furi OS — does the WHOLE chain work once aimed at the right form? (2026-08-10)
 
 The design is now measured rather than assumed:
 

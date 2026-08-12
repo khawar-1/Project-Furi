@@ -1,5 +1,5 @@
 """
-Jarvis OS — Reminders API (Phase 4, Part 4)
+Furi OS — Reminders API (Phase 4, Part 4)
 
 List/cancel access to reminders, plus a manual-create endpoint (the primary
 creation path is chat — see app/core/reminder_parser.py + the hook in

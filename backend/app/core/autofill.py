@@ -1,5 +1,5 @@
 """
-Jarvis OS — Autofill profile (Phase 15.2)
+Furi OS — Autofill profile (Phase 15.2)
 
 The curated, user-owned data source a commit-mode browse fills forms from — the
 grounding corpus for form fills, exactly as recipient/upload grounding works: a

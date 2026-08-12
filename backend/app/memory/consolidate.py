@@ -1,5 +1,5 @@
 """
-Jarvis OS — Contact history consolidation (2026-08-04)
+Furi OS — Contact history consolidation (2026-08-04)
 
 *(Tier 2, item 7 of `suhhestionsfromclaude.txt` — "memory only grows")*
 

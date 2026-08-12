@@ -1,4 +1,4 @@
-"""The routing audit trail (2026-08-03) — the record of what Jarvis DIDN'T do.
+"""The routing audit trail (2026-08-03) — the record of what Furi DIDN'T do.
 
 Routing fails OPEN by design, so a message that should have become a task and
 instead became a chat reply used to leave zero evidence anywhere. On 2026-07-17 a
@@ -100,7 +100,7 @@ async def test_a_classifier_failure_is_told_apart_from_a_chat_verdict():
 async def test_an_unrecognized_reply_is_a_failure_not_a_chat_verdict():
     """A blank or garbled reply wears the same fail-open clothes as a CHAT
     verdict. It is a FAILURE — on a thinking model an empty reply once made
-    EVERY message fall open to chat and Jarvis silently stopped doing tasks
+    EVERY message fall open to chat and Furi silently stopped doing tasks
     (2026-07-13). A rising rate of these is a provider problem, not a prompt one."""
     provider = FakeProvider(reply="")
     rt.begin("s1", "delete my temp files")

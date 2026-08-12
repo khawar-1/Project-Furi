@@ -1,5 +1,5 @@
 """
-Jarvis OS — Memory Engine
+Furi OS — Memory Engine
 Central class for all memory operations: store, recall, and context assembly.
 Every chat message flows through build_context() before hitting the LLM.
 """
@@ -481,7 +481,7 @@ def resolve_confirmation_multi(reply: str, mentions: list, all_contacts: list) -
 
 class MemoryEngine:
     """
-    The brain of Jarvis OS.
+    The brain of Furi OS.
     Stores and retrieves all 5 memory types, then assembles them into a
     context block that gets injected into every system prompt.
     """

@@ -1,6 +1,6 @@
 /**
- * Jarvis OS — Streaming Indicator
- * Animated "thinking" indicator shown while Jarvis is generating a response.
+ * Furi OS — Streaming Indicator
+ * Animated "thinking" indicator shown while Furi is generating a response.
  */
 export function StreamingIndicator() {
   return (
@@ -18,7 +18,7 @@ export function StreamingIndicator() {
         ))}
       </div>
       <span className="text-xs text-muted font-mono animate-pulse-cyan">
-        Jarvis is thinking...
+        Furi is thinking...
       </span>
     </div>
   );

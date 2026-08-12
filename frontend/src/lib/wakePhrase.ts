@@ -1,9 +1,9 @@
 /**
- * Jarvis OS — Wake phrase detection by transcript ("Furi", "Hey Furi")
+ * Furi OS — Wake phrase detection by transcript ("Furi", "Hey Furi")
  *
  * ⚠️ WHY THIS EXISTS RATHER THAN A SECOND ONNX MODEL. openWakeWord's classifier
  * is trained per PHRASE: the bundled `hey_jarvis_v0.1.onnx` recognises "Hey
- * Jarvis" and nothing else, and no setting can change that — the phrase is in the
+ * Furi" and nothing else, and no setting can change that — the phrase is in the
  * weights. The user calls the assistant Furi. Training a new classifier is an
  * offline job (synthetic voices, a Colab notebook, an hour), so the phrase would
  * have stayed unchangeable until someone did it.
@@ -247,7 +247,7 @@ export class SpeechGate {
     }
   }
 
-  /** Drop everything buffered (the mic became busy, or Jarvis started talking). */
+  /** Drop everything buffered (the mic became busy, or Furi started talking). */
   reset(): void {
     this.preroll = [];
     this.prerollLength = 0;

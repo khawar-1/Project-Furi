@@ -1,5 +1,5 @@
 """
-Jarvis OS — Evidence escalation (Phase 6 Part 1 hardening, 2026-07-16)
+Furi OS — Evidence escalation (Phase 6 Part 1 hardening, 2026-07-16)
 
 When a web_search comes back with thin evidence, CODE adds the read_webpage
 step that gets the real page — no LLM call, no replan budget.

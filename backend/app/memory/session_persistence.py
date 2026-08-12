@@ -1,5 +1,5 @@
 """
-Jarvis OS — Pending Session-State Persistence (Phase 3.5)
+Furi OS — Pending Session-State Persistence (Phase 3.5)
 
 Snapshots a ConversationSession's PARKED QUESTIONS (pending_resolution /
 pending_creation) and the session's confirmed names to the SQLite

@@ -4,8 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-This is Jarvis OS — a local-first personal AI desktop app built with 
+This is **Furi OS** — a local-first personal AI desktop app built with
 Electron + React frontend and FastAPI + Python backend.
+
+> **⚠️ RENAMED Jarvis → Furi on 2026-08-12, COSMETICALLY.** Prose, prompts, UI
+> copy, comments and docs now say Furi. Deliberately UNCHANGED, because they are
+> identifiers or on-disk state and renaming them would break a live install:
+> `~/.jarvis/` (auth token, Google + Home Assistant tokens, browser profile,
+> trash, model weights), `backend/jarvis.db`, the Qdrant collection
+> `jarvis_memory`, the `X-Jarvis-Token` auth header, `window.jarvis` /
+> `__JARVIS_TOKEN__`, `com.jarvis.os` (must equal `setAppUserModelId` or Windows
+> drops every toast), the `data-jarvis-obs` / `data-jarvis-idx` DOM attributes,
+> the `prose-jarvis` / `jarvis-orb` CSS classes, `JarvisScheduler`, and the
+> bundled `hey_jarvis_v0.1.onnx` wake-word model (its phrase is baked into its
+> weights — the configurable 'speech' mode is what listens for "Furi").
+> Vocative/stop-word lists (`extractor.AI_TOOLS`, the greeting strippers in
+> `reminder_parser`, `task_router`, `interrupt_router`, `spoken`, `planner`,
+> `question_gate`) accept **both** names — "furi" was ADDED, never substituted,
+> so existing history still parses and neither name can be saved as a contact.
+> **The incident log below is left VERBATIM**: it quotes live user reports word
+> for word, and rewriting those quotes would falsify the record this file exists
+> to keep. Entries dated before 2026-08-12 say "Jarvis" and mean this app.
 What's complete:
 - Phase 1: Electron app, FastAPI backend, SQLite + Qdrant databases, 
   multi-LLM abstraction (Groq/Gemini/Ollama), streaming chat

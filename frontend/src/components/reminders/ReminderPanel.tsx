@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Reminders Panel (Phase 4, Part 4)
+ * Furi OS — Reminders Panel (Phase 4, Part 4)
  * Read/cancel surface over the backend's reminder list — creation itself
  * happens through chat ("remind me at 6 to call Jamil"); this panel is
  * where you see what's pending and cancel one before it fires.

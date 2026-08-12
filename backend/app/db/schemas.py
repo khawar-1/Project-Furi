@@ -1,5 +1,5 @@
 """
-Jarvis OS — Pydantic Schemas
+Furi OS — Pydantic Schemas
 Request/response shapes for all API endpoints.
 Kept separate from ORM models to enforce the API/DB boundary.
 """

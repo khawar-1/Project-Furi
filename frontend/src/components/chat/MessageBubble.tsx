@@ -1,14 +1,13 @@
 /**
- * Jarvis OS — Message Bubble
+ * Furi OS — Message Bubble
  * Renders a single chat message with markdown, role-based styling, and timestamp.
  */
 import { clsx } from 'clsx';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { Zap, User } from 'lucide-react';
 import type { ChatMessage } from '@/types';
 import { useChatStore } from '@/stores/chatStore';
 import { PlanCard } from './PlanCard';
+import { MarkdownBody } from './MarkdownBody';
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -59,7 +58,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         {/* Role Label */}
         <div className="flex items-center gap-2 px-1">
           <span className="text-[10px] font-mono text-muted uppercase tracking-wider">
-            {isUser ? 'You' : 'Jarvis'}
+            {isUser ? 'You' : 'Furi'}
           </span>
           {message.model && isAssistant && (
             <span className="text-[10px] font-mono text-cyan-500/40">
@@ -100,33 +99,9 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           {isUser ? (
             <p className="selectable whitespace-pre-wrap">{message.content}</p>
           ) : (
-            <div className="prose-jarvis">
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={{
-                  // Override code blocks for syntax highlighting
-                  code({ className, children, ...props }) {
-                    const isInline = !className;
-                    if (isInline) {
-                      return (
-                        <code className="font-mono text-cyan-300 bg-surface-1 px-1.5 py-0.5 rounded text-xs" {...props}>
-                          {children}
-                        </code>
-                      );
-                    }
-                    return (
-                      <pre className="bg-surface-1 border border-surface-border rounded-lg p-4 overflow-x-auto my-3">
-                        <code className="font-mono text-slate-300 text-xs leading-relaxed" {...props}>
-                          {children}
-                        </code>
-                      </pre>
-                    );
-                  },
-                }}
-              >
-                {message.content || (message.isStreaming ? '' : '...')}
-              </ReactMarkdown>
-            </div>
+            <MarkdownBody>
+              {message.content || (message.isStreaming ? '' : '...')}
+            </MarkdownBody>
           )}
         </div>
         )}

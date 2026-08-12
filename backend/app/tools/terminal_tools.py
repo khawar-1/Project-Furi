@@ -1,5 +1,5 @@
 """
-Jarvis OS — Terminal Tools (Phase 3, Part 3)
+Furi OS — Terminal Tools (Phase 3, Part 3)
 Three single-action tools for shell access:
 
   create_file     WRITE        create a new text file with given content

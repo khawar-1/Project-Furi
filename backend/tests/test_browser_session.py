@@ -1628,7 +1628,7 @@ def test_reaper_output_matches_only_the_jarvis_profile_command_line():
     stdout = "\n".join([
         f"1111\tchrome.exe {marker} --new-window https://youtube.com",
         f"2222\tchrome.exe {everyday} --restore-last-session",  # the user's Chrome
-        f"3333\tmsedge.exe {marker} --no-first-run",            # a Jarvis-profile Edge
+        f"3333\tmsedge.exe {marker} --no-first-run",            # a Furi-profile Edge
         f"badpid\tchrome.exe {marker}",                         # malformed pid → skipped
     ])
     assert browser_session._parse_reaper_output(stdout, marker) == [1111, 3333]

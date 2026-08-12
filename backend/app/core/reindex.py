@@ -1,5 +1,5 @@
 """
-Jarvis OS — Incremental reindex scheduler (Phase 6, Part 3)
+Furi OS — Incremental reindex scheduler (Phase 6, Part 3)
 
 Keeps the Part 2 semantic file index fresh on a cadence, without the user ever
 pressing "index now". A recurring "reindex" scheduler job re-runs the INCREMENTAL

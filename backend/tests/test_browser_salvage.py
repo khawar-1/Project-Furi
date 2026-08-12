@@ -1,7 +1,7 @@
 """
 Partial-result salvage on a failed browse (2026-07-26).
 
-THE LIVE DEFECT. Four browser tasks were given to Jarvis on 2026-07-26 and all
+THE LIVE DEFECT. Four browser tasks were given to Furi on 2026-07-26 and all
 four failed. In one of them the loop reached eBay's real results page, ran
 `extract`, and hit the action cap — so the listings the user asked it to compare
 had actually been gathered. The user was told "it failed", full stop, because

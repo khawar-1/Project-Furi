@@ -1,9 +1,9 @@
 """
-Jarvis OS — Push Channel (Phase 4, Part 1)
+Furi OS — Push Channel (Phase 4, Part 1)
 
 The server→client message channel: anything in the backend can call
 `push(type, payload)` and every connected frontend window receives the event
-over the /ws WebSocket. This is what lets Jarvis speak FIRST — reminders,
+over the /ws WebSocket. This is what lets Furi speak FIRST — reminders,
 task completions, approval requests — without a request asking for it.
 
 Design rules:

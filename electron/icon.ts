@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — App Icon (Phase 4, Part 3)
+ * Furi OS — App Icon (Phase 4, Part 3)
  * One 32x32 PNG (cyan HUD ring + dot, matching the frontend accents) embedded
  * as a base64 data URL. Embedded rather than loaded from disk because the
  * electron build step is plain `tsc` — it compiles .ts files only and would
@@ -13,7 +13,7 @@ const ICON_DATA_URL =
 
 let cached: NativeImage | null = null;
 
-/** The Jarvis icon as a NativeImage (decoded once, then reused). */
+/** The Furi icon as a NativeImage (decoded once, then reused). */
 export function appIcon(): NativeImage {
   if (cached === null) {
     cached = nativeImage.createFromDataURL(ICON_DATA_URL);

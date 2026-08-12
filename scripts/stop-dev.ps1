@@ -1,4 +1,4 @@
-# Jarvis OS - dev process sweeper ("npm run stop").
+# Furi OS - dev process sweeper ("npm run stop").
 #
 # Ctrl+C on `npm run dev` can strand pieces of the process tree on Windows:
 # the uvicorn --reload parent keeping port 8000 (recorded live incident), a
@@ -92,7 +92,7 @@ if ($killed.Count -gt 0) {
     Write-Host "Stopped $($killed.Count) leftover process(es):"
     $killed | ForEach-Object { Write-Host "  - $_" }
 } elseif ($stillHeld.Count -eq 0) {
-    Write-Host 'Clean - no leftover Jarvis dev processes found.'
+    Write-Host 'Clean - no leftover Furi dev processes found.'
 }
 
 if ($stillHeld.Count -gt 0) {

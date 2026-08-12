@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Electron Main Process
+ * Furi OS — Electron Main Process
  * Creates the BrowserWindow, loads the frontend, and manages backend lifecycle.
  *
  * Phase 4, Part 3 — ambient presence:
@@ -270,13 +270,13 @@ async function summonWindow(): Promise<void> {
 // ============================================================
 function createTray(): void {
   tray = new Tray(appIcon());
-  tray.setToolTip('Jarvis OS');
+  tray.setToolTip('Furi OS');
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: 'Open Jarvis', click: () => void summonWindow() },
+      { label: 'Open Furi', click: () => void summonWindow() },
       { type: 'separator' },
       {
-        label: 'Quit Jarvis',
+        label: 'Quit Furi',
         click: () => {
           isQuitting = true;
           app.quit();
@@ -318,7 +318,7 @@ function registerMediaPermissionHandlers(): void {
   );
 }
 
-/** Phase 7, Part 5 — the "Jarvis moment": ONLY the hotkey path announces
+/** Phase 7, Part 5 — the "Furi moment": ONLY the hotkey path announces
  *  itself to the renderer ('summoned-by-hotkey'), so opt-in hands-free
  *  listening starts exactly when the user pressed Ctrl+Shift+J — never on a
  *  tray click, a toast click, or a second app launch. */
@@ -353,7 +353,7 @@ function registerGlobalHotkey(): void {
 // ============================================================
 // App Lifecycle
 // ============================================================
-// Single instance: launching Jarvis while it lives in the tray must summon
+// Single instance: launching Furi while it lives in the tray must summon
 // the existing window, never start a second app (and second backend spawn).
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -364,6 +364,12 @@ if (!app.requestSingleInstanceLock()) {
     // Windows ties toast notifications to an Application User Model ID; without
     // this, Notification.show() is silently dropped. In dev the Electron
     // binary's own identity is the one Windows has a shortcut for.
+    //
+    // ⚠️ 'com.jarvis.os' KEPT THROUGH THE FURI RENAME, DELIBERATELY. It must
+    // stay byte-identical to package.json's build.appId, and changing that pair
+    // changes the app's INSTALL identity on Windows — an existing install
+    // becomes a different application. The rename was cosmetic by decision;
+    // this is one of the identifiers it deliberately did not touch.
     if (process.platform === 'win32') {
       app.setAppUserModelId(isDev ? process.execPath : 'com.jarvis.os');
     }

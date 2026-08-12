@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Chat State (Zustand)
+ * Furi OS — Chat State (Zustand)
  * Manages all conversation state: messages, streaming, session, provider.
  */
 import { create } from 'zustand';

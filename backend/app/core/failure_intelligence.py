@@ -1,5 +1,5 @@
 """
-Jarvis OS — Failure intelligence (2026-08-03)
+Furi OS — Failure intelligence (2026-08-03)
 
 The read half of the round that gave plans an audit trail. A read-only signal
 derived ON DEMAND from `plan_traces` — no new table, no background job, and
@@ -256,6 +256,6 @@ def format_recent_failures(patterns: list[FailurePattern]) -> str:
             line += f' — "{p.example_error}"'
         lines.append(line)
     return (
-        "What has gone wrong recently, from Jarvis's own record of its past "
+        "What has gone wrong recently, from Furi's own record of its past "
         "plans (see rule 23):\n" + "\n".join(lines)
     )

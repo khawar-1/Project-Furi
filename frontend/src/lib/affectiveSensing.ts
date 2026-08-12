@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Affective Sensing collector (Phase 13.1)
+ * Furi OS — Affective Sensing collector (Phase 13.1)
  *
  * Client side of the coarse "user load" read. It summarizes TIMING and ENERGY
  * only — never keystroke content, never audio — and POSTs the summary to the

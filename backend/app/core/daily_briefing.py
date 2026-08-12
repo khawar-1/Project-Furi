@@ -1,8 +1,8 @@
 """
-Jarvis OS — Daily briefing (Phase 5, Part 6, the capstone)
+Furi OS — Daily briefing (Phase 5, Part 6, the capstone)
 
-The "Jarvis moment", assembled from parts that all exist by now: each morning
-at a configurable local time, Jarvis gathers today's calendar events, unread
+The "Furi moment", assembled from parts that all exist by now: each morning
+at a configurable local time, Furi gathers today's calendar events, unread
 emails, birthdays, and memories dated today; composes a warm briefing with ONE
 LLM call (deterministic template fallback so a 429/outage still delivers); and
 delivers it exactly like a fired reminder — a persisted chat Message (survives
@@ -15,7 +15,7 @@ Design (mirrors app/core/birthdays.py — the first recurring feature):
 - A "daily_briefing" scheduler job kind, re-armed for tomorrow after each fire
   (recurrence without touching the scheduler's one-shot core). SQLite is the
   truth; a briefing due while the backend slept fires late-but-fires, framed
-  honestly ("missed while Jarvis was offline") — the reminder rule.
+  honestly ("missed while Furi was offline") — the reminder rule.
 - sync_briefing_job(db) is the single choke point (settings change + startup
   reconcile): cancel the current job, and iff enabled arm the next occurrence.
   The singleton's current job id lives in app_settings (daily_briefing.job_id),
@@ -61,7 +61,7 @@ _EMPTY_BRIEFING = (
 )
 
 _COMPOSER_SYSTEM = (
-    "You are Jarvis, the user's personal AI — the composed, quietly capable "
+    "You are Furi, the user's personal AI — the composed, quietly capable "
     "register of a trusted butler delivering the morning briefing. Open with a "
     "greeting that addresses the user as 'sir' (e.g. 'Good morning, sir.'); "
     "keep the tone warm, economical, and unflappable, with at most one touch "
@@ -276,7 +276,7 @@ def _render_data_block(sections: dict) -> str:
 def _late_prefix() -> str:
     """Honest framing when a briefing fired after the backend was offline past
     its time (the reminder late rule) — never presented as on-time."""
-    return "(Good morning — this briefing is late; Jarvis was offline earlier.)\n\n"
+    return "(Good morning — this briefing is late; Furi was offline earlier.)\n\n"
 
 
 def _template_briefing(data_block: str) -> str:
@@ -328,7 +328,7 @@ async def _deliver(db: AsyncSession, body: str, *, late: bool) -> Optional[str]:
             db, session_id, "assistant", body, what="daily briefing message",
         )
     await push("briefing", {
-        "title": "Jarvis",
+        "title": "Furi",
         "body": body,
         "text": body,
         "session_id": session_id,

@@ -1,5 +1,5 @@
 """
-Jarvis OS — Browser origin grounding (Phase 14, Part 2)
+Furi OS — Browser origin grounding (Phase 14, Part 2)
 
 The sites a browse loop may visit must trace to the USER'S OWN WORDS — the goal,
 the conversation, their answers — and NEVER to page content. This is the exact

@@ -2399,7 +2399,7 @@
     },
     {
       "id": "search-past-conversation",
-      "why": "Phase 6 Part 4 conversation search — planner rule 17's own example phrasing. FOUND AS A GAP BY THIS BENCH 2026-08-03 and FIXED the same day by a `stored_recall` tier: is_external_question correctly refuses this (its subject is 'we' — it is not an external-FACT question) and no other tier had a word for a past conversation. The tier needs a request signal alongside the recall phrase, so 'we discussed this already' stays free, and it stands down entirely when the message addresses Jarvis's MEMORY ('do you remember what i told you about jamil') — the chat path already has that bundle injected.",
+      "why": "Phase 6 Part 4 conversation search — planner rule 17's own example phrasing. FOUND AS A GAP BY THIS BENCH 2026-08-03 and FIXED the same day by a `stored_recall` tier: is_external_question correctly refuses this (its subject is 'we' — it is not an external-FACT question) and no other tier had a word for a past conversation. The tier needs a request signal alongside the recall phrase, so 'we discussed this already' stays free, and it stands down entirely when the message addresses Furi's MEMORY ('do you remember what i told you about jamil') — the chat path already has that bundle injected.",
       "known_gap": "",
       "ok_runs": 3,
       "runs": [
@@ -4166,7 +4166,7 @@
     },
     {
       "id": "background-intent",
-      "why": "INCIDENT 2026-07-09: the intent phrase must be STRIPPED before classification — with it attached the classifier read the whole message as a reminder request, listed it CHAT, and Jarvis denied having file access.",
+      "why": "INCIDENT 2026-07-09: the intent phrase must be STRIPPED before classification — with it attached the classifier read the whole message as a reminder request, listed it CHAT, and Furi denied having file access.",
       "known_gap": "",
       "ok_runs": 3,
       "runs": [

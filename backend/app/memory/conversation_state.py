@@ -1,5 +1,5 @@
 """
-Jarvis OS — Conversation Session
+Furi OS — Conversation Session
 Ephemeral, session-scoped working memory. NEVER persisted to the database.
 
 Each session gets exactly one ConversationSession. It merges what were

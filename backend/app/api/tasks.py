@@ -1,5 +1,5 @@
 """
-Jarvis OS — Background Tasks API (Phase 4, Parts 5-6)
+Furi OS — Background Tasks API (Phase 4, Parts 5-6)
 
 GET  /api/tasks              — list background tasks (status filter, newest first).
 GET  /api/tasks/{id}         — one task, including its serialized plan snapshot.

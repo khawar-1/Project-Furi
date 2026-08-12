@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — UI State (Zustand)
+ * Furi OS — UI State (Zustand)
  * Manages global UI state: active panel, sidebar, backend connection.
  */
 import { create } from 'zustand';

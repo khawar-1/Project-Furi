@@ -1,5 +1,5 @@
 """
-Jarvis OS — Home & IoT tools (Feature 1)
+Furi OS — Home & IoT tools (Feature 1)
 
 Five single-action tools over the user's Home Assistant hub:
 
@@ -136,7 +136,7 @@ async def _client() -> Any:
     if not config.enabled:
         raise HomeNotConnectedError(
             "Home & devices is turned off. Enable it in Settings → Home & devices "
-            "to let Jarvis see and control your home."
+            "to let Furi see and control your home."
         )
     return await get_home_client(config.base_url)
 
@@ -183,7 +183,7 @@ def _resolve_service(entity_id: str, state: str) -> tuple[str, str]:
     services = _DOMAIN_SERVICES.get(domain)
     if services is None:
         raise ValueError(
-            f"Jarvis cannot control '{domain}' devices — supported types are: "
+            f"Furi cannot control '{domain}' devices — supported types are: "
             f"{', '.join(sorted(_DOMAIN_SERVICES))}."
         )
     key = str(state or "").strip().lower()
@@ -230,7 +230,7 @@ class ListDevicesTool(BaseTool):
         if domain and domain not in SUPPORTED_DOMAINS:
             return _fail(
                 self,
-                f"'{domain}' is not a device type Jarvis knows — try one of: "
+                f"'{domain}' is not a device type Furi knows — try one of: "
                 f"{', '.join(sorted(SUPPORTED_DOMAINS))}.",
             )
         try:

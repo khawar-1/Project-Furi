@@ -1,5 +1,5 @@
 """
-Jarvis OS — Pending Plan Store (Phase 3, Part 4; persisted in Phase 3.5)
+Furi OS — Pending Plan Store (Phase 3, Part 4; persisted in Phase 3.5)
 
 Holding area for plans awaiting user approval or a clarifying-question
 answer. Two layers:
@@ -136,14 +136,14 @@ async def pop_plan(db: AsyncSession, plan_id: str) -> Optional[AgentPlan]:
 # The states in which a parked plan OWNS the session's next chat message.
 #
 # AWAITING_APPROVAL joined the set on 2026-08-03, closing a hole that predates
-# the pause round: an approval card was DEAF. Telling Jarvis "that's not right"
+# the pause round: an approval card was DEAF. Telling Furi "that's not right"
 # while it asked to delete five files never reached the plan — the message fell
 # through to the task router (starting a SECOND agent on the correction) while
 # the original card stayed live and CLICKABLE for the parked plan's whole 24h
 # TTL. Approve it the next morning and the uncorrected plan ran.
 #
 # A question card and an approval card are the same thing from the user's
-# chair: Jarvis stopped and is waiting. They now behave the same. What a typed
+# chair: Furi stopped and is waiting. They now behave the same. What a typed
 # message MEANS at an approval card is decided in code by the task router —
 # and a typed word can never GRANT approval (see _is_typed_approval there).
 _OPEN_STATUSES = (

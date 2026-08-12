@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Voice Mode overlay
+ * Furi OS — Voice Mode overlay
  *
  * Covers the chat's message area with the sphere while a hands-free
  * conversation runs. The header, the sidebar and the status bar stay live, so
@@ -12,12 +12,12 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { clsx } from 'clsx';
-import { ShieldQuestion } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '@/stores/chatStore';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { exitVoiceMode, toggleVoiceListening } from '@/lib/voiceModeControl';
 import { VoiceOrb, type OrbState } from './VoiceOrb';
+import { VoiceOutputPanel, currentTurnKey, turnOutputKind } from './VoiceOutputPanel';
 
 /**
  * `speaking` drops to false whenever the playback queue momentarily drains
@@ -55,18 +55,29 @@ export function VoiceModeOverlay() {
   // compares the RESULT — so the overlay re-renders when these flip, not when
   // the message text grows.
   const isStreaming = useChatStore((s) => s.isStreaming);
-  // `awaitsDecision`, NOT `hasOpenInteractivePlan` — the two differ on
-  // 'executing' and the contrast is documented where they live together
-  // (lib/planGate.ts). Subscribed through the store so the banner reacts.
-  const awaitingDecision = useChatStore((s) =>
-    s.messages.some(
-      (m) =>
-        m.planNeededApproval === true &&
-        m.plan != null &&
-        (m.plan.status === 'awaiting_approval' ||
-          m.plan.status === 'awaiting_choice')
-    )
+  // Both selectors return a PRIMITIVE, so this component re-renders about twice
+  // a turn (when the kind flips, when the turn changes) rather than once per
+  // streamed delta — the panel below owns the delta-sensitive subscription.
+  const outputKind = useChatStore((s) => turnOutputKind(s.messages));
+  const turnKey = useChatStore((s) => currentTurnKey(s.messages));
+
+  // The ✕ hides the TEXT, keyed on the turn it was pressed in. A new turn has a
+  // new key, so the next reply shows by itself — the hide can never leak
+  // forward, and nothing has to remember to clear it.
+  //
+  // Seeded with the turn that was already on screen when voice mode opened, so
+  // entering does not immediately dump the last typed reply over the sphere. It
+  // hides TEXT only: an approval card open at that moment still renders, which
+  // matters now that answering it in the chat is no longer the only way.
+  const [hiddenTurn, setHiddenTurn] = useState<string | null>(() =>
+    currentTurnKey(useChatStore.getState().messages)
   );
+  const textHidden = hiddenTurn !== null && hiddenTurn === turnKey;
+
+  const hasCard = outputKind === 'card' || outputKind === 'both';
+  const awaitingDecision = hasCard;
+  // The panel is what shrinks the sphere. A lone "show reply" chip does not.
+  const panelOpen = hasCard || (outputKind === 'text' && !textHidden);
 
   const speakingSettled = useSettledFlag(speaking, SPEAKING_SETTLE_MS);
 
@@ -127,7 +138,7 @@ export function VoiceModeOverlay() {
 
   return (
     <div
-      className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-8 px-8 animate-fade-in"
+      className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 px-8 py-5 animate-fade-in"
       role="region"
       aria-label="Voice conversation"
       style={{
@@ -141,66 +152,100 @@ export function VoiceModeOverlay() {
         backgroundSize: '42px 42px',
       }}
     >
-      {/* The canvas neural sphere handles its own hover-dispersal effect
-          internally via mouseenter/leave on this container div. No external
-          hover styling needed — the dispersal animation IS the feedback. */}
-      <div
-        className="relative"
-        style={{ width: 'min(52vh, 400px)', height: 'min(52vh, 400px)', overflow: 'visible' }}
-      >
-        <button
-          type="button"
-          onClick={toggleVoiceListening}
-          disabled={!tappable}
-          aria-label={
-            state === 'listening'
-              ? 'Send what you have said'
-              : state === 'speaking'
-                ? 'Interrupt Jarvis and talk'
-                : 'Start talking'
-          }
-          className={clsx(
-            'relative w-full h-full rounded-full outline-none',
-            'focus-visible:ring-2 focus-visible:ring-cyan-400/60',
-            tappable ? 'cursor-pointer' : 'cursor-default'
-          )}
-          style={{ overflow: 'visible' }}
-        >
-          <VoiceOrb state={state} className="w-full h-full" />
-        </button>
-      </div>
+      {/* Sphere + caption. `flex-1` WITHOUT `min-h-0`, deliberately: its
+          min-content height (the sphere's 96px floor + the caption) is what
+          stops it being squeezed to nothing and spilling its children out of
+          the region — MEASURED at 900x540, where `min-h-0` gave this block 0px
+          and the sphere overflowed upward. The panel below is the shrinkable
+          one. */}
+      <div className="flex-1 w-full flex flex-col items-center justify-center gap-4">
+        {/* The canvas neural sphere handles its own hover-dispersal effect
+            internally via mouseenter/leave on this container div. No external
+            hover styling needed — the dispersal animation IS the feedback.
 
-      {/* Caption. aria-live so the state is announced, not just coloured. */}
-      <div className="flex flex-col items-center gap-2 text-center max-w-xl">
-        <p
-          aria-live="polite"
-          className={clsx(
-            'selectable text-sm leading-relaxed min-h-[2.5rem] flex items-center',
-            voiceError
-              ? 'text-danger font-mono text-xs'
-              : state === 'listening' && interimText
-                ? 'text-slate-200'
-                : 'text-slate-400 font-mono text-xs tracking-wide uppercase'
-          )}
-        >
-          {caption}
-        </p>
+            ⚠️ NO CSS TRANSITION ON THE SIZE. VoiceOrb re-runs setup() from a
+            ResizeObserver — reallocating the canvas and its 95 stars — so an
+            animated width/height would do that on every frame of the
+            transition, on a machine whose whole perf story is "it lags". The
+            panel's own slide-up is what reads as the cause of the resize.
 
-        {awaitingDecision ? (
-          <button
-            type="button"
-            onClick={exitVoiceMode}
-            className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-semibold hover:bg-amber-500/20 transition-fast"
+            ⚠️ THE SPHERE TAKES THE LEFTOVER HEIGHT, IT DOES NOT CLAIM ONE.
+            MEASURED: a fixed square (even with max-height:100%) overflowed the
+            message region at every window below 1440x900, because the caption
+            and the gaps also need room out of the same box. So this wrapper is
+            `flex-1` and the caption is `shrink-0` — the caption takes its space
+            first, the sphere is `height:100%` of whatever is left, capped by
+            the max and kept square by aspect-ratio. The 96px floor is what
+            keeps it a usable tap target on a short window; the panel below is
+            the thing that gives way instead. */}
+        <div
+          className="flex-1 w-full flex items-center justify-center"
+          style={{ minHeight: '96px' }}
+        >
+          <div
+            className="relative"
+            style={{
+              height: '100%',
+              maxHeight: panelOpen ? 'min(30vh, 240px)' : 'min(52vh, 400px)',
+              aspectRatio: '1 / 1',
+              maxWidth: '100%',
+              overflow: 'visible',
+            }}
           >
-            <ShieldQuestion size={13} />
-            Jarvis needs your approval — view in chat
-          </button>
-        ) : (
+            <button
+              type="button"
+              onClick={toggleVoiceListening}
+              disabled={!tappable}
+              aria-label={
+                state === 'listening'
+                  ? 'Send what you have said'
+                  : state === 'speaking'
+                    ? 'Interrupt Furi and talk'
+                    : 'Start talking'
+              }
+              className={clsx(
+                'relative w-full h-full rounded-full outline-none',
+                'focus-visible:ring-2 focus-visible:ring-cyan-400/60',
+                tappable ? 'cursor-pointer' : 'cursor-default'
+              )}
+              style={{ overflow: 'visible' }}
+            >
+              <VoiceOrb state={state} className="w-full h-full" />
+            </button>
+          </div>
+        </div>
+
+        {/* Caption. aria-live so the state is announced, not just coloured. */}
+        <div className="shrink-0 flex flex-col items-center gap-2 text-center max-w-xl">
+          <p
+            aria-live="polite"
+            className={clsx(
+              'selectable text-sm leading-relaxed min-h-[2.5rem] flex items-center',
+              voiceError
+                ? 'text-danger font-mono text-xs'
+                : state === 'listening' && interimText
+                  ? 'text-slate-200'
+                  : 'text-slate-400 font-mono text-xs tracking-wide uppercase'
+            )}
+          >
+            {caption}
+          </p>
+
           <p className="text-[10px] text-muted/50 font-mono">
             Esc or ✕ to leave voice mode
           </p>
-        )}
+        </div>
       </div>
+
+      {/* The reading surface. The approval card renders HERE now — the old
+          "view in chat" button was the only way to answer one, and it worked by
+          throwing the user out of voice mode. */}
+      {outputKind !== 'none' && (
+        <VoiceOutputPanel
+          textHidden={textHidden}
+          onToggleText={() => setHiddenTurn(textHidden ? null : turnKey)}
+        />
+      )}
     </div>
   );
 }

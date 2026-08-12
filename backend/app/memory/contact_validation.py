@@ -1,5 +1,5 @@
 """
-Jarvis OS — Deterministic contact-field validation.
+Furi OS — Deterministic contact-field validation.
 
 The safety net behind the LLM extractor for contact attributes (email,
 birthday) — same species as normalize_future_phrasing in engine.py: the

@@ -1,7 +1,7 @@
 /**
- * Jarvis OS — Threads Panel (Phase 11.3 — ongoing-concern tracking)
+ * Furi OS — Threads Panel (Phase 11.3 — ongoing-concern tracking)
  * The things you have an open stake in ("the deadline", "waiting to hear back").
- * Jarvis captures these from conversation and proactively follows up on the open
+ * Furi captures these from conversation and proactively follows up on the open
  * ones via the Initiative Engine. Mark one resolved ("it landed") or dismiss it
  * to stop the nudges.
  */
@@ -123,7 +123,7 @@ export function ThreadsPanel() {
               <p className="text-slate-400 text-sm font-medium mb-1">No open threads</p>
               <p className="text-slate-600 text-xs max-w-xs">
                 When you mention something you have an open stake in &mdash; a deadline you&rsquo;re
-                worried about, waiting to hear back &mdash; Jarvis tracks it here and follows up.
+                worried about, waiting to hear back &mdash; Furi tracks it here and follows up.
               </p>
             </div>
           </div>

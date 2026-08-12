@@ -2,7 +2,7 @@
 Adding to the cart — the 2026-08-10 incident.
 
 THE INCIDENT. "go to junaidjamshed.com and add black kameez kurta in cart".
-Jarvis searched, PICKED A PRODUCT BY ITSELF out of 1000 results, opened it,
+Furi searched, PICKED A PRODUCT BY ITSELF out of 1000 results, opened it,
 never asked for a size, never added anything, stalled and asked what to do. The
 user answered "select size large and add to cart" — and it RESTARTED the
 journey, searched again, and opened a DIFFERENT product.

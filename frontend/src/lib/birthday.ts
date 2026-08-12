@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — birthday string helpers (Phase 5 Part 2).
+ * Furi OS — birthday string helpers (Phase 5 Part 2).
  *
  * A birthday is stored canonically as "MM-DD" (year unknown — people say
  * "Jamil's birthday is March 4") or "YYYY-MM-DD" (year known). All parsing

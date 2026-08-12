@@ -1,1 +1,1 @@
-"""Jarvis OS — Providers Package"""
+"""Furi OS — Providers Package"""

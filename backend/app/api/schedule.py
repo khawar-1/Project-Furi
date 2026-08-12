@@ -1,5 +1,5 @@
 """
-Jarvis OS — Schedule API (Phase 4, Part 2)
+Furi OS — Schedule API (Phase 4, Part 2)
 
 Read/cancel access to the scheduler's job table, plus a dev utility that
 schedules a delayed push event (the Part 2 analogue of POST /ws/test).

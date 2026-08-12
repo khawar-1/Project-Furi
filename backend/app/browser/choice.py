@@ -1,5 +1,5 @@
 """
-Jarvis OS — "which one did you mean?" for the things ON a page (2026-08-02)
+Furi OS — "which one did you mean?" for the things ON a page (2026-08-02)
 
 THE GAP THIS FILLS
 ------------------

@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Chat Input
+ * Furi OS — Chat Input
  * Multi-line textarea with keyboard shortcuts and send button.
  * Enter to send, Shift+Enter for newline.
  *
@@ -257,7 +257,7 @@ export function ChatInput({ onSend, isStreaming, disabled = false }: ChatInputPr
             value={draftMessage}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
-            placeholder="Message Jarvis... (Enter to send, Shift+Enter for newline)"
+            placeholder="Message Furi... (Enter to send, Shift+Enter for newline)"
             disabled={disabled}
             rows={1}
             className={clsx(

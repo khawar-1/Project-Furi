@@ -1,5 +1,5 @@
 """
-Jarvis OS — browse acceptance benchmark.
+Furi OS — browse acceptance benchmark.
 
 WHY THIS EXISTS, stated plainly: this browser stack has repeatedly been called
 "live-verified" on the strength of one run that was later contradicted. The
@@ -121,7 +121,7 @@ def _check(kind: str, spec: dict, output: dict) -> tuple[bool, str]:
 
 _HANDOFFS = (
     ("challenge_required", "a CAPTCHA / verification wall (never auto-solved)"),
-    ("login_required", "a sign-in wall (Jarvis never enters credentials)"),
+    ("login_required", "a sign-in wall (Furi never enters credentials)"),
     ("action_approval_required", "waiting for the user to approve a world-acting gesture"),
     ("origin_approval_required", "waiting for the user to approve an off-site jump"),
     ("commit_required", "waiting for the user to approve a form submit"),
@@ -272,7 +272,7 @@ async def _close_windows() -> None:
 
 def _reclaim() -> None:
     """The belt under the braces: kill any browser still holding OUR profile. The
-    reaper matches only --user-data-dir=<the Jarvis profile>, so a user's own
+    reaper matches only --user-data-dir=<the Furi profile>, so a user's own
     Chrome is never touched."""
     try:
         from app.core.browser_session import reclaim_orphaned_profile

@@ -1,5 +1,5 @@
 """
-Jarvis OS — "did you mean…?" for a site that does not exist (2026-08-01)
+Furi OS — "did you mean…?" for a site that does not exist (2026-08-01)
 
 THE INCIDENT
 ------------
@@ -8,7 +8,7 @@ Transcribed: "Go to **junitjamsheed.com** …". Chromium answered
 ERR_NAME_NOT_RESOLVED, commit_flow turned it into a flat step failure, both
 replans failed, and the task died. Google, given the identical misspelling,
 puts the real site on the first screen. The user's question was exactly right:
-why did Jarvis not ASK?
+why did Furi not ASK?
 
 WHY THIS IS STRUCTURAL, NOT A NICETY
 ------------------------------------

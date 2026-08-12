@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — About Me Panel
+ * Furi OS — About Me Panel
  * Displays user-specific facts extracted during conversations.
  * Facts can be searched, added manually, or deleted.
  */
@@ -311,7 +311,7 @@ export function MemoryExplorer() {
             <div>
               <p className="text-slate-400 text-sm font-medium mb-1">No facts yet</p>
               <p className="text-slate-600 text-xs max-w-xs">
-                Chat with Jarvis and it will automatically learn things about you.<br />
+                Chat with Furi and it will automatically learn things about you.<br />
                 You can also add facts manually using the button above.
               </p>
             </div>
@@ -381,7 +381,7 @@ function ConflictingFacts() {
         </span>
       </div>
       <p className="mt-2 text-[11px] text-slate-600 leading-relaxed max-w-lg">
-        Jarvis noticed a newer note that might replace an older one, but it did not
+        Furi noticed a newer note that might replace an older one, but it did not
         clearly cover everything the older one said — so it kept both rather than
         guess. Which is right?
       </p>
@@ -429,11 +429,11 @@ function ConflictingFacts() {
 }
 
 /**
- * Facts the housekeeping pass set aside — long unused, hidden from what Jarvis
+ * Facts the housekeeping pass set aside — long unused, hidden from what Furi
  * recalls, and NEVER deleted.
  *
  * ⚠️ THIS SECTION IS THE REASON THE ARCHIVE IS ACCEPTABLE AT ALL. An automatic
- * process that quietly stops Jarvis recalling things, with no way to see what
+ * process that quietly stops Furi recalling things, with no way to see what
  * it took or put it back, is indistinguishable from data loss. Collapsed by
  * default (it is housekeeping, not the user's actual facts) and hidden entirely
  * when nothing has been archived — which is the normal state.
@@ -464,9 +464,9 @@ function ArchivedFacts() {
       {open && (
         <div className="mt-3 space-y-2">
           <p className="text-[11px] text-slate-600 leading-relaxed max-w-lg">
-            Jarvis stopped recalling these because nothing needed them for a long
+            Furi stopped recalling these because nothing needed them for a long
             while. Nothing was deleted — restore any of them and it goes straight
-            back into what Jarvis remembers.
+            back into what Furi remembers.
           </p>
           {archived.map(memory => (
             <div
@@ -477,7 +477,7 @@ function ArchivedFacts() {
               <button
                 onClick={() => void restoreFact(memory.id)}
                 className="shrink-0 flex items-center gap-1 px-2 py-1 rounded text-[11px] text-cyan-400 hover:bg-cyan-500/10 transition-colors"
-                title="Put this back into what Jarvis remembers"
+                title="Put this back into what Furi remembers"
               >
                 <RotateCcw size={11} />
                 Restore

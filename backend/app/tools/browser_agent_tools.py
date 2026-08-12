@@ -1,5 +1,5 @@
 """
-Jarvis OS — Browser Agent Tools (Phase 14, Parts 1 & 2)
+Furi OS — Browser Agent Tools (Phase 14, Parts 1 & 2)
 
   browse_page   READ   open one URL in a REAL browser (JavaScript runs) and
                        return the rendered page: its interactive elements and
@@ -516,7 +516,7 @@ class BrowseTool(BaseTool):
                 # ~/.jarvis/browser profile keeps the cookie, so the resumed
                 # browse runs authenticated. The planner turns login_required
                 # into an AWAITING_CHOICE pause ("sign in, then say continue");
-                # answering re-runs this browse. Jarvis never sees the password.
+                # answering re-runs this browse. Furi never sees the password.
                 #
                 # ⚠️ AND THE TAB STAYS (2026-08-08). This branch was the last one
                 # still doing the pre-multi-tab thing: close the session, then
@@ -600,7 +600,7 @@ class BrowseTool(BaseTool):
 
                 # A CAPTCHA / verification challenge (15.4): the loop hit a human
                 # check it must NEVER solve. The user completes it by hand —
-                # Jarvis solves nothing and touches nothing on the challenge. The
+                # Furi solves nothing and touches nothing on the challenge. The
                 # planner turns challenge_required into an AWAITING_CHOICE pause
                 # ("complete the check, then say continue"); answering re-runs
                 # this browse, which reuses this same tab by site key.
@@ -700,7 +700,7 @@ class BrowseTool(BaseTool):
                 # An off-site navigation hand-off (2026-07-18): the loop would
                 # leave the sites the user named for a page-derived origin. Return
                 # a structured signal; the planner pauses to ask the user to
-                # approve THIS origin. Jarvis never follows a page-derived site on
+                # approve THIS origin. Furi never follows a page-derived site on
                 # its own.
                 # The tab STAYS (2026-08-02, with the action-approval branch
                 # below): the user is being asked about the page that is on it.
@@ -720,7 +720,7 @@ class BrowseTool(BaseTool):
                 # delete / buy. Return the structured signal; the planner pauses on
                 # an approval question naming the action, and on "yes" the resumed
                 # browse runs carrying THAT gesture's permit so exactly that one
-                # action can fire. Jarvis never acts on a live site without this yes.
+                # action can fire. Furi never acts on a live site without this yes.
                 #
                 # ⚠️ THE TAB STAYS OPEN (2026-08-02). This branch used to call
                 # release_after_run(), which closes any tab THIS run opened — and a
@@ -948,7 +948,7 @@ class BrowseTool(BaseTool):
             # bare _fail, whose output is None) so the planner can pause the plan
             # on a clarifying question instead of replanning a wall it cannot
             # pass. The error text is the fallback for a direct (non-planner)
-            # caller — YOU complete it, Jarvis never enters the credentials.
+            # caller — YOU complete it, Furi never enters the credentials.
             site = output.get("login_site") or "the site"
             opened = output.get("login_window_opened", True)
             kind = str(output.get("wall_kind") or "login").lower()
@@ -964,7 +964,7 @@ class BrowseTool(BaseTool):
             elif opened:
                 where = f"I've opened a {noun} window"
             else:
-                where = "Open the Jarvis browser window"
+                where = "Open the Furi browser window"
             if kind == "signup":
                 error = (
                     f"Account sign-up required at {site} — I won't create an "
@@ -998,7 +998,7 @@ class BrowseTool(BaseTool):
             # (not a bare _fail) so the planner pauses the plan on a clarifying
             # question instead of replanning a check it must never solve. The
             # error text is the fallback for a direct (non-planner) caller — YOU
-            # complete the check, Jarvis never solves or touches it.
+            # complete the check, Furi never solves or touches it.
             site = output.get("challenge_site") or "the site"
             kind = output.get("challenge_kind") or "CAPTCHA"
             opened = output.get("challenge_window_opened", True)
@@ -1011,7 +1011,7 @@ class BrowseTool(BaseTool):
             elif opened:
                 where = "I've opened the page"
             else:
-                where = "Open the Jarvis browser window"
+                where = "Open the Furi browser window"
             error = (
                 f"A {kind} verification at {site} needs to be completed, and I never "
                 f"solve these. {where} — please complete the check there yourself, "
@@ -1038,7 +1038,7 @@ class BrowseTool(BaseTool):
         if output.get("site_unreachable"):
             # The site could not be reached at all — bad certificate, DNS, refused
             # connection (2026-07-26: outfitters.com, a parked domain whose cert
-            # fails). A replan cannot fix this by trying harder, and Jarvis must
+            # fails). A replan cannot fix this by trying harder, and Furi must
             # NOT guess a neighbouring domain (an origin the user never named is
             # outside the grounding corpus by construction). So: say which site
             # and why, and let the planner ask the user or choose another source.
@@ -1174,7 +1174,7 @@ class BrowseTool(BaseTool):
                     "user_words": {
                         "type": "string",
                         "description": (
-                            "Set by Jarvis in code, never by you — the user's own "
+                            "Set by Furi in code, never by you — the user's own "
                             "request, verbatim. Do not supply this."
                         ),
                     },
@@ -1403,7 +1403,7 @@ class BrowseCommitTool(BaseTool):
                     "user_words": {
                         "type": "string",
                         "description": (
-                            "Set by Jarvis in code, never by you — the user's own "
+                            "Set by Furi in code, never by you — the user's own "
                             "request, verbatim. Do not supply this."
                         ),
                     },
@@ -1424,7 +1424,7 @@ class StopMediaTool(BaseTool):
 
     @property
     def permission_level(self) -> PermissionLevel:
-        # READ: closing a window Jarvis itself opened is a local teardown, not a
+        # READ: closing a window Furi itself opened is a local teardown, not a
         # web mutation — it touches nothing external and needs no approval (the
         # user asked to stop; making them approve stopping would be absurd).
         return PermissionLevel.READ

@@ -1,5 +1,5 @@
 """
-Jarvis OS — Planner Memory Context (Phase 3.5)
+Furi OS — Planner Memory Context (Phase 3.5)
 
 Renders the same long-term memory the chat path sees into a string for the
 agent planner, so task turns are not amnesiac about people, preferences, and

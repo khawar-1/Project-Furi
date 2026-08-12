@@ -1,5 +1,5 @@
 """
-Jarvis OS — deterministic structured extraction from an Observation.
+Furi OS — deterministic structured extraction from an Observation.
 
 WHY THIS EXISTS (the defect it repairs, 2026-07-26)
 --------------------------------------------------

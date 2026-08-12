@@ -1,5 +1,5 @@
 """
-Jarvis OS — Agent package (Phase 3)
+Furi OS — Agent package (Phase 3)
 LangGraph planner, plan schemas, and the pending-plan approval store
 (SQLite-persisted since Phase 3.5).
 """

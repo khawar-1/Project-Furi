@@ -1,5 +1,5 @@
 """
-Jarvis OS — Scheduled routines (Phase 10, Part 2)
+Furi OS — Scheduled routines (Phase 10, Part 2)
 
 Gives a teachable routine an optional TIME TRIGGER that auto-runs it. This is
 the one genuinely new autonomous surface in Phase 10 — everything else rides

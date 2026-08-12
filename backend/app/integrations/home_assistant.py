@@ -1,5 +1,5 @@
 """
-Jarvis OS — Home Assistant integration (Feature 1: Home & IoT control)
+Furi OS — Home Assistant integration (Feature 1: Home & IoT control)
 
 The ONLY module that holds the Home Assistant credential and the only place
 that speaks HTTP to the hub. `app/tools/home_tools.py` goes through
@@ -11,14 +11,14 @@ One self-hosted HTTP API covers ~2000 device brands (Hue, LIFX, Tuya, Z-Wave,
 Zigbee, Nest, Sonos, TP-Link…). A long-lived access token, a REST call, done.
 Integrating vendors one at a time would mean N OAuth flows, N token stores and
 N failure modes for one capability. HA also exposes SCENES, which map onto the
-routines Jarvis already has.
+routines Furi already has.
 
 Degradation contract (the google_services rule)
 -----------------------------------------------
 A missing/invalid/unreachable hub raises `HomeNotConnectedError` from ONE choke
 point — `get_home_client()` — with a stable, user-facing message. Every tool
 catches it and returns a clean failed ToolResult. No hub configured is a NORMAL
-state, not an error state: Jarvis says so and carries on.
+state, not an error state: Furi says so and carries on.
 
 ⚠️ WHY THERE IS NO SSRF EXEMPTION HERE, AND WHY THAT IS THE SAFER DESIGN
 ------------------------------------------------------------------------

@@ -270,8 +270,8 @@ def test_gate_weak_signals_still_need_a_verb():
 
 
 def test_gate_fires_on_own_action_questions():
-    # Questions about Jarvis's OWN actions name no domain noun ("what have
-    # you done today?") — the object is Jarvis's action record. Live bug
+    # Questions about Furi's OWN actions name no domain noun ("what have
+    # you done today?") — the object is Furi's action record. Live bug
     # 2026-07-13: "what was the name of folder that u created?" only reached
     # the classifier because it said "folder"; the chat LLM then asserted a
     # wrong folder from memory and denied the real jarvis_test one.
@@ -331,11 +331,11 @@ def test_gate_question_tier_ignores_statements():
 
 
 def test_classify_prompt_routes_own_action_questions_to_task():
-    # The classifier is TOLD that questions about Jarvis's own actions are
+    # The classifier is TOLD that questions about Furi's own actions are
     # TASK — before this, its CHAT line ("talking ABOUT past actions") made
     # it route them to chat, which cannot see the audit log.
     from app.api.task_router import _CLASSIFY_PROMPT
-    assert "JARVIS'S OWN actions is TASK" in _CLASSIFY_PROMPT
+    assert "FURI'S OWN actions is TASK" in _CLASSIFY_PROMPT
     assert "audit log" in _CLASSIFY_PROMPT
 
 
@@ -378,7 +378,7 @@ def test_gate_fires_for_external_questions(message):
 
 
 @pytest.mark.parametrize("message", [
-    # A question about the USER, about JARVIS, or about the two of them is
+    # A question about the USER, about FURI, or about the two of them is
     # answered from memory and context — the web cannot help, so these stay
     # free. This exclusion is the whole reason the wider tier is affordable.
     "how are you today",
@@ -494,7 +494,7 @@ def test_a_recall_phrase_without_a_request_stays_free(message):
 
 
 @pytest.mark.parametrize("message", [
-    # …and a question that addresses Jarvis's MEMORY is the chat path's own
+    # …and a question that addresses Furi's MEMORY is the chat path's own
     # job: retrieve_context() injects the facts/contacts bundle into EVERY
     # chat turn, so routing it would be a worse answer, not merely a wasted
     # call. This is the distinction that
@@ -747,7 +747,7 @@ def test_followup_ignores_long_messages():
 
 # ------------------------------- browse follow-up (open agent window, 2026-07-21)
 def test_browse_followup_fires_only_with_a_live_window(monkeypatch):
-    """After Jarvis opens a page, a short browser-verb message ("message him
+    """After Furi opens a page, a short browser-verb message ("message him
     'hi'") continues that session — but ONLY while a live window is held. The
     window is the domain signal, so no site keyword is needed. Live bug: it fell
     to plain chat, which offered a magic-word rephrase."""
@@ -1079,7 +1079,7 @@ async def test_impersonation_is_caught_inside_one_large_delta(client):
     events = await post_chat(client, "hows your day going", "s-imp-bulk")
     text = streamed_text(events)
 
-    assert "Correction from the Jarvis system" in text
+    assert "Correction from the Furi system" in text
     assert "no task ran" in text
 
 
@@ -1093,7 +1093,7 @@ async def test_impersonation_is_caught_far_into_a_long_reply(client):
     events = await post_chat(client, "thanks for earlier", "s-imp-late")
     text = streamed_text(events)
 
-    assert "Correction from the Jarvis system" in text
+    assert "Correction from the Furi system" in text
     assert "no reminder or calendar event was created" in text
 
 
@@ -1640,7 +1640,7 @@ async def test_impersonated_task_completion_is_cut_and_corrected(client):
     events = await post_chat(client, "hows your day going", "s-impersonate")
 
     text = streamed_text(events)
-    assert "Correction from the Jarvis system" in text
+    assert "Correction from the Furi system" in text
     assert "no task ran" in text
     # Cut at the marker: the fabricated results after it never reached the user
     assert "fisrtname.tmp" not in text
@@ -1650,7 +1650,7 @@ async def test_impersonated_task_completion_is_cut_and_corrected(client):
     # The persisted chat history carries the correction too
     history = (await client.get("/chat/sessions/s-impersonate/messages")).json()
     assistant = [m for m in history if m["role"] == "assistant"][-1]
-    assert "Correction from the Jarvis system" in assistant["content"]
+    assert "Correction from the Furi system" in assistant["content"]
 
 
 async def test_impersonated_reminder_confirmation_is_corrected(client):
@@ -1660,7 +1660,7 @@ async def test_impersonated_reminder_confirmation_is_corrected(client):
     events = await post_chat(client, "thanks for the help earlier", "s-imp-rem")
 
     text = streamed_text(events)
-    assert "Correction from the Jarvis system" in text
+    assert "Correction from the Furi system" in text
     assert "no reminder or calendar event was created" in text
 
 
@@ -1677,7 +1677,7 @@ async def test_impersonated_task_initiation_claim_is_corrected(client):
     events = await post_chat(client, "yes delete", "s-imp-init")
 
     text = streamed_text(events)
-    assert "Correction from the Jarvis system" in text
+    assert "Correction from the Furi system" in text
     assert "no task ran" in text
 
 
@@ -1697,7 +1697,7 @@ async def test_impersonated_browser_media_switch_is_corrected(client):
     )
 
     text = streamed_text(events)
-    assert "Correction from the Jarvis system" in text
+    assert "Correction from the Furi system" in text
     assert "no browser opened or video played" in text
     # Cut at the marker: the false "now playing" claim and the fabricated tail
     # never reached the user. (The correction text names anikoto.cz as an
@@ -1754,7 +1754,7 @@ async def test_dead_end_offer_is_rescued_into_a_real_search(client):
 
 
 async def test_the_offer_itself_never_reaches_the_user(client):
-    """Jarvis must not appear to ask permission and then act anyway. The cut
+    """Furi must not appear to ask permission and then act anyway. The cut
     happens BEFORE the offer is emitted — unlike the impersonation guard,
     which deliberately shows its marker so the correction has a referent.
 
@@ -1965,7 +1965,7 @@ async def test_impersonated_agent_handoff_state_is_corrected(client):
     events = await post_chat(client, "and that one too", "s-imp-handoff")
 
     text = streamed_text(events)
-    assert "Correction from the Jarvis system" in text
+    assert "Correction from the Furi system" in text
     assert "confirm the moment it's live" not in text, "the fabricated tail was cut"
 
 
@@ -1992,7 +1992,7 @@ def test_a_capability_offer_about_the_agent_is_not_a_fabrication():
 #   from here. Say it as one direct instruction, e.g. "open the fomi folder".
 #
 # The user's objection is the specification for this section: nobody can be
-# expected to remember a phrase that unlocks a capability Jarvis has just said
+# expected to remember a phrase that unlocks a capability Furi has just said
 # it has, and being told to guess one is worse than a plain refusal.
 #
 # THREE separate defects produced that one sentence, and the routing audit
@@ -2253,7 +2253,7 @@ async def test_a_folder_dead_end_is_rescued_the_way_a_web_one_always_was(client)
 
 
 async def test_the_magic_word_demand_never_reaches_the_user(client):
-    """The point of the whole round. Jarvis must not print a phrase to guess
+    """The point of the whole round. Furi must not print a phrase to guess
     and then immediately act — that reads as asking permission and ignoring
     the answer. Asserts no FRAGMENT escapes, not merely the whole sentence:
     the 2026-07-17 look-behind bug shipped exactly that way."""

@@ -1,8 +1,8 @@
 """
-recall_actions (app/tools/activity_tools.py) — Jarvis's own action history.
+recall_actions (app/tools/activity_tools.py) — Furi's own action history.
 
 The tool exists because "the folder YOU created today" is a question about
-Jarvis's audit trail, not the filesystem (live bug 2026-07-13: the planner
+Furi's audit trail, not the filesystem (live bug 2026-07-13: the planner
 answered with every file any program created that day). Uses the memory_tools
 test pattern: a file-backed DB the tool's own sessions point at
 (SESSION_FACTORY) — no test touches the real jarvis.db.

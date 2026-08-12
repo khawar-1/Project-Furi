@@ -1,5 +1,5 @@
 """
-Jarvis OS — Running the remote listener inside the main process (2026-08-03)
+Furi OS — Running the remote listener inside the main process (2026-08-03)
 
 A second `uvicorn.Server` as a lifespan-owned asyncio task, beside
 `start_housekeeping()`. It inherits the process, its database, its scheduler and

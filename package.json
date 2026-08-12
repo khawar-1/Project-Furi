@@ -1,7 +1,7 @@
 {
   "name": "jarvis-os",
   "version": "0.1.0",
-  "description": "Jarvis OS — Personal AI Operating System",
+  "description": "Furi OS — Personal AI Operating System",
   "private": true,
   "main": "dist-electron/main.js",
   "scripts": {
@@ -28,7 +28,7 @@
   },
   "build": {
     "appId": "com.jarvis.os",
-    "productName": "Jarvis OS",
+    "productName": "Furi OS",
     "directories": {
       "output": "release"
     },

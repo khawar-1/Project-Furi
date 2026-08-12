@@ -1,5 +1,5 @@
 """
-Jarvis OS — Routines (Phase 6, Part 5 — teachable procedural memory)
+Furi OS — Routines (Phase 6, Part 5 — teachable procedural memory)
 
 The ONE accessor for the `routines` table (modules own their domain; the
 routine router and the API never touch the table directly — the reminders
@@ -10,7 +10,7 @@ structural approval gate, path guards, and recipient/event-id locks all
 re-apply automatically.
 
 Also home to the "offer-to-save" logic: when the same goal has completed
-enough times (ROUTINE_OFFER_THRESHOLD), Jarvis proactively offers to save it
+enough times (ROUTINE_OFFER_THRESHOLD), Furi proactively offers to save it
 as a routine — spelling out the exact teach phrase so confirmation reuses the
 normal TEACH trigger (no fragile yes/no state machine). The offer is
 throttled to once per goal via the app_settings k/v store, and delivered the
@@ -226,7 +226,7 @@ async def maybe_offer_routine(
 
         await push("routine_offer", {
             "session_id": session_id,
-            "title": "Jarvis",
+            "title": "Furi",
             "body": body,
             "text": body,
             "goal": goal,

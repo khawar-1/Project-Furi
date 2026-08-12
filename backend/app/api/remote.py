@@ -1,5 +1,5 @@
 """
-Jarvis OS — Remote pairing API (2026-08-03)
+Furi OS — Remote pairing API (2026-08-03)
 
 Pair a phone, see what is paired, revoke one. Served on the LOCAL app only —
 these routes are deliberately absent from `remote_manifest.REMOTE_ROUTES`, so a

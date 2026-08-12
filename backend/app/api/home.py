@@ -1,5 +1,5 @@
 """
-Jarvis OS — Home & IoT API (Feature 1)
+Furi OS — Home & IoT API (Feature 1)
 
 Connection settings and a read-only device view for the Settings panel. The
 router only orchestrates (the reminders-router rule: routers orchestrate,
@@ -61,7 +61,7 @@ async def put_settings(update: HomeUpdate, db=Depends(get_db)) -> dict:
     """Save the connection settings.
 
     Validation happens HERE with a 400 rather than a silent drop: this is a
-    human editing a field, and a silently-ignored address reads as "Jarvis is
+    human editing a field, and a silently-ignored address reads as "Furi is
     broken" (the contact-validation rule — a silent drop is right for the LLM,
     wrong for a person)."""
     base_url = ""
@@ -116,7 +116,7 @@ async def test_connection(db=Depends(get_db)) -> dict:
 @router.get("/devices")
 async def list_devices(db=Depends(get_db)) -> dict:
     """Every device the hub exposes, for the Settings audit list — "this is what
-    Jarvis can see and control". Read-only; the agent path goes through the
+    Furi can see and control". Read-only; the agent path goes through the
     tools and their approval gate, never here."""
     config = await get_home_config(db)
     try:

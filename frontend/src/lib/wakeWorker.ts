@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Wake Word inference worker (Phase 12.2, hardened 2026-07-16)
+ * Furi OS — Wake Word inference worker (Phase 12.2, hardened 2026-07-16)
  *
  * Runs openWakeWord's three ONNX models (melspectrogram → embedding →
  * hey_jarvis) via onnxruntime-web, OFF the renderer's main/audio thread. This

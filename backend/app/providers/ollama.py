@@ -1,5 +1,5 @@
 """
-Jarvis OS — Ollama Provider
+Furi OS — Ollama Provider
 Implements the LLMProvider interface using the local Ollama HTTP API.
 No API key required — fully offline and local.
 """

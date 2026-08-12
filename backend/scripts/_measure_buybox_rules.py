@@ -1,5 +1,5 @@
 """
-Jarvis OS — which RULE picks the page's own buy box? (2026-08-10)
+Furi OS — which RULE picks the page's own buy box? (2026-08-10)
 
 `_measure_buybox_identity.py` established the ground truth on the incident's own
 product page: of 16 '/cart/add' forms, **form 0** is the page's own buy box (its

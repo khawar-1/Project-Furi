@@ -1,5 +1,5 @@
 """
-Jarvis OS — Pattern mining (Phase 10, Part 1)
+Furi OS — Pattern mining (Phase 10, Part 1)
 
 Detects RECURRING goals and their temporal cadence from the completed-Task
 history, ON DEMAND — the file_intelligence.frequent_folders precedent: reads

@@ -1,5 +1,5 @@
 """
-Jarvis OS — WHICH /cart/add form is the page's OWN product? (2026-08-10)
+Furi OS — WHICH /cart/add form is the page's OWN product? (2026-08-10)
 
 ⚠️ THIS QUESTION IS LOAD-BEARING FOR SAFETY, not for tidiness.
 `_measure_variant_binding.py` measured the incident's own product page and found:

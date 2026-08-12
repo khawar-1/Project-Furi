@@ -1,5 +1,5 @@
 """
-Jarvis OS — Best-effort chat-history persistence (2026-07-13)
+Furi OS — Best-effort chat-history persistence (2026-07-13)
 
 The ONE way to write a Message row that must never take the feature down
 with it. Every router/runner used to inline the same try/except-log around

@@ -1,5 +1,5 @@
 """
-Jarvis OS — Reading enumeration (query fan-out backstop, 2026-07-17)
+Furi OS — Reading enumeration (query fan-out backstop, 2026-07-17)
 
 Before a web_search runs, ask ONE narrow question in its own temperature-0 call:
 what distinct things could this goal mean, and which did they most likely mean?

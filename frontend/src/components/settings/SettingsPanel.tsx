@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Settings Panel (Phase 5, Part 1)
+ * Furi OS — Settings Panel (Phase 5, Part 1)
  * Home of external integrations; today that's the Google account card.
  * Connect opens the OAuth consent in the system browser (the backend runs
  * the loopback flow); while it's open we poll status — the status endpoint
@@ -94,7 +94,7 @@ const SCOPE_SUMMARY = [
 /** What a paired phone can do — and, just as importantly, what it cannot.
  *  Kept blunt: this is the copy someone reads before opening a port. */
 const REMOTE_SUMMARY = [
-  'See what Jarvis is working on, from your phone',
+  'See what Furi is working on, from your phone',
   'Approve, answer, pause or cancel work already under way',
   'Never starts anything — no chat, no shell, no new task',
 ];
@@ -184,7 +184,7 @@ function GoogleAccountCard() {
             </div>
           ))}
           <p className="text-[11px] text-slate-600 pt-1">
-            Jarvis never deletes or relabels mail — those permissions are not requested.
+            Furi never deletes or relabels mail — those permissions are not requested.
             The sign-in token stays on this machine.
           </p>
         </div>
@@ -344,7 +344,7 @@ function RemoteAccessCard() {
         {!enabled && (
           <div className="p-2.5 rounded-lg bg-surface-2 border border-surface-border text-xs text-slate-400">
             Set <code className="text-cyan-400/90 font-mono">REMOTE_ENABLED=true</code> in{' '}
-            <code className="text-cyan-400/90 font-mono">.env</code> and restart Jarvis to
+            <code className="text-cyan-400/90 font-mono">.env</code> and restart Furi to
             switch this on. Unlike the main API, it listens beyond this machine — use it
             only on a network you trust.
           </div>
@@ -526,7 +526,7 @@ function DailyBriefingCard() {
     >
       <div className="space-y-3">
         <p className="text-xs text-slate-400">
-          Each morning Jarvis gathers today's calendar, unread email, birthdays, and notes
+          Each morning Furi gathers today's calendar, unread email, birthdays, and notes
           into one message. Read-only — nothing is sent or changed.
         </p>
 
@@ -636,7 +636,7 @@ function InitiativeCard() {
           ? nextRun
             ? `Next check: ${nextRun.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}`
             : `Checking every ${settings?.interval_minutes ?? 45} min`
-          : 'Jarvis volunteers helpful suggestions — off'
+          : 'Furi volunteers helpful suggestions — off'
       }
       accessory={
         <Toggle
@@ -650,7 +650,7 @@ function InitiativeCard() {
       {/* The description shows either way — an opened card that renders nothing
           reads as broken. Only the controls are gated on being enabled. */}
       <p className="text-xs text-slate-400">
-        On a throttled schedule, Jarvis reviews your day (calendar, inbox, notes, and
+        On a throttled schedule, Furi reviews your day (calendar, inbox, notes, and
         activity) and surfaces a few timely suggestions in the Suggestions panel.
       </p>
 
@@ -741,7 +741,7 @@ function InitiativeCard() {
             </div>
           </div>
           <p className="text-[11px] text-muted">
-            During quiet hours Jarvis stays silent. Suggestions are also spaced at least{' '}
+            During quiet hours Furi stays silent. Suggestions are also spaced at least{' '}
             {settings.min_gap_minutes} min apart.
           </p>
 
@@ -765,7 +765,7 @@ function InitiativeCard() {
       {!enabled && (
         <div className="px-4 py-3.5">
           <p className="text-xs text-slate-400">
-            When on, Jarvis periodically looks for genuinely useful things to raise — a
+            When on, Furi periodically looks for genuinely useful things to raise — a
             meeting to prep for, an email worth a reply — and offers them quietly. Off by
             default; it never acts without your say-so unless you allow it.
           </p>
@@ -995,7 +995,7 @@ function FileIndexCard() {
     >
       <div className="space-y-4">
         <p className="text-xs text-slate-400">
-          Jarvis indexes the text of your documents (.txt, .md, .pdf, .docx) in the folders
+          Furi indexes the text of your documents (.txt, .md, .pdf, .docx) in the folders
           below so you can find them by meaning, not just filename. Indexing runs locally —
           nothing leaves your machine. Whole drives are never indexed.
         </p>
@@ -1056,7 +1056,7 @@ function FileIndexCard() {
               Folders you use most
             </p>
             <p className="text-[11px] text-slate-500">
-              Learned from your past file actions — Jarvis may suggest the top one when
+              Learned from your past file actions — Furi may suggest the top one when
               you save or move a file without saying where (you still approve it).
             </p>
             <ul className="space-y-1">
@@ -1292,7 +1292,7 @@ function VoiceCard() {
         {
           key: 'output_enabled',
           label: 'Spoken replies',
-          hint: 'Jarvis reads its answers aloud (also the header speaker toggle)',
+          hint: 'Furi reads its answers aloud (also the header speaker toggle)',
           value: settings.output_enabled,
         },
         {
@@ -1341,7 +1341,7 @@ function VoiceCard() {
       summary={
         enabled
           ? 'Push-to-talk and spoken replies — everything runs locally'
-          : 'Talk to Jarvis and hear it answer — off'
+          : 'Talk to Furi and hear it answer — off'
       }
       accessory={
         <Toggle
@@ -1401,7 +1401,7 @@ function VoiceCard() {
               </select>
             </div>
             <p className="text-[11px] text-slate-400 leading-relaxed">
-              Jarvis reads out exactly what it is about to do, and you can say
+              Furi reads out exactly what it is about to do, and you can say
               “approve” instead of clicking. Your answer is tied to the steps you
               were read — if the plan changes, it asks again. A plain “yes” is not
               enough on purpose.
@@ -1448,7 +1448,7 @@ function VoiceCard() {
             <p className="text-[11px] text-slate-400 leading-relaxed">
               {settings.wake_mode === 'model'
                 ? 'The bundled detector recognises “Hey Jarvis” and nothing else — the phrase is built into it. Switch to Speech to use your own.'
-                : 'Jarvis notices when someone speaks, then checks locally whether they said your phrase. Any phrase works, and it costs a little more power than the fixed detector.'}
+                : 'Furi notices when someone speaks, then checks locally whether they said your phrase. Any phrase works, and it costs a little more power than the fixed detector.'}
             </p>
           </div>
         )}
@@ -1613,7 +1613,7 @@ function VoiceCard() {
                   : 'Test mic'}
             </button>
             <button
-              onClick={() => speakText("Hi — I'm Jarvis. This is how I sound.")}
+              onClick={() => speakText("Hi — I'm Furi. This is how I sound.")}
               disabled={!enabled || !settings?.output_enabled || !ttsReady}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-300 bg-surface-2 border border-surface-border hover:border-cyan-500/30 transition-colors disabled:opacity-40"
               title={
@@ -1647,7 +1647,7 @@ const PRESENCE_LABELS: Record<WorldModel['presence'], string> = {
 };
 
 /** Phase 8 — the Context Layer's privacy-first sensing controls + the
- *  "what Jarvis currently sees" audit surface. Every toggle PUTs immediately
+ *  "what Furi currently sees" audit surface. Every toggle PUTs immediately
  *  (optimistic + revert, via the context store). */
 function ContextSensingCard() {
   const {
@@ -1702,7 +1702,7 @@ function ContextSensingCard() {
       accent="text-emerald-400/80"
       title="Context & sensing"
       summary={
-        enabled ? 'Sensing on — local only, nothing stored' : 'Off — Jarvis senses nothing'
+        enabled ? 'Sensing on — local only, nothing stored' : 'Off — Furi senses nothing'
       }
       accessory={
         <Toggle
@@ -1715,7 +1715,7 @@ function ContextSensingCard() {
     >
       <div className="space-y-3">
         <p className="text-xs text-slate-400">
-          Lets Jarvis know what you're doing right now — presence, the active app, and
+          Lets Furi know what you're doing right now — presence, the active app, and
           (optionally) what's on screen — so it can be genuinely helpful later. Everything
           stays on this machine, nothing is saved to disk, and this master switch turns it
           all off instantly.
@@ -1760,7 +1760,7 @@ function ContextSensingCard() {
                 <div className="flex-1 min-w-0">
                   <p className="text-xs text-slate-300">Screen-aware chat</p>
                   <p className="text-[11px] text-muted">
-                    Let Jarvis use on-screen text to answer your questions (sends screen
+                    Let Furi use on-screen text to answer your questions (sends screen
                     text to the language model when you chat).
                   </p>
                 </div>
@@ -1830,10 +1830,10 @@ function ContextSensingCard() {
               </div>
             </div>
 
-            {/* Audit: what Jarvis currently sees */}
+            {/* Audit: what Furi currently sees */}
             <div className="mt-1 p-3 rounded-lg bg-surface-2/50 border border-surface-border space-y-1.5">
               <div className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-slate-500">
-                <ShieldCheck size={11} /> What Jarvis currently sees
+                <ShieldCheck size={11} /> What Furi currently sees
               </div>
               <AuditRow label="Presence" value={world ? PRESENCE_LABELS[world.presence] : '—'} />
               <AuditRow label="Active app" value={world?.active_app || '—'} />
@@ -1925,7 +1925,7 @@ function BrowserAccountCard() {
     <SettingsCard
       icon={<Chrome size={15} />}
       title="Browser account"
-      summary="Sign into YouTube/Google so Jarvis plays as you"
+      summary="Sign into YouTube/Google so Furi plays as you"
       accessory={
         <StatusPill tone={loginOpen ? 'busy' : 'neutral'}>
           {loginOpen ? 'window open' : 'ready'}
@@ -1934,15 +1934,15 @@ function BrowserAccountCard() {
     >
       <div className="space-y-3">
         <p className="text-xs text-slate-400">
-          Jarvis drives its own <span className="text-slate-300">Chrome</span> window with a
+          Furi drives its own <span className="text-slate-300">Chrome</span> window with a
           private profile — separate from your everyday Chrome. Sign in once here and it stays
           signed in for every future play. You type your password directly into Google;
-          Jarvis never sees or stores it.
+          Furi never sees or stores it.
         </p>
         <p className="text-[11px] text-slate-600">
           A public song plays fine without signing in — this only makes playback use your account
           (history, recommendations). Note: Google sometimes refuses sign-in in an automated
-          window; if it does, that's Google's bot check, not a Jarvis error.
+          window; if it does, that's Google's bot check, not a Furi error.
         </p>
 
         {error && (
@@ -2026,7 +2026,7 @@ function BrowserVisionCard() {
           ? 'Needs an image-capable model configured in .env'
           : enabled
             ? 'On — used only when the page structure is not enough'
-            : `Let Jarvis "look" at a page when text alone can't find a control`
+            : `Let Furi "look" at a page when text alone can't find a control`
       }
       accessory={
         <Toggle
@@ -2039,7 +2039,7 @@ function BrowserVisionCard() {
     >
       <div className="space-y-3">
         <p className="text-xs text-slate-400">
-          When driving a live site, Jarvis reads the page's structure to decide what to click.
+          When driving a live site, Furi reads the page's structure to decide what to click.
           On pages with icon-only buttons or visual-only controls that can fail. With this on,
           it falls back to a <span className="text-slate-300">screenshot</span> sent to an
           image-capable model <span className="text-slate-300">only when it gets stuck</span> —
@@ -2051,7 +2051,7 @@ function BrowserVisionCard() {
           <div className="p-2.5 rounded-lg bg-surface-2 border border-surface-border text-[11px] text-slate-500">
             No vision key is configured. Add <span className="font-mono text-slate-400">VISION_API_KEY</span>{' '}
             (or reuse <span className="font-mono text-slate-400">GEMINI_API_KEY</span>) in your{' '}
-            <span className="font-mono text-slate-400">.env</span> to use this. Until then Jarvis
+            <span className="font-mono text-slate-400">.env</span> to use this. Until then Furi
             stays text-only when driving the browser.
           </div>
         )}
@@ -2081,7 +2081,7 @@ const AUTOFILL_KINDS: { value: AutofillKind; label: string }[] = [
   { value: 'secret', label: 'Secret (hidden)' },
 ];
 
-/** The grounded autofill profile (Phase 15.2): the curated data Jarvis fills web
+/** The grounded autofill profile (Phase 15.2): the curated data Furi fills web
  *  forms from. A form value must trace to one of these fields or the user's own
  *  words — never a web page. Secrets are display-masked and never sent to the AI. */
 function AutofillCard() {
@@ -2147,7 +2147,7 @@ function AutofillCard() {
     >
       <div className="space-y-3">
         <p className="text-[11px] text-slate-500">
-          When Jarvis fills a form on a live site, every value must come from this profile
+          When Furi fills a form on a live site, every value must come from this profile
           or your own words — never from the page. Secrets are hidden from the AI and only
           substituted at the moment of filling.
         </p>
@@ -2238,7 +2238,7 @@ function AutofillCard() {
 
 /**
  * Home & IoT (Feature 1) — the Home Assistant connection plus the audit list
- * of what Jarvis can see and control.
+ * of what Furi can see and control.
  *
  * The device list is the TRUST SURFACE, and it is why this card shows one at
  * all: a feature that can unlock a door has to be able to answer "what exactly
@@ -2351,7 +2351,7 @@ function DesktopControlCard() {
     >
       <div className="space-y-3">
         <p className="text-xs text-slate-400">
-          Jarvis already sees which window you have open. This lets it act: switch to a
+          Furi already sees which window you have open. This lets it act: switch to a
           window, open an app, turn the volume down. Every action is shown to you for
           approval first, naming the exact window or application.
         </p>
@@ -2398,7 +2398,7 @@ function DesktopControlCard() {
           />
           <SubToggle
             label="Screenshots"
-            hint="Saves an image of every display to ~/.jarvis/screenshots. Jarvis does not look at it."
+            hint="Saves an image of every display to ~/.jarvis/screenshots. Furi does not look at it."
             checked={settings.allow_screenshot}
             disabled={isBusy || off}
             onToggle={() => void save({ allow_screenshot: !settings.allow_screenshot })}
@@ -2436,7 +2436,7 @@ function DesktopControlCard() {
             }}
             className="w-full flex items-center justify-between text-[11px] text-slate-500 hover:text-slate-300 transition-colors pt-2.5"
           >
-            <span>Applications Jarvis can open{apps ? ` (${apps.count})` : ''}</span>
+            <span>Applications Furi can open{apps ? ` (${apps.count})` : ''}</span>
             <span className="font-mono">{showApps ? '−' : '+'}</span>
           </button>
           {showApps && (
@@ -2565,7 +2565,7 @@ function HomeCard() {
     >
       <div className="space-y-3">
         <p className="text-xs text-slate-400">
-          Connect your Home Assistant hub and Jarvis can read and control the devices in
+          Connect your Home Assistant hub and Furi can read and control the devices in
           your home. Every change — a light, a lock, the thermostat — is shown to you for
           approval first, naming the exact device and room.
         </p>
@@ -2639,7 +2639,7 @@ function HomeCard() {
             disabled={!settings.configured}
             className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-400 bg-surface-2 border border-surface-border hover:border-cyan-500/30 transition-colors disabled:opacity-40"
           >
-            {showDevices ? 'Hide devices' : 'What can Jarvis see?'}
+            {showDevices ? 'Hide devices' : 'What can Furi see?'}
           </button>
         </div>
 
@@ -2652,7 +2652,7 @@ function HomeCard() {
             ) : (
               <>
                 <p className="px-3 pt-2 text-[10px] uppercase tracking-wide text-slate-600">
-                  {devices.count} device(s) Jarvis can see
+                  {devices.count} device(s) Furi can see
                 </p>
                 <ul className="px-3 py-2 space-y-1">
                   {devices.devices.map((d) => (

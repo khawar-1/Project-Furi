@@ -1,10 +1,10 @@
 """
-Jarvis OS — whole-machine performance probe (idle footprint + chat turn latency).
+Furi OS — whole-machine performance probe (idle footprint + chat turn latency).
 
-WHY THIS EXISTS. Two complaints — "make Jarvis fast" and "it makes the laptop
+WHY THIS EXISTS. Two complaints — "make Furi fast" and "it makes the laptop
 stuck and crashes the opened things" — had no number behind either of them. The
 app already measures a chat turn (app/core/timing.py) but nothing had ever read
-the line back; and nothing at all measured what Jarvis costs the MACHINE while
+the line back; and nothing at all measured what Furi costs the MACHINE while
 sitting there, which is the half that produces
 `STATUS_COMMITMENT_LIMIT` (0xC000012D) in ~/.jarvis/logs/renderer-crashes.log.
 
@@ -12,7 +12,7 @@ Two independent modes, because they answer different questions:
 
   --idle    Samples the machine for N seconds: per-process-group CPU and RAM,
             system commit charge, and VRAM. No chat, no backend needed. This is
-            the one that answers "what does Jarvis cost when I am not using it",
+            the one that answers "what does Furi cost when I am not using it",
             and it is how the wake-word / screen-OCR decision gets made:
             run it with the feature on, run it again with it off, diff the two.
 
@@ -70,14 +70,14 @@ except Exception:
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 RESULTS_DIR = Path(__file__).resolve().parent / "bench-results"
 
-# Process-name -> group. Jarvis is several process trees and the interesting
+# Process-name -> group. Furi is several process trees and the interesting
 # question is which TREE is spending, not which pid.
 #
 # chrome/msedge are deliberately NOT here: the user's own browser has the same
 # image name as the browser agent's, and the first cut of this script charged
-# 3.9 GB of a personal Chrome to Jarvis. They are classified by command line
+# 3.9 GB of a personal Chrome to Furi. They are classified by command line
 # instead (see _classify_browser) and split into two groups, only one of which
-# counts toward the Jarvis total.
+# counts toward the Furi total.
 GROUPS = {
     "python": "backend (python)",
     "node": "frontend/dev (node)",
@@ -120,11 +120,11 @@ def logical_cores() -> int:
 
 
 def _classify_browser(pids: list[int]) -> None:
-    """Decide which of `pids` are Jarvis's browser, by command line.
+    """Decide which of `pids` are Furi's browser, by command line.
 
     Only pids not already classified are queried, so a steady set of browser
     windows costs one WMI query for the whole run. An unclassifiable pid is
-    recorded as NOT-Jarvis: over-charging the user's own browser to Jarvis is
+    recorded as NOT-Furi: over-charging the user's own browser to Furi is
     the failure this function exists to prevent, so ambiguity resolves away
     from us.
     """
@@ -239,7 +239,7 @@ def sample_vram() -> dict:
 def run_idle(seconds: int, interval: float, label: str) -> dict:
     cores = logical_cores()
     print(f"Sampling the machine for {seconds}s (every {interval}s), {cores} logical cores.")
-    print("Leave Jarvis alone for the duration - this measures the IDLE cost.\n")
+    print("Leave Furi alone for the duration - this measures the IDLE cost.\n")
 
     prev = sample_processes()
     prev_t = time.perf_counter()
@@ -331,12 +331,12 @@ def _print_idle(r: dict) -> None:
               f"{d['cpu_pct']['p95']:>9.2f} {d['ram_mb']['mean']:>9.0f}")
         # The user's own browser shares an image name with the agent's and is
         # shown for context (it competes for the same commit charge), but it is
-        # not Jarvis's cost and must never inflate the headline.
+        # not Furi's cost and must never inflate the headline.
         if g != OTHER_BROWSER_GROUP:
             total_cpu += d["cpu_pct"]["mean"]
             total_ram += d["ram_mb"]["mean"]
     print("-" * 65)
-    print(f"{'TOTAL (Jarvis only)':<28} {'':>5} {total_cpu:>10.2f} {'':>9} {total_ram:>9.0f}")
+    print(f"{'TOTAL (Furi only)':<28} {'':>5} {total_cpu:>10.2f} {'':>9} {total_ram:>9.0f}")
     sysinfo = r.get("system") or {}
     v = r.get("vram") or {}
     print()
@@ -482,7 +482,7 @@ def _load(label: str) -> dict:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Jarvis whole-machine performance probe")
+    ap = argparse.ArgumentParser(description="Furi whole-machine performance probe")
     ap.add_argument("--idle", type=int, metavar="SECONDS",
                     help="sample the idle footprint for N seconds")
     ap.add_argument("--interval", type=float, default=2.0,

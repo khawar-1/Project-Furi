@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Voice Mode policy (the ONE definition)
+ * Furi OS — Voice Mode policy (the ONE definition)
  *
  * Voice mode is a full-screen, hands-free conversation surface: the sphere takes
  * over the chat's interaction area and the loop runs listen → send → speak →

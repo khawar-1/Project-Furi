@@ -1,5 +1,5 @@
 """
-Jarvis OS — Gemini Provider
+Furi OS — Gemini Provider
 Implements the LLMProvider interface using Google's Gemini API.
 Supports full streaming and embedding generation.
 """

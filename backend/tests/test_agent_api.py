@@ -177,7 +177,7 @@ async def test_tools_endpoint_lists_all_registered_tools(client):
     assert tools["browse_page"]["permission_level"] == "read"
     # Phase 14 Part 2: the browse LOOP and stop_media are READ for the same
     # structural reason — the interceptor aborts every non-GET, so the loop can
-    # navigate and click but never submit. stop_media only closes a window Jarvis
+    # navigate and click but never submit. stop_media only closes a window Furi
     # itself opened. Neither needs approval.
     assert tools["browse"]["permission_level"] == "read"
     assert tools["stop_media"]["permission_level"] == "read"

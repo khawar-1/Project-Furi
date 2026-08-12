@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Sidebar Navigation
+ * Furi OS — Sidebar Navigation
  * HUD-style vertical icon navigation with active glow effects.
  */
 import { clsx } from 'clsx';
@@ -88,7 +88,7 @@ export function Sidebar() {
         </div>
         {!isSidebarCollapsed && (
           <span className="text-sm font-semibold text-slate-200 tracking-wide">
-            Jarvis <span className="text-cyan-400">OS</span>
+            Furi <span className="text-cyan-400">OS</span>
           </span>
         )}
       </div>

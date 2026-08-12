@@ -1,5 +1,5 @@
 """
-Jarvis OS — Browser COMMIT orchestration (Phase 14, Part 5)
+Furi OS — Browser COMMIT orchestration (Phase 14, Part 5)
 
 The security-critical half of browser control: submitting ONE form the user has
 explicitly approved, and nothing else. It is built as two phases with the
@@ -403,7 +403,7 @@ class CommitDiscovery:
     #     window, so the live session (form filled, vendor traffic armed) is
     #     HELD in browser_session's challenge registry and the user ticks the
     #     box in the agent's own headed window; the resumed discovery re-attaches
-    #     to it. Jarvis detects and waits, never solving the challenge.
+    #     to it. Furi detects and waits, never solving the challenge.
     challenge_required: bool = False
     challenge_kind: str = ""
     challenge_site: str = ""
@@ -411,7 +411,7 @@ class CommitDiscovery:
     # DISCOVER's loop would leave the sites the user named for a page-derived
     # origin (an external application/ATS, 2026-07-18). The planner pauses the
     # plan asking the user to approve THIS origin; only their "yes" adds it and
-    # the resumed discovery may reach the off-site form. Jarvis never follows a
+    # the resumed discovery may reach the off-site form. Furi never follows a
     # page-derived site on its own.
     origin_approval_required: bool = False
     origin_candidate: str = ""

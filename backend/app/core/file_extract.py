@@ -1,5 +1,5 @@
 """
-Jarvis OS — File content extraction (Phase 6, Part 2)
+Furi OS — File content extraction (Phase 6, Part 2)
 
 Turns a file on disk into plain text for the semantic file index. Three
 families, one entry point (extract_text):

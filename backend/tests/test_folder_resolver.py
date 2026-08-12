@@ -204,7 +204,7 @@ def test_answer_path_is_enforced_not_trusted(tmp_path, monkeypatch):
     heading for a different same-named copy gets the user's path substituted.
     The original design stood the guard down and trusted the revise LLM to
     fill the choice — live failure 2026-07-12: the user picked D:\\Downloads,
-    the revision kept the home copy, and Jarvis searched the wrong folder."""
+    the revision kept the home copy, and Furi searched the wrong folder."""
     home, d = tmp_path / "home", tmp_path / "d"
     _mkdir(home / "downloads", d / "downloads")
     _wire(monkeypatch, home, [d])

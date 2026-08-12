@@ -3,14 +3,14 @@
 Speaks the three REST endpoints `app/integrations/home_assistant.py` uses
 (`/api/config`, `/api/states`, `/api/services/{domain}/{service}`) with a small
 house full of devices, and PRINTS every service call it receives — so you can
-watch exactly what left Jarvis and reached "the house", and confirm that
+watch exactly what left Furi and reached "the house", and confirm that
 nothing reached it before you approved.
 
 State is real: turning the kitchen light on here actually flips the state this
 hub reports afterwards, so a follow-up "is the kitchen light on?" reads back
 what you just did rather than a canned answer.
 
-Run it in its own terminal, leave it running, then point Jarvis at it in
+Run it in its own terminal, leave it running, then point Furi at it in
 Settings -> Home & devices:
 
     cd backend
@@ -218,7 +218,7 @@ def main() -> int:
     print(f"  {len(STATES)} devices across "
           f"{len({r['attributes'].get('area') for r in STATES.values() if r['attributes'].get('area')})} rooms")
     print()
-    print("  Point Jarvis at it in Settings -> Home & devices, then watch this")
+    print("  Point Furi at it in Settings -> Home & devices, then watch this")
     print("  window: every SERVICE CALL below is something that reached the")
     print("  house. Nothing should appear here until you approve a card.")
     print("=" * 66)

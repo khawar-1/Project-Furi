@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Chat Panel
+ * Furi OS — Chat Panel
  * Main conversation interface with message list, streaming, and input bar.
  *
  * Phase 7, Part 4 — spoken responses: the header hosts the speaker toggle
@@ -35,12 +35,12 @@ function greeting(now = new Date()): string {
 }
 
 /**
- * ⚠️ THE STARTER PROMPTS ASK JARVIS TO DO THINGS, NOT TO DESCRIBE ITSELF.
+ * ⚠️ THE STARTER PROMPTS ASK FURI TO DO THINGS, NOT TO DESCRIBE ITSELF.
  * All four used to be about the product ("What can you do?", "Tell me about
  * your memory system", "How do tools work?", "What's planned for future
  * phases?") — the last one naming our internal build phases. A first screen
  * whose every suggestion is a question about the assistant reads like a demo;
- * these are things someone actually opens Jarvis to get done, and each one
+ * these are things someone actually opens Furi to get done, and each one
  * exercises a different capability that really exists.
  */
 const STARTERS = [
@@ -162,7 +162,7 @@ export function ChatPanel() {
       <div className="flex items-center justify-between h-14 px-4 border-b border-surface-border bg-surface-1 flex-shrink-0">
         <div className="flex items-center gap-3">
           <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shadow-sm" style={{ boxShadow: '0 0 6px rgba(16, 185, 129, 0.6)' }} />
-          <h2 className="text-sm font-semibold text-slate-200">Jarvis Chat</h2>
+          <h2 className="text-sm font-semibold text-slate-200">Furi Chat</h2>
           {isVoiceMode && (
             <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-[10px] font-mono text-cyan-400">
               <AudioLines size={10} />
@@ -198,8 +198,8 @@ export function ChatPanel() {
               disabled={togglingSpeaker}
               title={
                 voiceSettings.output_enabled
-                  ? 'Spoken replies are on — click to mute Jarvis'
-                  : 'Spoken replies are off — click to unmute Jarvis'
+                  ? 'Spoken replies are on — click to mute Furi'
+                  : 'Spoken replies are off — click to unmute Furi'
               }
               className={clsx(
                 'w-7 h-7 rounded-lg flex items-center justify-center transition-fast',
@@ -247,34 +247,44 @@ export function ChatPanel() {
           the header, sidebar and status bar stay live and usable.
           ⚠️ The list stays MOUNTED underneath while voice mode covers it, so
           scroll position survives and leaving voice mode is instant. */}
-      <div className="flex-1 overflow-y-auto relative">
-        {/* `display: contents` adds no box, so EmptyState's h-full still
-            resolves against the scroll container above. `inert` takes the
-            covered chat out of the tab order — without it, focus could still
-            reach a PlanCard's Approve button sitting behind the sphere. */}
-        <div
-          style={{ display: 'contents' }}
-          aria-hidden={isVoiceMode || undefined}
-          {...coveredProps}
-        >
-          {!hasMessages ? (
-            <EmptyState />
-          ) : (
-            <div className="py-4">
-              {messages.map((message) => (
-                <MessageBubble key={message.id} message={message} />
-              ))}
+      {/* ⚠️ THE OVERLAY IS A SIBLING OF THE SCROLLER, NOT A CHILD OF IT.
+          An absolutely positioned child of a scroll container is anchored to the
+          top of the scrollable CONTENT, not to the visible viewport — so with a
+          long conversation (which this panel auto-scrolls to the bottom of on
+          every message) the sphere sat above the visible area entirely. This
+          outer box is the positioned, non-scrolling layer; the inner one
+          scrolls. It is also what lets the voice panel bound its height against
+          the region the user can actually see. */}
+      <div className="flex-1 min-h-0 relative">
+        <div className="absolute inset-0 overflow-y-auto">
+          {/* `display: contents` adds no box, so EmptyState's h-full still
+              resolves against the scroll container above. `inert` takes the
+              covered chat out of the tab order — without it, focus could still
+              reach a PlanCard's Approve button sitting behind the sphere. */}
+          <div
+            style={{ display: 'contents' }}
+            aria-hidden={isVoiceMode || undefined}
+            {...coveredProps}
+          >
+            {!hasMessages ? (
+              <EmptyState />
+            ) : (
+              <div className="py-4">
+                {messages.map((message) => (
+                  <MessageBubble key={message.id} message={message} />
+                ))}
 
-              {/* Show streaming indicator only when the assistant hasn't started outputting yet */}
-              {isStreaming &&
-                messages[messages.length - 1]?.role === 'assistant' &&
-                messages[messages.length - 1]?.content === '' && (
-                  <StreamingIndicator />
-                )}
+                {/* Show streaming indicator only when the assistant hasn't started outputting yet */}
+                {isStreaming &&
+                  messages[messages.length - 1]?.role === 'assistant' &&
+                  messages[messages.length - 1]?.content === '' && (
+                    <StreamingIndicator />
+                  )}
 
-              <div ref={messagesEndRef} />
-            </div>
-          )}
+                <div ref={messagesEndRef} />
+              </div>
+            )}
+          </div>
         </div>
 
         {isVoiceMode && <VoiceModeOverlay />}

@@ -1,5 +1,5 @@
 """
-Jarvis OS — per-run browse trace.
+Furi OS — per-run browse trace.
 
 WHY (2026-07-26). Four live browser tasks failed on one afternoon, and every
 diagnosis had to be reconstructed from a single log line per step:

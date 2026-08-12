@@ -2,11 +2,11 @@ What is built (verified against the tree): 20 DB models, 27 API routers, ~36 too
 
 That is further than most "AI assistant" projects get. The gaps left are not mostly features.
 
-Tier 1 — the things that stop this being Jarvis rather than a very good local agent
+Tier 1 — the things that stop this being Furi rather than a very good local agent
 
 1. It cannot be installed. package.json build.files lists only dist-electron and frontend/dist — the backend is not packaged — and electron/main.ts:74-78 spawns the system python -m uvicorn from app.getAppPath()/backend. So npm run build produces an app that cannot start. No auto-update, no signing, no bundled Python. Right now it runs on exactly one machine because it was built there.
 
-2. It stops thinking when one API is down. factory.py picks one provider from .env and there is no fallback chain anywhere — no ladder, no local degradation, even though Ollama is already implemented. The 2026-07-26 DNS round proved the failure is legible now; it is still fatal. Jarvis never says the provider is unreachable.
+2. It stops thinking when one API is down. factory.py picks one provider from .env and there is no fallback chain anywhere — no ladder, no local degradation, even though Ollama is already implemented. The 2026-07-26 DNS round proved the failure is legible now; it is still fatal. Furi never says the provider is unreachable.
 
 3. Routing is unaudited — your own recorded open gap. ActivityLog captures tool calls, so a fail-open to chat leaves zero evidence. CLAUDE.md says it plainly: for a system whose main failure mode is it did not do the thing, the not-doing is the one thing unaudited — and on 2026-07-17 a live miss genuinely could not be root-caused because of it. This is the highest leverage item on the list: it converts future incidents from archaeology into a query.
 
@@ -14,7 +14,7 @@ Tier 1 — the things that stop this being Jarvis rather than a very good local 
 
 Tier 2 — reach and judgement
 
-5. One machine, one room. BACKEND_HOST stays 127.0.0.1 and should — it runs shell commands. But that means no phone, no away-from-desk, and film Jarvis is ambient. The honest version is a narrow authenticated remote surface (read + approve + ask, never a shell), designed with the same care the auth-token round used.
+5. One machine, one room. BACKEND_HOST stays 127.0.0.1 and should — it runs shell commands. But that means no phone, no away-from-desk, and film Furi is ambient. The honest version is a narrow authenticated remote surface (read + approve + ask, never a shell), designed with the same care the auth-token round used.
 
 6. Nothing learns from failure. file_intelligence learns folders and routines learn procedures — both narrow. Every failed plan, every rejected revision, every dead end is already in ActivityLog and nothing reads it back. That is the closest available thing to it gets better at working for you.
 
@@ -24,4 +24,4 @@ Tier 2 — reach and judgement
 
 Tier 3 — capability breadth (the visible half, and the cheapest)
 
-Messaging beyond email (WhatsApp/Slack/Telegram — the browser stack can already reach WhatsApp Web under the existing gates) · real documents and spreadsheets rather than create_file · music/media control · home and IoT, the single most iconic Jarvis capability and entirely absent · and a guided first run, because today a new user gets a chat box with indexing, voice, sensing and initiative all correctly off.
+Messaging beyond email (WhatsApp/Slack/Telegram — the browser stack can already reach WhatsApp Web under the existing gates) · real documents and spreadsheets rather than create_file · music/media control · home and IoT, the single most iconic Furi capability and entirely absent · and a guided first run, because today a new user gets a chat box with indexing, voice, sensing and initiative all correctly off.

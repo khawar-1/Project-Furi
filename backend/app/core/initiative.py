@@ -1,7 +1,7 @@
 """
-Jarvis OS — The Initiative Engine (Phase 9)
+Furi OS — The Initiative Engine (Phase 9)
 
-Jarvis volunteers the right thing at the right time, safely. A throttled
+Furi volunteers the right thing at the right time, safely. A throttled
 recurring "initiative" scheduler job reasons (ONE DeepSeek pass) over the World
 Model + calendar + inbox + memory + its own cadence signals, and surfaces a
 small number of proactive suggestions — a passive nudge, a question that starts
@@ -362,7 +362,7 @@ def _is_empty(signals: dict) -> bool:
 # ------------------------------------------------------------- composition
 
 _COMPOSER_SYSTEM = (
-    "You are Jarvis, the user's personal AI — composed, quietly capable, and "
+    "You are Furi, the user's personal AI — composed, quietly capable, and "
     "genuinely helpful. You are scanning the user's day to decide whether "
     "anything is worth proactively raising RIGHT NOW. Most of the time the "
     "honest answer is 'nothing' — a good butler does not invent errands. "
@@ -568,7 +568,7 @@ def _parse_initiatives(content: str) -> InitiativeSet:
 async def compose_initiatives(signals: dict, provider=None) -> list[InitiativeCandidate]:
     """ONE LLM pass over the code-gathered data → validated candidates. Validate-
     retry-once, then produce NOTHING on failure. Unlike the briefing there is no
-    deterministic fallback: Jarvis inventing proactive actions from a broken
+    deterministic fallback: Furi inventing proactive actions from a broken
     parse is exactly the failure mode to avoid — silence is safe."""
     if _is_empty(signals):
         return []
@@ -750,7 +750,7 @@ async def _run_pass(db: AsyncSession, config, provider=None) -> int:
     candidates.sort(key=lambda c: _priority_rank(c.priority))
 
     # Phase 13.2 — when the user reads as busy/stressed (with enough confidence),
-    # raise the surfacing bar: only HIGH-priority candidates survive, so Jarvis
+    # raise the surfacing bar: only HIGH-priority candidates survive, so Furi
     # doesn't pile trivia on someone already under load. Deterministic and
     # strictly reductive — it can only drop candidates, never add or upgrade one.
     if _under_load(signals):

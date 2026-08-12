@@ -1,5 +1,5 @@
 """
-Jarvis OS — CUDA runtime bootstrap (Phase 7 voice-speed round)
+Furi OS — CUDA runtime bootstrap (Phase 7 voice-speed round)
 
 Both voice engines can run on the machine's GPU: faster-whisper (STT) through
 ctranslate2's CUDA backend, and Kokoro (TTS) through onnxruntime-gpu's
@@ -127,7 +127,7 @@ def reset_cuda_probe() -> None:
     _cuda_available = None
 
 
-#: Logical cores deliberately left to the rest of the machine. Jarvis is a
+#: Logical cores deliberately left to the rest of the machine. Furi is a
 #: desktop app sharing a laptop with the user's real work, not a batch job that
 #: owns the box.
 _RESERVED_CORES = 2

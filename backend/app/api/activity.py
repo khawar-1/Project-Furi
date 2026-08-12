@@ -1,8 +1,8 @@
 """
-Jarvis OS — Activity API (Phase 3, Part 5)
+Furi OS — Activity API (Phase 3, Part 5)
 Read-only access to the ActivityLog audit trail (written by execute_tool for
 every tool invocation — including blocked approval-gate attempts) and, since
-2026-08-03, to the two trails that record what Jarvis DIDN'T do: routing (one
+2026-08-03, to the two trails that record what Furi DIDN'T do: routing (one
 row per chat turn, saying which router took it and — when none did — why) and
 plan traces (one row per planner invocation, saying why a plan gave up).
 
@@ -138,7 +138,7 @@ async def list_routing_decisions(
     limit: int = Query(50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
 ) -> list:
-    """The audit trail for what Jarvis DIDN'T do.
+    """The audit trail for what Furi DIDN'T do.
 
     Filter by `fail_open_reason` to separate the three causes of a chat outcome
     that are otherwise identical from outside: the gate never fired, the model

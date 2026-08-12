@@ -1,5 +1,5 @@
 """
-Jarvis OS — Settings API (Phase 5, Part 6)
+Furi OS — Settings API (Phase 5, Part 6)
 
 Runtime app settings the user toggles from the UI. Today that's the daily
 briefing (on/off + time). Everything goes through app/core/app_settings.py and

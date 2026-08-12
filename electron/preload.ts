@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Electron Preload Script
+ * Furi OS — Electron Preload Script
  * Exposes a typed `window.jarvis` API to the renderer via contextBridge.
  * This is the only bridge between the sandboxed renderer and Node.js.
  */

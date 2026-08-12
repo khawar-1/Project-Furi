@@ -1,5 +1,5 @@
 """
-Jarvis OS — Local speech-to-text (Phase 7, Part 1; GPU-accelerated voice round)
+Furi OS — Local speech-to-text (Phase 7, Part 1; GPU-accelerated voice round)
 
 faster-whisper behind an injectable factory (the google_services pattern):
 STT_MODEL_FACTORY is the ONE seam tests swap — the suite never downloads or

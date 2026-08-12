@@ -1,5 +1,5 @@
 """
-Jarvis OS — Deterministic plan rendering (Phase 3, shared since Phase 4 Part 5)
+Furi OS — Deterministic plan rendering (Phase 3, shared since Phase 4 Part 5)
 
 The plain-language texts for plan outcomes live HERE, in the agents package,
 so both the chat task router (inline plans) and the background task runner
@@ -428,8 +428,8 @@ def _action_line(row: dict) -> str:
 def _fmt_recall_actions(output: dict) -> str:
     actions = output.get("actions") or []
     if not actions:
-        return "No recorded actions matched — Jarvis has not performed any matching action."
-    lines = [f"Jarvis performed {len(actions)} recorded action(s) (newest first):"]
+        return "No recorded actions matched — Furi has not performed any matching action."
+    lines = [f"Furi performed {len(actions)} recorded action(s) (newest first):"]
     for row in actions:
         lines.append(f"- {_action_line(row)}")
     return "\n".join(lines)
@@ -536,7 +536,7 @@ def _fmt_screenshot(output: dict) -> str:
 def _fmt_clipboard(output: dict) -> str:
     """The clipboard's text, fenced. Fenced because it is UNTRUSTED prose the
     user copied from somewhere — it may carry its own markdown, and it must
-    never read as part of Jarvis's own answer."""
+    never read as part of Furi's own answer."""
     text = str(output.get("text") or "")
     if not text.strip():
         return "The clipboard is empty, or holds something that is not text."

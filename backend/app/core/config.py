@@ -1,5 +1,5 @@
 """
-Jarvis OS — Application Configuration
+Furi OS — Application Configuration
 Single source of truth for all environment-driven settings.
 Uses Pydantic Settings for automatic env-var loading and validation.
 """

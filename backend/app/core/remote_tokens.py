@@ -1,5 +1,5 @@
 """
-Jarvis OS — Remote device tokens (2026-08-03)
+Furi OS — Remote device tokens (2026-08-03)
 
 *(Tier 2, item 5 — "one machine, one room")*
 

@@ -1,5 +1,5 @@
 """
-Jarvis OS — Goal threads API (Phase 11, Part 3 — ongoing-concern tracking)
+Furi OS — Goal threads API (Phase 11, Part 3 — ongoing-concern tracking)
 
 Read + resolve/dismiss surface over goal threads for the Threads panel. Threads
 are primarily CAPTURED from conversation by the extractor; this router lets the

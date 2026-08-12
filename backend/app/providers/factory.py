@@ -1,5 +1,5 @@
 """
-Jarvis OS — LLM Provider Factory
+Furi OS — LLM Provider Factory
 Reads LLM_PROVIDER from config and instantiates the correct provider.
 New providers are added here — no other code changes needed.
 """

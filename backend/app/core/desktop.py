@@ -1,7 +1,7 @@
 """
-Jarvis OS — Desktop control (Feature 2)
+Furi OS — Desktop control (Feature 2)
 
-The OS abstraction behind `app/tools/desktop_tools.py`. Phase 8 taught Jarvis to
+The OS abstraction behind `app/tools/desktop_tools.py`. Phase 8 taught Furi to
 SENSE the desktop (active app, window title, idle time, screen OCR) and gave it
 no way to ACT on any of it; this closes that asymmetry.
 

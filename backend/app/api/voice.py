@@ -1,5 +1,5 @@
 """
-Jarvis OS — Voice API (Phase 7, Parts 1 + 3)
+Furi OS — Voice API (Phase 7, Parts 1 + 3)
 
 The runtime voice endpoints: transcribe one push-to-talk utterance, speak one
 piece of text, and the model status the UI polls while the (large, opt-in)

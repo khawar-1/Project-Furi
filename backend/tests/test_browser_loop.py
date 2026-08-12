@@ -1839,7 +1839,7 @@ async def test_an_internal_host_is_never_offered_for_approval(monkeypatch):
 async def test_an_off_site_navigation_halts_the_loop_for_approval(monkeypatch):
     """End to end: the model tries to leave the named site for a page-derived
     origin → the loop STOPS with origin_approval_required naming that origin, and
-    never issues the navigation (no goto acted). Jarvis asks before it leaves."""
+    never issues the navigation (no goto acted). Furi asks before it leaves."""
     monkeypatch.setattr("app.tools.browser_tools._host_is_blocked", lambda h: False)
     home = _page([_el(1, role="link", name="Apply", href="https://greenhouse.io/apply/1")],
                  url="https://weworkremotely.com/jobs/1")

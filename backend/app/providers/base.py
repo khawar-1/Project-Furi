@@ -1,5 +1,5 @@
 """
-Jarvis OS — LLM Provider Base Protocol
+Furi OS — LLM Provider Base Protocol
 Defines the interface all LLM providers must implement.
 Business logic never imports a concrete provider — only this interface.
 """

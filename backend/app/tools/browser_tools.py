@@ -1,7 +1,7 @@
 """
-Jarvis OS — Browser Tools (Phase 6, Part 1)
+Furi OS — Browser Tools (Phase 6, Part 1)
 
-Two single-action READ tools that let Jarvis reach the open web:
+Two single-action READ tools that let Furi reach the open web:
 
   web_search     READ   find pages for a query via a search provider
                         (DuckDuckGo, keyless) — returns title/url/snippet rows
@@ -76,7 +76,7 @@ CONTENT_MAX_CHARS = 1_200
 # 2026-07-17: "which teams have qualified for fifa worldcup final 2026" is
 # genuinely ambiguous English ("the World Cup Finals" IS the tournament in
 # football usage), the one query said "qualified", the top result was the
-# qualification page, and Jarvis answered with 48 teams two days before a
+# qualification page, and Furi answered with 48 teams two days before a
 # 2-team final. Rephrased, it answered correctly. Google answers both, and not
 # by understanding better: it fans the question out into several readings,
 # retrieves for each, and lets synthesis decide with the evidence in hand.
@@ -109,7 +109,7 @@ RRF_K = 60
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36 Jarvis/1.0"
+    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36 Furi/1.0"
 )
 _DDG_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
 _DDG_LITE_ENDPOINT = "https://lite.duckduckgo.com/lite/"

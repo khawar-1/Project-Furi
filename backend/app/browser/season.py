@@ -1,5 +1,5 @@
 """
-Jarvis OS — Latest-season resolution (2026-08-07)
+Furi OS — Latest-season resolution (2026-08-07)
 
 "play the latest episode of the latest SEASON of X" needs two different facts,
 and they are knowable in two different places:

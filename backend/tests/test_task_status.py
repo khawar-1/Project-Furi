@@ -1,6 +1,6 @@
 """
 Progress-aware chat: app/core/task_status.active_tasks_context — the
-BACKGROUND WORK block injected so Jarvis answers "how's the browser task going?"
+BACKGROUND WORK block injected so Furi answers "how's the browser task going?"
 from live Task rows, never from imagination.
 """
 from datetime import timedelta
@@ -88,5 +88,5 @@ async def test_missing_domain_falls_to_general_label(factory):
     async with factory() as db:
         await _add(db, session_id="s1", goal="legacy task", status="running", domain=None)
         block = await active_tasks_context(db, "s1")
-    assert "Jarvis" in block  # general agent display name
+    assert "Furi" in block  # general agent display name
     assert "legacy task" in block

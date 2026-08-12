@@ -5,7 +5,7 @@ THE DEFECT THESE PIN. `BrowserSession.open()` did a full
 `launch_persistent_context` per session and `close()` closed that context.
 Chromium allows one live context per profile, so every launch site first closed
 the sign-in window, the result window, the media session and the held agent
-window — the Chrome-closes-and-reopens flicker, and the reason Jarvis could only
+window — the Chrome-closes-and-reopens flicker, and the reason Furi could only
 ever hold ONE tab. The context is now a singleton that outlives sessions; a
 session is a tab in it.
 

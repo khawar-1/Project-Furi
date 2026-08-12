@@ -1,5 +1,5 @@
 """
-Jarvis OS — Relationship & memory cadence (Phase 11, Parts 1 & 2)
+Furi OS — Relationship & memory cadence (Phase 11, Parts 1 & 2)
 
 Read-only signals for the Initiative Engine, derived on demand (the
 file_intelligence precedent — no new table, best-effort → []):

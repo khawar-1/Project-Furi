@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Routines Panel (Phase 6, Part 5)
+ * Furi OS — Routines Panel (Phase 6, Part 5)
  * List/run/delete surface over saved routines. Teaching a routine happens
  * through chat ("save this as a routine called clean desktop"); this panel is
  * where you see them, run one on demand, and delete the ones you no longer

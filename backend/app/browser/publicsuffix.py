@@ -1,5 +1,5 @@
 """
-Jarvis OS — public suffixes, bundled and deliberately partial.
+Furi OS — public suffixes, bundled and deliberately partial.
 
 WHY THIS EXISTS
 ---------------

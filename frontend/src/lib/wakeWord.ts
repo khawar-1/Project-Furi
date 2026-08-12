@@ -1,5 +1,10 @@
 /**
- * Jarvis OS — Wake Word "Hey Jarvis" (Phase 12.2)
+ * Furi OS — Wake Word (Phase 12.2)
+ *
+ * ⚠️ The bundled openWakeWord model is literally named "Hey Jarvis" and its
+ * phrase is baked into its WEIGHTS — renaming it here would be a lie about a
+ * third-party artifact. The configurable 'speech' mode is what listens for
+ * "Furi"; see wakePhrase.ts.
  *
  * Fully ON-DEVICE wake-word detection. An always-on 16 kHz mic stream is
  * captured on the main thread and forwarded to a Web Worker (wakeWorker.ts),
@@ -22,7 +27,7 @@
  *
  * Structural gates (the caller keys start/stop on enabled && wake_word):
  * - Detection is SUSPENDED whenever the mic is otherwise in use (phase !==
- *   'idle') or Jarvis is speaking — prevents self-trigger and mic contention;
+ *   'idle') or Furi is speaking — prevents self-trigger and mic contention;
  *   the worker's buffers reset on suspend so no stale audio triggers on resume.
  * - A cooldown after each trigger avoids double-fires.
  *
@@ -424,7 +429,7 @@ function closeMic(): void {
 
 // ------------------------------------------------------------- suspend/resume
 
-/** Suspend while the mic is otherwise busy or Jarvis is speaking; resume on a
+/** Suspend while the mic is otherwise busy or Furi is speaking; resume on a
  *  return to idle. Tell the worker to drop its buffers on suspend so no stale
  *  audio triggers later. */
 function subscribeSuspend(): void {
@@ -435,7 +440,7 @@ function subscribeSuspend(): void {
       suspended = true;
       worker?.postMessage({ type: 'reset' });
       // Drop the half-captured utterance too: resuming mid-phrase would post a
-      // fragment, and Jarvis's own voice must never buffer into a wake check.
+      // fragment, and Furi's own voice must never buffer into a wake check.
       gate?.reset();
     } else if (!shouldSuspend && suspended) {
       suspended = false;

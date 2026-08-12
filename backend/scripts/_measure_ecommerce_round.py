@@ -1,5 +1,5 @@
 """
-Jarvis OS — the three pages behind the 2026-08-09 e-commerce report
+Furi OS — the three pages behind the 2026-08-09 e-commerce report
 
 WHY THIS EXISTS. Two live runs produced four defects, and planning them off
 INVENTED page shapes went wrong twice in a row — which is the recorded rule

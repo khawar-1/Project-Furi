@@ -1,10 +1,10 @@
 """
-Jarvis OS — Goal threads (Phase 11, Part 3 — ongoing-concern tracking)
+Furi OS — Goal threads (Phase 11, Part 3 — ongoing-concern tracking)
 
 The ONE accessor for the `goal_threads` table (the reminders rule — the
 extractor, the initiative gatherer, and the API all go through here; none
 touch the table directly). A goal thread is a lightweight ongoing concern —
-"the deadline I was worried about", "prepping for the interview" — that Jarvis
+"the deadline I was worried about", "prepping for the interview" — that Furi
 can proactively follow up on ("last week you were worried about X; did it
 land?").
 

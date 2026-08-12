@@ -1,5 +1,5 @@
 """
-Jarvis OS — Health Check API
+Furi OS — Health Check API
 Returns backend status, database connection, Qdrant availability, and active LLM provider.
 """
 from datetime import datetime

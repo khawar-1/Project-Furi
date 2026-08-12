@@ -1,5 +1,5 @@
 """
-Jarvis OS — Memory conflict capture (2026-08-04)
+Furi OS — Memory conflict capture (2026-08-04)
 
 *(Tier 2, item 7 of `suhhestionsfromclaude.txt` — "conflict handling is
 supersede-only")*

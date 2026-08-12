@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Voice Mode entry / exit
+ * Furi OS — Voice Mode entry / exit
  *
  * The two transitions, in one place, so every trigger (the composer button, the
  * X, Escape, the sidebar item, an unmount) does exactly the same thing.
@@ -28,7 +28,7 @@ function canEnterVoiceMode(settings: VoiceSettings | null): boolean {
 /**
  * Open voice mode and, when the moment is right, start listening immediately.
  *
- * The mic is deliberately NOT opened when Jarvis is mid-reply (that would cut
+ * The mic is deliberately NOT opened when Furi is mid-reply (that would cut
  * him off the instant you asked to hear him) or when an approval card is
  * waiting (a decision the user must see). In both cases the sphere appears in
  * the matching state and the existing conversation loop takes over on its own.
@@ -79,7 +79,7 @@ export function exitVoiceMode(): void {
  * second copy of the rules.
  *
  * - listening  → send what has been said, without waiting for the pause
- * - speaking   → barge in: silence Jarvis and take the floor
+ * - speaking   → barge in: silence Furi and take the floor
  * - idle       → start talking
  * - thinking   → nothing; there is nothing useful to interrupt
  */
@@ -95,7 +95,7 @@ export function toggleVoiceListening(): void {
   if (voice.speaking) {
     // ⚠️ cancelTurn BEFORE stopSpeaking. stopSpeaking only clears what is
     // already queued; the turn would keep enqueueing the sentences still
-    // streaming in, and Jarvis would start talking again a second later.
+    // streaming in, and Furi would start talking again a second later.
     cancelTurn();
     stopSpeaking();
   }

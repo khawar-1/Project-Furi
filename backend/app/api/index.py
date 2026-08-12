@@ -1,5 +1,5 @@
 """
-Jarvis OS — File index API (Phase 6, Part 2)
+Furi OS — File index API (Phase 6, Part 2)
 
 The user-facing controls for the semantic file index: which folders it covers,
 what to exclude, and a manual "index now" trigger + live status. Config lives in

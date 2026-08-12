@@ -1,5 +1,5 @@
 """
-Jarvis OS — Routines API (Phase 6, Part 5 — teachable procedural memory)
+Furi OS — Routines API (Phase 6, Part 5 — teachable procedural memory)
 
 List/create/delete access to saved routines, plus a direct run endpoint. The
 PRIMARY creation path is chat ("save this as a routine called X" — see

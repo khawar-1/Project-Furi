@@ -52,7 +52,7 @@ class Handoff(str, Enum):
     TARGET_CHOICE = "target_choice"      # several page items match equally well
     ORIGIN_APPROVAL = "origin_approval"  # page-derived off-site origin
     ACTION_APPROVAL = "action_approval"  # a world-acting gesture in READ mode
-    CHALLENGE = "challenge"              # CAPTCHA — never solved by Jarvis
+    CHALLENGE = "challenge"              # CAPTCHA — never solved by Furi
     COMMIT = "commit"                    # form contract awaiting approval
     NEXT_COMMIT = "next_commit"          # multi-commit: next form ready
     WINDOW_EXPIRED = "window_expired"    # a resume found its held window gone
@@ -81,7 +81,7 @@ class HandoffPayload:
     # than a separate window being opened (2026-08-08). WHERE THE USER SHOULD
     # LOOK — the pause text must not say "I've opened a window" about a tab that
     # was already on screen, which is how the live incident's episode-1 page read
-    # as Jarvis's answer instead of as the page it had stopped on. One field for
+    # as Furi's answer instead of as the page it had stopped on. One field for
     # every kind, because the question is identical for all of them; the CHALLENGE
     # branch has read `challenge_in_place` since 2026-08-03 and nothing had ever
     # passed it, so it also closes that.

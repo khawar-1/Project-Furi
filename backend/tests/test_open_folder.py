@@ -224,7 +224,7 @@ async def test_a_launcher_failure_names_the_folder_it_could_not_open(
 async def test_a_launcher_that_returns_is_success(db_session, tmp_path, opened):
     """⚠️ THE FALSE-FAILED FIX, pinned. `explorer.exe` conventionally exits
     non-zero having opened the window perfectly well, and `run_command` treats
-    any non-zero exit as failure — which is how Jarvis used to open the folder
+    any non-zero exit as failure — which is how Furi used to open the folder
     and then report the step FAILED. This tool never consults an exit code:
     a launcher that starts is a success, and only one that cannot start fails."""
     result = await execute_tool(
@@ -746,4 +746,4 @@ def test_the_mode_rule_names_opening_a_folder_as_a_quick_read():
     from app.api.task_router import _CLASSIFY_PROMPT
 
     assert "open a folder on screen" in _CLASSIFY_PROMPT
-    assert "Opening a folder is INLINE even when Jarvis has to search" in _CLASSIFY_PROMPT
+    assert "Opening a folder is INLINE even when Furi has to search" in _CLASSIFY_PROMPT

@@ -1,5 +1,5 @@
 """
-Jarvis OS — Cooperative Plan Cancellation (Phase 4, Part 6)
+Furi OS — Cooperative Plan Cancellation (Phase 4, Part 6)
 
 Cancel a background task MID-PLAN, between steps. The rules, all in code:
 

@@ -5,7 +5,7 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // ---- Jarvis OS Dark Palette
+        // ---- Furi OS Dark Palette
         surface: {
           DEFAULT: '#0A0A0F',
           1: '#0F0F17',

@@ -1,5 +1,5 @@
 """
-Jarvis OS — Groq Provider
+Furi OS — Groq Provider
 Implements the LLMProvider interface using the Groq API.
 Groq provides ultra-fast inference on open models (Llama, Mixtral, etc.).
 """

@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Contact create/edit modal (Phase 5 Part 2).
+ * Furi OS — Contact create/edit modal (Phase 5 Part 2).
  *
  * One form for both modes. Name is create-only: the engine's update path has
  * no rename support (a rename needs the create-path duplicate check), so edit

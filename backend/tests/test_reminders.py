@@ -241,7 +241,7 @@ async def test_late_fire_body_says_how_late(factory, sched):
     await sched._fire(reminder.job_id)
 
     body = sock.sent[0]["payload"]["body"]
-    assert "missed while Jarvis was offline" in body
+    assert "missed while Furi was offline" in body
     assert "was due 5 minutes ago" in body
     assert "take shower" in body
 

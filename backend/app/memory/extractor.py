@@ -1,5 +1,5 @@
 """
-Jarvis OS — Extraction Pipeline
+Furi OS — Extraction Pipeline
 After every user message, silently extract entities and preferences.
 Runs as a background task — never blocks the streaming response.
 """
@@ -110,7 +110,7 @@ Return ONLY valid JSON with this exact structure (no explanation, no markdown):
 CRITICAL RULES — READ CAREFULLY:
 1. USE CONVERSATION CONTEXT: Resolve ALL pronouns. If the user says "it's called Remo Office", look back in the conversation to see what "it" refers to. Never leave a reference unresolved.
 2. CORRECTIONS: If the user corrects a name or entity (e.g. "I meant Hamil" instead of "Jameell"), you MUST re-extract any facts (like phone numbers, emails, skills) that were provided for the wrong name in recent turns and attach them to the correct name in the current extraction.
-3. CONTACTS — HUMANS ONLY: NEVER create contact entries for AI tools, bots, or software. This includes: Jarvis, ChatGPT, GPT-4, Claude, Gemini, Antigravity, Copilot, Llama, Mistral. NEVER include the USER THEMSELVES in people_mentioned — the user is not their own contact; facts about the user go in user_profile_enrichment or facts_about_user.
+3. CONTACTS — HUMANS ONLY: NEVER create contact entries for AI tools, bots, or software. This includes: Furi, ChatGPT, GPT-4, Claude, Gemini, Antigravity, Copilot, Llama, Mistral. NEVER include the USER THEMSELVES in people_mentioned — the user is not their own contact; facts about the user go in user_profile_enrichment or facts_about_user.
 4. DATES IN FACTS: If a fact involves a specific event, date, or time, resolve the relative date using the CURRENT SYSTEM DATE above, include the absolute YYYY-MM-DD date inside the fact text itself, AND set "event_date". TENSE MUST MATCH THE DATE: if the event is in the FUTURE relative to the current system date, phrase BOTH perspectives as a plan (e.g. 'Planning to go fishing with {{CONTACT:Ali}} on 2026-08-01') — NEVER past tense ('Went fishing...' is wrong for a future date). Past events use past tense.
 5. SKILLS: Extract skills for people (e.g. "Python", "AI Engineering", "React"). Always populate the "skills" array when a person's skills are mentioned.
 6. RELATIONSHIPS: Extract every explicit relationship as an edge. Use ONLY these edge_types: FRIEND_OF, CLIENT_OF, COLLABORATES_WITH. For anything else, use OTHER and populate edge_label. Confidence: 1.0 if user explicitly stated it, 0.7 if inferred.
@@ -213,7 +213,11 @@ async def extract_entities(
 
 # Names that must never become contacts, even if the LLM slips
 AI_TOOLS = {
-    "jarvis", "chatgpt", "gpt", "gpt-4", "gpt-3", "claude", "gemini",
+    # ⚠️ BOTH NAMES, and "jarvis" stays FOREVER. This set is what keeps the
+    # assistant from being saved as a CONTACT. Dropping the old name would make
+    # every "jarvis, remind me…" in existing history eligible to become a
+    # person; the cost of keeping it is one word that is never anyone's name.
+    "furi", "jarvis", "chatgpt", "gpt", "gpt-4", "gpt-3", "claude", "gemini",
     "antigravity", "copilot", "llama", "mistral", "bard", "perplexity",
     "midjourney", "dall-e", "stable diffusion", "anthropic", "openai",
 }

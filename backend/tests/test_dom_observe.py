@@ -517,7 +517,7 @@ async def test_long_names_are_clipped_defensively():
 
 
 def test_a_password_role_element_renders_without_its_value():
-    """Jarvis does not handle credentials. The JS never reads a password value;
+    """Furi does not handle credentials. The JS never reads a password value;
     this pins the render side so a future change cannot leak one into a prompt."""
     obs = Observation(
         observation_id="x",
@@ -540,7 +540,7 @@ def test_the_extract_js_never_reads_a_password_value():
 
 
 # ---------------------------------------------- challenge zones (2026-07-19)
-# The structural half of "Jarvis never touches a CAPTCHA": the probe reports
+# The structural half of "Furi never touches a CAPTCHA": the probe reports
 # the widget boxes as `zones`, the element walk skips anything overlapping one,
 # and these Python helpers back the act-time and vision-path vetoes.
 def _challenge_obs(challenge):

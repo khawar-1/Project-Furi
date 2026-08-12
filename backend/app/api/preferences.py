@@ -1,5 +1,5 @@
 """
-Jarvis OS — Preferences API (Phase 2)
+Furi OS — Preferences API (Phase 2)
 Read and delete auto-extracted user preferences.
 """
 from fastapi import APIRouter, Depends, HTTPException

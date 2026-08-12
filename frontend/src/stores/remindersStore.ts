@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Reminders Store (Zustand)
+ * Furi OS — Reminders Store (Zustand)
  * List/cancel state for the Reminders panel (Phase 4, Part 4).
  */
 import { create } from 'zustand';

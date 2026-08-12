@@ -1,5 +1,5 @@
 """
-Jarvis OS — Episodes API (Phase 2)
+Furi OS — Episodes API (Phase 2)
 Read-only access to episodic memory (auto-populated by extraction pipeline).
 """
 from fastapi import APIRouter, Depends, Query

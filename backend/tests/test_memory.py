@@ -1,5 +1,5 @@
 """
-Jarvis OS — Memory engine tests (SQLite-only mode, no Qdrant).
+Furi OS — Memory engine tests (SQLite-only mode, no Qdrant).
 Run with: venv\\Scripts\\python -m pytest tests/ -v
 """
 import json

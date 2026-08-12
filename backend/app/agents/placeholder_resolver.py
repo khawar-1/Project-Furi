@@ -1,5 +1,5 @@
 """
-Jarvis OS — Deterministic Placeholder Resolution (planner hardening, 2026-07-10)
+Furi OS — Deterministic Placeholder Resolution (planner hardening, 2026-07-10)
 
 "PENDING: ..." placeholders are the planner's DESIGNED data-flow mechanism
 (plan rule 3): a step that consumes paths an earlier step will discover

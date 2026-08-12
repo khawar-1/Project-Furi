@@ -1,4 +1,4 @@
-"""Shared fixtures for the Jarvis OS backend test suite."""
+"""Shared fixtures for the Furi OS backend test suite."""
 import uuid
 
 import pytest

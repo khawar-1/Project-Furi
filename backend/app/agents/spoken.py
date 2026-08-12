@@ -1,5 +1,5 @@
 """
-Jarvis OS — The approval contract, spoken (2026-08-03)
+Furi OS — The approval contract, spoken (2026-08-03)
 
 *(Tier 2, item 8 of `suhhestionsfromclaude.txt` — "approval needs a screen")*
 
@@ -304,7 +304,7 @@ _SPOKEN_APPROVE_RE = re.compile(
 )
 # Filler that may trail consent without turning it into an instruction.
 _SPOKEN_NOISE = frozenset({
-    "please", "now", "jarvis", "thanks", "thank", "you", "sir", "it", "that",
+    "please", "now", "furi", "jarvis", "thanks", "thank", "you", "sir", "it", "that",
     "then", "and", "just", "go", "ahead", "on", "with", "the", "task", "all",
     "of", "them", "yes", "ok", "okay", "sure", "do", "this", "for", "me",
 })
@@ -333,7 +333,7 @@ def spoken_approval_level(config) -> str:
     so with voice itself switched off a client could still approve a write by
     posting a `spoken` block — while the guard's own comment claimed it stopped
     "a stale or hostile client". `output_enabled` is deliberately NOT consulted:
-    that governs whether Jarvis SPEAKS, and a user who reads the contract on
+    that governs whether Furi SPEAKS, and a user who reads the contract on
     screen and answers aloud is still giving consent.
 
     This exists as a function rather than one more line at the call site

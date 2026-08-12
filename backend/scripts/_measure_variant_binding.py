@@ -1,5 +1,5 @@
 """
-Jarvis OS — HOW does this product page carry its size? (2026-08-10)
+Furi OS — HOW does this product page carry its size? (2026-08-10)
 
 `_measure_cart_controls.py` found the buy-box form and `choice.axes_of` reported
 **AXES = 0** on it: the form's own `form.elements` are

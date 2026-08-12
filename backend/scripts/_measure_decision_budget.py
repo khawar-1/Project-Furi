@@ -1,5 +1,5 @@
 """
-Jarvis OS — what does a COMMIT decision really cost? (2026-08-10)
+Furi OS — what does a COMMIT decision really cost? (2026-08-10)
 
 The incident's own log shows the decision call returning an EMPTY string three
 times on a product page, at `decide_ms` 24-30s:

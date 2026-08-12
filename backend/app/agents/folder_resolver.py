@@ -1,5 +1,5 @@
 """
-Jarvis OS — Same-Named Folder Disambiguation (planner hardening, 2026-07-12)
+Furi OS — Same-Named Folder Disambiguation (planner hardening, 2026-07-12)
 
 "A folder name is not a location — it is a location on EVERY drive."
 
@@ -73,7 +73,7 @@ heading for a different same-named copy gets the user's path substituted.
 Standing down and trusting the revise LLM to fill the picked option was the
 original design — live failure 2026-07-12 (verification run): the user picked
 D:\\Downloads, the revise round kept C:\\Users\\DELL\\Downloads, the stood-down
-guard let it run, and Jarvis reported "no PDF files" from the wrong folder.
+guard let it run, and Furi reported "no PDF files" from the wrong folder.
 A vaguer qualifier ("the one on d drive") still just stands the guard down.
 Either way the answer→re-plan loop terminates: a substituted (or obeyed) step
 targets the chosen path, so the next detect() pass returns no action.

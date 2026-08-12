@@ -1,4 +1,4 @@
-"""Jarvis OS - routing audit report.
+"""Furi OS - routing audit report.
 
 Reads the `routing_decisions` table and answers the questions you actually have
 after something didn't happen:

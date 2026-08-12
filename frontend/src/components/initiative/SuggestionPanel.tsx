@@ -1,7 +1,7 @@
 /**
- * Jarvis OS — Suggestions Panel (Phase 9, the Initiative Engine)
+ * Furi OS — Suggestions Panel (Phase 9, the Initiative Engine)
  *
- * The quiet ambient surface where Jarvis's proactive suggestions land. Each
+ * The quiet ambient surface where Furi's proactive suggestions land. Each
  * card leads with the suggestion and a "why it matters" rationale; Accept /
  * Dismiss tune a per-category feedback signal server-side. Accepting a card
  * that carries an action starts an approval-gated background task — its
@@ -163,7 +163,7 @@ export function SuggestionPanel() {
             <div>
               <p className="text-slate-400 text-sm font-medium mb-1">No suggestions yet</p>
               <p className="text-slate-600 text-xs max-w-xs">
-                When Jarvis spots something worth raising, it shows up here. Turn the
+                When Furi spots something worth raising, it shows up here. Turn the
                 Initiative Engine on in Settings to let it start looking.
               </p>
             </div>

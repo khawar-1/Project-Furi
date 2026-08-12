@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Push Channel Client (Phase 4, Part 1)
+ * Furi OS — Push Channel Client (Phase 4, Part 1)
  *
  * The one WebSocket connection to the backend's /ws endpoint, through which
  * the server initiates messages no request asked for (reminders, task

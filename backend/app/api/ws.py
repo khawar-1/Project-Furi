@@ -1,5 +1,5 @@
 """
-Jarvis OS — WebSocket API (Phase 4, Part 1)
+Furi OS — WebSocket API (Phase 4, Part 1)
 
 The /ws endpoint frontends connect to for server-initiated messages. The
 channel is strictly server→client: inbound frames are read only to keep the

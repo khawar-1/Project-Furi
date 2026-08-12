@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Contacts Panel (Phase 2)
+ * Furi OS — Contacts Panel (Phase 2)
  * List view + detail view with interaction history.
  */
 import { useEffect, useState } from 'react';

@@ -1,5 +1,5 @@
 """
-Jarvis OS — the variant gate against the REAL site (2026-08-08).
+Furi OS — the variant gate against the REAL site (2026-08-08).
 
 The hermetic tests drive a fixture shaped like the contract; the opt-in
 test_browser_axes_js.py runs the JS against hand-written markup. Neither tells

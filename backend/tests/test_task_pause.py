@@ -424,7 +424,7 @@ async def test_a_paused_task_parks_pushes_and_persists(task_db, pushed, tmp_path
     assert [e[0] for e in pushed] == ["task"]
     payload = pushed[0][1]
     assert payload["status"] == "paused"
-    assert payload["title"] == "Jarvis paused"
+    assert payload["title"] == "Furi paused"
     assert payload["plan"]["status"] == "paused"
 
     # And persisted — the push channel has no queue.

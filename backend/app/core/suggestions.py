@@ -1,5 +1,5 @@
 """
-Jarvis OS — Suggestions domain (Phase 9, the Initiative Engine)
+Furi OS — Suggestions domain (Phase 9, the Initiative Engine)
 
 The ONE accessor for the `suggestions` table and the initiative feedback
 signal (the reminders.py rule: the router/handler orchestrate, this module owns
@@ -107,7 +107,7 @@ async def get_suggestion(db: AsyncSession, suggestion_id: str) -> Optional[Sugge
 async def list_suggestions(
     db: AsyncSession, status: Optional[str] = None, limit: int = 50
 ) -> list[Suggestion]:
-    """Newest first — the feed shows what Jarvis most recently volunteered."""
+    """Newest first — the feed shows what Furi most recently volunteered."""
     query = select(Suggestion).order_by(Suggestion.created_at.desc()).limit(limit)
     if status is not None:
         query = query.where(Suggestion.status == status)
@@ -143,7 +143,7 @@ async def count_created_since(db: AsyncSession, since) -> int:
 
 async def most_recent_created_at(db: AsyncSession):
     """The created_at of the most recent suggestion, or None (for the rate
-    limiter). Excludes nothing — any surfaced item counts as 'Jarvis spoke'."""
+    limiter). Excludes nothing — any surfaced item counts as 'Furi spoke'."""
     row = (
         await db.execute(
             select(Suggestion.created_at).order_by(Suggestion.created_at.desc()).limit(1)

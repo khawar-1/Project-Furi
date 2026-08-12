@@ -371,7 +371,7 @@ async def test_a_captcha_during_discovery_pauses_for_manual_completion(
     db_session, monkeypatch
 ):
     """A CAPTCHA on the way to the form hands off the SAME way as a login wall
-    (15.4), tagged kind='captcha' — the USER completes the check, Jarvis never
+    (15.4), tagged kind='captcha' — the USER completes the check, Furi never
     solves it — and the step is left PENDING to re-discover after."""
     async def fake_discover(params, session_id=None, **kwargs):
         return browser_commit.CommitDiscovery(
@@ -403,7 +403,7 @@ async def test_off_site_apply_pauses_then_resumes_on_yes(db_session, monkeypatch
     """Off-site hand-off (2026-07-18): discovery would leave the named site for a
     page-derived origin → PAUSE and ask. On 'yes' the origin is approved
     (plan.approved_origins), injected into the re-drafted step's allowlist, and
-    the resumed discovery reaches the form. Jarvis leaves the site only on the
+    the resumed discovery reaches the form. Furi leaves the site only on the
     user's explicit go-ahead."""
     seen = {"n": 0}
 
@@ -521,7 +521,7 @@ async def test_a_cross_origin_pending_url_is_never_stamped(db_session, monkeypat
 async def test_off_site_apply_declined_stops_without_visiting(db_session, monkeypatch):
     """Fail-closed: a non-affirmative answer to the origin-approval means DON'T
     leave the named site — the plan stops (CANCELLED), the origin is NOT approved,
-    and discovery never re-runs. Jarvis never follows a page-derived site on a
+    and discovery never re-runs. Furi never follows a page-derived site on a
     'no'."""
     seen = {"n": 0}
 
@@ -1755,7 +1755,7 @@ async def test_a_reattached_session_is_rearmed_before_it_is_driven(
 async def test_an_embedded_challenge_pauses_into_the_agents_own_window(
     db_session, monkeypatch
 ):
-    """mode 'embedded' → the pause tells the user to solve it in the Jarvis
+    """mode 'embedded' → the pause tells the user to solve it in the Furi
     browser window that is ALREADY open (the held session) — and the separate
     clean hand-off window is NOT opened (it could never carry the token)."""
     async def fake_discover(params, session_id=None, **kwargs):
@@ -1786,7 +1786,7 @@ async def test_an_embedded_challenge_pauses_into_the_agents_own_window(
 
     assert plan.status == PlanStatus.AWAITING_CHOICE
     assert plan.question.kind == "captcha"
-    assert "jarvis browser window" in plan.question.text.lower()
+    assert "furi browser window" in plan.question.text.lower()
     assert opened == []                 # no separate window for an embedded widget
 
 

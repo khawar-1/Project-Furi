@@ -657,7 +657,7 @@ def _wrow(url, title="T", content="", snippet="s", truncated=False):
 async def test_fanout_covers_both_readings_of_the_incident_question():
     """The incident, frozen: the ambiguous wording now reaches BOTH pages.
 
-    This is the thesis — not that Jarvis picks right, but that the right page is
+    This is the thesis — not that Furi picks right, but that the right page is
     IN the evidence for the summary to pick from."""
     calls = _fanout_provider({
         "playing": [_wrow("https://w.org/final", "Final", "Spain v Argentina " * 60)],

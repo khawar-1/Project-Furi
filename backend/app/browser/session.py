@@ -1,7 +1,7 @@
 """
-Jarvis OS — Browser Session (Phase 14, Part 1)
+Furi OS — Browser Session (Phase 14, Part 1)
 
-A real Chromium Jarvis can drive, under ACTION-LEVEL SAFETY (2026-07-21, owner
+A real Chromium Furi can drive, under ACTION-LEVEL SAFETY (2026-07-21, owner
 decision): **the page may talk to the network freely, but the agent cannot
 commit — every agent-performed submit requires the one-shot, code-read
 commit permit bound to a signature approval.**
@@ -464,7 +464,7 @@ async def _settle_profile() -> None:
 # window (open_login_window's detached subprocess) or a leaked automation context
 # after a crash/kill. That orphan holds the single-instance lock, and the next
 # launch hangs on it (2026-07-20 incident). reclaim_orphaned_profile() kills that
-# orphan and ONLY that orphan: every window Jarvis launches — the automation
+# orphan and ONLY that orphan: every window Furi launches — the automation
 # context (launch_persistent_context user_data_dir=...) AND the clean window
 # (_default_clean_launcher --user-data-dir=...) — carries the exact profile path
 # on its command line, so matching that path can never touch the user's everyday
@@ -474,7 +474,7 @@ async def _settle_profile() -> None:
 # A reaper enumerates the machine's processes and returns the PIDs whose command
 # line contains --user-data-dir=<profile>; reclaim then kills them. The real
 # implementation is Windows-only (a CIM/tasklist query); off Windows it is a
-# no-op (the single-instance-lock-hang is a Windows behavior, and Jarvis browser
+# no-op (the single-instance-lock-hang is a Windows behavior, and Furi browser
 # control ships Windows-first).
 _PROFILE_REAPER: Optional[Callable[[str], list[int]]] = None
 
@@ -489,7 +489,7 @@ def _windows_profile_pids(profile_marker: str) -> list[int]:
     if not marker:
         return []
     # CIM over PowerShell: the command line is the one field that distinguishes the
-    # Jarvis-profile Chrome from every other chrome.exe. -Filter narrows to the two
+    # Furi-profile Chrome from every other chrome.exe. -Filter narrows to the two
     # browser image names before we read command lines.
     ps = (
         "Get-CimInstance Win32_Process -Filter "
@@ -550,7 +550,7 @@ def reclaim_orphaned_profile() -> int:
     if killed:
         logger.info(
             f"browser: reclaimed the profile lock — killed {killed} orphaned "
-            f"Jarvis-profile browser process(es)"
+            f"Furi-profile browser process(es)"
         )
         # A kill frees the lock a moment later, exactly like a close(); make the
         # next launch settle so it does not race the dying process.
@@ -1711,7 +1711,7 @@ async def _default_browser_factory() -> Any:
                 except asyncio.TimeoutError:
                     errors.append(f"{name}: launch timed out (profile likely locked)")
                     logger.warning(f"browser: {errors[-1]}")
-                    # A timeout is the lock signature — an orphaned Jarvis-profile
+                    # A timeout is the lock signature — an orphaned Furi-profile
                     # Chrome from a prior run, OR the half-spawned Chrome this very
                     # cancelled launch may have left behind (a wait_for cancel does
                     # not un-spawn the process). Reclaim after EVERY timeout so a
@@ -4135,7 +4135,7 @@ def pending_discovery() -> Optional[dict[str, Any]]:
 # ----------------------------------------------------------- login window
 # The ONE-TIME sign-in flow (the deferred 14.4 "manual login wall", brought
 # forward by user request 2026-07-17: "play on youtube signed in as the account
-# I added in Jarvis"). The account the user connected in Settings is a Google
+# I added in Furi"). The account the user connected in Settings is a Google
 # API token — it does NOT put a session cookie in a browser. The only honest way
 # to sign the browser in is for the USER to log in by hand, once, in a real
 # window; the persistent ~/.jarvis/browser profile then keeps that session for
@@ -4149,7 +4149,7 @@ def pending_discovery() -> Optional[dict[str, Any]]:
 #
 # One profile = one live persistent context: opening login first stops any media
 # session, and a browse first closes login (BrowseTool calls close_login_window).
-# Credentials are NEVER seen, stored, or transmitted by Jarvis — the user enters
+# Credentials are NEVER seen, stored, or transmitted by Furi — the user enters
 # them directly into Google's own page.
 DEFAULT_LOGIN_URL = "https://accounts.google.com/"
 
@@ -4357,7 +4357,7 @@ async def _close_login_handles_locked() -> bool:
 
 
 async def open_login_window(url: str = DEFAULT_LOGIN_URL) -> None:
-    """Open the Jarvis browser profile as a normal, user-driven window at a
+    """Open the Furi browser profile as a normal, user-driven window at a
     sign-in / verification page. Closes any active media session first (one
     profile, one live context). Prefers a CLEAN Chrome subprocess (no automation
     fingerprint — see CLEAN_BROWSER_LAUNCHER) and falls back to the Playwright
@@ -4456,7 +4456,7 @@ def login_window_open() -> bool:
 # cannot load it). uBlock's filter lists cover the rotating pop-under domains the
 # static Rule 0 host list never can, so WATCHING is ad-free.
 #
-# THE ONE HONEST TRADE-OFF: a non-automation window has no CDP, so Jarvis cannot
+# THE ONE HONEST TRADE-OFF: a non-automation window has no CDP, so Furi cannot
 # press play in it. --autoplay-policy=no-user-gesture-required starts standard
 # players (YouTube) on their own; a custom anime/streaming player may need ONE user
 # click — and uBlock then blocks the ad-popup that click usually triggers.
@@ -4577,7 +4577,7 @@ def active_media_window() -> Optional[dict[str, str]]:
 
 
 async def shutdown_browser_windows() -> None:
-    """Close every browser window Jarvis has open — EVERY held-session slot
+    """Close every browser window Furi has open — EVERY held-session slot
     (media, result window, pending commit, challenge, discovery) AND the
     sign-in/verification window — so a clean backend shutdown leaves NO
     Chromium holding the ~/.jarvis/browser profile lock (the orphan that hangs

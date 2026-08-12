@@ -1,5 +1,5 @@
 """
-Jarvis OS — Task Continuation Routing (2026-07-29)
+Furi OS — Task Continuation Routing (2026-07-29)
 
 "I asked it to look again, but then it failed."
 

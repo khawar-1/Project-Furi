@@ -1,5 +1,5 @@
 """
-Jarvis OS — Agent API (Phase 3, Part 5)
+Furi OS — Agent API (Phase 3, Part 5)
 
 POST /api/agent/execute  — plan a user goal; returns the finished plan for
                            READ-only goals, or an awaiting_approval plan

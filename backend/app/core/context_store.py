@@ -1,5 +1,5 @@
 """
-Jarvis OS — World Model / Context Store (Phase 8, Part 1)
+Furi OS — World Model / Context Store (Phase 8, Part 1)
 
 The Context Layer's aggregate: a single, in-memory, WRITE-ONLY picture of what
 the user is doing right now, and the ONE read seam — get_world_model(db) — that
@@ -369,7 +369,7 @@ def _derive_user_state(config: ContextConfig, now: float) -> Optional[dict]:
 
 #: A load read only steers behavior (initiative bar, chat brevity, output router)
 #: when it is high AND confident enough — a single weak signal never re-tunes
-#: Jarvis. Kept as one predicate so every consumer agrees on the threshold.
+#: Furi. Kept as one predicate so every consumer agrees on the threshold.
 HIGH_LOAD_MIN_CONFIDENCE = 0.33
 
 
@@ -602,7 +602,7 @@ def _capture_location(entry: _ScreenCapture) -> str:
 
 
 #: Injected instead of screen text when the user OPTED IN to screen-aware chat
-#: but no fresh capture exists (fresh launch with Jarvis focused, sensing
+#: but no fresh capture exists (fresh launch with Furi focused, sensing
 #: paused, backend just restarted — the ring is in-memory by design). Without
 #: this the LLM sees nothing and INVENTS rituals ("just say 'take a
 #: screenshot'" — live fabrication 2026-07-16); an honest system-authored
@@ -610,7 +610,7 @@ def _capture_location(entry: _ScreenCapture) -> str:
 SCREEN_NO_CAPTURE_NOTE = (
     "NO FRESH SCREEN CAPTURE: screen-aware chat is enabled, but there is no "
     "recent capture right now. Captures happen AUTOMATICALLY while screen "
-    "sensing runs; Jarvis never captures its own window, so right after "
+    "sensing runs; Furi never captures its own window, so right after "
     "startup nothing exists until the user views another window for a moment. "
     "If the user asks about their screen: say you don't have a fresh view yet "
     "and ask them to bring the screen they mean to the front for a couple of "

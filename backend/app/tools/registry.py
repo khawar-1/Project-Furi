@@ -1,5 +1,5 @@
 """
-Jarvis OS — Tool Registry (Phase 3)
+Furi OS — Tool Registry (Phase 3)
 Global registry for the plugin tool architecture.
 
 Tools self-register (register_tool decorator or registry.register); the rest
@@ -11,7 +11,7 @@ of the system only ever calls execute_tool(), which:
      behind "DESTRUCTIVE always requires approval", not a prompt rule.
   3. Runs safe_execute() so raw exceptions never propagate
   4. Writes an ActivityLog row for every attempt — executed AND blocked —
-     so the Timeline UI shows everything Jarvis did or tried to do
+     so the Timeline UI shows everything Furi did or tried to do
 
 An audit-log failure never breaks the tool call itself: the result is still
 returned and the failure goes to loguru.
@@ -45,7 +45,7 @@ _RESULT_SUMMARY_MAX_LEN = 1000
 # A year bounds the table — the actual defect — while leaving the folder-habit
 # ranking materially intact. Deliberately far longer than the 30 days routing
 # decisions and plan traces get: those record one turn's reasoning, this records
-# what Jarvis DID, which is the audit trail the whole approval story rests on.
+# what Furi DID, which is the audit trail the whole approval story rests on.
 ACTIVITY_RETENTION_DAYS = 365
 
 

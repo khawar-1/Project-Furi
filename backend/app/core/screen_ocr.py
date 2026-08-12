@@ -1,5 +1,5 @@
 """
-Jarvis OS — Screen OCR (Phase 8, Part 3)
+Furi OS — Screen OCR (Phase 8, Part 3)
 
 The opt-in, hard-gated on-screen-context reader. Electron captures a downscaled
 screen frame (desktopCapturer) and POSTs it here ONLY while screen OCR is armed;

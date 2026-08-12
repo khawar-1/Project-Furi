@@ -1,5 +1,5 @@
 """
-Jarvis OS — Google service factories (Phase 5, Part 1)
+Furi OS — Google service factories (Phase 5, Part 1)
 
 The ONE way business code gets a Gmail or Calendar client. Module-level
 factory indirection follows the SESSION_FACTORY pattern (memory_tools /

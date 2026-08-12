@@ -1,5 +1,5 @@
 """
-Jarvis OS — Periodic housekeeping sweep (2026-08-03)
+Furi OS — Periodic housekeeping sweep (2026-08-03)
 
 Expired state was reconciled ONLY at startup. On a desktop app that is a real
 gap, because the backend is meant to stay up: a background task left waiting on

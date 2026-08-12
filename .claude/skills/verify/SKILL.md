@@ -1,9 +1,9 @@
 ---
 name: verify
-description: Runtime-verify a Jarvis OS backend change by driving the real FastAPI + planner surface with an isolated backend instance (scratch DB, alternate port).
+description: Runtime-verify a Furi OS backend change by driving the real FastAPI + planner surface with an isolated backend instance (scratch DB, alternate port).
 ---
 
-# Verifying Jarvis OS backend changes at the runtime surface
+# Verifying Furi OS backend changes at the runtime surface
 
 The backend's real surface is the FastAPI API on 127.0.0.1 (the Electron
 app is just a client). Planner/agent changes are observable through

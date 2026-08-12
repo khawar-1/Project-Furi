@@ -1,5 +1,5 @@
 """
-Jarvis OS — The remote surface's route manifest (2026-08-03)
+Furi OS — The remote surface's route manifest (2026-08-03)
 
 *(Tier 2, item 5 — "one machine, one room")*
 
@@ -39,7 +39,7 @@ sends mail and drives a browser. Putting it on a LAN port would mean the remote
 surface can start anything the desktop can — which is precisely "a shell",
 however the words are arranged. It is denied.
 
-The four ACTIONS that are allowed are all answers to something Jarvis already
+The four ACTIONS that are allowed are all answers to something Furi already
 asked, about work the user already started at the desk:
 
     POST /api/agent/approve        approve or cancel a plan already parked
@@ -114,7 +114,7 @@ DENIED: dict[str, str] = {
     "/ws/test": "dev utility that broadcasts an arbitrary payload to every client",
 
     # ---- changes settings ---------------------------------------------------
-    "/api/settings/briefing": "changes when Jarvis speaks first",
+    "/api/settings/briefing": "changes when Furi speaks first",
     "/api/settings/voice": "changes voice settings, INCLUDING who may approve by voice",
     "/api/context/settings": "the sensing kill switch — changing it remotely is the wrong direction",
     "/api/index/config": "changes which folders are indexed",
@@ -153,7 +153,7 @@ DENIED: dict[str, str] = {
     # ---- home & IoT: configured at the machine, like pairing ---------------
     #
     # ⚠️ /settings takes the hub ADDRESS and the ACCESS TOKEN. A paired phone
-    # that could rewrite the address could point Jarvis's home tools at a hub
+    # that could rewrite the address could point Furi's home tools at a hub
     # someone else controls — the same class of hazard as a paired device that
     # can pair another, which is why /api/remote is absent from this manifest
     # too. Connecting a home is a decision made at the desk.
@@ -172,14 +172,14 @@ DENIED: dict[str, str] = {
     "/api/home/devices": "every room, lock and door in the house, and whether each is open",
 
     # Desktop control (Feature 2), denied for the same two reasons. /settings
-    # can widen what Jarvis may do to the machine — a phone that could flip
+    # can widen what Furi may do to the machine — a phone that could flip
     # allow_clipboard on is a phone that can read whatever was last copied,
     # which on a work machine is routinely a password. /apps enumerates every
     # program the user has installed, which is a fingerprint of them and of
     # no use away from the desk. A desktop plan STARTED at the desk still
     # pauses for approval, and approving it is /api/agent/approve, which IS
     # on the manifest.
-    "/api/desktop/settings": "widens what Jarvis may do to the machine, including clipboard access",
+    "/api/desktop/settings": "widens what Furi may do to the machine, including clipboard access",
     "/api/desktop/apps": "every application installed on the user's machine",
 
     # ---- discloses more than a phone needs ---------------------------------
@@ -191,10 +191,10 @@ DENIED: dict[str, str] = {
     "/api/context/status": "sensing state; the phone has no use for it",
     "/api/browser/media": "the titles and URLs of every open agent tab",
     "/api/browser/account": "browser sign-in state",
-    "/api/agent/tools": "the full tool inventory — a map of everything Jarvis can do",
+    "/api/agent/tools": "the full tool inventory — a map of everything Furi can do",
     "/api/activity/routing": "per-turn routing forensics, including a copy of what was typed",
     "/api/activity/plans": "per-plan failure forensics",
-    "/memory/search": "semantic search across everything Jarvis knows about the user",
+    "/memory/search": "semantic search across everything Furi knows about the user",
     "/memory/stats": "memory counts",
     "/memory/archived": "archived memories",
     "/memory/conflicts": "pairs of the user's own facts that may disagree",

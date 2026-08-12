@@ -1,5 +1,5 @@
 """
-Jarvis OS — Contacts API (Phase 2)
+Furi OS — Contacts API (Phase 2)
 Full CRUD for relationship memory including identity resolution.
 """
 from typing import Optional

@@ -1,7 +1,7 @@
 """
-Jarvis OS — Background-work status for progress-aware chat (boss + agents).
+Furi OS — Background-work status for progress-aware chat (boss + agents).
 
-When the user asks Jarvis "how's the browser task going?" the answer must come
+When the user asks Furi "how's the browser task going?" the answer must come
 from the live Task rows, not the chat LLM's imagination. This module renders a
 compact, read-only BACKGROUND WORK block that ``chat._build_system_prompt``
 injects alongside MEMORY CONTEXT — so the boss can report on its agents

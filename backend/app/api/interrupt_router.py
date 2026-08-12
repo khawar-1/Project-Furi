@@ -1,7 +1,7 @@
 """
-Jarvis OS — Mid-run Interrupt Routing (2026-08-03)
+Furi OS — Mid-run Interrupt Routing (2026-08-03)
 
-"When Jarvis is performing a task and it got something wrong, I want to pause
+"When Furi is performing a task and it got something wrong, I want to pause
 it and tell it what to do."
 
 Until now a message typed while an agent was working had two possible fates,
@@ -63,7 +63,7 @@ _SSE_HEADERS = {
 # judgements at zero three times. This asks one certain question: did the user
 # open with an explicit stop word?
 _PAUSE_RE = re.compile(
-    r"^\s*(?:hey\s+|ok(?:ay)?[,\s]+|no[,\s]+|oi\s+|jarvis[,\s]+)*"
+    r"^\s*(?:hey\s+|ok(?:ay)?[,\s]+|no[,\s]+|oi\s+|furi[,\s]+|jarvis[,\s]+)*"
     r"(?:"
     r"pause|hold\s+on|hold\s+up|hang\s+on|halt|"
     r"wait(?:\s+a\s+(?:sec(?:ond)?|min(?:ute)?|moment))?|"
@@ -94,7 +94,7 @@ _STEER_LEAD_RE = re.compile(
 # please", "wait a moment now"). Anything this short is a bare pause.
 _STEER_MIN_WORDS = 2
 _STEER_NOISE = frozenset({
-    "it", "that", "this", "please", "now", "jarvis", "everything", "them",
+    "it", "that", "this", "please", "now", "furi", "jarvis", "everything", "them",
     "the", "task", "there", "ok", "okay", "right", "yourself",
 })
 

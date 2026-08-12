@@ -1,7 +1,7 @@
 # Phase 15 — Agentic Multi-Step Flows
 
-The goal of Phase 15 is to close the gap between "Jarvis can drive any single
-site" (Phase 14, complete) and "Jarvis does the multi-step things I do" —
+The goal of Phase 15 is to close the gap between "Furi can drive any single
+site" (Phase 14, complete) and "Furi does the multi-step things I do" —
 searching a job board, opening each posting, filling and submitting an
 application, uploading a resume, signing in when asked, and getting past the
 visual-only pages DOM observation can't read.
@@ -20,7 +20,7 @@ authenticated origin, a compromised loop has full user authority. The real
 controls remain: **grounding** (what data/where, from the user's words, never a
 page), the **approval gate** (every send is seen and one-shot), the **headed
 watchable window** (the last honest control), and **CAPTCHAs are never
-auto-solved**. Phase 15 makes Jarvis do far more of what you do; it does not
+auto-solved**. Phase 15 makes Furi do far more of what you do; it does not
 remove the need for you to watch the important sends.
 
 ## Dependencies & sequencing
@@ -212,7 +212,7 @@ resolves through the DOM index; unconfigured vision fails clean to DOM-only.
   loop detects a wall or CAPTCHA, **pauses the plan AWAITING the user**, surfaces
   the headed window, and resumes when the user has signed in / solved it. The
   held session (15.1's registry) carries the now-authenticated state forward.
-- **CAPTCHAs are never solved automatically** — ToS and safety. Jarvis only
+- **CAPTCHAs are never solved automatically** — ToS and safety. Furi only
   detects, hands off to the watchable window, and waits. Stated as a hard rule.
 - Detection is heuristic (known CAPTCHA iframes/challenge markers + a login-form
   signal), best-effort → on uncertainty the loop asks rather than barrels
@@ -235,7 +235,7 @@ authenticated session; a false-positive-prone page asks rather than guesses.
 > surface the headed watchable window, and resume — carrying the now-authenticated
 > held session forward (15.1's registry). **CAPTCHAs are never solved or
 > auto-interacted-with — detect, hand off to the window, wait; state this as a
-> hard rule.** Credentials are never typed by Jarvis. Detection is heuristic and
+> hard rule.** Credentials are never typed by Furi. Detection is heuristic and
 > best-effort — on uncertainty, ask rather than proceed. Tests: mid-flow wall
 > pauses without typing a credential; a detected CAPTCHA pauses and is never
 > touched; resume uses the authenticated session; an ambiguous page asks. Do not
@@ -293,7 +293,7 @@ audit-verified.
 
 ## What Phase 15 does and does not deliver
 
-**After 15.1–15.5, Jarvis can:** search a site, open results, fill and submit
+**After 15.1–15.5, Furi can:** search a site, open results, fill and submit
 multiple forms in one goal (each approved), upload grounded files, autofill from a
 curated profile you own, get past visual-only pages, and hand off login/CAPTCHA to
 you mid-flow — all with no per-site code.

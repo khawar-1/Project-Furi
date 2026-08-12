@@ -1,5 +1,5 @@
 """
-Jarvis OS — Reversible memory archive (2026-08-03)
+Furi OS — Reversible memory archive (2026-08-03)
 
 *(Tier 2, item 7 — "memory only grows")*
 
@@ -59,7 +59,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import SemanticMemory, utc_now
 
 # Six months of never once being needed. Deliberately long: the cost of
-# archiving too eagerly is that Jarvis forgets something the user still cares
+# archiving too eagerly is that Furi forgets something the user still cares
 # about, and the cost of archiving too slowly is a slightly larger table.
 ARCHIVE_AFTER_DAYS = 180
 # Gradual, so a first run over years of history is observable.

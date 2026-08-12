@@ -1,4 +1,4 @@
-"""Jarvis OS - planner acceptance benchmark.
+"""Furi OS - planner acceptance benchmark.
 
 The REAL `AgentPlanner`, the real tool registry, the real approval gate, real
 provider calls, against a real filesystem - inside a sandbox.

@@ -1,5 +1,5 @@
 """
-Jarvis OS — Email Tools (Phase 5, Part 3)
+Furi OS — Email Tools (Phase 5, Part 3)
 Six single-action tools over the user's Gmail account:
 
   search_emails       READ         find messages via a query BUILT IN CODE
@@ -38,7 +38,7 @@ other half — see _recipient_violation in planner.py):
   from get_gmail_service() ONLY, so tests swap GMAIL_SERVICE_FACTORY and
   the suite never touches the real API.
 - Scopes cap capability structurally (google_auth.SCOPES): read, compose,
-  send — Jarvis cannot delete or relabel mail no matter what a plan says.
+  send — Furi cannot delete or relabel mail no matter what a plan says.
 """
 import asyncio
 import base64
@@ -61,7 +61,7 @@ SEARCH_MAX_RESULTS = 25       # each hit costs a metadata fetch — keep latency
 BODY_MAX_CHARS = 20_000       # read_email body cap
 THREAD_BODY_MAX_CHARS = 4_000  # per-message cap inside read_thread
 THREAD_MAX_MESSAGES = 25
-MAX_RECIPIENTS = 10           # To + Cc combined — Jarvis is not a mass mailer
+MAX_RECIPIENTS = 10           # To + Cc combined — Furi is not a mass mailer
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _RE_PREFIX_RE = re.compile(r"^\s*re\s*:", re.IGNORECASE)
@@ -297,7 +297,7 @@ def _compose_inputs(
         return None, _fail(
             tool,
             f"{len(to) + len(cc)} recipients exceeds the limit of "
-            f"{MAX_RECIPIENTS} — Jarvis does not send bulk mail.",
+            f"{MAX_RECIPIENTS} — Furi does not send bulk mail.",
         )
     subject = str(kwargs.get("subject") or "").strip()
     if not subject:

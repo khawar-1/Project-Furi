@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Continuous Conversation (Phase 12.1)
+ * Furi OS — Continuous Conversation (Phase 12.1)
  *
  * A store-subscriber controller (the same init-module pattern the output
  * router uses) that re-opens a short hands-free listening window AFTER a

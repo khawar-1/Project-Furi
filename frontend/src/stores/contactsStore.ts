@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Contacts Store (Zustand)
+ * Furi OS — Contacts Store (Zustand)
  */
 import { create } from 'zustand';
 import type { Contact } from '@/types';

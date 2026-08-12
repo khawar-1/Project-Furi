@@ -1,7 +1,7 @@
 /**
- * Jarvis OS — Agents Panel (boss + domain-specialized agents)
+ * Furi OS — Agents Panel (boss + domain-specialized agents)
  *
- * Watch and manage the background workers Jarvis's boss dispatched: one per
+ * Watch and manage the background workers Furi's boss dispatched: one per
  * task, each owned by a domain agent (browser / file / email / research /
  * calendar). Shows live status + "step X of N" progress, lets you cancel a
  * running worker, and — for a worker paused at the approval gate or on a
@@ -250,7 +250,7 @@ export function TasksPanel() {
             <div>
               <p className="text-slate-400 text-sm font-medium mb-1">No agents working right now</p>
               <p className="text-slate-600 text-xs max-w-xs">
-                Give Jarvis a task in chat — "organize my downloads", "apply to the 3 python jobs on
+                Give Furi a task in chat — "organize my downloads", "apply to the 3 python jobs on
                 weworkremotely" — and it hands the work to the right agent here, in the background.
               </p>
             </div>

@@ -1,5 +1,5 @@
 """
-Jarvis OS — App settings store (Phase 5, Part 6)
+Furi OS — App settings store (Phase 5, Part 6)
 
 The ONE accessor for runtime-configurable app settings (the AppSetting table).
 A small key/value store with JSON-encoded values — the home for settings the
@@ -629,7 +629,7 @@ async def set_context_config(db: AsyncSession, config: ContextConfig) -> None:
 #:               the master `enabled` is false).
 #: - "suggest" — only informational nudges; nothing ever starts a plan.
 #: - "ask"     — nudges may carry a goal; ACCEPTING starts an approval-gated Task.
-#: - "act"     — Jarvis may auto-start the Task without waiting for Accept. Even
+#: - "act"     — Furi may auto-start the Task without waiting for Accept. Even
 #:               then every write inside still pauses at the approval gate — a
 #:               hand-edited row can never grant silent write authority.
 INITIATIVE_AUTONOMY_LEVELS = ("off", "suggest", "ask", "act")
@@ -648,7 +648,7 @@ INITIATIVE_MAX_GAP = 12 * 60
 class InitiativeConfig:
     """Phase 9 — the Initiative Engine's settings, privacy-and-quota-first.
 
-    `enabled` is the master switch and defaults OFF: Jarvis never volunteers a
+    `enabled` is the master switch and defaults OFF: Furi never volunteers a
     thing until the user opts in (the sensing/index/voice convention). `autonomy`
     is the CEILING the code-owned policy caps every candidate at — default
     "ask", so accepting a suggestion is always required before any plan starts;

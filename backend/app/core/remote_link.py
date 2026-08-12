@@ -1,5 +1,5 @@
 """
-Jarvis OS — The pairing link: a real address, and a QR of it (2026-08-04)
+Furi OS — The pairing link: a real address, and a QR of it (2026-08-04)
 
 *(Tier 2, item 5 — the half that makes the remote surface usable by a person)*
 

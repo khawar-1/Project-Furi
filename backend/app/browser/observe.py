@@ -1,5 +1,5 @@
 """
-Jarvis OS — DOM Observation (Phase 14, Part 1)
+Furi OS — DOM Observation (Phase 14, Part 1)
 
 Turns a live page into the text a text-only LLM can act on: a numbered list of
 the interactive elements, then the page's prose.
@@ -215,7 +215,7 @@ class Observation:
     # {kind, mode, blocking, solved, zones} as _EXTRACT_JS documents. A challenge
     # widget lives in a cross-origin iframe or closed shadow root the element
     # list never captures, so it is detected structurally in-page, never from
-    # prose. browser_loop.detect_challenge reads this; Jarvis never solves one.
+    # prose. browser_loop.detect_challenge reads this; Furi never solves one.
     # mode 'interstitial' = the page IS the challenge; 'embedded' = a widget on
     # an ordinary page. `zones` are viewport rects of the widget(s) — every
     # overlapping element was already skipped during stamping, and the helpers
@@ -289,7 +289,7 @@ _CHALLENGE_PROBE_JS = """
   //   zones — viewport rects (top-page CSS px) of every detected widget. The
   //           element walk below SKIPS anything intersecting a zone, so a
   //           challenge control can never be stamped, listed, or clicked — the
-  //           structural half of "Jarvis never touches a CAPTCHA".
+  //           structural half of "Furi never touches a CAPTCHA".
   //   solved — a response field carries a non-empty token (how a resumed commit
   //           verifies the HUMAN's solve actually happened).
   //   blocking — true only for an interstitial; an embedded widget no longer
@@ -776,7 +776,7 @@ _EXTRACT_JS = """
     // "[12] div" tells it nothing and spends the same budget.
     const role = wideSet.has(el) ? 'item' : roleOf(el);
     // A password field's VALUE is never read — not clipped, not redacted-with-
-    // a-hint, simply never taken. Jarvis does not handle credentials (14.4).
+    // a-hint, simply never taken. Furi does not handle credentials (14.4).
     const value = (role === 'password') ? '' : clip(el.value || '', 80);
     let href = '';
     if (tag === 'a') {

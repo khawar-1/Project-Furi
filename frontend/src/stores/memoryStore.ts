@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — About Me Store (Zustand)
+ * Furi OS — About Me Store (Zustand)
  * State for the "About Me" panel: user-specific facts only.
  * Fetches SemanticMemory where subject IN ('user', 'shared').
  */

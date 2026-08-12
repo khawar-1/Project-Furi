@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Browser media state (Zustand, Phase 14, Part 2)
+ * Furi OS — Browser media state (Zustand, Phase 14, Part 2)
  *
  * The "▶ Playing" indicator's state: what `browse` left playing, and the stop
  * control. Updated live by an onPush('browser_media') handler (App.tsx) and

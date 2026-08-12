@@ -1,5 +1,5 @@
 """
-Jarvis OS — Voice speed benchmark (STT + TTS, CPU vs GPU).
+Furi OS — Voice speed benchmark (STT + TTS, CPU vs GPU).
 
 Loads the REAL Whisper (ctranslate2) and Kokoro (onnxruntime) engines through
 the app's own builders and times a warm synth + a warm transcribe on each

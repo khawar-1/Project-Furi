@@ -1,3 +1,3 @@
 """
-Jarvis OS — Memory Package
+Furi OS — Memory Package
 """

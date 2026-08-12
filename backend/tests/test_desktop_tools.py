@@ -130,7 +130,7 @@ class FakeDesktop:
 def _default_windows():
     return [
         Window(handle=1001, title="notes.txt - Notepad", process="notepad.exe"),
-        Window(handle=1002, title="Jarvis OS - Google Chrome", process="chrome.exe"),
+        Window(handle=1002, title="Furi OS - Google Chrome", process="chrome.exe"),
         Window(handle=1003, title="report.docx - Word", process="winword.exe"),
     ]
 
@@ -682,10 +682,10 @@ def test_the_clipboard_card_shows_the_complete_text_never_clipped():
 
 def test_enrichment_names_the_real_window_on_the_card():
     plan = _Plan([_read_step(_default_windows())])
-    step = _step("close_window", {"handle": 1002, "title": "Jarvis OS - Google Chrome"})
+    step = _step("close_window", {"handle": 1002, "title": "Furi OS - Google Chrome"})
     step.action_detail = _step_action_detail(step.tool, step.parameters)
     _enrich_window_action_detail(plan, step)
-    assert "window: 'Jarvis OS - Google Chrome' (chrome.exe)" in step.action_detail
+    assert "window: 'Furi OS - Google Chrome' (chrome.exe)" in step.action_detail
 
 
 def test_enrichment_is_a_no_op_for_a_placeholder_or_an_unknown_handle():
@@ -905,7 +905,7 @@ def test_windows_render_grouped_by_application():
     out = _RESULT_FORMATTERS["list_windows"]({
         "windows": [
             {"handle": 1, "title": "notes.txt", "process": "notepad.exe"},
-            {"handle": 2, "title": "Jarvis", "process": "chrome.exe"},
+            {"handle": 2, "title": "Furi", "process": "chrome.exe"},
         ],
         "count": 2,
     })

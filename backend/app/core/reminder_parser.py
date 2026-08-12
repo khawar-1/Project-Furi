@@ -1,5 +1,5 @@
 """
-Jarvis OS — Reminder Detection + Time Parsing (Phase 4, Part 4)
+Furi OS — Reminder Detection + Time Parsing (Phase 4, Part 4)
 
 Deterministic (non-LLM) recognition of reminder requests ("remind me at 6
 to call Jamil") and extraction of the due time + reminder text. Same
@@ -204,7 +204,7 @@ def _remove_spans(message: str, spans: list) -> str:
 # jarvis, remind me i have a meeting at 6" would otherwise store the text
 # "hey jarvis , i have a meeting" — noise, not the reminder).
 _GREETING_PREFIX_RE = re.compile(
-    r"^(?:(?:hey|hi|hello|yo|ok|okay|oh|um+|uh+|please|jarvis)(?:[\s,!.]+|$))+",
+    r"^(?:(?:hey|hi|hello|yo|ok|okay|oh|um+|uh+|please|furi|jarvis)(?:[\s,!.]+|$))+",
     re.IGNORECASE,
 )
 

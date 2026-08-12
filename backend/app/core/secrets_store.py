@@ -1,5 +1,5 @@
 """
-Jarvis OS — secrets-at-rest (Browser refactor Phase 7)
+Furi OS — secrets-at-rest (Browser refactor Phase 7)
 
 Autofill SECRET field values are sensitive (a form password, an API key). They
 were stored PLAINTEXT in the autofill_fields.value column — any local process, a

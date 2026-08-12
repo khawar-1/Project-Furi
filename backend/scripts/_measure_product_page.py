@@ -1,5 +1,5 @@
 """
-Jarvis OS — what does a PRODUCT page really offer? (2026-08-08)
+Furi OS — what does a PRODUCT page really offer? (2026-08-08)
 
 The listing measurement returned a product page with 38 elements and NO
 add-to-cart control, no size selector and no quantity input. That is either

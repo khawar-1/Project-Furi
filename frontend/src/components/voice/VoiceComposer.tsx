@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Voice Mode composer
+ * Furi OS — Voice Mode composer
  *
  * Replaces ChatInput while voice mode is open: a large mic that is the main
  * control, a field you can still type into, and an ✕ that leaves.
@@ -80,7 +80,7 @@ export function VoiceComposer() {
     : isTranscribing
       ? 'Transcribing…'
       : speaking
-        ? 'Interrupt Jarvis and talk'
+        ? 'Interrupt Furi and talk'
         : 'Start talking';
 
   return (
@@ -118,7 +118,7 @@ export function VoiceComposer() {
               handleSend();
             }
           }}
-          placeholder="Message Jarvis… (type or speak)"
+          placeholder="Message Furi… (type or speak)"
           rows={1}
           className={clsx(
             'flex-1 bg-transparent text-sm text-slate-200 placeholder-muted resize-none outline-none',

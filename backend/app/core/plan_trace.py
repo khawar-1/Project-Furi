@@ -1,4 +1,4 @@
-"""Jarvis OS — per-run plan trace (2026-08-03)
+"""Furi OS — per-run plan trace (2026-08-03)
 
 One record per planner invocation saying how it ended and, when it failed, WHY.
 

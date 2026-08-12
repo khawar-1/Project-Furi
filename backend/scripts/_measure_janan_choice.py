@@ -1,5 +1,5 @@
 """
-Jarvis OS — what does the "add janan to cart" page ACTUALLY look like? (2026-08-08)
+Furi OS — what does the "add janan to cart" page ACTUALLY look like? (2026-08-08)
 
 WHY THIS EXISTS. The live run stopped with "couldn't work out a safe next action
 on this page" after `_decide` returned an EMPTY string twice on

@@ -1,5 +1,5 @@
 """
-Jarvis OS — Reminder Chat Routing (Phase 4, Part 4)
+Furi OS — Reminder Chat Routing (Phase 4, Part 4)
 
 Detects a reminder request in the latest user message and, when the time
 parses cleanly, creates the Reminder (+ schedules its job through Part 2)

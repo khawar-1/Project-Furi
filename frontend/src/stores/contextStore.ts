@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Context Layer State (Zustand, Phase 8)
+ * Furi OS — Context Layer State (Zustand, Phase 8)
  *
  * The sensing config + live status + world-model audit. Settings changes PUT
  * IMMEDIATELY (the FileIndexCard/DailyBriefingCard lesson — optimistic, revert

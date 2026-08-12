@@ -1,5 +1,5 @@
 """
-Jarvis OS — Backend Entry Point
+Furi OS — Backend Entry Point
 Now includes memory API routes, contacts, episodes, preferences.
 """
 import asyncio
@@ -63,7 +63,7 @@ except Exception:  # pragma: no cover — logging must never take the app down
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup and shutdown lifecycle management."""
-    logger.info("🚀 Jarvis OS backend starting...")
+    logger.info("🚀 Furi OS backend starting...")
 
     # Register CUDA DLL directories FIRST, before anything imports onnxruntime
     # or the voice engines — the GPU voice path (ctranslate2 STT / onnxruntime
@@ -329,7 +329,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
-    logger.info("🛑 Jarvis OS backend shutting down...")
+    logger.info("🛑 Furi OS backend shutting down...")
     # Stop accepting REMOTE requests before anything else is torn down — a
     # phone approving a plan while the scheduler and browser are closing would
     # be acting on a machine that is already leaving.
@@ -347,7 +347,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.debug(f"housekeeping shutdown: {e}")
     await scheduler.shutdown()
 
-    # Phase 14: close every browser window Jarvis has open BEFORE stopping the
+    # Phase 14: close every browser window Furi has open BEFORE stopping the
     # loop, so a clean shutdown never orphans a Chromium holding the profile lock
     # (the orphan that hangs the next run's launch). Order: close windows (on the
     # browser loop) → reclaim as a guaranteed sweep (covers the clean-subprocess
@@ -384,7 +384,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="Jarvis OS API",
+        title="Furi OS API",
         description="Personal AI Operating System — Backend API",
         version=settings.APP_VERSION,
         lifespan=lifespan,

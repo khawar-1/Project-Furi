@@ -1,5 +1,5 @@
 """
-Jarvis OS — Browser agent loop (Phase 14, Part 2)
+Furi OS — Browser agent loop (Phase 14, Part 2)
 
 The read-observe-decide-act loop that turns "one page" (Part 1's browse_page)
 into "do a thing on a live site": open YouTube, search, play the first result —
@@ -539,7 +539,7 @@ class BrowseOutcome:
     # 2026-08-01 symptom ("it started playing a video I didn't ask for"), and
     # the multi-tab round made the in-place branch the common one.
     destination_only: bool = False
-    # The user asked Jarvis to stop, and this run halted between its own actions
+    # The user asked Furi to stop, and this run halted between its own actions
     # to obey (2026-08-03). NOT a failure to replan around: the tool marks the
     # step's result with interruption.STOPPED_BY_USER, the planner's pause check
     # fires on the very next node, and apply_pause resets the step to PENDING so
@@ -562,7 +562,7 @@ class BrowseOutcome:
     # wall this is a HAND-OFF, not a failure to replan: the tool opens the
     # user-driven window at the challenge and the plan PAUSES until the user
     # completes it, then the browse re-runs (the profile carries the clearance
-    # cookie forward). Jarvis detects and waits — it never solves a CAPTCHA.
+    # cookie forward). Furi detects and waits — it never solves a CAPTCHA.
     challenge_required: bool = False
     challenge_kind: str = ""
     challenge_url: str = ""
@@ -2097,7 +2097,7 @@ def detect_login_wall(
 
 
 # ----------------------------------------------- OPTIONAL sign-in offer (soft)
-# 2026-07-19, by user request ("the site suggested sign in/sign up but Jarvis
+# 2026-07-19, by user request ("the site suggested sign in/sign up but Furi
 # didn't ask me"). Distinct from detect_login_wall, which is a HARD wall the loop
 # must never pass. This is a page that merely OFFERS an account while the task
 # could proceed as a guest — so the loop STOPS and asks the user which they want
@@ -2162,7 +2162,7 @@ def detect_auth_offer(obs: dom_observe.Observation) -> Optional[tuple[bool, bool
     itself, so this only fires on an OPTIONAL offer. Best-effort — never raises.
 
     SAME-SITE ONLY (2026-07-21, by user report — "there was a signup request that
-    wasn't for the site we were on, but Jarvis still asked me to sign up / continue
+    wasn't for the site we were on, but Furi still asked me to sign up / continue
     as guest"). An account offer counts only when it belongs to the site we're
     operating on: a "Sign in with Google", a third-party "Sign up" widget, or a
     newsletter/marketing link whose href points to ANOTHER registrable domain is
@@ -2415,7 +2415,7 @@ async def _auth_navigation_target(
     it just re-clicks the same link until the stuck-limit fails the whole task
     (live 2026-07-18: "sign in to youtube and play jane" reached the video, then
     died re-clicking Sign in, closing the window). Catching the auth-host TARGET
-    here hands the sign-in off exactly like a landed wall — Jarvis never signs
+    here hands the sign-in off exactly like a landed wall — Furi never signs
     in, and the user's explicit "sign in" is honoured instead of spun on.
 
     A click's real href is read from the live DOM (the observation clips it for
@@ -4561,7 +4561,7 @@ async def run_browse(
             out.wall_kind = kind
             return out
 
-        # CAPTCHA / verification challenge (15.4): stop the loop cleanly — Jarvis
+        # CAPTCHA / verification challenge (15.4): stop the loop cleanly — Furi
         # NEVER solves or interacts with a challenge (ToS + safety, the hard
         # rule). Like a login wall, the tool opens the user-driven window and the
         # plan pauses; the user completes the check by hand and the resumed browse
@@ -5651,7 +5651,7 @@ async def run_browse(
             # is bound to this page render). Stop with mode 'embedded': the tool
             # HOLDS this session (form intact), arms the vendor-traffic
             # carve-out, and the plan pauses for the HUMAN to tick the box in
-            # this very window. Jarvis touches nothing on the widget — its
+            # this very window. Furi touches nothing on the widget — its
             # elements were never even stamped.
             gate = unsolved_embedded_challenge(obs)
             if gate is not None:

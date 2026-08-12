@@ -1,5 +1,5 @@
 """
-Jarvis OS — Local text-to-speech (Kokoro, via kokoro-onnx)
+Furi OS — Local text-to-speech (Kokoro, via kokoro-onnx)
 
 Kokoro (an 82M-param TTS, Apache-2.0) behind the same injectable factory the
 Piper/Chatterbox engines used (the voice_stt / google_services pattern):

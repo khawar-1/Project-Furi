@@ -1,5 +1,5 @@
 """
-Jarvis OS — Dependency Injection
+Furi OS — Dependency Injection
 FastAPI dependency providers for database sessions, Qdrant, and LLM providers.
 """
 from typing import AsyncIterator, Optional

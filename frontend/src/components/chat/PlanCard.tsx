@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Plan Card (Phase 3, Part 8)
+ * Furi OS — Plan Card (Phase 3, Part 8)
  * Renders an agent plan inside the chat: every step with its permission
  * badge, DESTRUCTIVE steps flagged red with a warning, and Approve / Cancel
  * buttons for plans paused at the approval gate. After the user answers,
@@ -373,7 +373,7 @@ export function PlanCard({
               ? 'Cancelling — the step currently running will finish first; nothing further will run.'
               : pauseRequested
                 ? 'Stopping — the step currently running will finish first, then I’ll hold so you can tell me what to change.'
-                : 'Running in the background — Jarvis will notify you when it finishes.'}
+                : 'Running in the background — Furi will notify you when it finishes.'}
           </span>
           {!cancelRequested && !pauseRequested && onPauseTask && (
             <button
@@ -507,15 +507,15 @@ export function PlanCard({
         <div className="px-4 pb-4 space-y-2.5">
           {plan.question.kind === 'login' || plan.question.kind === 'signup' || plan.question.kind === 'captcha' ? (
             // Human handoff: the USER signs in / creates the account / completes
-            // the verification in the window Jarvis opened. Jarvis never enters
+            // the verification in the window Furi opened. Furi never enters
             // the credentials and never solves a CAPTCHA — say so unmistakably,
             // distinct from an ordinary clarifying question.
             <div className="space-y-1.5 px-3 py-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-100 text-xs">
               <div className="flex items-center gap-1.5 font-semibold text-amber-300">
                 <Lock size={13} className="flex-shrink-0" />
                 {plan.question.kind === 'captcha'
-                  ? 'You complete the check — Jarvis never solves CAPTCHAs'
-                  : `You ${plan.question.kind === 'signup' ? 'create the account' : 'sign in'} — Jarvis never enters your credentials`}
+                  ? 'You complete the check — Furi never solves CAPTCHAs'
+                  : `You ${plan.question.kind === 'signup' ? 'create the account' : 'sign in'} — Furi never enters your credentials`}
               </div>
               <span className="block break-words whitespace-pre-wrap text-amber-100/90">
                 {plan.question.text}
@@ -640,9 +640,9 @@ export function PlanCard({
               <span>
                 This plan includes {otherDestructiveCount} destructive step
                 {otherDestructiveCount !== 1 ? 's' : ''} — the exact command is
-                shown on each red step above. Files Jarvis deletes go to a
+                shown on each red step above. Files Furi deletes go to a
                 recoverable trash (~/.jarvis/trash); shell commands may make
-                changes Jarvis cannot undo.
+                changes Furi cannot undo.
               </span>
             </div>
           )}

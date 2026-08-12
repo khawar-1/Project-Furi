@@ -1,4 +1,4 @@
-# Jarvis OS — Proposed Feature Roadmap
+# Furi OS — Proposed Feature Roadmap
 
 > **Status:** written 2026-08-04 as a proposal. **Features 1 and 2 are now
 > BUILT** (see their ✅ headers); 3–8 and the cross-cutting prerequisites are
@@ -16,7 +16,7 @@
 
 ## Context
 
-Jarvis OS's **cognitive** layer is complete to an unusually high standard:
+Furi OS's **cognitive** layer is complete to an unusually high standard:
 memory with identity resolution, decay, consolidation and a conflict queue; a
 LangGraph planner behind a structural approval gate with grounding locks;
 background domain agents with pause/steer/cancel; an initiative engine; a
@@ -25,7 +25,7 @@ fills and submits forms behind per-gesture approval. 33 tools, 23 routers,
 121 test files, three scored benches.
 
 What is missing is **embodiment** — reach into the physical world, control of
-the machine Jarvis already watches, and input channels beyond keyboard and
+the machine Furi already watches, and input channels beyond keyboard and
 microphone. Every feature below closes part of that gap.
 
 ## Conventions every feature here follows
@@ -56,7 +56,7 @@ below assumes them rather than restating them.
 > spec (no SSRF exemption — the tools expose no URL at all; the remote surface
 > denies all three routes; `spoken.py` needed forms the spec did not mention).
 
-**The single most iconic Jarvis capability, and currently absent.** Verified:
+**The single most iconic Furi capability, and currently absent.** Verified:
 `grep -ril "homeassistant|smart.home|hue|mqtt|tuya"` across `backend/app` and
 `frontend/src` returns only two unrelated `.wasm` binaries.
 `app/integrations/` contains Google and nothing else.
@@ -185,7 +185,7 @@ for the most common thing a person asks an assistant to do.
 
 ### Why this is the highest-frequency feature on the list
 
-"Pull that up", "put it on the main screen", "mute that" is film-Jarvis's
+"Pull that up", "put it on the main screen", "mute that" is film-Furi's
 most-used register. You have already built the hard half. This is the easy half.
 
 ### Architecture
@@ -254,7 +254,7 @@ seam, with its own explicit gate.
   screenshot_retention_days}`. Sub-toggles so a user can allow focus/volume
   while refusing window-closing.
 - Settings `DesktopControlCard` showing the discovered app registry (the audit
-  surface — "these are the apps Jarvis can open").
+  surface — "these are the apps Furi can open").
 
 ### Routing
 
@@ -336,7 +336,7 @@ send structurally blocked; per-channel not-configured degradation.
 # 4. Real documents and spreadsheets
 
 `create_file` writes plain text. `python-docx` is **already a dependency** and
-used read-only in `app/core/file_extract.py`. Jarvis can read a .docx and
+used read-only in `app/core/file_extract.py`. Furi can read a .docx and
 cannot write one.
 
 ### Architecture
@@ -425,7 +425,7 @@ once.
 
 Phase 8 captures the screen and condenses it **deterministically** to a short
 text summary (`condense_ocr_text`, no LLM). That is the right posture for a
-passive background sensor. It also means Jarvis cannot answer *"what's this
+passive background sensor. It also means Furi cannot answer *"what's this
 error?"* or *"read me that dialog"* — OCR text alone loses layout, and the
 summary is deliberately short.
 
@@ -464,7 +464,7 @@ a chat window can otherwise become an instruction channel.
 ### Config
 
 `context.config` gains `on_demand_vision: False`. Settings copy must be plain:
-*"Jarvis can take a full-detail picture of your screen and send it to the
+*"Furi can take a full-detail picture of your screen and send it to the
 vision model when you ask a question about it."* Cloud transmission must be
 stated, because unlike the passive OCR path this one leaves the machine.
 
@@ -472,10 +472,10 @@ stated, because unlike the passive OCR path this one leaves the machine.
 
 # 7. Gesture cursor control (voice-activated)
 
-**Voice-armed, camera-driven cursor control.** The user says *"Jarvis, take the
+**Voice-armed, camera-driven cursor control.** The user says *"Furi, take the
 mouse"*; the webcam activates, hand landmarks are tracked, and hand movement
 drives the system cursor with pinch-to-click, fist-to-drag and two-finger
-scroll. *"Jarvis, release"*, `Esc`, or the hand leaving frame disarms it.
+scroll. *"Furi, release"*, `Esc`, or the hand leaving frame disarms it.
 
 ### ⚠️ This is the most dangerous feature on this list, and the reason is not obvious
 
@@ -489,11 +489,11 @@ Three structural consequences, all non-negotiable:
 1. **Gesture control is NOT a tool and must never be registered.** It is an
    *input device*, not a capability. It gets no entry in `app/tools/`, no
    `ToolDefinition`, and no reachability from the planner, a routine, a
-   scheduled routine, or the initiative engine. Nothing Jarvis can decide to do
+   scheduled routine, or the initiative engine. Nothing Furi can decide to do
    may turn on the user's camera or move their cursor. It is armed by a human,
    for a human, only.
 
-2. **A synthesized click can never land on Jarvis's own approval UI.** Gesture
+2. **A synthesized click can never land on Furi's own approval UI.** Gesture
    mode **auto-suspends** whenever any plan is `awaiting_approval`,
    `awaiting_choice`, or `paused` — the same `_OPEN_STATUSES` predicate
    `plan_store` already owns, so there is no second hand-kept copy of the list.
@@ -701,7 +701,7 @@ Not features, but each one caps everything above.
 `app/providers/factory.py` is an `if/elif` returning exactly one provider.
 Every feature funnels through `create_provider()` / `get_llm_provider()` —
 routing, planning, summaries, extraction, browse decisions, initiative,
-briefings, memory digests. One outage and Jarvis is a text box.
+briefings, memory digests. One outage and Furi is a text box.
 `app/providers/ollama.py` is 145 implemented lines, unreachable without editing
 `.env` and restarting.
 

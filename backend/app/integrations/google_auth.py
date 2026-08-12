@@ -1,5 +1,5 @@
 """
-Jarvis OS — Google Integration Foundation (Phase 5, Part 1)
+Furi OS — Google Integration Foundation (Phase 5, Part 1)
 
 OAuth 2.0 for installed apps (loopback redirect on 127.0.0.1) plus local
 token storage. This module is the ONLY place that reads or writes Google
@@ -12,7 +12,7 @@ Security rules, all enforced in code:
   lines carry exception class names and account email at most, never token
   material.
 - Scopes are least-privilege and frozen at module level (gmail readonly/
-  compose/send + calendar.events — never gmail.modify or full mail: Jarvis
+  compose/send + calendar.events — never gmail.modify or full mail: Furi
   reads, drafts, and sends; it does not delete or relabel mail). A stored
   token missing ANY required scope counts as NOT connected — re-consent,
   never silent partial capability.
@@ -327,7 +327,7 @@ class GoogleAuthManager:
                 open_browser=True,
                 authorization_prompt_message="",
                 success_message=(
-                    "Jarvis is connected to your Google account — "
+                    "Furi is connected to your Google account — "
                     "you can close this tab."
                 ),
                 timeout_seconds=OAUTH_FLOW_TIMEOUT_SECONDS,

@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Device & Screen Sensing (Phase 8, Parts 2 + 3)
+ * Furi OS — Device & Screen Sensing (Phase 8, Parts 2 + 3)
  *
  * The native half of the Context Layer, running entirely in the Electron MAIN
  * process so it works while the window lives in the tray. It writes to the
@@ -202,10 +202,10 @@ async function postDevice(): Promise<void> {
 // ============================================================
 async function captureAndPostScreen(): Promise<boolean> {
   if (!settings.enabled || !settings.screen_ocr || screenPaused) return false;
-  // Self-observation guard (screen-aware chat): never capture while Jarvis
+  // Self-observation guard (screen-aware chat): never capture while Furi
   // itself is the foreground window. Asking "what's on my screen" from inside
-  // Jarvis means the thing the user was looking at BEFORE focusing us — and
-  // OCR-ing our own chat panel would feed Jarvis's answers back into its own
+  // Furi means the thing the user was looking at BEFORE focusing us — and
+  // OCR-ing our own chat panel would feed Furi's answers back into its own
   // context (a feedback loop). The last pre-focus capture stays "current";
   // a hidden/tray window is not focused, so wake-word asks capture normally.
   if (BrowserWindow.getFocusedWindow()) return false;
@@ -248,8 +248,8 @@ function scheduleChangeCapture(): void {
   changeCaptureTimer = setTimeout(() => {
     changeCaptureTimer = null;
     // Burn the min-gap ONLY when a capture actually happened: a fire skipped by
-    // the self-observation guard (Jarvis was focused) must not throttle the
-    // very next switch away — "focus Jarvis, then switch to Chrome 2s later"
+    // the self-observation guard (Furi was focused) must not throttle the
+    // very next switch away — "focus Furi, then switch to Chrome 2s later"
     // has to capture Chrome promptly, not wait out a gap the skip started.
     void captureAndPostScreen().then((captured) => {
       if (captured) lastChangeCaptureAt = Date.now();

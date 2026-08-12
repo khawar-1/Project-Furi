@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Settings design vocabulary
+ * Furi OS — Settings design vocabulary
  *
  * ONE definition each for the switch, the status chip, the card shell and the
  * labelled control row. Before this file the panel carried SIX hand-copied

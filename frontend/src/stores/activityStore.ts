@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Activity Store (Zustand)
+ * Furi OS — Activity Store (Zustand)
  * Tool-execution audit trail for the Timeline panel (Phase 3).
  */
 import { create } from 'zustand';

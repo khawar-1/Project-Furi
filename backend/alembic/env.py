@@ -1,5 +1,5 @@
 """
-Jarvis OS — Alembic migration environment.
+Furi OS — Alembic migration environment.
 
 The URL comes from app settings (DATABASE_URL) with the async driver stripped,
 since migrations run synchronously. Override with the ALEMBIC_DATABASE_URL

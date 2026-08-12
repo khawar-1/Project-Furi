@@ -1,5 +1,5 @@
 """
-Jarvis OS — Browser media + account control API (Phase 14, Part 2)
+Furi OS — Browser media + account control API (Phase 14, Part 2)
 
 The stop-control surface for a `browse` window left playing (keep_open) plus the
 one-time sign-in flow. The media/login sessions are in-memory registries in
@@ -96,10 +96,10 @@ async def account_status() -> dict:
     return {"login_open": browser_session.login_window_open()}
 
 
-@router.post("/login", summary="Open a one-time sign-in window in the Jarvis browser")
+@router.post("/login", summary="Open a one-time sign-in window in the Furi browser")
 async def open_login(req: LoginRequest) -> dict:
-    """Open the Jarvis browser profile as a normal, user-driven window so the
-    user can sign into their account BY HAND. Jarvis never sees the credentials;
+    """Open the Furi browser profile as a normal, user-driven window so the
+    user can sign into their account BY HAND. Furi never sees the credentials;
     the persistent profile keeps the session for later playback. 503 when no
     browser can launch (Playwright/Chromium missing) — a normal state, said
     plainly, not a 500."""

@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Agents / Tasks Store (Zustand)
+ * Furi OS — Agents / Tasks Store (Zustand)
  *
  * The Agents panel's state: the live list of background workers (one per task,
  * each owned by a domain agent) plus per-task live step progress from

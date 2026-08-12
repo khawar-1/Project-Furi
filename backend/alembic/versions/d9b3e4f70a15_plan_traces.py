@@ -4,7 +4,7 @@ Revision ID: d9b3e4f70a15
 Revises: c7f2a5e91d84
 Create Date: 2026-08-03
 
-The routing_decisions sibling, one layer down: routing records what Jarvis
+The routing_decisions sibling, one layer down: routing records what Furi
 didn't DO, this records why a plan it did take gave up. See
 app/core/plan_trace.py for what was unrecorded before it.
 

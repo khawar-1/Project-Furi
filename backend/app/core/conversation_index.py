@@ -1,5 +1,5 @@
 """
-Jarvis OS — Conversation index service (Phase 6, Part 4)
+Furi OS — Conversation index service (Phase 6, Part 4)
 
 Messages are the one memory surface that was SQLite-only — searchable by
 session, never by meaning. This module embeds each chat Message into the Qdrant

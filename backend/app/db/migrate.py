@@ -1,5 +1,5 @@
 """
-Jarvis OS — Startup schema migration + drift alarm (2026-07-13)
+Furi OS — Startup schema migration + drift alarm (2026-07-13)
 
 Live incident 2026-07-12: the production jarvis.db was missing the Phase 6
 Part 4 `messages.embedded_at` column — the migration existed but was never
@@ -25,7 +25,7 @@ Three DB states, handled explicitly:
   tolerate create_all racing ahead (guards inside the migration files).
 
 Everything is best-effort: a migration failure logs CRITICAL and startup
-continues — a degraded-but-running Jarvis beats a dead one, and the drift
+continues — a degraded-but-running Furi beats a dead one, and the drift
 alarm names exactly what is broken.
 """
 import asyncio

@@ -1,5 +1,5 @@
 """
-Jarvis OS — The phone page (2026-08-03)
+Furi OS — The phone page (2026-08-03)
 
 One self-contained HTML document, served ONLY by the remote listener. No build
 step, no bundle, no framework: the desktop frontend has essentially zero
@@ -25,7 +25,7 @@ REMOTE_PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
-<title>Jarvis</title>
+<title>Furi</title>
 <style>
   :root { --bg:#0A0A0F; --card:#14141c; --line:#24242f; --text:#e2e8f0;
           --dim:#94a3b8; --cyan:#22d3ee; --red:#f87171; --amber:#fbbf24; }
@@ -67,7 +67,7 @@ REMOTE_PAGE = """<!doctype html>
 </style>
 </head>
 <body>
-<header><span id="dot"></span><h1>Jarvis</h1><span id="sub" class="dim"></span></header>
+<header><span id="dot"></span><h1>Furi</h1><span id="sub" class="dim"></span></header>
 <main id="app"><div class="empty">Connecting…</div></main>
 <script>
 // The token arrives once in the URL fragment (never sent to a server, never
@@ -126,7 +126,7 @@ function taskHtml(t) {
   return `<div class="card ${waiting || asking ? 'approve' : ''}" data-task="${esc(t.id)}"
               data-plan="${esc(planId)}" data-contract="${esc(contractHash)}">
     <p class="goal">${esc(t.goal)}</p>
-    <div class="dim">${esc(t.agent || 'Jarvis')} · ${esc(t.status)}</div>
+    <div class="dim">${esc(t.agent || 'Furi')} · ${esc(t.status)}</div>
     ${waiting ? pending.map(stepHtml).join('') : ''}
     ${asking && p.question ? `<div class="step">${esc(p.question.text)}</div>` : ''}
     ${waiting ? `<div class="row">
@@ -159,7 +159,7 @@ async function refresh() {
     app.innerHTML = `<div class="empty">${
       String(e).includes('401')
         ? 'This device is not paired. Scan the QR code in Settings on the machine.'
-        : 'Can’t reach Jarvis.'}</div>`;
+        : 'Can’t reach Furi.'}</div>`;
   }
 }
 

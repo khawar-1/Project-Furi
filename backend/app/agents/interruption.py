@@ -1,7 +1,7 @@
 """
-Jarvis OS — Cooperative Plan Pause & Steer (2026-08-03)
+Furi OS — Cooperative Plan Pause & Steer (2026-08-03)
 
-"When Jarvis is performing a task and it got something wrong, I want to pause
+"When Furi is performing a task and it got something wrong, I want to pause
 it and tell it what to do."
 
 Until now the only mid-run lever was CANCEL, which is TERMINAL: every pending

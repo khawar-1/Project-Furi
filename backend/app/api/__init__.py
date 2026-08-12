@@ -1,1 +1,1 @@
-"""Jarvis OS — API Package"""
+"""Furi OS — API Package"""

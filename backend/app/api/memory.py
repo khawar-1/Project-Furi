@@ -1,5 +1,5 @@
 """
-Jarvis OS — Memory API
+Furi OS — Memory API
 Full CRUD for semantic memories plus search and stats endpoints.
 The 'subject' filter allows the frontend to fetch only user-facing facts (user | shared)
 for the About Me panel, or contact-specific facts when browsing a contact.

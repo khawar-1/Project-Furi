@@ -1,5 +1,5 @@
 """
-Jarvis OS — where does OBSERVE time actually go? (2026-08-02)
+Furi OS — where does OBSERVE time actually go? (2026-08-02)
 
 WHY THIS EXISTS. The junaidjamshed run recorded `observe_ms` of 28,993 then
 64,157 on a single page, while browse_bench sites observe in 30–160ms — and

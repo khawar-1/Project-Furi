@@ -1,5 +1,5 @@
 """
-Jarvis OS — Scheduler / Event Bus (Phase 4, Part 2)
+Furi OS — Scheduler / Event Bus (Phase 4, Part 2)
 
 Timed work for every proactive feature (reminders, background tasks, ...).
 The design mirrors plan_store: SQLite is the truth, the in-process timers

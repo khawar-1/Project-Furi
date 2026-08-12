@@ -2,7 +2,7 @@
 The approval card was DEAF, and abandoned rows never got swept (2026-08-03).
 
 TWO defects, both reported by the user in the same breath as "what would happen
-to a confirmation card if I tell Jarvis what it's doing isn't correct?".
+to a confirmation card if I tell Furi what it's doing isn't correct?".
 
 DEFECT 1 — a typed correction never reached the plan holding an approval card.
 AWAITING_APPROVAL was not in plan_store._OPEN_STATUSES, so the message fell

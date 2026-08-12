@@ -1,5 +1,5 @@
 """
-Jarvis OS — WHICH add-to-cart control belongs to the page's own product? (2026-08-10)
+Furi OS — WHICH add-to-cart control belongs to the page's own product? (2026-08-10)
 
 `_measure_product_page.py` refuted the obvious design. On the incident's own
 product page there is not ONE add-to-cart control — there are FOURTEEN:

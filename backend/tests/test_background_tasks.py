@@ -231,7 +231,7 @@ async def test_write_task_pauses_parks_and_resumes_on_approval(task_db, pushed, 
     assert parked is not None
     pause = pushed[0][1]
     assert pause["status"] == "awaiting_approval"
-    assert pause["title"] == "Jarvis needs your approval"
+    assert pause["title"] == "Furi needs your approval"
     assert "needs your approval" in pause["body"]
     assert "Create out.txt" in pause["body"]  # the exact step, never paraphrased
     assert pause["plan"]["requires_approval"] is True
@@ -288,7 +288,7 @@ async def test_question_pause_pushes_and_answer_continues(task_db, pushed, tmp_p
 
     assert task.status == "awaiting_choice"
     pause = pushed[0][1]
-    assert pause["title"] == "Jarvis has a question"
+    assert pause["title"] == "Furi has a question"
     assert "Which file did you mean?" in pause["body"]
 
     # Answer: what /api/agent/choose does for a task-owned plan

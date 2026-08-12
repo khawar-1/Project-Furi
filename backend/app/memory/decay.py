@@ -1,5 +1,5 @@
 """
-Jarvis OS — Memory decay as a RANKING signal (2026-08-03)
+Furi OS — Memory decay as a RANKING signal (2026-08-03)
 
 *(Tier 2, item 7 — "memory only grows")*
 

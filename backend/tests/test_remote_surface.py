@@ -96,9 +96,9 @@ def test_nothing_that_can_start_work_is_mounted(method, path):
 
 @pytest.mark.parametrize("method,path", [
     ("GET", "/api/context/world"),      # OCR'd screen text
-    ("GET", "/api/agent/tools"),        # a map of everything Jarvis can do
+    ("GET", "/api/agent/tools"),        # a map of everything Furi can do
     ("GET", "/api/browser/media"),      # open tab URLs and titles
-    ("GET", "/memory/search"),          # everything Jarvis knows about the user
+    ("GET", "/memory/search"),          # everything Furi knows about the user
     ("GET", "/api/activity/routing"),   # a copy of what was typed
     ("GET", "/api/autofill"),           # form-fill data, some of it secret
 ])

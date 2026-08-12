@@ -1,1 +1,1 @@
-"""Jarvis OS — DB Package"""
+"""Furi OS — DB Package"""

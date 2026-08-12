@@ -607,7 +607,7 @@ async def test_the_login_pause_text_points_at_the_tab_it_was_handed_over_on():
     handed over IN PLACE, the sign-in page is normally on a tab the user is
     already looking at — and in the live incident, saying "I've opened a sign-in
     window" about it made the (wrong) episode that tab was showing read as
-    Jarvis's answer rather than as the page it had stopped on."""
+    Furi's answer rather than as the page it had stopped on."""
     from app.agents.planner import _login_wall_question
 
     in_place = _login_wall_question(

@@ -1,5 +1,5 @@
 """
-Jarvis OS — Extraction Output Schema
+Furi OS — Extraction Output Schema
 Pydantic validation for the LLM entity-extraction JSON.
 
 The extractor LLM returns free-form JSON; this module turns it into a typed,

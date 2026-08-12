@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Suggestions Store (Zustand) — Phase 9, the Initiative Engine
+ * Furi OS — Suggestions Store (Zustand) — Phase 9, the Initiative Engine
  *
  * The proactive suggestion feed: list + accept/dismiss, plus a live receiver
  * for pushed `suggestion` events. Mirrors remindersStore (silent poll, keep

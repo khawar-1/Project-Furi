@@ -1,5 +1,5 @@
 """
-Jarvis OS — the 2026-08-09 e-commerce round against the REAL site.
+Furi OS — the 2026-08-09 e-commerce round against the REAL site.
 
 The hermetic suite drives fixtures shaped like the observation; the opt-in
 test_browser_extract_js.py runs the JS over hand-written markup. Neither tells

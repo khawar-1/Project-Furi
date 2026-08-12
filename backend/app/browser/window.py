@@ -7,7 +7,7 @@ context per profile (the single-instance lock), so "one profile = one live
 context" had to be enforced at every launch site: each browse first closed the
 sign-in window, the result window, the media session AND the held agent window,
 then launched again. That teardown is what the user sees as Chrome closing and
-reopening, and it is why Jarvis could only ever have ONE tab.
+reopening, and it is why Furi could only ever have ONE tab.
 
 The fix is one level up from a fix this stack already made. `ensure_playwright_driver`
 turned the Node driver from per-session into a startup singleton for exactly this

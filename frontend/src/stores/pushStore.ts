@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Push Channel State (Zustand, Phase 4)
+ * Furi OS — Push Channel State (Zustand, Phase 4)
  * Connection status of the server→client WebSocket. The connection itself
  * lives in lib/push.ts; this store only mirrors its state for the UI.
  */

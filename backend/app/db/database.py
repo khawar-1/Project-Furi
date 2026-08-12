@@ -1,5 +1,5 @@
 """
-Jarvis OS — SQLite Database Setup
+Furi OS — SQLite Database Setup
 Async SQLAlchemy engine and session factory.
 """
 from sqlalchemy.ext.asyncio import (

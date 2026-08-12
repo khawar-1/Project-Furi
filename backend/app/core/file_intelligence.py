@@ -1,5 +1,5 @@
 """
-Jarvis OS — File Intelligence (Phase 6, Part 6 — the phase capstone)
+Furi OS — File Intelligence (Phase 6, Part 6 — the phase capstone)
 
 Learns the user's folder HABITS so the planner can suggest a save/move
 destination when the user names none ("save these notes", "organize this
@@ -23,7 +23,7 @@ Design notes:
   parent is always the true destination folder.
 - Folder keys are OS-normalized (case-insensitive on Windows) so "C:\\Users\\x"
   and "c:\\users\\X" count as one; the first-seen casing is displayed.
-- Jarvis's own trash (~/.jarvis/trash) is never a suggestion.
+- Furi's own trash (~/.jarvis/trash) is never a suggestion.
 """
 import json
 import os
@@ -44,7 +44,7 @@ from app.db.models import ActivityLog
 # permanently dominate the ranking.
 _DESTINATION_TOOLS = ("create_file", "move_file", "rename_file", "move_files")
 
-# Never suggest Jarvis's own trash as a place to save things.
+# Never suggest Furi's own trash as a place to save things.
 _TRASH_DIR = Path.home() / ".jarvis" / "trash"
 
 DEFAULT_LIMIT = 5

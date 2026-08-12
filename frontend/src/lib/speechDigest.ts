@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Spoken form of a reply (what Jarvis SAYS, not what it WRITES)
+ * Furi OS — Spoken form of a reply (what Furi SAYS, not what it WRITES)
  *
  * A written reply and a spoken one are different artefacts. On screen, "here are
  * the 52 PDFs" is best answered with 52 lines; read aloud it is 52 filenames in

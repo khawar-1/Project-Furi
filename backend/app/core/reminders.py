@@ -1,12 +1,12 @@
 """
-Jarvis OS — Reminders (Phase 4, Part 4)
+Furi OS — Reminders (Phase 4, Part 4)
 
 The phase's "moment": "remind me at 6 to call Jamil" becomes a Reminder row
 plus a Part 2 scheduled job. When the job fires: a Part 1 push event goes
 out (a live window shows it in chat and, if unfocused or closed to tray,
 Part 3 raises the native notification); and — because the push channel has
 no queue — a chat message is ALSO persisted into the reminder's session
-directly, so the reminder is visible next time the user opens Jarvis even
+directly, so the reminder is visible next time the user opens Furi even
 if no window ever caught the push.
 
 Reminder is the user-facing record (text, due_at, session_id, status); the
@@ -97,7 +97,7 @@ async def _reminder_job_handler(job: FiredJob) -> None:
     """Runs once the scheduler has already won the fire-vs-cancel race for
     this job. Marks the Reminder fired, pushes the live event, and persists
     a chat message into its session so a closed window still gets the
-    reminder next time it opens Jarvis."""
+    reminder next time it opens Furi."""
     from app.db.database import AsyncSessionLocal
 
     reminder_id = job.payload.get("reminder_id")
@@ -120,14 +120,14 @@ async def _reminder_job_handler(job: FiredJob) -> None:
             # backend restart), never presented as if it fired on time.
             late_by = _describe_lateness((utc_now() - reminder.due_at).total_seconds())
             body = (
-                f"Reminder (missed while Jarvis was offline — was due "
+                f"Reminder (missed while Furi was offline — was due "
                 f"{late_by} ago): {reminder.text}"
             )
         else:
             body = f"Reminder: {reminder.text}"
         await push("reminder", {
             "reminder_id": reminder.id,
-            "title": "Jarvis",
+            "title": "Furi",
             "body": body,
             "text": reminder.text,
             "session_id": reminder.session_id,

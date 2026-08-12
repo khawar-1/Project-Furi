@@ -1,5 +1,5 @@
 """
-Jarvis OS — Qdrant Client
+Furi OS — Qdrant Client
 Manages the local Qdrant vector database in embedded (disk) mode.
 Creates all Phase 2 collections at startup.
 """

@@ -1,5 +1,5 @@
 """
-Jarvis OS — Semantic file index service (Phase 6, Part 2)
+Furi OS — Semantic file index service (Phase 6, Part 2)
 
 Walks the user's configured folders, extracts text (app/core/file_extract.py),
 chunks it, embeds each chunk locally (fastembed, 384-dim — the same
@@ -324,7 +324,7 @@ async def index_folders(
         # 24-minute build, so every concurrent chat/audit write stalled 30s on
         # the busy timeout and was then DROPPED by its best-effort writer — an
         # entire conversation vanished from history. Short transactions keep
-        # the rest of Jarvis writable while a pass runs.
+        # the rest of Furi writable while a pass runs.
         await db.commit()
 
     # Prune: active rows we did not encounter this pass are gone / de-scoped.

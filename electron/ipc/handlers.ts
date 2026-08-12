@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — IPC Handler Registration
+ * Furi OS — IPC Handler Registration
  * All main-process IPC handlers are defined here.
  * Keep this file focused — one handler per capability.
  */
@@ -68,7 +68,7 @@ export function registerIpcHandlers(
     if (!title && !body) return;
 
     const notification = new Notification({
-      title: title || 'Jarvis',
+      title: title || 'Furi',
       body,
       icon: appIcon(),
     });

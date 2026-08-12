@@ -1,5 +1,5 @@
 """
-Jarvis OS — Integrations API (Phase 5, Part 1)
+Furi OS — Integrations API (Phase 5, Part 1)
 
 Connect/disconnect/status for the Google account. Everything goes through
 app/integrations/google_auth.py; this router never touches token files or

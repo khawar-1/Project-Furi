@@ -1,5 +1,5 @@
 """
-Jarvis OS — Semantic file + conversation search tool (Phase 6, Parts 3-4)
+Furi OS — Semantic file + conversation search tool (Phase 6, Parts 3-4)
 
 The SEARCH half of the Part 2 file index AND (Part 4) of the conversation index:
 find a file OR a past chat by what is INSIDE it or by description ("the notes

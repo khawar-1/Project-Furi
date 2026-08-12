@@ -13,7 +13,7 @@ usual, because the measurement contradicted four things a hand-written fixture
 would have encoded — and the previous round deferred this work precisely because
 it had only a fragrance page, which has no multi-valued axis at all:
 
-  1. NOTHING IS CHECKED and the hidden `id` is EMPTY. The contract Jarvis would
+  1. NOTHING IS CHECKED and the hidden `id` is EMPTY. The contract Furi would
      have shown and submitted carried NO variant whatsoever.
   2. AVAILABILITY IS SIGNALLED TWO DIFFERENT WAYS ON ONE PAGE. The main product
      leaves the input enabled and marks only the LABEL (`is-disabled`); the

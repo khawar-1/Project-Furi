@@ -1,5 +1,5 @@
 """
-Jarvis OS — Autofill profile API (Phase 15.2)
+Furi OS — Autofill profile API (Phase 15.2)
 
 CRUD over the curated autofill profile the browser fills forms from. The user
 owns this data; a commit-mode browse may only fill a form with a value that

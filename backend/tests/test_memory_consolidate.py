@@ -2,7 +2,7 @@
 
 The budget round made memory BOUNDED; this makes what falls outside the bound
 still USEFUL. `budget.MAX_FACTS_PER_CONTACT = 8` clips a contact's fact log in
-every prompt, so past the recent window everything Jarvis learned about a person
+every prompt, so past the recent window everything Furi learned about a person
 was in the database, on the API, in the UI — and invisible to the model forever.
 
 Most of these tests are about what it must NOT do: it deletes nothing, it

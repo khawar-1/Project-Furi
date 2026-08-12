@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — App-wide render safety net.
+ * Furi OS — App-wide render safety net.
  *
  * Without this, an uncaught error in ANY component's render unmounts the entire
  * React tree and leaves a blank window (in Electron: just the native menu bar,

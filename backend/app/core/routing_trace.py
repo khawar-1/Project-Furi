@@ -1,10 +1,10 @@
-"""Jarvis OS — per-turn routing trace (2026-08-03)
+"""Furi OS — per-turn routing trace (2026-08-03)
 
 One record per chat turn saying which router took it and, when none did, WHY.
 
 WHY THIS EXISTS
 ---------------
-``ActivityLog`` records every tool call, so every path where Jarvis *acts*
+``ActivityLog`` records every tool call, so every path where Furi *acts*
 leaves evidence. Routing is the mirror image: it fails OPEN by design — five
 routers each ``return None`` silently, and ``maybe_handle_task`` has two exits
 that produce an ordinary chat reply and no row anywhere (the gate did not fire;

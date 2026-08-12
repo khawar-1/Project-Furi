@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Activity Timeline Panel (Phase 3)
+ * Furi OS — Activity Timeline Panel (Phase 3)
  * Chronological audit trail of every tool execution: what ran, with which
  * parameters, whether it succeeded, and how long it took. Read-only view of
  * the backend ActivityLog — the timeline never mutates anything.
@@ -327,7 +327,7 @@ export function TimelinePanel() {
               </p>
               <p className="text-slate-600 text-xs max-w-xs">
                 {entries.length === 0
-                  ? 'When Jarvis runs tasks for you — searching, creating, or organizing files — every action shows up here.'
+                  ? 'When Furi runs tasks for you — searching, creating, or organizing files — every action shows up here.'
                   : 'Try a different filter, or switch off "This chat".'}
               </p>
             </div>

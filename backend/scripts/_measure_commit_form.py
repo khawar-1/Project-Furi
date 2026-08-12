@@ -1,8 +1,8 @@
 """
-Jarvis OS — what is actually INSIDE the add-to-cart form? (2026-08-08)
+Furi OS — what is actually INSIDE the add-to-cart form? (2026-08-08)
 
 The variant question ("which size? how many?") can only be anchored to the form
-Jarvis is about to submit. Anchoring it to the PAGE is measurably wrong: the
+Furi is about to submit. Anchoring it to the PAGE is measurably wrong: the
 product page's only visible <select> is the REVIEW SORT dropdown, so a page-level
 gate would ask the user to choose "Most recent / Highest rating".
 

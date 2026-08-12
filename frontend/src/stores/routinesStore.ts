@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Routines Store (Zustand)
+ * Furi OS — Routines Store (Zustand)
  * List/run/delete state for the Routines panel (Phase 6, Part 5). Creation
  * happens through chat ("save this as a routine called X"); running from here
  * starts a background Task whose outcome arrives as a push event.

@@ -1,5 +1,5 @@
 """
-Jarvis OS — Initiative API (Phase 9)
+Furi OS — Initiative API (Phase 9)
 
 The suggestion feed + the Initiative Engine settings. Everything goes through
 app/core/suggestions.py and app/core/initiative.py; this router only

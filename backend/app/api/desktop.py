@@ -1,5 +1,5 @@
 """
-Jarvis OS — Desktop control API (Feature 2)
+Furi OS — Desktop control API (Feature 2)
 
 Settings and a read-only view of the application registry for the Settings
 panel. The router only orchestrates (the reminders-router rule: routers
@@ -7,7 +7,7 @@ orchestrate, modules own their domain) — `app/core/app_settings.py` owns the
 config and `app/core/desktop.py` owns everything that touches the OS.
 
 `GET /apps` is the TRUST SURFACE. `launch_app` can start anything in this list
-and nothing outside it, so "what exactly can Jarvis open?" has to be answerable
+and nothing outside it, so "what exactly can Furi open?" has to be answerable
 without running a plan and without reading the code.
 """
 from fastapi import APIRouter, Depends, HTTPException
@@ -82,7 +82,7 @@ async def put_settings(update: DesktopUpdate, db=Depends(get_db)) -> dict:
     """Save the settings.
 
     Validation is a 400 rather than a silent clamp: this is a human editing a
-    field, and a silently-adjusted value reads as "Jarvis ignored me" (the
+    field, and a silently-adjusted value reads as "Furi ignored me" (the
     contact-validation rule — a silent drop is right for the LLM, wrong for a
     person). The coercer still clamps, as the defence against a hand-edited row."""
     if not (1 <= update.screenshot_retention_days <= 365):

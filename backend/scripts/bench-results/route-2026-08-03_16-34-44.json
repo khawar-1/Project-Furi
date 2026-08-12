@@ -4166,7 +4166,7 @@
     },
     {
       "id": "background-intent",
-      "why": "INCIDENT 2026-07-09: the intent phrase must be STRIPPED before classification — with it attached the classifier read the whole message as a reminder request, listed it CHAT, and Jarvis denied having file access.",
+      "why": "INCIDENT 2026-07-09: the intent phrase must be STRIPPED before classification — with it attached the classifier read the whole message as a reminder request, listed it CHAT, and Furi denied having file access.",
       "known_gap": "",
       "ok_runs": 3,
       "runs": [

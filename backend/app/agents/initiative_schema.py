@@ -1,5 +1,5 @@
 """
-Jarvis OS — Initiative candidate schema (Phase 9)
+Furi OS — Initiative candidate schema (Phase 9)
 
 The initiative heartbeat's ONE LLM pass returns free-form JSON; this module
 turns it into a typed, default-filled `InitiativeSet` so the pipeline never

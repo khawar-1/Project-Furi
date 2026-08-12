@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Voice State (Phase 7, Part 2)
+ * Furi OS — Voice State (Phase 7, Part 2)
  *
  * Push-to-talk state machine: idle → recording (mic held) → transcribing
  * (released, waiting on the backend) → idle. Voice is a TRANSPORT, never an
@@ -70,7 +70,7 @@ const OPEN_MIC_GRACE = Number.POSITIVE_INFINITY;
  *
  * Deliberately high. Below this the transcript is sent even if the model was
  * unsure, because the cost of dropping something the user really said (they
- * repeat themselves, and wonder whether Jarvis is broken) is worse than the cost
+ * repeat themselves, and wonder whether Furi is broken) is worse than the cost
  * of an occasional junk turn (they see it and move on).
  */
 const NO_SPEECH_DROP_PROB = 0.7;
@@ -218,7 +218,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
    *  shorter never-heard-speech grace so a quiet user ends the conversation. */
   const startCapture = async (mode: VoiceMode, initialSilenceMs?: number) => {
     const { settings } = get();
-    // Barge-in (Part 4): opening the mic silences Jarvis instantly —
+    // Barge-in (Part 4): opening the mic silences Furi instantly —
     // you can't listen while you're being talked over.
     stopSpeaking();
     set({ error: null });
@@ -346,7 +346,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
     beginWakeListen: async () => {
       const { phase, settings } = get();
       // Gated on the wake-word master (NOT listen_on_summon). wakeWord.ts
-      // already suppresses detection while the mic is busy or Jarvis speaks,
+      // already suppresses detection while the mic is busy or Furi speaks,
       // but re-check phase here so a late trigger can never double-open.
       if (!settings?.enabled || !settings.wake_word) return;
       if (phase !== 'idle') return;
@@ -436,7 +436,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => {
             // plan was DISCARDED here: the card kept offering Approve for a
             // plan the backend had already consumed (clicking it 404'd), the
             // outcome text was never rendered, and — in the one feature whose
-            // whole point is not needing a screen — Jarvis said nothing at
+            // whole point is not needing a screen — Furi said nothing at
             // all. The card path has done both since 2026-07-12
             // (chatStore.respondToPlan); this is the same two steps.
             const outcome = useChatStore.getState().applyApprovedPlan(spoken.plan);

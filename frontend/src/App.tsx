@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Root Application
+ * Furi OS — Root Application
  * About Me, Contacts panels are now live.
  */
 import { useEffect } from 'react';
@@ -134,7 +134,7 @@ export default function App() {
     };
   }, []);
 
-  // Phase 7 Part 5: the "Jarvis moment" — the global hotkey summons the
+  // Phase 7 Part 5: the "Furi moment" — the global hotkey summons the
   // window AND (opt-in via listen_on_summon, checked in the store) starts a
   // hands-free recording. No-op in a plain browser (no Electron bridge).
   useEffect(() => {

@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Multi-Modal Output Router (Phase 12.3)
+ * Furi OS — Multi-Modal Output Router (Phase 12.3)
  *
  * The ONE decision layer for how a proactive push event reaches the user:
  * native toast, spoken voice, or (implicitly) the in-app card. It replaces the
@@ -169,10 +169,10 @@ export function initOutputRouter(): () => void {
         rememberSpokenContract(plan.id, plan.contract_hash);
         return;
       }
-      // 'Jarvis' is notificationContent's FALLBACK title, not content — saying
+      // 'Furi' is notificationContent's FALLBACK title, not content — saying
       // it before every announcement is noise. A real title leads the sentence.
       speakText(
-        content.title === 'Jarvis'
+        content.title === 'Furi'
           ? content.body
           : `${content.title}. ${content.body}`
       );

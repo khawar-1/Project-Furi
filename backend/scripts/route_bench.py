@@ -1,4 +1,4 @@
-"""Jarvis OS - routing acceptance benchmark.
+"""Furi OS - routing acceptance benchmark.
 
 WHY THIS EXISTS. `browse_bench.py` is a scored gate with real numbers; routing
 had none. And the asymmetry inside routing was worse than "untested": the

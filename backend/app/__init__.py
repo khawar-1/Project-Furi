@@ -1,1 +1,1 @@
-"""Jarvis OS — App Package"""
+"""Furi OS — App Package"""

@@ -1,7 +1,7 @@
 """
-Jarvis OS — Domain agent registry (the "boss + specialized agents" model)
+Furi OS — Domain agent registry (the "boss + specialized agents" model)
 
-Jarvis is the BOSS: it classifies a task's domain and hands it to the matching
+Furi is the BOSS: it classifies a task's domain and hands it to the matching
 agent. Every agent is the SAME proven ``AgentPlanner`` engine — it shares the
 approval gate (``registry.execute_tool``), the grounding/recipient/event-id/
 upload locks, the path guards, and the background ``task_runner``. An agent is a
@@ -67,7 +67,7 @@ AGENTS: dict[str, AgentSpec] = {
         "file", "File agent", "TASK",
         {"move_file", "move_files", "rename_file", "create_folder", "create_file",
          "delete_file", "delete_files", "open_folder", "run_command", "execute_script"},
-        "You are Jarvis's file & system agent: you work with the user's files, "
+        "You are Furi's file & system agent: you work with the user's files, "
         "folders, and terminal. Stay within file/system work; use your read "
         "tools to locate things before you change them.",
     ),
@@ -75,20 +75,20 @@ AGENTS: dict[str, AgentSpec] = {
         "email", "Email agent", "EMAIL",
         {"search_emails", "read_email", "read_thread",
          "create_email_draft", "send_email", "reply_email"},
-        "You are Jarvis's email agent: you search, read, draft, send, and reply "
+        "You are Furi's email agent: you search, read, draft, send, and reply "
         "to the user's Gmail. You may read the user's files when a task needs "
         "you to reference or attach one.",
     ),
     "calendar": _spec(
         "calendar", "Calendar agent", "CALENDAR",
         {"list_events", "find_events", "create_event", "update_event", "delete_event"},
-        "You are Jarvis's calendar agent: you look at and change the user's "
+        "You are Furi's calendar agent: you look at and change the user's "
         "Google Calendar events.",
     ),
     "research": _spec(
         "research", "Research agent", "WEB",
         {"web_search", "read_webpage", "browse_page"},
-        "You are Jarvis's research agent: you search the web and read pages to "
+        "You are Furi's research agent: you search the web and read pages to "
         "look up online information. You only READ the web — you never act on a "
         "live site or submit anything.",
     ),
@@ -96,7 +96,7 @@ AGENTS: dict[str, AgentSpec] = {
         "browser", "Browser agent", "BROWSE",
         {"browse", "browse_commit", "stop_media", "browse_page",
          "web_search", "read_webpage"},
-        "You are Jarvis's browser agent: you drive a real browser to ACT on the "
+        "You are Furi's browser agent: you drive a real browser to ACT on the "
         "live sites the user named — play/watch media, sign in and navigate, "
         "fill and submit forms. Only visit sites the user named.",
     ),
@@ -104,7 +104,7 @@ AGENTS: dict[str, AgentSpec] = {
         "home", "Home agent", "HOME",
         {"list_devices", "get_device_state", "set_device_state", "run_scene",
          "set_climate"},
-        "You are Jarvis's home agent: you read and control the devices in the "
+        "You are Furi's home agent: you read and control the devices in the "
         "user's home through their hub. ALWAYS list the devices first and use a "
         "PENDING placeholder for the entity id — never guess one, because a "
         "wrong id could be another room's lock or heating.",
@@ -118,7 +118,7 @@ AGENTS: dict[str, AgentSpec] = {
         {"list_windows", "focus_window", "close_window", "launch_app",
          "set_volume", "media_key", "take_screenshot",
          "read_clipboard", "write_clipboard", "open_folder"},
-        "You are Jarvis's desktop agent: you work with the windows, "
+        "You are Furi's desktop agent: you work with the windows, "
         "applications, sound and clipboard on THIS machine. ALWAYS list the "
         "windows first and use a PENDING placeholder for a window handle — "
         "never guess one, because a handle is an opaque number and a wrong one "
@@ -126,7 +126,7 @@ AGENTS: dict[str, AgentSpec] = {
     ),
     # Cross-domain / unknown fallback: the full registry (pre-agent behavior).
     "general": AgentSpec(
-        key="general", display_name="Jarvis", label=None, tools=None,
+        key="general", display_name="Furi", label=None, tools=None,
         persona="",
     ),
 }

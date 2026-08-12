@@ -1,5 +1,5 @@
 """
-Jarvis OS — Base Tool Interface
+Furi OS — Base Tool Interface
 Abstract base class that every tool in the plugin architecture must implement.
 This enforces the open/closed principle: new tools extend this, never modify it.
 """
@@ -37,7 +37,7 @@ class ToolDefinition(BaseModel):
 
 class BaseTool(ABC):
     """
-    Abstract base for all Jarvis OS tools.
+    Abstract base for all Furi OS tools.
     
     Every tool must:
     1. Declare its name and permission level

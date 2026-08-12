@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Shared TypeScript Types (Phase 2)
+ * Furi OS — Shared TypeScript Types (Phase 2)
  * All types used across the frontend application.
  */
 
@@ -211,7 +211,7 @@ export interface PlanQuestion {
   options: string[];
   /** A non-plain question the UI renders distinctly. "login"/"signup" mark a
    *  credential handoff where the USER signs in / creates the account in the
-   *  opened window — Jarvis never enters the credentials. Empty/undefined = a
+   *  opened window — Furi never enters the credentials. Empty/undefined = a
    *  plain clarifying question. */
   kind?: string;
 }
@@ -706,7 +706,7 @@ export interface WorldModel {
 // ============================================================
 // Initiative Engine (Phase 9 — proactive suggestions)
 // ============================================================
-/** The autonomy ceiling the user sets — how far Jarvis may go on its own. */
+/** The autonomy ceiling the user sets — how far Furi may go on its own. */
 export type AutonomyLevel = 'off' | 'suggest' | 'ask' | 'act';
 
 /** What the policy classified a surfaced suggestion as. */

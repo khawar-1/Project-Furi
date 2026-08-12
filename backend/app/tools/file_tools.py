@@ -1,5 +1,5 @@
 """
-Jarvis OS — File Tools (Phase 3, Part 2)
+Furi OS — File Tools (Phase 3, Part 2)
 Tools over the local filesystem:
 
   search_files    READ         find files/folders by name, extension, date, size
@@ -755,7 +755,7 @@ def _default_open_launcher(folder: Path) -> None:
 
     Exit codes are deliberately NOT checked. `explorer.exe` conventionally exits
     non-zero even when it has opened the window perfectly well, and treating
-    that as failure is the live defect this tool exists to remove — Jarvis used
+    that as failure is the live defect this tool exists to remove — Furi used
     to open the folder through `run_command` and then report the step FAILED.
     A launcher that cannot start at all raises, and that is the real failure.
     """
@@ -1117,7 +1117,7 @@ def _trash_target(name: str) -> Path:
 
 @register_tool
 class DeleteFileTool(BaseTool):
-    """Delete a single file — moved to Jarvis's trash first, so it is
+    """Delete a single file — moved to Furi's trash first, so it is
     recoverable by hand. Never deletes directories."""
 
     @property
@@ -1145,7 +1145,7 @@ class DeleteFileTool(BaseTool):
         return ToolDefinition(
             name=self.name,
             description=(
-                "Delete a single file. The file is first moved to Jarvis's "
+                "Delete a single file. The file is first moved to Furi's "
                 f"trash folder ({TRASH_DIR}) so it can be recovered by hand. "
                 "Directories are refused."
             ),
@@ -1213,7 +1213,7 @@ class DeleteFilesTool(BaseTool):
                 "files in that folder') — never one delete_file step per file. "
                 "Pass the paths as a list; a 'PENDING: ...' placeholder on "
                 "'paths' is filled in code from an earlier search's results. "
-                f"Every file is moved to Jarvis's trash ({TRASH_DIR}) first, so "
+                f"Every file is moved to Furi's trash ({TRASH_DIR}) first, so "
                 "it can be recovered by hand. Directories are refused."
             ),
             parameters={

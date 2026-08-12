@@ -1,5 +1,5 @@
 """
-Jarvis OS — MEMORY CONTEXT budget (2026-08-03)
+Furi OS — MEMORY CONTEXT budget (2026-08-03)
 
 *(Tier 2, item 7 of `suhhestionsfromclaude.txt` — "memory only grows")*
 
@@ -34,7 +34,7 @@ counts. Memory was the ONLY unbounded input.
 
 A "total system-prompt budget" was considered and REJECTED: the base prompt is
 the IDENTITY / CAPABILITIES / MEMORY-RULES / honesty block, and a cap that could
-clip it would delete the rules that stop Jarvis fabricating actions — a safety
+clip it would delete the rules that stop Furi fabricating actions — a safety
 regression dressed as tidying. Bound the input that grows; never the rules.
 
 HOW IT CLIPS

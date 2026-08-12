@@ -1,5 +1,5 @@
 """
-Jarvis OS — Context Layer API (Phase 8)
+Furi OS — Context Layer API (Phase 8)
 
 The endpoints the Electron sensing loops write to and the UI reads from. Config
 lives in app/core/app_settings.py; the world model in app/core/context_store.py;

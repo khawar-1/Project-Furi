@@ -1,5 +1,5 @@
 """
-Jarvis OS — The remote listener (2026-08-03)
+Furi OS — The remote listener (2026-08-03)
 
 *(Tier 2, item 5 — "one machine, one room")*
 
@@ -13,7 +13,7 @@ allowlist. That works right up until it doesn't: a middleware ordering change, a
 route registered before the gate, an exception path that returns early — and the
 whole API is on the LAN. Here the guarantee is not "a check refuses it", it is
 **the route is not there**. `/chat/stream` 404s on the remote port for the same
-reason it 404s on a webserver that never heard of Jarvis.
+reason it 404s on a webserver that never heard of Furi.
 
 That is the same move as `registry.execute_tool` refusing structurally instead
 of by prompt, and as READ-mode browsing: prefer the guarantee you cannot code
@@ -109,7 +109,7 @@ def create_remote_app(source: FastAPI) -> FastAPI:
     """Build the remote listener by copying the manifest's routes out of the
     real app. Nothing is re-declared — the handlers are the same objects."""
     remote = FastAPI(
-        title="Jarvis OS — Remote",
+        title="Furi OS — Remote",
         description="Read, approve, answer. Never a shell.",
         # No API explorer on a LAN port: it is a map of the surface.
         docs_url=None,

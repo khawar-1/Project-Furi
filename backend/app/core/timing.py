@@ -1,5 +1,5 @@
 """
-Jarvis OS — per-turn timing instrumentation.
+Furi OS — per-turn timing instrumentation.
 
 One TurnTimer per chat turn collects named stage durations and emits a SINGLE
 summary log line at INFO, e.g.:
@@ -7,7 +7,7 @@ summary log line at INFO, e.g.:
     chat turn timings [a1b2c3d4]: restore=2ms route=310ms context=145ms
     persist=18ms ttft=420ms total=1610ms
 
-This exists so "Jarvis feels slow" is attributable to a stage instead of a
+This exists so "Furi feels slow" is attributable to a stage instead of a
 guess, and so a latency regression shows up in the logs of the run that
 introduced it. Stage names are free-form; `mark()` records time-since-start
 (used for time-to-first-token), `stage()`/`start()`+`stop()` record a span.

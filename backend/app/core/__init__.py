@@ -1,3 +1,3 @@
 """
-Jarvis OS — Core Package
+Furi OS — Core Package
 """

@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Voice Input (Phase 7, Part 2)
+ * Furi OS — Voice Input (Phase 7, Part 2)
  *
  * Push-to-talk microphone capture. One recording at a time: getUserMedia →
  * MediaRecorder (webm/opus — what faster-whisper's PyAV decoder expects) plus
@@ -63,7 +63,7 @@ export const MIN_SPEECH_MS = 150;
  * A fan, an air conditioner or a nearby laptop can hold the meter above a FIXED
  * 0.08 forever, and then the post-speech quiet gap never elapses and the mic
  * never closes — a worse failure than the one being fixed, because it looks like
- * Jarvis has stopped responding. So the quiet test uses a floor derived from the
+ * Furi has stopped responding. So the quiet test uses a floor derived from the
  * quietest moment actually observed in this recording.
  *
  * Asymmetric on purpose, and this is the safety direction: ARMING still uses the

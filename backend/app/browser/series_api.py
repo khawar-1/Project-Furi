@@ -1,5 +1,5 @@
 """
-Jarvis OS — Structured series/season lookup (2026-08-07)
+Furi OS — Structured series/season lookup (2026-08-07)
 
 "Which season of X is current, and what episode is it on?" answered from a
 CATALOG API instead of read out of search prose. Zero LLM calls, zero

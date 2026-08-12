@@ -1,5 +1,5 @@
 """
-Jarvis OS — Birthday reminders (Phase 5, Part 4)
+Furi OS — Birthday reminders (Phase 5, Part 4)
 
 The first RECURRING proactive feature, built entirely on Parts 1-2 like the
 Part 4 (phase 4) reminders: a contact's birthday becomes a scheduled_jobs row
@@ -162,7 +162,7 @@ def _birthday_body(contact: Contact, job: FiredJob) -> str:
         run_local = job.run_at.replace(tzinfo=timezone.utc).astimezone()
         when = f"{run_local.strftime('%B')} {run_local.day}"
         return (
-            f"Birthday reminder (missed while Jarvis was offline — {name}'s "
+            f"Birthday reminder (missed while Furi was offline — {name}'s "
             f"birthday was on {when}) 🎂"
         )
     age = _age_turning(contact.birthday, job.run_at)
@@ -212,7 +212,7 @@ async def _birthday_job_handler(job: FiredJob) -> None:
         body = _birthday_body(contact, job)
         await push("birthday", {
             "contact_id": contact.id,
-            "title": "Jarvis",
+            "title": "Furi",
             "body": body,
             "text": body,
             "late": job.late,

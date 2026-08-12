@@ -1,5 +1,5 @@
 """
-Jarvis OS — Live Plan Narration (Phase 4, Part 6)
+Furi OS — Live Plan Narration (Phase 4, Part 6)
 
 Per-step status events published over the Part 1 push channel while a plan
 executes, so a live PlanCard can tick its rows (running → completed/failed)

@@ -1,5 +1,5 @@
 """
-Jarvis OS — ORM Models
+Furi OS — ORM Models
 All SQLite tables for the memory engine, contacts, episodes, preferences, messages,
 UserProfile (living identity wiki), and EntityEdge (typed relationship graph).
 """
@@ -495,8 +495,8 @@ class Routine(Base):
 # ============================================================
 class Suggestion(Base):
     """
-    A proactive suggestion Jarvis volunteered from the initiative heartbeat —
-    the user-facing record of the ambient suggestion feed. This is Jarvis's
+    A proactive suggestion Furi volunteered from the initiative heartbeat —
+    the user-facing record of the ambient suggestion feed. This is Furi's
     OWN generated content (a nudge, a question, or an action it chose to
     surface), so it persists to SQLite (unlike Phase 8 sensed data, which is
     retention=none): the feed must survive a restart and stay accept/dismiss-
@@ -534,11 +534,11 @@ class Suggestion(Base):
 
 
 # ============================================================
-# Goal threads — ongoing concerns Jarvis nudges toward (Phase 11, Part 3)
+# Goal threads — ongoing concerns Furi nudges toward (Phase 11, Part 3)
 # ============================================================
 class GoalThread(Base):
     """A lightweight ongoing-concern / goal thread ("the deadline I was worried
-    about", "prepping for the interview") that Jarvis can proactively follow up
+    about", "prepping for the interview") that Furi can proactively follow up
     on — "last week you were worried about the deadline; did it land?".
 
     Captured from conversation by the extractor (source="extractor") or created
@@ -696,12 +696,12 @@ class FileIndex(Base):
 
 
 # ============================================================
-# Routing decisions — the audit trail for what Jarvis DIDN'T do
+# Routing decisions — the audit trail for what Furi DIDN'T do
 # ============================================================
 class RoutingDecision(Base):
     """One row per chat turn: which router took it, and — when none did — WHY.
 
-    ActivityLog records every tool call, so every path where Jarvis *acts*
+    ActivityLog records every tool call, so every path where Furi *acts*
     leaves evidence. Routing is the opposite: it fails OPEN by design, so a
     message that should have become a task and instead became a chat reply
     left ZERO rows anywhere. For a system whose dominant failure mode is "it

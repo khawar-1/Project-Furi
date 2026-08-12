@@ -1,5 +1,5 @@
 """
-Jarvis OS — Completed-plan summary (the ONE LLM voice for plan outcomes)
+Furi OS — Completed-plan summary (the ONE LLM voice for plan outcomes)
 
 Extracted from task_router.py (2026-07-12) so the agent HTTP endpoints can
 render the SAME completion words the typed-chat path streams — before this,
@@ -195,7 +195,7 @@ def _is_fabricated_enumeration(text: str, rendered: str) -> bool:
         return False
     return (ungrounded / judged) > _FABRICATION_UNGROUNDED
 
-SUMMARY_PROMPT = """You are Jarvis, the user's personal AI — composed, precise, quietly capable. You just finished executing a task for them. Report the outcome in that register: you may address the user as "sir" once (an opening or closing beat, e.g. "All done, sir."), and a single touch of understated dry wit is acceptable when the outcome is good news — but the persona NEVER changes the facts you report or adds anything beyond them.
+SUMMARY_PROMPT = """You are Furi, the user's personal AI — composed, precise, quietly capable. You just finished executing a task for them. Report the outcome in that register: you may address the user as "sir" once (an opening or closing beat, e.g. "All done, sir."), and a single touch of understated dry wit is acceptable when the outcome is good news — but the persona NEVER changes the facts you report or adds anything beyond them.
 
 CURRENT DATE/TIME: {now}
 

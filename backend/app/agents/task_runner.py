@@ -1,5 +1,5 @@
 """
-Jarvis OS — Background Task Runner (Phase 4, Part 5)
+Furi OS — Background Task Runner (Phase 4, Part 5)
 
 Plans escape the chat turn: a persisted Task row wraps an AgentPlan that
 executes as a detached asyncio task. SQLite is the truth for task state —
@@ -89,9 +89,9 @@ _TERMINAL_STATUS = {
 }
 
 _TITLES = {
-    "awaiting_approval": "Jarvis needs your approval",
-    "awaiting_choice": "Jarvis has a question",
-    "paused": "Jarvis paused",
+    "awaiting_approval": "Furi needs your approval",
+    "awaiting_choice": "Furi has a question",
+    "paused": "Furi paused",
     "completed": "Task complete",
     "failed": "Task failed",
     "cancelled": "Task cancelled",
@@ -450,7 +450,7 @@ async def _settle(db: AsyncSession, task: Task, plan: AgentPlan, notify: bool = 
             "status": status,
             "session_id": task.session_id,
             "goal": task.goal,
-            "title": _TITLES.get(status, "Jarvis"),
+            "title": _TITLES.get(status, "Furi"),
             "body": body,
             "plan": serialize_plan_for_api(plan),
         })

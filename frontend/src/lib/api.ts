@@ -1,5 +1,5 @@
 /**
- * Jarvis OS — Typed API Client (Phase 2)
+ * Furi OS — Typed API Client (Phase 2)
  * All backend communication goes through this module.
  */
 import type {
@@ -510,7 +510,7 @@ export const contextApi = {
   getStatus: (): Promise<ContextStatus> =>
     apiFetch<ContextStatus>('/api/context/status'),
 
-  /** The aggregated world model — the "what Jarvis currently sees" audit. */
+  /** The aggregated world model — the "what Furi currently sees" audit. */
   getWorld: (): Promise<WorldModel> => apiFetch<WorldModel>('/api/context/world'),
 
   /** Phase 13: post a coarse affective summary (timing/energy only — never
@@ -581,7 +581,7 @@ export const browserApi = {
   accountStatus: (): Promise<{ login_open: boolean }> =>
     apiFetch<{ login_open: boolean }>('/api/browser/account'),
 
-  /** Open a user-driven sign-in window in the Jarvis browser profile. */
+  /** Open a user-driven sign-in window in the Furi browser profile. */
   openLogin: (url?: string): Promise<{ login_open: boolean }> =>
     apiFetch<{ login_open: boolean }>('/api/browser/login', {
       method: 'POST',
@@ -658,7 +658,7 @@ export const homeApi = {
       { method: 'POST' },
     ),
 
-  /** Every device the hub exposes — the audit list: "this is what Jarvis can
+  /** Every device the hub exposes — the audit list: "this is what Furi can
    *  see and control". Read-only; the agent path goes through the tools and
    *  their approval gate, never here. */
   listDevices: (): Promise<HomeDeviceList> =>

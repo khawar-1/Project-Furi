@@ -1,5 +1,5 @@
 """
-Jarvis OS — Vision Provider seam (Phase 15.3; vision-first since 2026-07-21)
+Furi OS — Vision Provider seam (Phase 15.3; vision-first since 2026-07-21)
 
 The browser loop (app/browser/loop.py) reads a page as DOM text and acts on it,
 AND — when a vision provider is configured — sees it as a set-of-marks screenshot

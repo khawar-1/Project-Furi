@@ -1,5 +1,5 @@
 """
-Jarvis OS — the 2026-08-10 add-to-cart round, against the REAL site.
+Furi OS — the 2026-08-10 add-to-cart round, against the REAL site.
 
 A hermetic test can only tell you the code agrees with a fixture. This drives the
 REAL modules — real Chromium, the real `BrowserSession`, the real `observe`, the

@@ -420,7 +420,7 @@ def test_a_payload_parked_before_this_field_still_deserializes():
 
 # ========================================= 6. the 2026-08-10 multi-word incident
 #
-# "go to junaidjamshed.com and add black kameez kurta in cart". Jarvis picked a
+# "go to junaidjamshed.com and add black kameez kurta in cart". Furi picked a
 # product by itself from 1000 results and never asked. TWO INDEPENDENT
 # SUPPRESSORS, each of which alone is enough to silence the question — so a fix
 # for either one on its own would have changed nothing.

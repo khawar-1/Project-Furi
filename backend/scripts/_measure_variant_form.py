@@ -1,5 +1,5 @@
 """
-Jarvis OS — what does a variant AXIS look like in the DOM? (2026-08-08)
+Furi OS — what does a variant AXIS look like in the DOM? (2026-08-08)
 
 The 2026-08-08 item-choice round measured a FRAGRANCE page and found no
 multi-valued axis at all, so the variant gate was deliberately not built. The
